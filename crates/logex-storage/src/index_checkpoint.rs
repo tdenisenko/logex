@@ -9,7 +9,8 @@ use serde::{Deserialize, Serialize};
 use crate::{BundleReference, SegmentReader, durability};
 
 pub(crate) const INDEX_CHECKPOINT_FILE: &str = "index-checkpoint";
-const MAGIC: &[u8; 8] = b"LXICP002";
+const MAGIC: &[u8; 8] = b"LXICP003";
+const LEGACY_MAGIC: &[u8; 8] = b"LXICP002";
 const MAX_CHECKPOINT_BYTES: usize = 1_024;
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -125,7 +126,7 @@ impl IndexBuildCheckpoint {
         }
         let payload = serde_json::to_vec(&self.identity).map_err(io::Error::other)?;
         let mut bytes = MAGIC.to_vec();
-        bytes.extend_from_slice(keccak256(&payload).as_slice());
+        bytes.extend_from_slice(checkpoint_digest(MAGIC, &payload).as_slice());
         bytes.extend_from_slice(&payload);
         let index_dir = self.dir.join("indexes");
         durability::publish_tree(&index_dir, &index_dir.join(INDEX_CHECKPOINT_FILE), &bytes)?;
@@ -144,17 +145,32 @@ fn read_checkpoint(index_dir: &Path) -> io::Result<Option<Identity>> {
         .read_to_end(&mut bytes)?;
     if bytes.len() > MAX_CHECKPOINT_BYTES
         || bytes.len() < 40
-        || &bytes[..8] != MAGIC
-        || keccak256(&bytes[40..]).as_slice() != &bytes[8..40]
+        || (&bytes[..8] != MAGIC && &bytes[..8] != LEGACY_MAGIC)
+        || checkpoint_digest(&bytes[..8], &bytes[40..]).as_slice() != &bytes[8..40]
     {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "invalid index checkpoint",
         ));
     }
-    serde_json::from_slice(&bytes[40..])
-        .map(Some)
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+    let identity = serde_json::from_slice(&bytes[40..])
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    // Older derived sets have no page integrity checks. Scan the source columns
+    // until they are rebuilt, even if their row/generation identity still matches.
+    Ok((&bytes[..8] == MAGIC).then_some(identity))
+}
+
+fn checkpoint_digest(magic: &[u8], payload: &[u8]) -> alloy_primitives::B256 {
+    if magic == LEGACY_MAGIC {
+        keccak256(payload)
+    } else {
+        // Bind the new format discriminator too: changing an old marker's
+        // version must never promote unchecked legacy files into a current set.
+        let mut hash = alloy_primitives::Keccak256::new();
+        hash.update(magic);
+        hash.update(payload);
+        hash.finalize()
+    }
 }
 
 #[cfg(test)]
@@ -341,6 +357,44 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+    }
+
+    #[test]
+    fn legacy_index_publication_requires_rebuilding_without_changing_source_data() {
+        let dir = tempfile::tempdir().unwrap();
+        ColumnFile::write_batch(dir.path(), &[row()]).unwrap();
+        let reader = SegmentReader::open(dir.path()).unwrap();
+        let source = fs::read(dir.path().join("address.col")).unwrap();
+        IndexBuildCheckpoint::begin(dir.path())
+            .unwrap()
+            .publish()
+            .unwrap();
+        let marker = dir.path().join("indexes").join(INDEX_CHECKPOINT_FILE);
+        let mut bytes = fs::read(&marker).unwrap();
+        bytes[..8].copy_from_slice(LEGACY_MAGIC);
+        let digest = keccak256(&bytes[40..]);
+        bytes[8..40].copy_from_slice(digest.as_slice());
+        fs::write(&marker, &bytes).unwrap();
+        assert!(
+            IndexReadCheckpoint::open(dir.path(), &reader)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(fs::read(&marker).unwrap(), bytes);
+        let mut promoted = bytes.clone();
+        promoted[..8].copy_from_slice(MAGIC);
+        fs::write(&marker, promoted).unwrap();
+        assert!(IndexReadCheckpoint::open(dir.path(), &reader).is_err());
+        fs::write(&marker, &bytes).unwrap();
+        let build = IndexBuildCheckpoint::begin(dir.path()).unwrap();
+        assert!(!build.can_reuse_existing());
+        build.publish().unwrap();
+        assert!(
+            IndexReadCheckpoint::open(dir.path(), &reader)
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(fs::read(dir.path().join("address.col")).unwrap(), source);
     }
 
     #[test]

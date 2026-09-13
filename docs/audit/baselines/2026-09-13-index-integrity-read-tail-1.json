@@ -1,0 +1,750 @@
+{
+  "schema": 1,
+  "scope": "Read-tail confirmation at9269254c againstae4: four and32dense-container layouts,25536timings/48RSS with separately predeclared warm-up and measured phases. Same source/fixture with one incidental write/build per process. Every sample remains retained; prior full-workload results remain required evidence.",
+  "screens": [
+    {
+      "stage": "read-tail-1",
+      "base_commit": "ae4c01c913f89e8448a2c98d5905733525c51047",
+      "candidate_commit": "9269254cf4d472af5c4815e94934d39f06a44f8b",
+      "purpose": "Predefined read-tail confirmation after final4: preserve original baselineae4 and candidate9269254c, include 32dense-container point/absent/full read observations above10%p95 and four dense containers as control. Identical fixture,2warm-up pairs30reads and10measured pairs100reads, one incidental write/build per process. Preserve every prior/current sample and result oracle. This changes surrounding process work and does not establish writer acceptance or replace the integrated comparison. Investigate every above5%; reject repeatable source-induced above10%.",
+      "retained_counts": {
+        "config": 48,
+        "sample": 25536,
+        "disk": 96,
+        "rss": 48
+      },
+      "comparisons": [
+        {
+          "kind": "comparison",
+          "suite": "warmup_large_payload",
+          "phase": "warmup",
+          "metric": "point_present",
+          "values": {
+            "base": {
+              "samples": 60,
+              "median": 0.0169585,
+              "p95": 0.025291
+            },
+            "candidate": {
+              "samples": 60,
+              "median": 0.0167505,
+              "p95": 0.025708
+            }
+          },
+          "median_change_percent": -1.2265235722499046,
+          "p95_change_percent": 1.6488078763196468
+        },
+        {
+          "kind": "comparison",
+          "suite": "warmup_large_payload",
+          "phase": "warmup",
+          "metric": "point_absent",
+          "values": {
+            "base": {
+              "samples": 60,
+              "median": 0.011729,
+              "p95": 0.017083
+            },
+            "candidate": {
+              "samples": 60,
+              "median": 0.0120625,
+              "p95": 0.021375
+            }
+          },
+          "median_change_percent": 2.8433796572597814,
+          "p95_change_percent": 25.124392671076514
+        },
+        {
+          "kind": "comparison",
+          "suite": "warmup_large_payload",
+          "phase": "warmup",
+          "metric": "open_range",
+          "values": {
+            "base": {
+              "samples": 60,
+              "median": 0.0143125,
+              "p95": 0.02075
+            },
+            "candidate": {
+              "samples": 60,
+              "median": 0.014270999999999999,
+              "p95": 0.021667
+            }
+          },
+          "median_change_percent": -0.2899563318777387,
+          "p95_change_percent": 4.419277108433728
+        },
+        {
+          "kind": "comparison",
+          "suite": "warmup_large_payload",
+          "phase": "warmup",
+          "metric": "bloom_present_open",
+          "values": {
+            "base": {
+              "samples": 60,
+              "median": 0.013416500000000001,
+              "p95": 0.015584
+            },
+            "candidate": {
+              "samples": 60,
+              "median": 0.013458,
+              "p95": 0.017125
+            }
+          },
+          "median_change_percent": 0.3093206126784098,
+          "p95_change_percent": 9.888347022587274
+        },
+        {
+          "kind": "comparison",
+          "suite": "warmup_large_payload",
+          "phase": "warmup",
+          "metric": "bloom_present_reuse",
+          "values": {
+            "base": {
+              "samples": 60,
+              "median": 0.0035,
+              "p95": 0.003875
+            },
+            "candidate": {
+              "samples": 60,
+              "median": 0.002417,
+              "p95": 0.002625
+            }
+          },
+          "median_change_percent": -30.94285714285715,
+          "p95_change_percent": -32.258064516129025
+        },
+        {
+          "kind": "comparison",
+          "suite": "warmup_large_payload",
+          "phase": "warmup",
+          "metric": "bloom_absent_open",
+          "values": {
+            "base": {
+              "samples": 60,
+              "median": 0.0106665,
+              "p95": 0.013917
+            },
+            "candidate": {
+              "samples": 60,
+              "median": 0.011479,
+              "p95": 0.014792
+            }
+          },
+          "median_change_percent": 7.617306520414369,
+          "p95_change_percent": 6.28727455629805
+        },
+        {
+          "kind": "comparison",
+          "suite": "warmup_large_payload",
+          "phase": "warmup",
+          "metric": "write_btree",
+          "values": {
+            "base": {
+              "samples": 2,
+              "median": 0.1161045,
+              "p95": 0.131875
+            },
+            "candidate": {
+              "samples": 2,
+              "median": 0.091708,
+              "p95": 0.1075
+            }
+          },
+          "median_change_percent": -21.012536120477677,
+          "p95_change_percent": -18.483412322274873
+        },
+        {
+          "kind": "comparison",
+          "suite": "warmup_large_payload",
+          "phase": "warmup",
+          "metric": "build_bloom",
+          "values": {
+            "base": {
+              "samples": 2,
+              "median": 115.278813,
+              "p95": 115.480209
+            },
+            "candidate": {
+              "samples": 2,
+              "median": 117.0512705,
+              "p95": 117.729375
+            }
+          },
+          "median_change_percent": 1.5375396864990343,
+          "p95_change_percent": 1.9476636035530515
+        },
+        {
+          "kind": "comparison",
+          "suite": "warmup_large_payload",
+          "phase": "warmup",
+          "metric": "peak_rss",
+          "values": {
+            "base": {
+              "samples": 2,
+              "median": 123289600.0,
+              "p95": 123355136
+            },
+            "candidate": {
+              "samples": 2,
+              "median": 123371520.0,
+              "p95": 123387904
+            }
+          },
+          "median_change_percent": 0.0664451827242507,
+          "p95_change_percent": 0.026563952716163186
+        },
+        {
+          "kind": "comparison",
+          "suite": "large_payload",
+          "phase": "measurement",
+          "metric": "point_present",
+          "values": {
+            "base": {
+              "samples": 1000,
+              "median": 0.014125,
+              "p95": 0.0175
+            },
+            "candidate": {
+              "samples": 1000,
+              "median": 0.01375,
+              "p95": 0.016958
+            }
+          },
+          "median_change_percent": -2.6548672566371723,
+          "p95_change_percent": -3.097142857142865
+        },
+        {
+          "kind": "comparison",
+          "suite": "large_payload",
+          "phase": "measurement",
+          "metric": "point_absent",
+          "values": {
+            "base": {
+              "samples": 1000,
+              "median": 0.009792,
+              "p95": 0.012792
+            },
+            "candidate": {
+              "samples": 1000,
+              "median": 0.010083,
+              "p95": 0.013083
+            }
+          },
+          "median_change_percent": 2.971813725490202,
+          "p95_change_percent": 2.274859287054398
+        },
+        {
+          "kind": "comparison",
+          "suite": "large_payload",
+          "phase": "measurement",
+          "metric": "open_range",
+          "values": {
+            "base": {
+              "samples": 1000,
+              "median": 0.012333,
+              "p95": 0.015667
+            },
+            "candidate": {
+              "samples": 1000,
+              "median": 0.01275,
+              "p95": 0.015916
+            }
+          },
+          "median_change_percent": 3.381172464120641,
+          "p95_change_percent": 1.5893278866407012
+        },
+        {
+          "kind": "comparison",
+          "suite": "large_payload",
+          "phase": "measurement",
+          "metric": "bloom_present_open",
+          "values": {
+            "base": {
+              "samples": 1000,
+              "median": 0.01275,
+              "p95": 0.016417
+            },
+            "candidate": {
+              "samples": 1000,
+              "median": 0.012708,
+              "p95": 0.0165
+            }
+          },
+          "median_change_percent": -0.32941176470586697,
+          "p95_change_percent": 0.5055734908935738
+        },
+        {
+          "kind": "comparison",
+          "suite": "large_payload",
+          "phase": "measurement",
+          "metric": "bloom_present_reuse",
+          "values": {
+            "base": {
+              "samples": 1000,
+              "median": 0.003417,
+              "p95": 0.003667
+            },
+            "candidate": {
+              "samples": 1000,
+              "median": 0.002375,
+              "p95": 0.002542
+            }
+          },
+          "median_change_percent": -30.494585894059114,
+          "p95_change_percent": -30.67902917916553
+        },
+        {
+          "kind": "comparison",
+          "suite": "large_payload",
+          "phase": "measurement",
+          "metric": "bloom_absent_open",
+          "values": {
+            "base": {
+              "samples": 1000,
+              "median": 0.01025,
+              "p95": 0.013583
+            },
+            "candidate": {
+              "samples": 1000,
+              "median": 0.010958,
+              "p95": 0.014458
+            }
+          },
+          "median_change_percent": 6.907317073170738,
+          "p95_change_percent": 6.441875874254599
+        },
+        {
+          "kind": "comparison",
+          "suite": "large_payload",
+          "phase": "measurement",
+          "metric": "write_btree",
+          "values": {
+            "base": {
+              "samples": 10,
+              "median": 0.1093125,
+              "p95": 0.141125
+            },
+            "candidate": {
+              "samples": 10,
+              "median": 0.0886875,
+              "p95": 0.103375
+            }
+          },
+          "median_change_percent": -18.867924528301895,
+          "p95_change_percent": -26.749335695305586
+        },
+        {
+          "kind": "comparison",
+          "suite": "large_payload",
+          "phase": "measurement",
+          "metric": "build_bloom",
+          "values": {
+            "base": {
+              "samples": 10,
+              "median": 114.469146,
+              "p95": 116.54175
+            },
+            "candidate": {
+              "samples": 10,
+              "median": 114.5585835,
+              "p95": 115.195791
+            }
+          },
+          "median_change_percent": 0.07813240783678399,
+          "p95_change_percent": -1.154915727625505
+        },
+        {
+          "kind": "comparison",
+          "suite": "large_payload",
+          "phase": "measurement",
+          "metric": "peak_rss",
+          "values": {
+            "base": {
+              "samples": 10,
+              "median": 123314176.0,
+              "p95": 123437056
+            },
+            "candidate": {
+              "samples": 10,
+              "median": 123379712.0,
+              "p95": 123404288
+            }
+          },
+          "median_change_percent": 0.053145552381583805,
+          "p95_change_percent": -0.026546323334220023
+        },
+        {
+          "kind": "comparison",
+          "suite": "warmup_thirty_two_dense_containers",
+          "phase": "warmup",
+          "metric": "point_present",
+          "values": {
+            "base": {
+              "samples": 60,
+              "median": 0.032979,
+              "p95": 0.039375
+            },
+            "candidate": {
+              "samples": 60,
+              "median": 0.0368545,
+              "p95": 0.063833
+            }
+          },
+          "median_change_percent": 11.751417568755862,
+          "p95_change_percent": 62.115555555555545
+        },
+        {
+          "kind": "comparison",
+          "suite": "warmup_thirty_two_dense_containers",
+          "phase": "warmup",
+          "metric": "point_absent",
+          "values": {
+            "base": {
+              "samples": 60,
+              "median": 0.010354,
+              "p95": 0.01325
+            },
+            "candidate": {
+              "samples": 60,
+              "median": 0.011104,
+              "p95": 0.020042
+            }
+          },
+          "median_change_percent": 7.243577361406217,
+          "p95_change_percent": 51.26037735849059
+        },
+        {
+          "kind": "comparison",
+          "suite": "warmup_thirty_two_dense_containers",
+          "phase": "warmup",
+          "metric": "open_range",
+          "values": {
+            "base": {
+              "samples": 60,
+              "median": 0.0350625,
+              "p95": 0.044791
+            },
+            "candidate": {
+              "samples": 60,
+              "median": 0.0392705,
+              "p95": 0.067833
+            }
+          },
+          "median_change_percent": 12.00142602495542,
+          "p95_change_percent": 51.44337031993036
+        },
+        {
+          "kind": "comparison",
+          "suite": "warmup_thirty_two_dense_containers",
+          "phase": "warmup",
+          "metric": "bloom_present_open",
+          "values": {
+            "base": {
+              "samples": 60,
+              "median": 0.0138955,
+              "p95": 0.01675
+            },
+            "candidate": {
+              "samples": 60,
+              "median": 0.0134165,
+              "p95": 0.016958
+            }
+          },
+          "median_change_percent": -3.4471591522435285,
+          "p95_change_percent": 1.2417910447761082
+        },
+        {
+          "kind": "comparison",
+          "suite": "warmup_thirty_two_dense_containers",
+          "phase": "warmup",
+          "metric": "bloom_present_reuse",
+          "values": {
+            "base": {
+              "samples": 60,
+              "median": 0.003542,
+              "p95": 0.003917
+            },
+            "candidate": {
+              "samples": 60,
+              "median": 0.002416,
+              "p95": 0.002625
+            }
+          },
+          "median_change_percent": -31.78994918125353,
+          "p95_change_percent": -32.98442685728874
+        },
+        {
+          "kind": "comparison",
+          "suite": "warmup_thirty_two_dense_containers",
+          "phase": "warmup",
+          "metric": "bloom_absent_open",
+          "values": {
+            "base": {
+              "samples": 60,
+              "median": 0.0110415,
+              "p95": 0.01375
+            },
+            "candidate": {
+              "samples": 60,
+              "median": 0.011604,
+              "p95": 0.015333
+            }
+          },
+          "median_change_percent": 5.094416519494649,
+          "p95_change_percent": 11.512727272727275
+        },
+        {
+          "kind": "comparison",
+          "suite": "warmup_thirty_two_dense_containers",
+          "phase": "warmup",
+          "metric": "write_btree",
+          "values": {
+            "base": {
+              "samples": 2,
+              "median": 0.2926045,
+              "p95": 0.425834
+            },
+            "candidate": {
+              "samples": 2,
+              "median": 0.218771,
+              "p95": 0.262625
+            }
+          },
+          "median_change_percent": -25.233207281501137,
+          "p95_change_percent": -38.326906728913144
+        },
+        {
+          "kind": "comparison",
+          "suite": "warmup_thirty_two_dense_containers",
+          "phase": "warmup",
+          "metric": "build_bloom",
+          "values": {
+            "base": {
+              "samples": 2,
+              "median": 462.87854200000004,
+              "p95": 466.955417
+            },
+            "candidate": {
+              "samples": 2,
+              "median": 464.4808955,
+              "p95": 470.506833
+            }
+          },
+          "median_change_percent": 0.34617148012014987,
+          "p95_change_percent": 0.7605471252087437
+        },
+        {
+          "kind": "comparison",
+          "suite": "warmup_thirty_two_dense_containers",
+          "phase": "warmup",
+          "metric": "peak_rss",
+          "values": {
+            "base": {
+              "samples": 2,
+              "median": 478666752.0,
+              "p95": 478674944
+            },
+            "candidate": {
+              "samples": 2,
+              "median": 478789632.0,
+              "p95": 478855168
+            }
+          },
+          "median_change_percent": 0.025671304615704216,
+          "p95_change_percent": 0.03765060240963347
+        },
+        {
+          "kind": "comparison",
+          "suite": "thirty_two_dense_containers",
+          "phase": "measurement",
+          "metric": "point_present",
+          "values": {
+            "base": {
+              "samples": 1000,
+              "median": 0.0336455,
+              "p95": 0.050834
+            },
+            "candidate": {
+              "samples": 1000,
+              "median": 0.035917,
+              "p95": 0.050083
+            }
+          },
+          "median_change_percent": 6.751274316030353,
+          "p95_change_percent": -1.4773576739977035
+        },
+        {
+          "kind": "comparison",
+          "suite": "thirty_two_dense_containers",
+          "phase": "measurement",
+          "metric": "point_absent",
+          "values": {
+            "base": {
+              "samples": 1000,
+              "median": 0.010667,
+              "p95": 0.018875
+            },
+            "candidate": {
+              "samples": 1000,
+              "median": 0.010958,
+              "p95": 0.01675
+            }
+          },
+          "median_change_percent": 2.72803974875786,
+          "p95_change_percent": -11.258278145695355
+        },
+        {
+          "kind": "comparison",
+          "suite": "thirty_two_dense_containers",
+          "phase": "measurement",
+          "metric": "open_range",
+          "values": {
+            "base": {
+              "samples": 1000,
+              "median": 0.036291,
+              "p95": 0.068
+            },
+            "candidate": {
+              "samples": 1000,
+              "median": 0.038459,
+              "p95": 0.063417
+            }
+          },
+          "median_change_percent": 5.973932931029746,
+          "p95_change_percent": -6.739705882352942
+        },
+        {
+          "kind": "comparison",
+          "suite": "thirty_two_dense_containers",
+          "phase": "measurement",
+          "metric": "bloom_present_open",
+          "values": {
+            "base": {
+              "samples": 1000,
+              "median": 0.013042,
+              "p95": 0.017667
+            },
+            "candidate": {
+              "samples": 1000,
+              "median": 0.01275,
+              "p95": 0.018917
+            }
+          },
+          "median_change_percent": -2.2389204109799166,
+          "p95_change_percent": 7.075338201166015
+        },
+        {
+          "kind": "comparison",
+          "suite": "thirty_two_dense_containers",
+          "phase": "measurement",
+          "metric": "bloom_present_reuse",
+          "values": {
+            "base": {
+              "samples": 1000,
+              "median": 0.003458,
+              "p95": 0.003833
+            },
+            "candidate": {
+              "samples": 1000,
+              "median": 0.002375,
+              "p95": 0.002625
+            }
+          },
+          "median_change_percent": -31.318681318681318,
+          "p95_change_percent": -31.51578398121575
+        },
+        {
+          "kind": "comparison",
+          "suite": "thirty_two_dense_containers",
+          "phase": "measurement",
+          "metric": "bloom_absent_open",
+          "values": {
+            "base": {
+              "samples": 1000,
+              "median": 0.010875,
+              "p95": 0.015042
+            },
+            "candidate": {
+              "samples": 1000,
+              "median": 0.011292,
+              "p95": 0.015583
+            }
+          },
+          "median_change_percent": 3.8344827586207053,
+          "p95_change_percent": 3.5965961973141836
+        },
+        {
+          "kind": "comparison",
+          "suite": "thirty_two_dense_containers",
+          "phase": "measurement",
+          "metric": "write_btree",
+          "values": {
+            "base": {
+              "samples": 10,
+              "median": 0.223021,
+              "p95": 0.273291
+            },
+            "candidate": {
+              "samples": 10,
+              "median": 0.22327049999999998,
+              "p95": 0.311666
+            }
+          },
+          "median_change_percent": 0.11187287295815196,
+          "p95_change_percent": 14.041808914307463
+        },
+        {
+          "kind": "comparison",
+          "suite": "thirty_two_dense_containers",
+          "phase": "measurement",
+          "metric": "build_bloom",
+          "values": {
+            "base": {
+              "samples": 10,
+              "median": 461.050958,
+              "p95": 474.940875
+            },
+            "candidate": {
+              "samples": 10,
+              "median": 459.1944165,
+              "p95": 468.607667
+            }
+          },
+          "median_change_percent": -0.4026759879327657,
+          "p95_change_percent": -1.333472929656776
+        },
+        {
+          "kind": "comparison",
+          "suite": "thirty_two_dense_containers",
+          "phase": "measurement",
+          "metric": "peak_rss",
+          "values": {
+            "base": {
+              "samples": 10,
+              "median": 478748672.0,
+              "p95": 478887936
+            },
+            "candidate": {
+              "samples": 10,
+              "median": 478822400.0,
+              "p95": 478920704
+            }
+          },
+          "median_change_percent": 0.015400147156952038,
+          "p95_change_percent": 0.006842519415650727
+        }
+      ]
+    }
+  ],
+  "raw_evidence": {
+    "path": "2026-09-13-index-integrity-read-tail-1.json.gz",
+    "sha256": "5f657821829bc723ea6754839f414b1a336f7f6e18d3fccb077b84213b2f52b5",
+    "files": 56
+  },
+  "limitations": [
+    "All timings, warm-ups, outliers, failed prior candidates and per-process counters remain retained. The report includes every metric, including slower cases. Investigate above5%; reject repeatable source-induced above10%.",
+    "This comparison measures generated index workloads on the recorded host and filesystem. It does not establish live-network throughput, whole-query memory limits, valid-artifact source binding, or release readiness.",
+    "The mixed ingestion/query comparison, write-only observations, historical-ingestion tail investigation and final workspace/CI/merge gates remain separately required. These read-focused surrounding workloads do not establish write-tail acceptance. Earlier large-page and checksum alternatives remain rejected."
+  ]
+}

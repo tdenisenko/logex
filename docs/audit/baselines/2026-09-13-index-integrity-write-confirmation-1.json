@@ -1,0 +1,430 @@
+{
+  "schema": 1,
+  "scope": "Write-only confirmation at9269254c against originalae4: five bounded layouts,10600timings/120RSS including predefined warm-up and measured phases; exact bitmap equality after every timed write. Every sample remains retained; this archive alone does not declare application acceptance.",
+  "screens": [
+    {
+      "stage": "write-confirmation-1",
+      "base_commit": "ae4c01c913f89e8448a2c98d5905733525c51047",
+      "candidate_commit": "9269254cf4d472af5c4815e94934d39f06a44f8b",
+      "purpose": "Fixed write-only confirmation of final4 variable small/dense B-tree writes. Includes all five bounded fixture layouts including four dense containers as a control. Same sources and public write API, identical copied fixture,2warm-up pairs30writes and10measured pairs100writes per layout. Every result is reopened and exactly compared outside timing. Retain all old/new samples; reject repeatable source-induced above10%, investigate above5%. No application acceptance is declared by this diagnostic alone.",
+      "retained_counts": {
+        "config": 120,
+        "sample": 10600,
+        "disk": 120,
+        "rss": 120
+      },
+      "comparisons": [
+        {
+          "kind": "comparison",
+          "suite": "warmup_small",
+          "phase": "warmup",
+          "metric": "write_btree",
+          "values": {
+            "base": {
+              "samples": 60,
+              "median": 0.086625,
+              "p95": 0.120333
+            },
+            "candidate": {
+              "samples": 60,
+              "median": 0.072375,
+              "p95": 0.243166
+            }
+          },
+          "median_change_percent": -16.45021645021645,
+          "p95_change_percent": 102.07756808190607
+        },
+        {
+          "kind": "comparison",
+          "suite": "warmup_small",
+          "phase": "warmup",
+          "metric": "peak_rss",
+          "values": {
+            "base": {
+              "samples": 2,
+              "median": 2277376.0,
+              "p95": 2293760
+            },
+            "candidate": {
+              "samples": 2,
+              "median": 2269184.0,
+              "p95": 2293760
+            }
+          },
+          "median_change_percent": -0.3597122302158251,
+          "p95_change_percent": 0.0
+        },
+        {
+          "kind": "comparison",
+          "suite": "small",
+          "phase": "measurement",
+          "metric": "write_btree",
+          "values": {
+            "base": {
+              "samples": 1000,
+              "median": 0.089958,
+              "p95": 0.1095
+            },
+            "candidate": {
+              "samples": 1000,
+              "median": 0.081375,
+              "p95": 0.10225
+            }
+          },
+          "median_change_percent": -9.541119188954838,
+          "p95_change_percent": -6.621004566210054
+        },
+        {
+          "kind": "comparison",
+          "suite": "small",
+          "phase": "measurement",
+          "metric": "peak_rss",
+          "values": {
+            "base": {
+              "samples": 10,
+              "median": 2334720.0,
+              "p95": 2359296
+            },
+            "candidate": {
+              "samples": 10,
+              "median": 2260992.0,
+              "p95": 2277376
+            }
+          },
+          "median_change_percent": -3.157894736842104,
+          "p95_change_percent": -3.472222222222221
+        },
+        {
+          "kind": "comparison",
+          "suite": "warmup_dense4",
+          "phase": "warmup",
+          "metric": "write_btree",
+          "values": {
+            "base": {
+              "samples": 60,
+              "median": 0.045625,
+              "p95": 0.255083
+            },
+            "candidate": {
+              "samples": 60,
+              "median": 0.0430835,
+              "p95": 0.274666
+            }
+          },
+          "median_change_percent": -5.570410958904115,
+          "p95_change_percent": 7.677109019417205
+        },
+        {
+          "kind": "comparison",
+          "suite": "warmup_dense4",
+          "phase": "warmup",
+          "metric": "peak_rss",
+          "values": {
+            "base": {
+              "samples": 2,
+              "median": 2441216.0,
+              "p95": 2441216
+            },
+            "candidate": {
+              "samples": 2,
+              "median": 2465792.0,
+              "p95": 2506752
+            }
+          },
+          "median_change_percent": 1.0067114093959662,
+          "p95_change_percent": 2.684563758389258
+        },
+        {
+          "kind": "comparison",
+          "suite": "dense4",
+          "phase": "measurement",
+          "metric": "write_btree",
+          "values": {
+            "base": {
+              "samples": 1000,
+              "median": 0.051396,
+              "p95": 0.251625
+            },
+            "candidate": {
+              "samples": 1000,
+              "median": 0.046667,
+              "p95": 0.234
+            }
+          },
+          "median_change_percent": -9.201105144369205,
+          "p95_change_percent": -7.004470938897156
+        },
+        {
+          "kind": "comparison",
+          "suite": "dense4",
+          "phase": "measurement",
+          "metric": "peak_rss",
+          "values": {
+            "base": {
+              "samples": 10,
+              "median": 2506752.0,
+              "p95": 2588672
+            },
+            "candidate": {
+              "samples": 10,
+              "median": 2498560.0,
+              "p95": 2523136
+            }
+          },
+          "median_change_percent": -0.32679738562091387,
+          "p95_change_percent": -2.5316455696202556
+        },
+        {
+          "kind": "comparison",
+          "suite": "warmup_dense8",
+          "phase": "warmup",
+          "metric": "write_btree",
+          "values": {
+            "base": {
+              "samples": 60,
+              "median": 0.063021,
+              "p95": 0.13725
+            },
+            "candidate": {
+              "samples": 60,
+              "median": 0.0647085,
+              "p95": 0.274791
+            }
+          },
+          "median_change_percent": 2.677678868948452,
+          "p95_change_percent": 100.21202185792349
+        },
+        {
+          "kind": "comparison",
+          "suite": "warmup_dense8",
+          "phase": "warmup",
+          "metric": "peak_rss",
+          "values": {
+            "base": {
+              "samples": 2,
+              "median": 2580480.0,
+              "p95": 2588672
+            },
+            "candidate": {
+              "samples": 2,
+              "median": 2646016.0,
+              "p95": 2654208
+            }
+          },
+          "median_change_percent": 2.5396825396825307,
+          "p95_change_percent": 2.5316455696202445
+        },
+        {
+          "kind": "comparison",
+          "suite": "dense8",
+          "phase": "measurement",
+          "metric": "write_btree",
+          "values": {
+            "base": {
+              "samples": 1000,
+              "median": 0.057146,
+              "p95": 0.224125
+            },
+            "candidate": {
+              "samples": 1000,
+              "median": 0.057,
+              "p95": 0.196459
+            }
+          },
+          "median_change_percent": -0.2554859482728489,
+          "p95_change_percent": -12.344004461795876
+        },
+        {
+          "kind": "comparison",
+          "suite": "dense8",
+          "phase": "measurement",
+          "metric": "peak_rss",
+          "values": {
+            "base": {
+              "samples": 10,
+              "median": 2703360.0,
+              "p95": 2785280
+            },
+            "candidate": {
+              "samples": 10,
+              "median": 2662400.0,
+              "p95": 2818048
+            }
+          },
+          "median_change_percent": -1.5151515151515138,
+          "p95_change_percent": 1.17647058823529
+        },
+        {
+          "kind": "comparison",
+          "suite": "warmup_dense9",
+          "phase": "warmup",
+          "metric": "write_btree",
+          "values": {
+            "base": {
+              "samples": 60,
+              "median": 0.057417,
+              "p95": 0.341916
+            },
+            "candidate": {
+              "samples": 60,
+              "median": 0.0585205,
+              "p95": 0.330167
+            }
+          },
+          "median_change_percent": 1.9219046623822233,
+          "p95_change_percent": -3.4362241018261797
+        },
+        {
+          "kind": "comparison",
+          "suite": "warmup_dense9",
+          "phase": "warmup",
+          "metric": "peak_rss",
+          "values": {
+            "base": {
+              "samples": 2,
+              "median": 2613248.0,
+              "p95": 2637824
+            },
+            "candidate": {
+              "samples": 2,
+              "median": 2646016.0,
+              "p95": 2654208
+            }
+          },
+          "median_change_percent": 1.2539184952978122,
+          "p95_change_percent": 0.6211180124223503
+        },
+        {
+          "kind": "comparison",
+          "suite": "dense9",
+          "phase": "measurement",
+          "metric": "write_btree",
+          "values": {
+            "base": {
+              "samples": 1000,
+              "median": 0.061646,
+              "p95": 0.295709
+            },
+            "candidate": {
+              "samples": 1000,
+              "median": 0.06475,
+              "p95": 0.346166
+            }
+          },
+          "median_change_percent": 5.035200986276478,
+          "p95_change_percent": 17.06305861505737
+        },
+        {
+          "kind": "comparison",
+          "suite": "dense9",
+          "phase": "measurement",
+          "metric": "peak_rss",
+          "values": {
+            "base": {
+              "samples": 10,
+              "median": 2686976.0,
+              "p95": 2834432
+            },
+            "candidate": {
+              "samples": 10,
+              "median": 2678784.0,
+              "p95": 2818048
+            }
+          },
+          "median_change_percent": -0.3048780487804881,
+          "p95_change_percent": -0.5780346820809301
+        },
+        {
+          "kind": "comparison",
+          "suite": "warmup_dense32",
+          "phase": "warmup",
+          "metric": "write_btree",
+          "values": {
+            "base": {
+              "samples": 60,
+              "median": 0.1346665,
+              "p95": 0.212041
+            },
+            "candidate": {
+              "samples": 60,
+              "median": 0.14158349999999997,
+              "p95": 0.218959
+            }
+          },
+          "median_change_percent": 5.136392495535258,
+          "p95_change_percent": 3.2625765771713944
+        },
+        {
+          "kind": "comparison",
+          "suite": "warmup_dense32",
+          "phase": "warmup",
+          "metric": "peak_rss",
+          "values": {
+            "base": {
+              "samples": 2,
+              "median": 3465216.0,
+              "p95": 3555328
+            },
+            "candidate": {
+              "samples": 2,
+              "median": 3407872.0,
+              "p95": 3424256
+            }
+          },
+          "median_change_percent": -1.654846335697402,
+          "p95_change_percent": -3.686635944700456
+        },
+        {
+          "kind": "comparison",
+          "suite": "dense32",
+          "phase": "measurement",
+          "metric": "write_btree",
+          "values": {
+            "base": {
+              "samples": 1000,
+              "median": 0.12731199999999998,
+              "p95": 0.338417
+            },
+            "candidate": {
+              "samples": 1000,
+              "median": 0.1273125,
+              "p95": 0.361
+            }
+          },
+          "median_change_percent": 0.00039273595577871134,
+          "p95_change_percent": 6.673128122996164
+        },
+        {
+          "kind": "comparison",
+          "suite": "dense32",
+          "phase": "measurement",
+          "metric": "peak_rss",
+          "values": {
+            "base": {
+              "samples": 10,
+              "median": 3424256.0,
+              "p95": 3571712
+            },
+            "candidate": {
+              "samples": 10,
+              "median": 3407872.0,
+              "p95": 3424256
+            }
+          },
+          "median_change_percent": -0.4784688995215336,
+          "p95_change_percent": -4.128440366972475
+        }
+      ]
+    }
+  ],
+  "raw_evidence": {
+    "path": "2026-09-13-index-integrity-write-confirmation-1.json.gz",
+    "sha256": "8029fe316f4d66b88184078dfc6315c0d2e8006aa9c1e26d37287b0c7e58d3af",
+    "files": 131
+  },
+  "limitations": [
+    "A single new bounded fixture is copied identically into both archived revisions. Its source, documentation, plan, runner and exact hash remain retained. Production source and pinned dependencies match each recorded Git revision.",
+    "The timed public writer includes its finalization and close. Reopen and exact bitmap equality are outside each timer but can warm the filesystem and allocator for the next write. This diagnostic removes surrounding bloom/query work and does not replace the original seven-layout workload.",
+    "All prior/current timings, warm-ups, outliers and counters remain retained. Investigate above5%; reject repeatable source-induced above10%. Integrated workloads and final workspace/CI/merge remain separate gates."
+  ]
+}
