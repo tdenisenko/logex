@@ -13,6 +13,7 @@ const INDEX_MAGIC: &[u8; 4] = b"LXIX";
 const INDEX_VERSION: u32 = 2;
 const INDEX_HEADER_LEN: usize = 20;
 const INDEX_V2_ENTRY_TRAILER_LEN: usize = 8 + 4;
+const SINGLE_ENTRY_BULK_MAX_LOGICAL_BYTES: u64 = 1024 * 1024;
 
 /// An in-memory B+ tree index mapping fixed-size byte keys to roaring bitmaps
 /// of row IDs. Used during index construction and for the hot partition.
@@ -207,6 +208,19 @@ impl BTreeIndexReader {
     /// Structural validation alone cannot detect valid-looking data mutations.
     pub fn get_from_file(path: &Path, key: &[u8]) -> io::Result<Option<RoaringBitmap>> {
         let mut file = IndexFile::open(path)?;
+        if single_entry_bulk_route_hint(&file, key) {
+            let reader = Self::open_file(file)?;
+            if reader.key_size != key.len() || reader.entries.len() != 1 {
+                return Err(invalid_index(
+                    "single-entry route changed during validation",
+                ));
+            }
+            let (validated_key, bitmap) = reader.entries.into_iter().next().unwrap();
+            if validated_key != key {
+                return Err(invalid_index("single-entry route key mismatch"));
+            }
+            return Ok(Some(bitmap));
+        }
         let mut bytes = [0u8; INDEX_HEADER_LEN];
         file.read_exact(&mut bytes)?;
         let header = IndexHeader::parse(&bytes)?;
@@ -307,6 +321,40 @@ impl BTreeIndexReader {
     pub fn key_size(&self) -> usize {
         self.key_size
     }
+}
+
+fn single_entry_bulk_route_hint(file: &IndexFile, requested_key: &[u8]) -> bool {
+    let Some(prefix) =
+        file.pending_unverified_prefix_for_bounded_route(SINGLE_ENTRY_BULK_MAX_LOGICAL_BYTES)
+    else {
+        return false;
+    };
+    let Ok(header) = IndexHeader::parse(prefix) else {
+        return false;
+    };
+    if header.version != 2
+        || header.entry_count != 1
+        || header.key_size != requested_key.len()
+        || header.validate_geometry(file.logical_len()).is_err()
+    {
+        return false;
+    }
+    let Ok(table_end) = table_end(header.key_size, 1) else {
+        return false;
+    };
+    let Ok(table_end) = usize::try_from(table_end) else {
+        return false;
+    };
+    let Some(entry) = prefix.get(INDEX_HEADER_LEN..table_end) else {
+        return false;
+    };
+    let (hinted_key, descriptor) = entry.split_at(header.key_size);
+    if hinted_key != requested_key {
+        return false;
+    }
+    let offset = u64::from_le_bytes(descriptor[..8].try_into().unwrap());
+    let len = u64::from(u32::from_le_bytes(descriptor[8..].try_into().unwrap()));
+    offset == table_end as u64 && len >= 8 && offset.checked_add(len) == Some(file.logical_len())
 }
 
 fn union_entries(entries: &[(Vec<u8>, RoaringBitmap)]) -> RoaringBitmap {
@@ -626,6 +674,38 @@ mod tests {
         data
     }
 
+    fn single_dense_integrity_fixture(key: u32) -> (Vec<u8>, RoaringBitmap) {
+        let bitmap: RoaringBitmap = (0..5000).collect();
+        let mut serialized = Vec::new();
+        bitmap.serialize_into(&mut serialized).unwrap();
+        let table_end = INDEX_HEADER_LEN + 4 + INDEX_V2_ENTRY_TRAILER_LEN;
+        let mut data = b"LXIX".to_vec();
+        data.extend_from_slice(&2u32.to_le_bytes());
+        data.extend_from_slice(&4u32.to_le_bytes());
+        data.extend_from_slice(&1u64.to_le_bytes());
+        data.extend_from_slice(&key.to_be_bytes());
+        data.extend_from_slice(&(table_end as u64).to_le_bytes());
+        data.extend_from_slice(&(serialized.len() as u32).to_le_bytes());
+        data.extend_from_slice(&serialized);
+        (data, bitmap)
+    }
+
+    fn synthetic_single_entry_logical(key: u32, logical_len: usize) -> Vec<u8> {
+        let table_end = INDEX_HEADER_LEN + 4 + INDEX_V2_ENTRY_TRAILER_LEN;
+        assert!(logical_len >= table_end + 8 && logical_len <= u32::MAX as usize);
+        let mut data = Vec::new();
+        data.try_reserve_exact(logical_len).unwrap();
+        data.resize(logical_len, 0);
+        data[..4].copy_from_slice(INDEX_MAGIC);
+        data[4..8].copy_from_slice(&2u32.to_le_bytes());
+        data[8..12].copy_from_slice(&4u32.to_le_bytes());
+        data[12..20].copy_from_slice(&1u64.to_le_bytes());
+        data[20..24].copy_from_slice(&key.to_be_bytes());
+        data[24..32].copy_from_slice(&(table_end as u64).to_le_bytes());
+        data[32..36].copy_from_slice(&((logical_len - table_end) as u32).to_le_bytes());
+        data
+    }
+
     fn write_protected_fixture(path: &Path, data: &[u8]) {
         write_index_file(path, data.len() as u64, |writer| writer.write_all(data)).unwrap();
     }
@@ -669,6 +749,108 @@ mod tests {
         fs::write(&path, damaged).unwrap();
         assert!(BTreeIndexReader::open(&path).is_err());
         assert!(BTreeIndexReader::get_from_file(&path, &1u32.to_be_bytes()).is_err());
+    }
+
+    #[test]
+    fn matched_single_entry_bulk_route_returns_exact_rows_after_full_validation() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("single-dense.bptree");
+        let key = 7u32.to_be_bytes();
+        let (logical, expected) = single_dense_integrity_fixture(7);
+        assert!(logical.len() > 4096);
+        write_protected_fixture(&path, &logical);
+
+        let file = IndexFile::open(&path).unwrap();
+        assert!(single_entry_bulk_route_hint(&file, &key));
+        assert!(!single_entry_bulk_route_hint(&file, &8u32.to_be_bytes()));
+        assert!(!single_entry_bulk_route_hint(&file, &[0; 3]));
+        assert_eq!(
+            BTreeIndexReader::get_from_file(&path, &key).unwrap(),
+            Some(expected)
+        );
+    }
+
+    #[test]
+    fn absent_and_wrong_width_keys_do_not_take_single_entry_bulk_route() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("single-dense-damaged-footer.bptree");
+        let key = 7u32.to_be_bytes();
+        let (logical, _) = single_dense_integrity_fixture(7);
+        write_protected_fixture(&path, &logical);
+        let mut physical = fs::read(&path).unwrap();
+        *physical.last_mut().unwrap() ^= 1;
+        fs::write(&path, physical).unwrap();
+
+        assert!(
+            BTreeIndexReader::get_from_file(&path, &8u32.to_be_bytes())
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            BTreeIndexReader::get_from_file(&path, &[0; 3])
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert!(BTreeIndexReader::get_from_file(&path, &key).is_err());
+    }
+
+    #[test]
+    fn single_entry_bulk_route_never_trusts_misleading_prefix_or_damaged_payload() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("single-dense-damaged.bptree");
+        let key = 7u32.to_be_bytes();
+        let (logical, _) = single_dense_integrity_fixture(7);
+        write_protected_fixture(&path, &logical);
+        let pristine = fs::read(&path).unwrap();
+        let logical_start = pristine
+            .windows(logical.len())
+            .position(|window| window == logical)
+            .unwrap();
+
+        for position in [12, 20, 24, 32] {
+            let mut damaged = pristine.clone();
+            damaged[logical_start + position] ^= 1;
+            fs::write(&path, damaged).unwrap();
+            assert!(
+                BTreeIndexReader::get_from_file(&path, &key).is_err(),
+                "hint position {position}"
+            );
+        }
+
+        let mut damaged = pristine;
+        damaged[logical_start + 4096 + 1] ^= 1;
+        fs::write(&path, damaged).unwrap();
+        assert!(BTreeIndexReader::get_from_file(&path, &key).is_err());
+    }
+
+    #[test]
+    fn single_entry_bulk_route_is_bounded_and_requires_more_than_one_page() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("single-route-bound.bptree");
+        let key = 7u32.to_be_bytes();
+
+        write_protected_fixture(&path, &integrity_fixture(2, &[(7, 10)]));
+        assert!(!single_entry_bulk_route_hint(
+            &IndexFile::open(&path).unwrap(),
+            &key
+        ));
+
+        for (logical_len, expected) in [
+            (SINGLE_ENTRY_BULK_MAX_LOGICAL_BYTES as usize, true),
+            (SINGLE_ENTRY_BULK_MAX_LOGICAL_BYTES as usize + 1, false),
+        ] {
+            let logical = synthetic_single_entry_logical(7, logical_len);
+            write_protected_fixture(&path, &logical);
+            assert_eq!(
+                single_entry_bulk_route_hint(&IndexFile::open(&path).unwrap(), &key),
+                expected,
+                "logical length {logical_len}"
+            );
+            if expected {
+                assert!(BTreeIndexReader::get_from_file(&path, &key).is_err());
+            }
+        }
     }
 
     #[test]
