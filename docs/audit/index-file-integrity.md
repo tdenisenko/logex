@@ -67,23 +67,23 @@ pending.
 ## Implementation under validation
 
 New derived files wrap their existing logical B-tree/bloom encoding in a page
-integrity container. Its 48-byte header fixes magic, version, 2048-byte page size,
+integrity container. Its 48-byte header fixes magic, version, 4096-byte page size,
 logical length, a per-file 128-bit random identity and reserved fields, protected by CRC32. The original logical
-bytes remain contiguous. The current experiment uses container version 4 and
+bytes remain contiguous. The current experiment uses container version 5 and
 one eight-byte metadata-seeded XXH3 fingerprint per page. Screens 1–16 used
 version 1 and four-byte CRC32 page checks; screen 17 used version 2 and XXH64.
 Each page fingerprint
 includes a domain tag, format version, logical length, file identity, page position and actual
 page length. Version 3 hashes that complete metadata into a seed and uses the
-standard seeded hash on the page bytes. Version 4 retains this construction with
-2 KiB pages and its own version domain. This is a distinct encoding from hashing
+standard seeded hash on the page bytes. Versions 4 and 5 retain this construction with
+2 and 4 KiB pages respectively and its own version domain. This is a distinct encoding from hashing
 the concatenated metadata and page. Exact physical extent is checked using the
 opened handle.
 
 Point lookups validate only bytes from pages they inspect, keeping logarithmic
 table search. Bloom exclusions verify the page containing the tested bit. Range
 readers retain contiguous whole-file reads and validate every page. A reader
-holds a 2 KiB data-page cache and a checksum cache capped at 16 KiB (smaller files
+holds a 4 KiB data-page cache and a checksum cache capped at 16 KiB (smaller files
 allocate only their footer size); no global validation cache or
 per-query full-file scrub is introduced. Writer fingerprint storage costs eight
 bytes per logical page, and B-tree payloads stream once instead of retaining all
@@ -366,3 +366,17 @@ The independent persisted-byte oracle fixes the new geometry explicitly, and
 all previous prototype versions are rejected. All 66 index unit tests and focused Clippy pass; logs and source hashes are
 retained in `/private/tmp/logex-index-integrity-focused-7`. Equivalent release
 measurements remain outstanding, so this is not yet accepted.
+
+
+Screen 19 (`32aea52c`, 2 KiB pages) retains another 7,440 timings/40 RSS. Large
+contiguous full-read median is +8.77%, and the nonconsecutive-row median remains
++11.20%; their p95 changes are +1.00%/+5.52%. Point medians are -0.57%/+6.14%.
+The small full-read aggregate remains +21.84%, with substantial initial-process
+tail variation retained. This experiment remains insufficient for acceptance.
+The next source uses 4 KiB pages (container version 5), reducing per-page seed
+work again and expanding footer-cache coverage to 8 MiB. Its larger point-read
+and page-cache granularity remains an explicit performance tradeoff to measure.
+All 66 index unit tests, formatting and focused Clippy pass for this source;
+`/private/tmp/logex-index-integrity-focused-8` retains the parent revision, exact
+diff and logs. No validation path or old-format fallback was removed in either
+page-size experiment.
