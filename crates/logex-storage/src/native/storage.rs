@@ -938,7 +938,10 @@ impl NativeStorage {
         // Legacy prefixes need the same capture-to-publication ownership as
         // identified sources, without deriving a native identity from their rows.
         let legacy_owner = if start.source_namespace.is_none() {
-            Some(crate::column::SourceWriteGuard::acquire_legacy(&dir)?)
+            Some(crate::column::SourceWriteGuard::acquire_legacy_prefix(
+                &dir,
+                start.row_count,
+            )?)
         } else {
             None
         };
@@ -2297,8 +2300,9 @@ impl NativeStorage {
             .transpose()?;
         // Retain this owner through manifest and catalog publication below.
         let legacy_owner = if descriptor.source_namespace.is_none() {
-            Some(crate::column::SourceWriteGuard::acquire_legacy(
+            Some(crate::column::SourceWriteGuard::acquire_legacy_prefix(
                 &segment_dir,
+                descriptor.row_count,
             )?)
         } else {
             None
@@ -7065,6 +7069,69 @@ mod tests {
                 Some(namespace)
             );
             drop(reopened);
+        }
+    }
+
+    #[test]
+    fn legacy_zero_prefix_directory_preparation_preserves_first_append() {
+        for restart_before_repair in [false, true] {
+            for partial in [false, true] {
+                let tmp = TempDir::new().unwrap();
+                let config = NativeStorageConfig {
+                    data_dir: tmp.path().to_path_buf(),
+                    hot_target_rows: 32,
+                    compaction_safety_margin_blocks: 2_048,
+                };
+                let mut storage = NativeStorage::open(config.clone()).unwrap();
+                let id = storage.catalog.active_hot_segment.unwrap();
+                let index = storage
+                    .catalog
+                    .segments
+                    .iter()
+                    .position(|segment| segment.id == id)
+                    .unwrap();
+                storage.catalog.segments[index].source_namespace = None;
+                assert_eq!(storage.catalog.segments[index].row_count, 0);
+                let dir = storage.segment_path(id);
+                let path = storage.paths.segment_manifest_path(id);
+                let mut manifest = SegmentManifest::load(&path).unwrap().unwrap();
+                manifest.source_namespace = None;
+                fs::write(path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+                storage.persist_catalog().unwrap();
+                if partial {
+                    fs::write(dir.join("address.col"), b"incomplete header").unwrap();
+                }
+                assert!(!dir.join(".source-publication").exists());
+                if restart_before_repair {
+                    drop(storage);
+                    storage = NativeStorage::open(config.clone()).unwrap();
+                } else {
+                    assert_eq!(
+                        storage
+                            .rebuild_partial_raw_segment(index, "legacy-zero-test")
+                            .unwrap(),
+                        partial
+                    );
+                }
+                let rows = make_rows(2, 100);
+                storage.write_batch(&rows).unwrap();
+                storage.checkpoint().unwrap();
+                drop(storage);
+                let reopened = NativeStorage::open(config).unwrap();
+                let reader = SegmentReader::open(&dir).unwrap();
+                assert_eq!(reader.read_log_rows(None).unwrap(), rows);
+                assert_eq!(reader.source_namespace(), None);
+                assert_eq!(
+                    reopened
+                        .catalog
+                        .segments
+                        .iter()
+                        .find(|segment| segment.id == id)
+                        .unwrap()
+                        .source_namespace,
+                    None
+                );
+            }
         }
     }
 

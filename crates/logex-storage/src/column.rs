@@ -20,6 +20,11 @@ const CANONICAL_COMMITTED: u8 = 2;
 const CANONICAL_ENVELOPE_HEADER: usize = 8 + 1 + 1 + 16 + 8 + 8 + 8 + 4;
 pub(crate) const CANONICAL_PREFIX_BYTES: usize = CANONICAL_ENVELOPE_HEADER + 8;
 
+#[cfg(test)]
+thread_local! {
+    static BEFORE_ABSENT_APPEND_CREATE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SourceMarker {
     state: u8,
@@ -120,11 +125,23 @@ pub(crate) fn verify_prefix_recovery_pending(
 }
 
 impl SourceWriteGuard {
-    fn acquire(dir: &Path) -> io::Result<Self> {
+    // Directory creation belongs only to full initialization and explicit
+    // empty-prefix recovery, never to an existing-source mutation or check.
+    fn create_and_acquire(dir: &Path) -> io::Result<Self> {
         fs::create_dir_all(dir)?;
+        Self::acquire_existing(dir)
+    }
+
+    fn acquire_existing(dir: &Path) -> io::Result<Self> {
         // Use the segment directory inode, matching native maintenance
         // ownership without creating another persistent lock namespace.
         let file = File::open(dir)?;
+        if !file.metadata()?.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotADirectory,
+                "source path is not a directory",
+            ));
+        }
         file.try_lock().map_err(|error| match error {
             TryLockError::WouldBlock => io::Error::new(
                 io::ErrorKind::WouldBlock,
@@ -145,17 +162,33 @@ impl SourceWriteGuard {
         generation: u64,
         segment_id: u64,
     ) -> io::Result<Self> {
-        let mut owner = Self::acquire(dir)?;
+        let mut owner = Self::acquire_existing(dir)?;
         owner.binding = Some(verify_owned_source(dir, namespace, generation, segment_id)?);
         Ok(owner)
     }
 
     pub(crate) fn acquire_legacy(dir: &Path) -> io::Result<Self> {
-        let mut owner = Self::acquire(dir)?;
+        Self::acquire_existing(dir)?.with_legacy_binding()
+    }
+
+    pub(crate) fn acquire_legacy_prefix(dir: &Path, prefix_rows: u64) -> io::Result<Self> {
+        Self::acquire_prefix(dir, prefix_rows)?.with_legacy_binding()
+    }
+
+    fn acquire_prefix(dir: &Path, prefix_rows: u64) -> io::Result<Self> {
+        if prefix_rows == 0 {
+            // Only an authoritative empty prefix can restore an absent source.
+            Self::create_and_acquire(dir)
+        } else {
+            Self::acquire_existing(dir)
+        }
+    }
+
+    fn with_legacy_binding(mut self) -> io::Result<Self> {
         // Legacy native sources remain scan-readable but cannot acquire a
         // trusted identity from their shape or an incidental standalone marker.
-        owner.binding = read_source_binding(dir)?;
-        Ok(owner)
+        self.binding = read_source_binding(&self.dir)?;
+        Ok(self)
     }
 }
 
@@ -549,7 +582,7 @@ pub(crate) fn begin_prefix_recovery(
     segment_id: u64,
     kind: SegmentKind,
 ) -> io::Result<PrefixRecoveryGuard> {
-    let owner = SourceWriteGuard::acquire(dir)?;
+    let owner = SourceWriteGuard::acquire_prefix(dir, prefix_rows)?;
     match read_source_marker(dir)? {
         Some(marker)
             if marker.state == SOURCE_PREFIX_REWRITE
@@ -909,7 +942,7 @@ impl ColumnFile {
         canonical: Option<&NullBitmap>,
         publication: durability::Publication,
     ) -> io::Result<()> {
-        let _owner = SourceWriteGuard::acquire(dir)?;
+        let _owner = SourceWriteGuard::create_and_acquire(dir)?;
         let mut namespace = [0; 16];
         getrandom::fill(&mut namespace).map_err(|error| io::Error::other(error.to_string()))?;
         Self::write_batch_with_owned_source(
@@ -937,7 +970,7 @@ impl ColumnFile {
         publication: durability::Publication,
         identity: SourceIdentity,
     ) -> io::Result<()> {
-        let _owner = SourceWriteGuard::acquire(dir)?;
+        let _owner = SourceWriteGuard::create_and_acquire(dir)?;
         match read_source_marker(dir)? {
             None => {}
             Some(marker)
@@ -1104,7 +1137,6 @@ impl ColumnFile {
                 "canonical bitmap length differs from replacement rows",
             ));
         }
-        fs::create_dir_all(dir)?;
         // Readers must see the recovery-required state before column replacement.
         // Standalone replacement orders it before changing columns; catalog-zero initialization
         // may defer both markers because its caller publishes the complete tree.
@@ -1133,6 +1165,8 @@ impl ColumnFile {
         )
     }
 
+    // Every caller already owns a prepared segment directory. Repeating
+    // directory preparation here would add filesystem work to every batch.
     fn write_batch_contents(
         dir: &Path,
         rows: &[LogRow],
@@ -1141,7 +1175,6 @@ impl ColumnFile {
         binding: Option<SourceBinding>,
         order_names: bool,
     ) -> io::Result<()> {
-        fs::create_dir_all(dir)?;
         let row_count = rows.len() as u64;
         let replacements = durability::ReplacementBatch::new(publication);
 
@@ -1282,8 +1315,32 @@ impl ColumnFile {
         existing_rows: u64,
         publication: durability::Publication,
     ) -> io::Result<()> {
-        let initialize = !dir.try_exists()?;
-        let _owner = SourceWriteGuard::acquire(dir)?;
+        let (_owner, initialize) = match SourceWriteGuard::acquire_existing(dir) {
+            Ok(owner) => (owner, false),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                if existing_rows != 0 {
+                    return Err(error);
+                }
+                #[cfg(test)]
+                if let Some(hook) = BEFORE_ABSENT_APPEND_CREATE.with_borrow_mut(Option::take) {
+                    hook();
+                }
+                let owner = SourceWriteGuard::create_and_acquire(dir)?;
+                // Absence was observed before ownership. Another writer may
+                // have published or interrupted a source in that interval.
+                // Only a still-empty directory is safe to initialize here.
+                if read_source_marker(dir)?.is_some()
+                    || fs::read_dir(dir)?.next().transpose()?.is_some()
+                {
+                    return Err(io::Error::new(
+                        io::ErrorKind::WouldBlock,
+                        "source appeared during append initialization; recapture its committed state",
+                    ));
+                }
+                (owner, true)
+            }
+            Err(error) => return Err(error),
+        };
         if initialize {
             let mut namespace = [0; 16];
             getrandom::fill(&mut namespace).map_err(|error| io::Error::other(error.to_string()))?;
@@ -1488,9 +1545,8 @@ impl ColumnFile {
         generation: u64,
         segment_id: u64,
     ) -> io::Result<()> {
-        let _owner = SourceWriteGuard::acquire(dir)?;
-        let binding = verify_owned_source(dir, namespace, generation, segment_id)?;
-        Self::append_batch_owned(dir, rows, existing_rows, publication, Some(binding))
+        let owner = SourceWriteGuard::acquire_bound(dir, namespace, generation, segment_id)?;
+        Self::append_batch_owned(dir, rows, existing_rows, publication, owner.binding)
     }
 
     fn write_fixed_col(
@@ -1745,7 +1801,7 @@ impl ColumnFile {
 
     #[cfg(test)]
     pub(crate) fn replace_canonical_bitmap(dir: &Path, bitmap: &NullBitmap) -> io::Result<()> {
-        let mut owner = SourceWriteGuard::acquire(dir)?;
+        let mut owner = SourceWriteGuard::create_and_acquire(dir)?;
         owner.binding = read_source_binding(dir)?;
         Self::replace_canonical_bitmap_owned(dir, bitmap, &owner)
     }
@@ -1929,6 +1985,162 @@ mod tests {
         fs::write(&path, bytes).unwrap();
         assert!(ColumnFile::append_batch(tmp.path(), &[row()], 1).is_err());
         assert_eq!(fs::read(tmp.path().join("address.col")).unwrap(), before);
+    }
+
+    #[test]
+    fn absent_append_preserves_source_published_before_ownership() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("new-source");
+        let writer_dir = dir.clone();
+        let mut replacement = row();
+        replacement.block_number = 777;
+        let writer_row = replacement.clone();
+        BEFORE_ABSENT_APPEND_CREATE.with_borrow_mut(|hook| {
+            *hook = Some(Box::new(move || {
+                ColumnFile::write_batch(&writer_dir, &[writer_row]).unwrap()
+            }));
+        });
+        let result = ColumnFile::append_batch(&dir, &[row()], 0);
+        assert_eq!(
+            crate::SegmentReader::open(&dir)
+                .unwrap()
+                .read_log_rows(None)
+                .unwrap(),
+            vec![replacement],
+            "append used a stale absence observation; returned {result:?}"
+        );
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::WouldBlock);
+    }
+
+    #[test]
+    fn absent_append_rejects_nonzero_expected_prefix_without_creating_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("missing-source");
+        assert!(
+            ColumnFile::append_batch(&dir, &[row()], 1).is_err(),
+            "append ignored its expected nonzero prefix"
+        );
+        assert!(!dir.exists());
+    }
+
+    #[test]
+    fn absent_append_rejects_pending_and_partial_sources_before_initialization() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        for pending in [false, true] {
+            let tmp = tempfile::tempdir().unwrap();
+            let dir = tmp.path().join("new-source");
+            let writer_dir = dir.clone();
+            let artifact = if pending {
+                SOURCE_MARKER_FILE
+            } else {
+                "address.col"
+            };
+            let original = Rc::new(RefCell::new(Vec::new()));
+            let captured = Rc::clone(&original);
+            BEFORE_ABSENT_APPEND_CREATE.with_borrow_mut(|hook| {
+                *hook = Some(Box::new(move || {
+                    let _owner = SourceWriteGuard::create_and_acquire(&writer_dir).unwrap();
+                    if pending {
+                        write_source_marker(
+                            &writer_dir,
+                            SourceMarker::new(
+                                SourceIdentity {
+                                    namespace: [8; 16],
+                                    generation: 0,
+                                    segment_id: u64::MAX,
+                                    kind: SegmentKind::Hot,
+                                },
+                                SOURCE_UPDATING,
+                                0,
+                            ),
+                            durability::Publication::Ordered,
+                        )
+                        .unwrap();
+                    } else {
+                        fs::write(writer_dir.join(artifact), b"partial column").unwrap();
+                    }
+                    *captured.borrow_mut() = fs::read(writer_dir.join(artifact)).unwrap();
+                }));
+            });
+            assert_eq!(
+                ColumnFile::append_batch(&dir, &[row()], 0)
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::WouldBlock
+            );
+            assert_eq!(fs::read(dir.join(artifact)).unwrap(), *original.borrow());
+            assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
+        }
+    }
+
+    #[test]
+    fn existing_source_ownership_validates_directory_and_excludes_other_owners() {
+        let tmp = tempfile::tempdir().unwrap();
+        let owner = SourceWriteGuard::acquire_existing(tmp.path()).unwrap();
+        assert_eq!(
+            SourceWriteGuard::acquire_existing(tmp.path())
+                .err()
+                .unwrap()
+                .kind(),
+            io::ErrorKind::WouldBlock
+        );
+        drop(owner);
+        drop(SourceWriteGuard::acquire_existing(tmp.path()).unwrap());
+        let file = tmp.path().join("regular-file");
+        fs::write(&file, b"preserve").unwrap();
+        assert_eq!(
+            SourceWriteGuard::acquire_existing(&file)
+                .err()
+                .unwrap()
+                .kind(),
+            io::ErrorKind::NotADirectory
+        );
+        assert!(ColumnFile::write_batch(&file, &[row()]).is_err());
+        assert_eq!(fs::read(file).unwrap(), b"preserve");
+    }
+
+    #[test]
+    fn existing_source_operations_do_not_create_missing_nonzero_sources() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("missing");
+        assert_eq!(
+            SourceWriteGuard::acquire_bound(&missing, [7; 16], 0, 1)
+                .err()
+                .unwrap()
+                .kind(),
+            io::ErrorKind::NotFound
+        );
+        assert_eq!(
+            SourceWriteGuard::acquire_legacy(&missing)
+                .err()
+                .unwrap()
+                .kind(),
+            io::ErrorKind::NotFound
+        );
+        assert_eq!(
+            begin_prefix_recovery(&missing, [7; 16], 1, 0, 1, SegmentKind::Hot)
+                .err()
+                .unwrap()
+                .kind(),
+            io::ErrorKind::NotFound
+        );
+        assert_eq!(
+            ColumnFile::append_batch_with_source_binding(
+                &missing,
+                &[row()],
+                1,
+                durability::Publication::Ordered,
+                [7; 16],
+                0,
+                1
+            )
+            .unwrap_err()
+            .kind(),
+            io::ErrorKind::NotFound
+        );
+        assert!(!missing.exists());
     }
 
     #[test]
