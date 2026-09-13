@@ -30,8 +30,11 @@ Only a pending exact-prefix repair binds its authoritative recovery row boundary
 
 Legacy/raw replacement publishes an explicit updating state before replacing
 same-name column files and a committed identity after completing publication.
-Readers validate the committed state before and after capturing handles. A marker
-updated only before or only after replacement cannot exclude a mixed capture.
+Manifestless, unidentified and zero-row readers validate the committed state
+before and after capturing handles. Identified nonempty native readers compare
+the committed marker after capture with the identity from that captured manifest,
+as detailed below. Publishing a marker only before or only after replacement
+cannot exclude a mixed capture.
 Native manifests and raw markers must agree; a standalone raw replacement cannot
 silently keep using the former native identity. Captured raw row boundaries must
 remain fixed through prefix appends or yield an explicit error.
@@ -163,7 +166,7 @@ tail pass is claimed. The repeatable raw ingestion benefit supports retaining th
 initialization optimization. These are comparisons against the preceding
 implementation candidate, not final acceptance against merged PR #149.
 
-## Query capture optimization under implementation
+## Query capture optimization
 
 An identified nonempty native manifest already supplies the expected namespace,
 generation, segment ID and visible row boundary. Validate the committed marker
@@ -181,3 +184,116 @@ manifest. Canonical bitmap readers already allow newer append bits. Current quer
 callers enforce the captured row boundary and return no candidates for zero rows
 before reading canonical bits. No wrong query result was demonstrated in that
 stable zero-row case. Broader snapshot/caller review remains in batch 7.
+
+The implementation is committed as `7bfcf4595fc4bc5df63c5d010fd8640af3585186`.
+[Focused validation](baselines/2026-09-13-source-identity-capture-focused-1.json)
+passes formatting, strict workspace Clippy, 251 storage tests, 80 index tests,
+13 native query tests and 11 background tests. Five storage cases remain ignored
+as described above. Deterministic hooks cover pending/missing/foreign markers
+after file capture, prefix append and exact-prefix rewrite, and the retained
+legacy/zero-row transition checks. Existing raw-to-paged unbundled compaction
+coverage exercises manifest retry and retained file handles. Expected identity is
+recomputed inside every retry iteration; changed-identity retry was reviewed in
+source, rather than claimed as a new deterministic test.
+
+The archive also retains failed attempts 8 and 9: three new cases initially failed
+while their generation-3 fixture called a maintenance refresh before publishing
+its first manifest; a later unreachable-branch cleanup required collapsing the
+remaining condition for Clippy. The corrected fixture explicitly publishes its
+initial raw schema. No production validation was weakened. Attempt 10 passes,
+and its complete tested-source patch exactly matches the committed candidate.
+The [isolated five-path comparison](baselines/2026-09-13-source-identity-capture-release.json)
+against `8f7e1dcb` retains 10,000 timings, 100 explicit warmups and 20 RSS
+observations. Block-hash point, block-number range, timestamp range, present-topic
+and absent-topic medians change -6.87%, -4.23%, -3.19%, -4.41% and -8.18%.
+Their p95 changes are -7.42%, -1.65%, -2.76%, -8.04% and -8.11%; RSS median
+changes +0.36%. This supports retaining the scoped query optimization. The final
+six-workload comparison against merged PR #149 is retained below; complete
+workspace/release gates, exact-head CI and merge remain pending.
+
+## Direct comparison with merged PR #149
+
+The [direct release comparison](baselines/2026-09-13-source-identity-final-release.json)
+retains all 20,000 timings, 100 explicit warmups and 120 RSS observations for
+`9c0a58fc` versus `7bfcf459`. Raw live ingestion median/p95 changes are
++0.60%/-1.16% dense and +3.19%/+1.07% sparse, resolving the initial 18–20%
+median regression. Actual live publication changes -0.28%/+5.62%; historical
+publication +0.32%/+5.13%. These publication tails remain under investigation.
+
+The short block-hash point and absent-topic median changes are +6.49% and +9.69%,
+with p95 +10.18% and +11.22%. Other short-query p95 changes are +7.12–8.42%.
+Dense engine p95 changes reach +11.95% while its medians are slightly lower;
+dense concurrent p95 is +7.48%, and sparse count/reopen/index-build p95 changes
+are +12.18%/+8.48%/+5.04%. None of these observations is discarded or treated as
+an automatic pass. The complete table and absolute timings are in the evidence.
+
+The [completed fixed investigation](baselines/2026-09-13-source-identity-final-tail-1.json)
+repeats each affected complete workload with 20 balanced source pairs and 10
+identical-candidate pairs: short paths, dense engine, dense mixed, sparse mixed
+and actual publication. It retains 51,000 timings, 300 explicit warmups and 300
+RSS observations using the exact saved artifacts. Controls remain separate from
+source comparisons, and all initial samples are included in pooled source
+statistics. Pooled raw live ingestion median/p95 changes are +1.58%/+3.29% dense
+and +2.48%/+2.87% sparse; actual live publication +0.24%/-4.13%, historical
+-1.73%/-3.97%. The initial large engine and publication tails do not repeat in
+this fixed schedule. Dense mixed native-query p95 +9.70%, index-build p95 +5.24%,
+sparse reopen p95 +5.22% and count p95 +5.84% remain explicit observations.
+
+The empty-result topic query still exceeds the user's limit: median +9.69%
+initially, +10.48% in confirmation and +10.98% with all source samples pooled.
+Its pooled p95 is +8.50%; other short-query pooled median changes are +1.67–6.85%.
+This candidate is not accepted. Identical-candidate short-query median differences
+range -0.59% to -1.50%; their much larger negative tail differences illustrate
+tail variability, but do not explain away the repeated source median regression.
+
+A [third bounded sampling attempt](baselines/2026-09-13-source-identity-profiles-2.json)
+completed the unchanged query workload but could not attach the sampler. It
+provides no hotspot attribution; all instrumented observations are retained and
+excluded from acceptance. Source review finds one marker read on the absent-bloom
+path, with no redundant checkpoint marker read. A small experiment will replace
+the trailing EOF read with a length check on the same opened handle, then read
+the fixed payload. Immutable atomic replacement makes that handle's length stable
+under the writer protocol. This retains the number of system calls and is not
+assumed faster; it must demonstrate a benefit before retention. Full gates, CI
+and merge remain pending.
+
+The same-handle marker reader experiment is committed as
+`b6505ee3e28d506a667aa7674a8775919b8abc12`.
+[Focused attempt 11](baselines/2026-09-13-source-identity-marker-read-focused-1.json)
+passes formatting, strict Clippy, 252 storage tests, 80 index tests, 13 native
+query tests and 11 background tests. The fixed-size fixture checks valid,
+one-byte-short and one-byte-long files; existing checksum/state checks remain.
+The archive verifies exact equality between the tested and committed source
+patch. Four unused test descriptor path labels now match their decimal segment
+IDs. The README also explains the old-data compatibility condition rather than
+suggesting an index rebuild can establish missing source identity.
+
+Its predefined ten-pair comparison uses all five unchanged short-query paths
+against `7bfcf459`. The first launch stopped before builds or timings because
+the sandbox blocked the read-only hardware inventory; its log is retained.
+The subsequent launch uses the same plan with the necessary execution permission.
+The [completed isolated comparison](baselines/2026-09-13-source-identity-marker-read-release.json)
+retains all 10,000 timings, 100 warmups and 20 RSS observations. Block-hash,
+block-number, timestamp, present-topic and absent-topic median changes are
+-3.52%, -2.91%, -3.13%, -4.22% and -3.05%, respectively; p95 changes are
+-4.22%, -4.90%, -10.45%, -11.71% and -21.80%. RSS median changes -0.67%.
+These measurements support provisional retention. A new direct six-workload
+comparison against merged PR #149 is running on the frozen candidate; full
+acceptance is not inferred by multiplying earlier percentage improvements.
+The [direct marker-reader baseline comparison](baselines/2026-09-13-source-identity-marker-read-baseline-release.json)
+retains all 20,000 timings, 100 warmups and 120 RSS observations. Raw live
+ingestion median/p95 changes are +1.47%/-1.88% dense and +2.16%/+8.79% sparse;
+historical ingestion medians +0.17%/-1.14%. Actual live publication changes
++0.38%/+4.34%, historical +0.83%/-6.58%. Engine-query medians range -0.41% to
++0.07%. Sparse reopen p95 +6.86%, sparse count p95 +6.33% and sparse engine
+aggregate p95 +5.15% remain explicit observations.
+
+The short-query result still prevents acceptance: absent-topic median +10.56%,
+p95 +25.21%; block-hash median +7.48%, p95 +27.32%. Other short-query medians
+are +3.49–4.76% and p95 +9.28–22.76%. The isolated marker-read improvement does
+not establish compliance with the direct baseline. Source review identified a
+small heap-backed set in unbundled schema validation over a fixed 14-name domain.
+The next experiment uses a stack array for exactly the same unknown-name,
+duplicate-name and non-topic-null-bitmap checks, preserving existing permissive
+unbundled completeness and topic-nullability rules. It will be validated and
+measured independently before any retention decision.

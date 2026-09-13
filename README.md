@@ -365,9 +365,19 @@ Command samples:
 ```
 
 Normal historical sync already writes compacted sealed segments and continuously
-builds the current query index profile. `build-indexes` is mainly for older data
-directories, interrupted indexing, or changed index profiles. `compact` is
-mainly for older data directories or changed compression profiles.
+builds the current query index profile. `build-indexes` handles interrupted
+indexing and changed index profiles. `compact` handles older representations or
+changed compression profiles.
+
+Indexes require a storage-owned source identity. Older segments without that
+identity remain readable through scans, but rebuilding their indexes alone cannot
+establish it. Such segments require a fresh sync or a complete storage-owned
+rewrite; representation-only compaction does not add identity. Explicit index
+builds report this compatibility condition; background indexing skips repeated
+rebuild attempts and records the reason at debug log level.
+See the [source identity audit](docs/audit/source-publication-identity.md) for
+the format and recovery details. Keep existing data directories until their
+replacement has been validated.
 
 ## Config File
 
