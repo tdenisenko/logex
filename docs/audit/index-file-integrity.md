@@ -67,9 +67,9 @@ pending.
 ## Implementation under validation
 
 New derived files wrap their existing logical B-tree/bloom encoding in a page
-integrity container. Its 48-byte header fixes magic, version, 8192-byte page size,
+integrity container. Its 48-byte header fixes magic, version, 4096-byte page size,
 logical length, a per-file 128-bit random identity and reserved fields, protected by CRC32. The original logical
-bytes remain contiguous. The current experiment uses container version 6 and
+bytes remain contiguous. The current experiment uses container version 5 and
 one eight-byte metadata-seeded XXH3 fingerprint per page. Screens 1–16 used
 version 1 and four-byte CRC32 page checks; screen 17 used version 2 and XXH64.
 Each page fingerprint
@@ -83,7 +83,7 @@ opened handle.
 Point lookups validate only bytes from pages they inspect, keeping logarithmic
 table search. Bloom exclusions verify the page containing the tested bit. Range
 readers retain contiguous whole-file reads and validate every page. A reader
-holds an 8 KiB data-page cache and a checksum cache capped at 16 KiB (smaller files
+holds a 4 KiB data-page cache and a checksum cache capped at 16 KiB (smaller files
 allocate only their footer size); no global validation cache or
 per-query full-file scrub is introduced. Writer fingerprint storage costs eight
 bytes per logical page, and B-tree payloads stream once instead of retaining all
@@ -498,3 +498,39 @@ control retains every open/write/close timing. Single writes are faster than
 splitting the same bytes at 8 KiB, and the two generated file sizes have similar
 costs. This control excludes entropy and serialization and cannot replace the
 application comparison.
+
+### Expanded comparison 3: rejected larger pages
+
+The seven-layout comparison at `984e65af` retains all 97,608 timings / 168 RSS
+observations. Version 6 / 8 KiB pages are rejected: gapped full reads remain
++10.54% median / +10.49% p95; 32-container point median is +13.89%; bloom absent
+medians range from +11.16% to +16.80%, with several larger tail regressions.
+Small writes (-13.65% / -29.16%), typical/many-key full reads (about -51%) and
+write gains do not offset failed layouts. The implementation returns to version
+5 / 4 KiB pages and explicitly tests rejection of the discarded version 6.
+
+A finite 288-timing checksum diagnostic compared current seeded XXH3 with nested
+XXH3 and streaming XXH3 over the concatenated metadata and page. All independently
+assembled composition controls passed using the same pinned implementation.
+Nested hashing improves only about 3.7% at 4 KiB and 1.6–2.4% at 8 KiB and changes
+collision composition; streaming is slower. Neither alternative is adopted.
+The full comparison, diagnostic source, controls and raw results are retained in
+[expanded comparison 3](baselines/2026-09-13-index-integrity-expanded-comparison-3.json).
+
+A separate initialized-read API diagnostic retains 240 batch timings across
+4/32/64/256 KiB and 1 MiB generated files. Every result is checked after its timer;
+each batch retains 8 MiB of outputs until the oracle and destruction. The pinned
+nightly borrowed-buffer API reduces median API cost by about 14.6% at 32 KiB and
+3.2–3.8% at 64/256 KiB. This is an API/allocator diagnostic, not application
+acceptance. No production initialized-read boundary or nightly feature has been
+added on this evidence alone.
+
+The next bounded point-read candidate uses an unverified prefix solely to choose
+whole-file verification for a matching single-entry v2 file larger than one page
+and at most 1 MiB. Width, key, count and canonical descriptor extent must match the
+hint. The same opened handle then verifies the whole body/footer and fully checks
+B-tree and bitmap structure before a bitmap is moved out. Absent, wrong-width,
+large and multi-key lookups retain the ordinary path. This can save a separate
+footer read and partial-page copy, but also rereads the prefetched page; all 75 index tests, formatting and focused Clippy pass at `e3b809e4`.
+An isolated comparison against `3d723cb9` (same 4 KiB geometry and bounded write
+buffers) is required before claiming a performance improvement.
