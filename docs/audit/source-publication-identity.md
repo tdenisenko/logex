@@ -814,6 +814,28 @@ clearance remains unresolved. In particular, the retained historical publication
 tail uncertainty deserves attention despite its stable median. Read-only
 suitability checks on the previously offered mac-mini observed approximately
 24% CPU use in the second sample, 15 GB physical memory used and 670 MB unused;
-no workload, source transfer, data change or service change was performed there.
-An idle host or quiet test window has been requested while local correctness
+no workload, source transfer, data change or service change was performed during
+that initial check. An idle host or quiet test window has been requested while local correctness
 validation proceeds. No performance waiver or release-readiness claim is made.
+
+
+All [nine local workspace/release gates](baselines/2026-09-13-source-identity-validation-final.json)
+pass on committed checkpoint `c229ace0`: vendor verification, formatting,
+workspace check, strict Clippy, 1,151 workspace tests (23 existing ignored),
+documentation checks, release node build, 146 release query tests (nine existing
+ignored) and two release API consistency tests. The packet verifies the exact
+Git archive against every recorded source hash and retains complete logs plus
+the successful optimization-revert regression check. Linux/macOS CI and merge
+remain separate pending work.
+
+The mac-mini's internal temporary filesystem is confirmed APFS on a fixed SSD,
+with approximately 104 GiB available at preflight. A new private directory,
+`/private/tmp/logex-source-identity-controls.0ivODK`, contains the exact `c229ace0`
+source archive for isolated build preparation. No test workload or service has
+started there, and external-volume contents remain untouched. CPU use and low
+unused memory alone do not establish timing stability or memory pressure;
+inactive/file-backed memory is substantial and no swapouts were observed. A
+single finite same-binary control packet is being designed to assess precision
+before considering any new source comparison. The pending quiet-window question
+does not authorize assuming that the host is quiet. All earlier measurements and
+the unresolved performance disposition remain unchanged.
