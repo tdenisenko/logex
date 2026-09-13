@@ -370,14 +370,21 @@ indexing and changed index profiles. `compact` handles older representations or
 changed compression profiles.
 
 Indexes require a storage-owned source identity. Older segments without that
-identity remain readable through scans, but rebuilding their indexes alone cannot
-establish it. Such segments require a fresh sync or a complete storage-owned
-rewrite; representation-only compaction does not add identity. Explicit index
+identity remain readable through scans, but rebuilding their indexes cannot
+establish it. Existing unidentified native segments need a fresh sync into a new
+data directory to become index-eligible. There is currently no native in-place
+identity migration command; compaction and recovery also preserve their
+unidentified status. Explicit index
 builds report this compatibility condition; background indexing skips repeated
 rebuild attempts and records the reason at debug log level.
 See the [source identity audit](docs/audit/source-publication-identity.md) for
 the format and recovery details. Keep existing data directories until their
 replacement has been validated.
+
+Do not open a data directory written by this version with an older binary.
+Older binaries are not guaranteed to reject every upgraded representation and
+can discard identity metadata. To roll back, use a preserved pre-upgrade data
+directory or backup; no downgrade migration is provided.
 
 ## Config File
 

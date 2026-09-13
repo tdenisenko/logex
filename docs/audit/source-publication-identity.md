@@ -2,6 +2,11 @@
 
 This batch follows merged PR #149 and is in progress. It addresses source identity
 behind derived indexes; it does not claim the rest of the offline audit is done.
+The current candidate is `179e0ff7`, with passing focused checks and a completed
+fixed release comparison. [Performance disposition](#final-direct-performance-disposition)
+remains unresolved for several query tails; full gates, CI and merge remain
+pending. Earlier candidates and rejected experiments are retained below as the
+audit history, not separate accepted implementations.
 
 ## Confirmed failures
 
@@ -41,16 +46,24 @@ silently keep using the former native identity. Captured raw row boundaries must
 remain fixed through prefix appends or yield an explicit error.
 
 Missing legacy identity is a compatibility condition, not evidence that old
-indexes are correct. Such data remains scan-readable but index-ineligible until
-a complete storage-owned rewrite establishes identity; the diagnostic must
-distinguish this from a transient rebuild. No automatic row-count-based identity
-migration is planned. Existing native metadata without identity must likewise
-remain explicit unless its established exclusive recovery/publication boundary
-can safely supply identity without a new migration subsystem. Interrupted replacement must be resolved only by
+indexes are correct. Such data remains scan-readable but index-ineligible;
+the diagnostic distinguishes this from a transient rebuild. Existing native
+unidentified segments currently require a fresh sync into a new directory for
+indexing. No in-place identity migration command or automatic row-count-based
+identity migration is provided. Native recovery and representation compaction
+preserve absent identity. A standalone full raw rewrite establishes its own
+identity but does not migrate the native catalog/manifest. Interrupted replacement must be resolved only by
 a complete rewrite or existing verified recovery evidence. Never infer completion
 from equal row counts, silently clear an updating state, or schedule an endless
 background rebuild loop. Existing maintenance ownership and recovery boundaries
 must remain consistent; query capture must not recursively acquire writer locks.
+
+Downgrade rejection is not guaranteed. Native catalog/storage version numbers
+remain unchanged, and older binaries may ignore added identity fields in
+otherwise compatible bundled data; raw canonical envelopes also differ from
+their plain-bitmap reader. Do not use an older binary on a directory written by
+this version. Operational rollback uses a preserved pre-upgrade directory or
+backup. This is one-way upgrade guidance, not a tested downgrade migration.
 
 ## Prefix-repair recovery boundary
 
@@ -511,3 +524,194 @@ publication, read before obtaining a writer-first lock, and fail subsequent appe
 when an incidental sidecar is retained. The two no-sidecar append controls pass.
 The complete patch, commands, toolchain, logs and hashes are retained for the
 focused correction's evidence packet.
+
+### Legacy recovery correction
+
+Commit `66d511ceac9bb086f6391acc67c7d21cfdb2709e` holds one legacy source owner
+from before capture through rewriting, manifest/catalog publication and cleanup.
+The private rewrite helper borrows that owner, checks its directory and preserves
+any incidental canonical binding. Catalog/manifest identity remains absent, so
+legacy data remains index-ineligible. The
+[complete reproduction and focused checks](baselines/2026-09-13-source-identity-legacy-focused-1.json)
+retain all eight before-fix failures, two controls and the exact corrected source.
+Focused attempt 17 passes formatting, strict workspace Clippy, 273 storage tests,
+80 index tests, 13 native query tests and 11 background tests. Five existing
+storage checks remain ignored. The writer-first cases also verify unchanged
+artifact and catalog bytes. Both private recovery branches are called directly.
+
+Source review found repeated directory preparation introduced by the initial
+identity implementation: acquisition prepares a directory, and both private owned
+write helpers prepare it again. Existing-source append and integrity acquisition
+also prepare the directory before opening it. A bounded separate experiment will
+remove verified duplicate preparation and distinguish existing-source ownership
+from allowed initialization, while preserving same-handle directory checks,
+zero-prefix recovery, locks and all publication barriers. Its performance benefit
+is not yet measured. The earlier pooled sparse tails remain unresolved.
+
+Entry-point review also identified two older public-append gaps. Its absence
+observation precedes ownership, so a concurrent completed initialization can be
+overwritten by a stale initialization decision. An absent directory also enters
+full initialization even if the caller supplied a nonzero expected prefix.
+The next bounded regressions will require preserving a concurrent publication
+and rejecting a missing nonzero prefix without creating files. These correctness
+requirements are independent of whether removing redundant preparation improves
+measured performance.
+
+### Existing-source acquisition and absent append
+
+Commit `179e0ff7c7b2816c96d1a62195fa75b2cf8d3b09` opens an existing source
+directly, checks directory type on the same handle and acquires the same inode
+lock. Initialization prepares its directory once; private owned-write helpers
+no longer repeat that preparation. Missing nonzero sources are not created by
+mutation, verification or recovery ownership. Explicit zero-prefix recovery keeps
+its existing initialization capability; ordinary startup still requires every
+catalog segment directory to exist. No dependencies or durability barriers change.
+
+Public append rejects a missing nonzero prefix before creation. A zero-prefix
+NotFound fallback rechecks marker and directory contents while holding ownership;
+a completed, interrupted or partial source that appeared meanwhile yields a
+conflict without replacement. The
+[reproduction and focused evidence](baselines/2026-09-13-source-identity-directory-focused-1.json)
+retains both before-fix failures and the complete directory-preparation draft in
+which they ran. This was not a test-only diff against `66d511ce`. Focused attempt
+18 passes formatting, strict Clippy, 279 storage tests, 80 index tests, 13 native
+query tests and 11 background tests; five existing storage checks remain ignored.
+Additional cases cover directory type, missing paths, lock exclusion, partial/
+interrupted initialization preservation, and four zero-row legacy startup/direct-
+recovery scenarios followed by first append and reopen without identity promotion.
+Independent review found no additional correctness defect in this draft.
+
+A fixed ten-pair [release comparison](baselines/2026-09-13-source-identity-directory-release.json)
+with `66d511ce` completed on both complete mixed workloads and actual publication,
+using unchanged parameters and fixtures. It retains all 4,000 timings and 60 RSS
+observations. The required append
+correctness fixes are independent of any measured preparation benefit; source
+inspection alone does not justify claiming a performance improvement. The earlier
+pooled sparse tail differences, direct final-baseline acceptance, all workspace/
+release gates, CI and merge remain pending.
+
+Independent retention review distinguishes correctness/cleanup from optimization.
+The absent-append checks prevent reproduced overwrites and missing-prefix loss.
+Separating existing acquisition from explicit creation prevents missing nonzero
+sources from being manufactured by an ownership check. The two removed private
+preparations are obsolete under their verified prepared-directory ownership
+precondition. Retain this coherent subset for those reasons; do not claim a
+speedup from syscall counts or sub-noise median changes. Direct-baseline
+performance acceptance remains mandatory.
+
+Before taking any final direct samples, the next schedule is predefined against
+merged PR #149: ten initial balanced source pairs for all six unchanged workloads,
+then twenty more source pairs and ten identical-candidate pairs for every suite,
+regardless of initial outcomes. This yields 30 source pairs per suite and retains
+80,000 total timings, 400 explicit warmups and 480 RSS observations across both
+phases. Controls remain separate from the pooled source results. That comparison
+started only after completing and packaging the directory confirmation below.
+
+The [completed directory investigation](baselines/2026-09-13-source-identity-directory-tail-1.json)
+retains all 12,000 additional timings and 180 RSS observations from twenty source
+pairs and ten identical-candidate pairs for each complete affected suite. Pooled
+source live-ingestion median/p95 changes are -0.54%/-0.07% dense and -0.10%/+0.13%
+sparse; historical ingestion -0.10%/+1.14% dense and +0.02%/+0.01% sparse.
+Actual publication changes are -0.84%/-0.78% live and +0.24%/-1.86% historical.
+These small median changes do not establish a preparation speedup.
+
+Dense concurrent-query p95 remains +13.65% pooled and +14.07% in confirmation,
+versus +3.73% in the identical-candidate control. It remains unresolved. Sparse
+concurrent-query p95 is +2.26% pooled, -7.40% in confirmation and +14.90% in the
+identical-candidate control. Sparse count p95 is +5.75% pooled, +3.32% in
+confirmation and -10.23% in the control. Historical publication p95 is +9.40% in
+confirmation but -1.86% pooled; its control changes -0.39%. Publication RSS
+median/p95 changes -3.07%/-3.34% pooled, while its identical-candidate median
+changes +9.10%. Every observation remains retained; these differences are not
+blanket-dismissed as noise or treated as a direct-master acceptance result.
+
+The final direct comparison uses merged `9c0a58fc` and corrected `179e0ff7`.
+Source and HEAD remain frozen through both predefined phases. Complete local
+gates, platform CI and merge follow only after assessing those results.
+
+Its [initial ten-pair phase](baselines/2026-09-13-source-identity-complete-baseline-release.json)
+is complete and retains all 20,000 timings, 100 warmups and 120 RSS observations.
+Live ingestion median/p95 changes are +2.05%/-6.77% dense and +1.93%/-1.20%
+sparse; historical ingestion +0.71%/-3.27% dense and -0.11%/-1.57% sparse.
+Reopen changes +3.42%/-0.67% dense and +1.83%/+1.80% sparse. Actual publication
+changes +0.11%/-3.16% live and -1.68%/-7.73% historical. Publication RSS median
+is -6.57%; all other initial RSS medians are within 0.5%.
+
+Short-query medians range -0.77% to +3.47%, while p95 changes range +5.96% to
++11.35%. Dense engine query medians range +0.74% to +1.18%, with p95 +15.83%
+to +18.29%. Sparse engine medians are within 0.12%, with p95 -4.56% to -8.68%.
+Mixed query medians are within 0.58% and their p95 increases do not exceed 2.16%.
+The larger short-query/dense-engine tails require investigation. The already-
+declared follow-up is running for every suite, using the same saved binaries;
+the initial results do not alter its scope or establish final acceptance.
+
+## Final direct performance disposition
+
+The [complete fixed follow-up](baselines/2026-09-13-source-identity-complete-tail-1.json)
+is retained with its initial phase: 80,000 timings, 400 explicit warmups and 480
+RSS observations. Every suite has thirty source pairs and ten separate
+identical-candidate pairs. The verifier checks the predeclared schedule, input
+hashes, saved binaries, fixture parameters, all raw logs/observations, per-process
+summaries, pooled source statistics and archive roundtrip. Source and HEAD stayed
+at `179e0ff7` through both phases. No source observations are discarded, and
+controls are never pooled with source comparisons.
+
+Selected pooled source changes against merged `9c0a58fc`:
+
+| Workload | Median latency | p95 latency |
+| --- | ---: | ---: |
+| Actual live storage publication | +0.58% | +3.60% |
+| Actual historical storage publication | -0.12% | +6.91% |
+| Dense raw live ingestion | +2.97% | +5.71% |
+| Sparse raw live ingestion | +1.94% | -0.05% |
+| Dense raw historical ingestion | +0.08% | -0.47% |
+| Sparse raw historical ingestion | -0.22% | -1.27% |
+| Dense reopen | +4.66% | +3.13% |
+| Sparse reopen | +2.21% | +6.40% |
+| Dense compaction | +0.97% | +6.03% |
+| Sparse compaction | +0.31% | -0.90% |
+| Short block-hash lookup | +1.70% | +8.69% |
+| Short block-number range | +4.80% | +10.16% |
+| Short timestamp range | +4.84% | +11.54% |
+| Short present-topic lookup | +0.92% | +7.71% |
+| Short absent-topic lookup | +2.07% | +11.04% |
+| Dense concurrent native queries | -0.09% | -0.76% |
+| Sparse concurrent native queries | +0.73% | +11.55% |
+
+Dense engine query medians range +0.09% to +0.38%, with p95 +1.65% to +3.17%.
+Sparse engine medians range +0.002% to +0.26%, with p95 -1.70% to +0.70%.
+Remaining mixed-query medians are within 0.94%; sparse native-filter/count p95
+changes are +6.54%/+6.50%. Pooled RSS medians are within 0.90% except publication
+at +2.34%; all pooled RSS p95 changes are within 1.46%. Complete values, including
+every phase and control, are in the linked report.
+
+These measurements do not show a large ingestion slowdown. They do not establish
+complete performance acceptance: the pooled short-query tail exceedances remain
+unresolved. The initial and confirmation latency regimes differ, and a pooled
+quantile is not an average of phase quantiles. Short-query controls taken later
+have tight tails but cannot retrospectively describe the initial regime. Analyze
+retained phase/process/order distributions and paired process-level uncertainty
+before deciding whether separate attribution instrumentation is needed. Do not
+replace the pooled results with favorable confirmation values or subtract control
+percentages. No further acceptance runs are scheduled.
+
+Sparse concurrent-query confirmation p95 is +17.92%, while its identical-candidate
+control is +17.09%. This demonstrates substantial variation without changing
+source, but does not cancel the pooled +11.55% observation or prove its entire
+difference is unrelated to source. Dense compaction p95 is +13.78% in confirmation,
+-3.37% initially and +0.01% in the control, with the pooled +6.03% retained.
+Historical publication p95 is +18.74% in confirmation, -7.73% initially and
+-3.56% in the identical-candidate control, versus +6.91% pooled. This phase
+excursion is included in the retained-data investigation because ingestion is a
+priority; its pooled median -0.12% does not erase the tail observations. Live
+publication confirmation p95 is +8.77%, versus +3.60% pooled and +0.13% control.
+
+Read-only compaction review identifies necessary new raw sidecar authority and
+manifest/canonical capture validation under the existing maintenance owner.
+Routing and raw-completeness checks subsequently reopen some of that metadata;
+safe reuse would need to retain exact row counts and legacy physical lengths,
+which have stronger requirements than ordinary captured-prefix validation.
+Existing tree publication also flushes the new sidecar. Codecs, worker/write
+logic and maintenance locking are unchanged; no compaction random draw or raw
+canonical rewrite was added. These are attribution leads, not measured removable
+latency or permission to omit integrity/durability checks.
