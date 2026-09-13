@@ -67,22 +67,23 @@ pending.
 ## Implementation under validation
 
 New derived files wrap their existing logical B-tree/bloom encoding in a page
-integrity container. Its 48-byte header fixes magic, version, 1024-byte page size,
+integrity container. Its 48-byte header fixes magic, version, 2048-byte page size,
 logical length, a per-file 128-bit random identity and reserved fields, protected by CRC32. The original logical
-bytes remain contiguous. The current experiment uses container version 3 and
+bytes remain contiguous. The current experiment uses container version 4 and
 one eight-byte metadata-seeded XXH3 fingerprint per page. Screens 1–16 used
 version 1 and four-byte CRC32 page checks; screen 17 used version 2 and XXH64.
 Each page fingerprint
 includes a domain tag, format version, logical length, file identity, page position and actual
 page length. Version 3 hashes that complete metadata into a seed and uses the
-standard seeded hash on the page bytes. This is a distinct encoding from hashing
+standard seeded hash on the page bytes. Version 4 retains this construction with
+2 KiB pages and its own version domain. This is a distinct encoding from hashing
 the concatenated metadata and page. Exact physical extent is checked using the
 opened handle.
 
 Point lookups validate only bytes from pages they inspect, keeping logarithmic
 table search. Bloom exclusions verify the page containing the tested bit. Range
 readers retain contiguous whole-file reads and validate every page. A reader
-holds a 1 KiB data-page cache and a checksum cache capped at 16 KiB (smaller files
+holds a 2 KiB data-page cache and a checksum cache capped at 16 KiB (smaller files
 allocate only their footer size); no global validation cache or
 per-query full-file scrub is introduced. Writer fingerprint storage costs eight
 bytes per logical page, and B-tree payloads stream once instead of retaining all
@@ -332,3 +333,36 @@ not a guarantee. Smaller filters can increase false positives versus the old
 oversized file. Exact no-false-negative checks and measured query/build cost are
 required before accepting this tradeoff. Existing protected 2 MiB files remain
 supported under the current page format.
+
+
+## Remaining read overhead after seeded fingerprints
+
+Screen 18 (`7d714253`) retains all 7,440 timings and 40 RSS observations. Large
+contiguous point/full-read medians are +2.63%/+9.37%; nonconsecutive-row point/
+full-read medians are +8.87%/+12.37%. Typical and many-key full reads improve
+about 49%, and their writes improve 68–70%. This candidate remains unaccepted.
+The small full-read aggregate is +26.06%; its four candidate process medians are
+40.35, 20.69, 14.63 and 14.60 microseconds versus 24.13, 15.96, 13.79 and 14.08.
+All startup observations remain included. More substantial final sampling and
+explicit cold/warm conditions are required; later samples alone are not acceptance.
+The actual workspace feature union for twox-hash 2.1.2 is `alloc`, `std`,
+`xxhash32`, `xxhash3_64`, `xxhash64`.
+
+Inspection of the pinned standard library confirms that `Take<File>` forwards
+uninitialized-buffer reads, but its default `read_to_end` begins without the
+known file-size hint. A finite local diagnostic compares this path, explicit
+zero-initialization plus `read_exact`, and `fs::read` at four sizes, retaining
+14,400 timings in `/private/tmp/logex-index-full-read-micro-1`. Every byte is
+checked outside the timer. Zero-initialization is slower at every measured size;
+at 64 KiB the medians are 10.67/11.29/10.63 microseconds respectively. The bounded
+reader is retained, and the proposed read-strategy change is rejected.
+
+The next candidate increases page size from 1 to 2 KiB. Prior checksum diagnostics
+show substantial per-page metadata/seed work, so halving the number of pages
+reduces this work and footer size without dropping any check. This trades larger
+point-read/cache granularity for fewer fingerprints and a footer-cache span of
+4 MiB. The 2 MiB bloom plus its logical header now fits in one footer window.
+The independent persisted-byte oracle fixes the new geometry explicitly, and
+all previous prototype versions are rejected. All 66 index unit tests and focused Clippy pass; logs and source hashes are
+retained in `/private/tmp/logex-index-integrity-focused-7`. Equivalent release
+measurements remain outstanding, so this is not yet accepted.
