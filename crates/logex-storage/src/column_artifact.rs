@@ -99,24 +99,18 @@ impl ColumnArtifacts {
         let mut artifacts = Self::open_inspected(dir, manifest, None)?;
         if artifacts.bundle.is_none() {
             if let Some(manifest) = manifest {
-                let mut seen = [false; COLUMN_NAMES.len()];
+                let mut names = std::collections::BTreeSet::new();
                 for column in &manifest.columns {
-                    let Some(position) = COLUMN_NAMES
-                        .iter()
-                        .position(|known| *known == column.name.as_str())
-                    else {
-                        return Err(invalid("unknown or repeated column in captured schema"));
-                    };
                     if (column.null_bitmap_path.is_some()
                         && !matches!(
                             column.name.as_str(),
                             "topic0" | "topic1" | "topic2" | "topic3"
                         ))
-                        || seen[position]
+                        || !COLUMN_NAMES.contains(&column.name.as_str())
+                        || !names.insert(&column.name)
                     {
                         return Err(invalid("unknown or repeated column in captured schema"));
                     }
-                    seen[position] = true;
                 }
             }
             let paths: Vec<String> = if let Some(manifest) = manifest {
