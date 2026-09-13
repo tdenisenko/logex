@@ -877,3 +877,17 @@ numeric/error-handling checks pass for the analyzer, including errors after a
 provisional eligibility result and changes to external input records. Python 3.9
 syntax is checked; these preparation checks ran locally on Python 3.13. They are
 not benchmark observations or a substitute for the remote packet's own checks.
+
+The remote runner/platform preflight subsequently passed on Python 3.9.6 using
+only `/usr/bin/true`; no LogEx fixture was involved. The third preparation's
+dependency download was progressing slowly, so only that owned Cargo fetch was
+interrupted. Its complete record remains a stopped preparation, not a successful
+build. All 18 remaining archives were available locally and verified against
+Cargo.lock; 17 were supplied to the stopped private cache and one had already
+finished downloading. A fresh fourth build in
+`/private/tmp/logex-source-identity-controls-4.uHyHMD` copied the completed cache,
+passed offline dependency resolution and entered compilation. The
+[interrupted attempt, cache verification, platform preflight and exact script updates](baselines/2026-09-13-source-identity-remote-cache.json)
+are retained. Only the control design's private root and corresponding script
+hash changed; its fixture, schedule, analysis and stopping rules are identical.
+No source-performance result or new performance allowance is inferred.

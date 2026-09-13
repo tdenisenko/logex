@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "status": "offline_compilation_in_progress_no_LogEx_workload_executed",
+  "candidate_commit": "c229ace0345dd7b6b8c07388d3c0aed8a9c6a771",
+  "stopped_attempt": {
+    "root": "/private/tmp/logex-source-identity-controls-3.PeHWi0",
+    "started": "2026-09-13T14:23:13.163662+00:00",
+    "finished": "2026-09-13T14:40:42.171985+00:00",
+    "command": "cargo fetch --locked",
+    "exit": -2,
+    "reason": "Replace slow download preparation with already cached, checksum-verified dependencies."
+  },
+  "cache_archives_verified": 18,
+  "cache_archives_supplied": 17,
+  "platform_preflight": "Passed on remote Python 3.9.6 with /usr/bin/true only; no LogEx performance observation.",
+  "current_root": "/private/tmp/logex-source-identity-controls-4.uHyHMD",
+  "measurement_design_unchanged": true,
+  "final_assets": {
+    "build_only.py": "6a36bc11e324af7f9e4838c089af37e7f810f7ee7f9b95b6831544e645d59cfd",
+    "control_design.json": "fe15a712cdf7ecdfffb29eedca9cea10096d7afb24ba233310b216487a35c46c",
+    "control_run.py": "0fa9a431b53610d5cc7a282ec4a1c69a897872fb5034740dca4605a870a58bdf",
+    "root4-preparation.patch": "bafda9728e8c795f75d4a8a9cfc050c6580425d3c3f582573a8ef52e4d373313"
+  },
+  "raw_evidence": {
+    "path": "2026-09-13-source-identity-remote-cache-raw.json.gz",
+    "sha256": "82820ddeeb6ccf5f6d33c96bbdfce3af5e97b82178491b0597b52e7832702bad",
+    "files": 103
+  }
+}
