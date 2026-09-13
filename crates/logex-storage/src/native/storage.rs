@@ -6587,7 +6587,7 @@ mod tests {
             let dir = storage.segment_path(descriptor.id);
             // The first parallel column write did not finish all its files. The
             // manifest still has zero rows; the WAL contains the entire batch.
-            ColumnFile::write_batch_with_source_namespace(
+            ColumnFile::write_initial_batch_with_source_identity(
                 &dir,
                 &pending,
                 None,

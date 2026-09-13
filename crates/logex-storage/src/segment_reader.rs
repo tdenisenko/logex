@@ -1142,7 +1142,7 @@ mod tests {
     fn write_native_raw(dir: &Path, rows: &[LogRow], descriptor: &mut SegmentDescriptor) {
         let namespace = [descriptor.id as u8; 16];
         descriptor.source_namespace = Some(namespace.into());
-        ColumnFile::write_batch_with_source_namespace(
+        ColumnFile::write_initial_batch_with_source_identity(
             dir,
             rows,
             None,

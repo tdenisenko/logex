@@ -439,7 +439,7 @@ pub(crate) fn append_ingest_rows(
 ) -> std::io::Result<()> {
     if existing_rows == 0 {
         match source_identity {
-            Some(identity) => ColumnFile::write_batch_with_source_namespace(
+            Some(identity) => ColumnFile::write_initial_batch_with_source_identity(
                 segment_dir,
                 rows,
                 None,
@@ -2277,7 +2277,7 @@ mod tests {
     }
 
     fn write_native_raw(dir: &Path, rows: &[LogRow], descriptor: &SegmentDescriptor) {
-        ColumnFile::write_batch_with_source_namespace(
+        ColumnFile::write_initial_batch_with_source_identity(
             dir,
             rows,
             None,
@@ -2779,7 +2779,7 @@ mod tests {
         let dir = paths.segment_dir(descriptor.id);
         let rows = descending_rows()[..50].to_vec();
         apply_rows_to_descriptor(&mut descriptor, &rows);
-        ColumnFile::write_batch_with_source_namespace(
+        ColumnFile::write_initial_batch_with_source_identity(
             &dir,
             &rows,
             None,
@@ -2929,7 +2929,8 @@ mod tests {
         let (_tmp, paths, mut descriptor, rows) = legacy_rewrite_fixture(false);
         let dir = paths.segment_dir(descriptor.id);
         // This fixture switches to raw columns before taking any snapshots.
-        fs::remove_file(paths.segment_manifest_path(descriptor.id)).unwrap();
+        fs::remove_dir_all(&dir).unwrap();
+        fs::create_dir_all(&dir).unwrap();
         write_native_raw(&dir, &rows[..2], &descriptor);
         descriptor.row_count = 2;
         persist_segment_manifest_with_columns(&paths, &descriptor, default_columns()).unwrap();
@@ -2979,7 +2980,8 @@ mod tests {
         let (_tmp, paths, descriptor, rows) = legacy_rewrite_fixture(false);
         let dir = paths.segment_dir(descriptor.id);
         // Use the generic raw representation that compaction will retire.
-        fs::remove_file(paths.segment_manifest_path(descriptor.id)).unwrap();
+        fs::remove_dir_all(&dir).unwrap();
+        fs::create_dir_all(&dir).unwrap();
         write_native_raw(&dir, &rows, &descriptor);
         persist_segment_manifest_with_columns(&paths, &descriptor, default_columns()).unwrap();
         let (captured_tx, captured_rx) = std::sync::mpsc::channel();

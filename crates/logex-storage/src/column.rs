@@ -658,6 +658,7 @@ impl ColumnFile {
             rows,
             canonical,
             publication,
+            durability::Publication::Ordered,
             durability::Publication::Durable,
             SourceIdentity {
                 namespace,
@@ -668,7 +669,9 @@ impl ColumnFile {
         )
     }
 
-    pub(crate) fn write_batch_with_source_namespace(
+    /// Initialize a catalog-owned raw source whose authoritative prefix is zero.
+    /// The caller publishes the resulting columns through its manifest/catalog.
+    pub(crate) fn write_initial_batch_with_source_identity(
         dir: &Path,
         rows: &[LogRow],
         canonical: Option<&NullBitmap>,
@@ -679,15 +682,15 @@ impl ColumnFile {
         match read_source_marker(dir)? {
             None => {}
             Some(marker)
-                if (marker.state == SOURCE_COMMITTED
-                    || (marker.state == SOURCE_UPDATING && marker.prefix_rows == 0))
+                if marker.state == SOURCE_COMMITTED
+                    && marker.prefix_rows == 0
                     && marker.namespace == identity.namespace
                     && marker.generation == identity.generation
                     && marker.segment_id == identity.segment_id => {}
             Some(_) => {
                 return Err(io::Error::new(
                     io::ErrorKind::WouldBlock,
-                    "raw source has an incompatible incomplete publication",
+                    "raw source must be restored to its catalog-zero prefix before initialization",
                 ));
             }
         }
@@ -696,7 +699,8 @@ impl ColumnFile {
             rows,
             canonical,
             publication,
-            publication,
+            durability::Publication::Deferred,
+            durability::Publication::Deferred,
             identity,
         )
     }
@@ -797,6 +801,7 @@ impl ColumnFile {
         rows: &[LogRow],
         canonical: Option<&NullBitmap>,
         publication: durability::Publication,
+        pending_publication: durability::Publication,
         marker_publication: durability::Publication,
         identity: SourceIdentity,
     ) -> io::Result<()> {
@@ -812,7 +817,7 @@ impl ColumnFile {
         write_source_marker(
             dir,
             SourceMarker::new(identity, SOURCE_UPDATING, 0),
-            durability::Publication::Ordered,
+            pending_publication,
         )?;
         Self::write_batch_contents(dir, rows, canonical, publication)?;
         write_source_marker(
@@ -979,6 +984,7 @@ impl ColumnFile {
                 rows,
                 None,
                 publication,
+                durability::Publication::Ordered,
                 durability::Publication::Durable,
                 SourceIdentity {
                     namespace,
@@ -1726,5 +1732,41 @@ mod tests {
             io::ErrorKind::WouldBlock
         );
         drop(owner);
+    }
+
+    #[test]
+    fn native_initial_write_rejects_nonzero_or_incomplete_source_without_mutation() {
+        let dir = tempfile::tempdir().unwrap();
+        let identity = SourceIdentity {
+            namespace: [9; 16],
+            generation: 3,
+            segment_id: 7,
+            kind: SegmentKind::Hot,
+        };
+        let sentinel = dir.path().join("sentinel");
+        fs::write(&sentinel, b"unchanged").unwrap();
+
+        for marker in [
+            SourceMarker::new(identity, SOURCE_COMMITTED, 1),
+            SourceMarker::new(identity, SOURCE_UPDATING, 0),
+        ] {
+            write_source_marker(dir.path(), marker, durability::Publication::Deferred).unwrap();
+            let marker_before = fs::read(dir.path().join(SOURCE_MARKER_FILE)).unwrap();
+            let error = ColumnFile::write_initial_batch_with_source_identity(
+                dir.path(),
+                &[row()],
+                None,
+                durability::Publication::Deferred,
+                identity,
+            )
+            .unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+            assert_eq!(
+                fs::read(dir.path().join(SOURCE_MARKER_FILE)).unwrap(),
+                marker_before
+            );
+            assert_eq!(fs::read(&sentinel).unwrap(), b"unchanged");
+            assert!(!dir.path().join("address.col").exists());
+        }
     }
 }
