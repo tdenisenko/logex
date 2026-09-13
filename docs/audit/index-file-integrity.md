@@ -15,12 +15,12 @@ every returned result afterwards. It is copied identically into both revisions
 for a new comparison. No previous sample is removed or relabeled as raw lookup
 latency.
 
-All nine local gates passed at exact head `3b0a52b7`, including 65 index unit
-tests, the required workspace checks, release query tests and both release
-protocol consistency tests. Logs and source hashes are retained in
-`/private/tmp/logex-index-integrity-gates-1`. The subsequent timing correction
-affects only the opt-in benchmark, so its compilation and focused execution
-still require separate validation.
+Earlier nine local gates passed at exact head `3b0a52b7`, including 65 index
+unit tests, workspace/release checks and both protocol consistency tests. Those
+results predate the later reader/writer optimizations. Current production source
+`7c99c9f4` passes all79 focused index tests, formatting and focused Clippy; the
+final exact-source workspace/release gate run is still required. Earlier logs
+remain in `/private/tmp/logex-index-integrity-gates-1`.
 
 ## Findings and reproduction
 
@@ -392,8 +392,10 @@ typical/many-key full-read medians improve about52%. The large contiguous full
 read is +9.86%/+8.94%, close to the budget and retained as a sensitivity limit.
 The nonconsecutive-row full read is +11.86%/+11.90%, and its point-read p95 is
 +15.48%. Small B-tree writes are +17.87% median/+26.98% p95. This candidate fails
-acceptance. Typical/many-key write p95 values are +26.30–46.75% despite large median
-gains; these tails also remain subject to investigation.
+acceptance. Many-key write p95 is +26.30% despite a large median gain and remains
+subject to investigation. Typical write p95 improves 46.75%. The earlier prose
+and archive-report limitation incorrectly grouped both tails as regressions;
+this corrects that description without changing any raw measurement.
 
 Source review identifies an avoidable flush in B-tree serialization: calling
 `BufWriter::flush` forwards the flush through the container before its footer is
@@ -579,3 +581,100 @@ They therefore do not establish write-tail acceptance. The seven-layout original
 baseline comparison retains 30 write/build samples per measured process. That
 comparison, mixed ingestion/query workloads, final workspace gates and CI remain
 required before accepting or merging this milestone.
+
+
+### Expanded comparison 4 and remaining attribution
+
+Exact source `9269254c` completes the original seven-layout protocol, retaining
+97,608 timings / 168 RSS observations in
+[expanded comparison 4](baselines/2026-09-13-index-integrity-expanded-comparison-4.json).
+Every generated-row result check passes. Typical/many-key full reads improve
+51.37%/51.92% at the median and 49.49%/50.46% at p95; their write medians improve
+67.30%/71.22%. Small/four/eight/nine-container full-read medians are
+-1.74%/+3.03%/+6.76%/+7.15%. Bloom absent-open medians range from +3.73% to +8.16%;
+these are retained costs of checking the selected page.
+
+This run does not establish acceptance. Small writes are +7.42% median/+10.60%
+p95, eight-container writes +27.38%/+8.88%, and nine-container writes
++10.94%/-1.57%. Thirty-two-container point reads are +9.12%/+20.33%, absent reads
++5.12%/+20.87%, and full reads +9.64%/+14.63%. Similar point/absent tail movement
+and the large variation of unchanged write code across prior runs are reasons
+to investigate, not grounds to discard these values.
+
+For example, small-write per-process median changes range from -26.14% to
++56.43% in the ten balanced pairs; the pooled median is +7.42%. The recorded APFS
+filesystem has roughly 33 GiB available and reports 97% capacity. Neither the
+benchmark nor the API diagnostic controls OS writeback or cache eviction. These
+conditions constrain attribution; no causal claim is made from them alone.
+
+The next predefined write-only comparison uses identical copied bounded fixtures
+and the same public writer API, with generated-row bitmap equality after every
+timed write. It isolates writer timing from bloom construction and query work;
+its oracle can still warm filesystem and allocator state. The unchanged mixed
+storage/index/query/publication fixtures are also required to measure real sync
+impact. All earlier samples and candidates remain retained.
+
+
+### Mixed workloads and fixed confirmations
+
+The unchanged mixed fixtures at `9269254c` retain 10,000 timings / 100 RSS in
+[mixed comparison 2](baselines/2026-09-13-index-integrity-mixed-2-release.json).
+Both dense and sparse query-engine result workloads stay near the baseline
+(median changes -0.38% to +0.28%, largest p95 +2.14%). Integrated index build
+medians improve 7.45% dense / 13.58% sparse. Live/historical publication medians
+change +0.03% / +1.33%, p95 -3.99% / +0.67%. Sparse ingestion/query/compaction/
+reopen checks stay within 5% at median and p95, with faster concurrent-query p95.
+All exact result and reopen checks pass.
+
+Dense ingestion still needs attribution: live p95 +9.21%, historical p95
++116.41% (57.874 to 125.243 ms), despite median changes +0.18% / -1.36%.
+Seven large historical samples occur in candidate process pairs 2, 6 and 7;
+these processes also contain live-write spikes. They remain in the evidence.
+The predefined follow-up keeps every original sample and uses twenty more
+balanced source pairs plus ten identical-candidate-binary control pairs. The
+control labels are scheduling groups, never different source revisions.
+
+The [write-only confirmation](baselines/2026-09-13-index-integrity-write-confirmation-1.json)
+retains 10,600 timings / 120 RSS, with exact bitmap equality after every timed
+write. Small/four/eight/nine/32-container write median changes are
+-9.54%/-9.20%/-0.26%/+5.04%/+0.00%; p95 changes are
+-6.62%/-7.00%/-12.34%/+17.06%/+6.67%. It does not reproduce the larger small/eight/
+nine median increases, but the nine-container tail remains a recorded observation.
+Reopening each result warms state differently from the original surrounding
+workload; these measurements are not pooled with the original workload or used
+to erase its results. No speculative writer rewrite is adopted from these tails.
+
+The [read-tail confirmation](baselines/2026-09-13-index-integrity-read-tail-1.json)
+retains 25,536 timings / 48 RSS, including all incidental write/build samples.
+For 32 containers, point/absent/full-read median changes are +6.75%/+2.73%/+5.97%
+and p95 changes -1.48%/-11.26%/-6.74%. The four-container control has point median
+-2.65%, full median +3.38%, with corresponding p95 -3.10%/+1.59%. This does not
+repeat the original read-tail increases. The 32-container point/full median
+costs remain explicit, including the original +9.12%/+9.64% values. One incidental
+write sample per process cannot establish writer-tail acceptance.
+
+
+The [dense confirmation and identical-binary control](baselines/2026-09-13-index-integrity-dense-tail-1.json)
+are complete, retaining 5,400 timings / 60 RSS. Confirmation historical median/
+p95 changes are -1.28%/+0.24%; live changes -0.36%/+3.10%. Combining all original
+and confirmation source samples gives historical -1.30%/+3.20% and live
+-0.17%/+9.10%. The identical-binary controls remain separate; their live and
+historical median/p95 scheduling-group differences are -0.45%/-2.09% and
+-0.33%/-3.08%. These controls are stable and do not identify the cause of the
+initial spikes. The initial seven large historical observations remain included
+in the combined results, not removed as outliers.
+
+The final source comparisons retain 149,144 timings / 496 RSS across expanded
+comparison4, mixed2, write-only, read-tail and dense-tail runs. The fixed
+confirmations do not establish a repeatable source-induced regression above10%.
+Retained costs and limits remain explicit: 32-container full/point medians near
+6–10%, bloom absence medians up to8.16%, combined dense live p95+9.10%, and
+non-repeated direct write/read tail increases. The different surrounding
+workloads are reported separately. This supports proceeding to correctness and
+CI gates for this scoped milestone; it does not prove every individual tail is
+within10%, explain every filesystem delay, or establish live-sync/release
+readiness. Broader mixed/staging performance work must retain these observations.
+
+The final static production review finds no new concrete correctness concern in
+the combined framing, full/point reads, writer finalization and builder/checkpoint
+paths. This is a bounded review, with runtime validation supplied separately.

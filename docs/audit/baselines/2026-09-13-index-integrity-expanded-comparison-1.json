@@ -1830,5 +1830,6 @@
     "Finite profile4 covers only its own generated gapped index using the exact candidate library from the completed comparison. It identifies fingerprint setup and dense decoder zero-fill; it is not a paired latency measurement.",
     "Dense API micro1 retains9600 timings across1/4/8/9container controls. Micro2 retains18000 across1/4/8/9/64containers and adds owned MultiOps, which avoids growing-cardinality rescans while improving larger decoding. These exclude index container/preflight costs and do not establish application acceptance. Focused10/11 retain parent+diff and all test outcomes for the bounded prototype and scalable follow-up.",
     "All previous investigation evidence remains separately tracked; whole-file source binding, other audit batches and final integrated/workspace/CI/merge gates remain open."
-  ]
+  ],
+  "description_correction": "The original limitation incorrectly grouped typical and many-key write tails as regressions. Raw comparison1 records show typical write p95 improves46.75%; only many-key write p95 regresses26.30%. Every original raw record and the original compressed archive remain unchanged. Other stated comparison1 failures and its nonacceptance remain valid."
 }
