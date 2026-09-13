@@ -1643,6 +1643,23 @@ mod tests {
         (tmp, dir)
     }
 
+    #[test]
+    fn unbundled_manifest_rejects_unknown_column_name() {
+        let (_tmp, dir) = compacted_fixture();
+        let mut manifest = load_manifest(&dir).unwrap().unwrap();
+        manifest.columns[0].name = "unknown_column".to_owned();
+        fs::write(
+            dir.join("segment.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            SegmentReader::open(&dir).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+    }
+
     fn assert_variable_page_row_count_is_checked(row_ids: Option<&[u32]>) {
         let (_tmp, dir) = compacted_fixture();
         let manifest = load_manifest(&dir).unwrap().unwrap();
