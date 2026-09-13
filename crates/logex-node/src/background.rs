@@ -293,8 +293,12 @@ pub async fn run_background_indexer(
             }
         };
 
-        if should_rebuild_hot_indexes(last_indexed.as_ref(), &current)
-            || (current.row_count > 0 && query_indexes_missing(&current.path))
+        let index_status = (current.row_count > 0)
+            .then(|| query_indexes_missing(&current.path))
+            .flatten();
+        if index_status.is_some()
+            && (should_rebuild_hot_indexes(last_indexed.as_ref(), &current)
+                || index_status == Some(true))
         {
             let path = current.path.clone();
             match tokio::task::spawn_blocking(move || IndexBuilder::build_all_indexes(&path)).await
@@ -510,7 +514,7 @@ fn sealed_query_index_targets(
         .iter()
         .filter(|partition| partition.meta.row_count > 0)
         .filter(|partition| Some(partition.meta.id) != active_historical_segment)
-        .filter(|partition| query_indexes_missing(&partition.meta.path))
+        .filter(|partition| query_indexes_missing(&partition.meta.path) == Some(true))
         .take(limit)
         .map(|partition| partition.meta.path.clone())
         .collect();
@@ -518,9 +522,16 @@ fn sealed_query_index_targets(
     (max_segment_id, targets)
 }
 
-fn query_indexes_missing(path: &Path) -> bool {
-    // A failed freshness check is handled by the subsequent build's error path.
-    IndexBuilder::indexes_missing(path, IndexBuildProfile::Erc20Transfer).unwrap_or(true)
+fn query_indexes_missing(path: &Path) -> Option<bool> {
+    match IndexBuilder::indexes_missing(path, IndexBuildProfile::Erc20Transfer) {
+        Ok(missing) => Some(missing),
+        Err(error) if error.kind() == io::ErrorKind::Unsupported => {
+            tracing::debug!(path = %path.display(), %error, "source is not eligible for indexes");
+            None
+        }
+        // Other failures are handled by the subsequent build's error path.
+        Err(_) => Some(true),
+    }
 }
 
 #[cfg(test)]
@@ -620,15 +631,15 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let indexes = tmp.path().join("indexes");
         std::fs::create_dir_all(&indexes).unwrap();
-        assert!(query_indexes_missing(tmp.path()));
+        assert_eq!(query_indexes_missing(tmp.path()), Some(true));
 
         for file_name in IndexBuilder::required_index_files(IndexBuildProfile::Erc20Transfer) {
             std::fs::write(indexes.join(file_name), []).unwrap();
         }
-        assert!(query_indexes_missing(tmp.path()));
+        assert_eq!(query_indexes_missing(tmp.path()), Some(true));
         logex_storage::ColumnFile::write_batch(tmp.path(), &[]).unwrap();
         IndexBuilder::build_indexes(tmp.path(), IndexBuildProfile::Erc20Transfer).unwrap();
-        assert!(!query_indexes_missing(tmp.path()));
+        assert_eq!(query_indexes_missing(tmp.path()), Some(false));
     }
 
     #[test]

@@ -11,13 +11,18 @@ use crate::page::{
     decode_var_bytes_page_bounded, read_page_index,
 };
 use crate::reader::{RawBytesColumn, RawFixedColumn};
-use crate::{ColumnFileHeader, NullBitmap};
+use crate::{
+    ColumnFileHeader, NullBitmap,
+    column::{PrefixRecoveryGuard, read_source_binding, verify_prefix_recovery_pending},
+};
 
 #[derive(Debug, Clone)]
 pub struct SegmentReader {
     dir: PathBuf,
     manifest: Option<SegmentManifest>,
     artifacts: ColumnArtifacts,
+    source_namespace: Option<[u8; 16]>,
+    captured_rows: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -36,6 +41,12 @@ impl SegmentReader {
     pub(crate) fn bundle_reference(&self) -> Option<&crate::bundle::BundleReference> {
         self.artifacts.bundle().map(|bundle| bundle.reference())
     }
+    /// Immutable identity of the logical rows captured by this reader. Legacy
+    /// manifestless data without a storage-owned marker remains scan-readable,
+    /// but cannot safely publish or reuse derived indexes.
+    pub fn source_namespace(&self) -> Option<[u8; 16]> {
+        self.source_namespace
+    }
 
     pub fn open(dir: &Path) -> io::Result<Self> {
         Self::open_inner(dir, None)
@@ -46,6 +57,45 @@ impl SegmentReader {
     /// needed if an index is unavailable. Other columns may not be readable.
     pub fn open_projected(dir: &Path, columns: &[&str]) -> io::Result<Self> {
         Self::open_inner(dir, Some(columns))
+    }
+
+    pub(crate) fn open_recovering_prefix(owner: &PrefixRecoveryGuard) -> io::Result<Self> {
+        if !owner.pending() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "prefix recovery reader requires a pending rewrite",
+            ));
+        }
+        let dir = owner.dir();
+        verify_prefix_recovery_pending(dir, owner)?;
+        let mut manifest = load_manifest(dir)?.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "verified prefix recovery requires its catalog-selected manifest",
+            )
+        })?;
+        if manifest.source_namespace.map(|namespace| namespace.0) != Some(owner.namespace())
+            || manifest.generation != owner.generation()
+            || manifest.segment_id != owner.segment_id()
+            || manifest.column_bundle.is_some()
+            || manifest.row_count < owner.prefix_rows()
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "prefix recovery manifest differs from authoritative source metadata",
+            ));
+        }
+        manifest.validate_read_bounds()?;
+        manifest.row_count = owner.prefix_rows();
+        let artifacts = ColumnArtifacts::open_projected(dir, Some(&manifest), None)?;
+        verify_prefix_recovery_pending(dir, owner)?;
+        Ok(Self {
+            dir: dir.to_path_buf(),
+            manifest: Some(manifest),
+            artifacts,
+            source_namespace: Some(owner.namespace()),
+            captured_rows: Some(owner.prefix_rows()),
+        })
     }
 
     fn open_inner(dir: &Path, projection: Option<&[&str]>) -> io::Result<Self> {
@@ -61,13 +111,69 @@ impl SegmentReader {
             if let Some(manifest) = &manifest {
                 manifest.validate_read_bounds()?;
             }
+            let bundled = manifest
+                .as_ref()
+                .is_some_and(|manifest| manifest.column_bundle.is_some());
+            let marker_before = if bundled {
+                None
+            } else {
+                read_source_binding(dir)?
+            };
+            let source_namespace = match manifest.as_ref() {
+                Some(manifest) => manifest.source_namespace.map(|namespace| namespace.0),
+                None => marker_before.map(|binding| binding.namespace),
+            };
+            if !bundled {
+                if let (Some(manifest), Some(actual)) = (manifest.as_ref(), marker_before)
+                    && manifest.source_namespace.is_some()
+                    && (manifest.source_namespace.map(|namespace| namespace.0)
+                        != Some(actual.namespace)
+                        || manifest.generation != actual.generation
+                        || manifest.segment_id != actual.segment_id)
+                {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "raw source namespace differs from the manifest",
+                    ));
+                }
+                if manifest
+                    .as_ref()
+                    .is_some_and(|manifest| manifest.source_namespace.is_some())
+                    && marker_before.is_none()
+                    && !manifest
+                        .as_ref()
+                        .is_some_and(|manifest| manifest.row_count == 0)
+                {
+                    return Err(io::Error::new(
+                        io::ErrorKind::Unsupported,
+                        "source identity is missing; complete a storage-owned rewrite",
+                    ));
+                }
+            }
             match ColumnArtifacts::open_projected(dir, manifest.as_ref(), projection) {
                 Ok(artifacts) => {
-                    return Ok(Self {
+                    let after = if !bundled {
+                        read_source_binding(dir)?
+                    } else {
+                        marker_before
+                    };
+                    if !bundled && after != marker_before {
+                        return Err(io::Error::new(
+                            io::ErrorKind::WouldBlock,
+                            "raw source changed during capture; retry the read",
+                        ));
+                    }
+                    let mut reader = Self {
                         dir: dir.to_path_buf(),
                         manifest,
                         artifacts,
-                    });
+                        source_namespace,
+                        captured_rows: None,
+                    };
+                    if reader.manifest.is_none() {
+                        reader.captured_rows = Some(reader.read_row_count()?);
+                    }
+                    return Ok(reader);
                 }
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {
                     // Publication can retire old names during capture. Retry only
@@ -93,7 +199,11 @@ impl SegmentReader {
         path: &str,
         row_ids: Option<&[u32]>,
     ) -> io::Result<RawFixedColumn<WIDTH>> {
-        let visible = self.manifest.as_ref().map(|m| m.row_count);
+        let visible = self
+            .manifest
+            .as_ref()
+            .map(|m| m.row_count)
+            .or(self.captured_rows);
         let requested = row_ids
             .and_then(|ids| ids.iter().max())
             .map(|&id| u64::from(id) + 1);
@@ -232,7 +342,13 @@ impl SegmentReader {
             let path = raw_column_path(column);
             let values =
                 RawBytesColumn::from_bytes(&self.dir.join(path), self.artifacts.read(path)?)?
-                    .materialize(row_ids, self.manifest.as_ref().map(|m| m.row_count))?;
+                    .materialize(
+                        row_ids,
+                        self.manifest
+                            .as_ref()
+                            .map(|m| m.row_count)
+                            .or(self.captured_rows),
+                    )?;
             let lengths = self.read_u32("data_len", row_ids)?;
             validate_data_lengths(&values, &lengths)?;
             return Ok((values, lengths));
@@ -287,6 +403,8 @@ impl SegmentReader {
     pub fn read_row_count(&self) -> io::Result<u64> {
         if let Some(manifest) = &self.manifest {
             Ok(manifest.row_count)
+        } else if let Some(captured_rows) = self.captured_rows {
+            Ok(captured_rows)
         } else {
             let data = self
                 .artifacts
@@ -1021,6 +1139,24 @@ mod tests {
             .collect()
     }
 
+    fn write_native_raw(dir: &Path, rows: &[LogRow], descriptor: &mut SegmentDescriptor) {
+        let namespace = [descriptor.id as u8; 16];
+        descriptor.source_namespace = Some(namespace.into());
+        ColumnFile::write_batch_with_source_namespace(
+            dir,
+            rows,
+            None,
+            crate::durability::Publication::Ordered,
+            crate::column::SourceIdentity {
+                namespace,
+                generation: descriptor.generation,
+                segment_id: descriptor.id,
+                kind: descriptor.kind,
+            },
+        )
+        .unwrap();
+    }
+
     #[test]
     fn log_rows_reject_inconsistent_data_lengths() {
         let tmp = TempDir::new().unwrap();
@@ -1083,12 +1219,31 @@ mod tests {
     }
 
     #[test]
+    fn captured_raw_reader_keeps_replaced_source_snapshot() {
+        let tmp = TempDir::new().unwrap();
+        let original = make_rows();
+        ColumnFile::write_batch(tmp.path(), &original).unwrap();
+        let captured = SegmentReader::open(tmp.path()).unwrap();
+        let captured_namespace = captured.source_namespace().unwrap();
+
+        let mut replacement = original.clone();
+        replacement[0].block_number += 1_000;
+        ColumnFile::write_batch(tmp.path(), &replacement).unwrap();
+
+        assert_eq!(captured.read_log_rows(None).unwrap(), original);
+        let current = SegmentReader::open(tmp.path()).unwrap();
+        assert_eq!(current.read_log_rows(None).unwrap(), replacement);
+        assert_ne!(current.source_namespace().unwrap(), captured_namespace);
+    }
+
+    #[test]
     fn reads_compacted_segment_rows() {
         let tmp = TempDir::new().unwrap();
         let paths = StorageCatalogPaths::new(tmp.path().to_path_buf());
         paths.ensure_base_dirs().unwrap();
-        let descriptor = SegmentDescriptor {
+        let mut descriptor = SegmentDescriptor {
             column_bundle: None,
+            source_namespace: None,
             id: 1,
             generation: 0,
             kind: SegmentKind::Sealed,
@@ -1106,8 +1261,12 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
 
         let rows = make_rows();
-        ColumnFile::write_batch(&dir, &rows).unwrap();
+        write_native_raw(&dir, &rows, &mut descriptor);
         persist_segment_manifest(&paths, &descriptor).unwrap();
+        assert_eq!(
+            SegmentReader::open(&dir).unwrap().source_namespace(),
+            descriptor.source_namespace.map(|namespace| namespace.0)
+        );
         let before = load_manifest(&dir).unwrap();
         compact_segment(&paths, &descriptor).unwrap();
 
@@ -1202,8 +1361,9 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let paths = StorageCatalogPaths::new(tmp.path().to_path_buf());
         paths.ensure_base_dirs().unwrap();
-        let descriptor = SegmentDescriptor {
+        let mut descriptor = SegmentDescriptor {
             column_bundle: None,
+            source_namespace: None,
             id: 2,
             generation: 0,
             kind: SegmentKind::Sealed,
@@ -1220,7 +1380,7 @@ mod tests {
         let dir = paths.segment_dir(descriptor.id);
         fs::create_dir_all(&dir).unwrap();
 
-        ColumnFile::write_batch(&dir, &make_rows()).unwrap();
+        write_native_raw(&dir, &make_rows(), &mut descriptor);
         persist_segment_manifest(&paths, &descriptor).unwrap();
         compact_segment(&paths, &descriptor).unwrap();
 
@@ -1252,8 +1412,9 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let paths = StorageCatalogPaths::new(tmp.path().to_path_buf());
         paths.ensure_base_dirs().unwrap();
-        let descriptor = SegmentDescriptor {
+        let mut descriptor = SegmentDescriptor {
             column_bundle: None,
+            source_namespace: None,
             id: 1,
             generation: 0,
             kind: SegmentKind::Sealed,
@@ -1267,7 +1428,7 @@ mod tests {
         };
         let dir = paths.segment_dir(descriptor.id);
         fs::create_dir_all(&dir).unwrap();
-        ColumnFile::write_batch(&dir, &make_rows()).unwrap();
+        write_native_raw(&dir, &make_rows(), &mut descriptor);
         persist_segment_manifest(&paths, &descriptor).unwrap();
         compact_segment(&paths, &descriptor).unwrap();
         (tmp, dir)
@@ -1629,8 +1790,7 @@ mod tests {
             .write_to(&mut bytes)
             .unwrap();
             fs::write(tmp.path().join("address.col"), bytes).unwrap();
-            let reader = SegmentReader::open(tmp.path()).unwrap();
-            let result = reader.read_row_count();
+            let result = SegmentReader::open(tmp.path()).and_then(|reader| reader.read_row_count());
             if (version, compression, row_count) == (1, 0, 0) {
                 assert_eq!(result.unwrap(), 0);
             } else {

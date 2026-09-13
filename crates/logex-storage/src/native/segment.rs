@@ -370,6 +370,7 @@ pub(crate) fn restore_bundled_checkpoint(
         column_bundle: Some(reference.clone()),
         format_version: super::catalog::STORAGE_FORMAT_VERSION,
         segment_id: descriptor.id,
+        source_namespace: descriptor.source_namespace,
         generation: descriptor.generation,
         kind: descriptor.kind,
         min_block: descriptor.min_block,
@@ -426,7 +427,7 @@ pub(crate) fn append_rows(
     existing_rows: u64,
     rows: &[LogRow],
 ) -> std::io::Result<()> {
-    append_ingest_rows(segment_dir, existing_rows, rows, Publication::Ordered)
+    append_ingest_rows(segment_dir, existing_rows, rows, Publication::Ordered, None)
 }
 
 pub(crate) fn append_ingest_rows(
@@ -434,11 +435,37 @@ pub(crate) fn append_ingest_rows(
     existing_rows: u64,
     rows: &[LogRow],
     publication: Publication,
+    source_identity: Option<crate::column::SourceIdentity>,
 ) -> std::io::Result<()> {
     if existing_rows == 0 {
-        ColumnFile::write_batch_with_publication(segment_dir, rows, None, publication)
+        match source_identity {
+            Some(identity) => ColumnFile::write_batch_with_source_namespace(
+                segment_dir,
+                rows,
+                None,
+                publication,
+                identity,
+            ),
+            None => ColumnFile::write_batch_with_publication(segment_dir, rows, None, publication),
+        }
     } else {
-        ColumnFile::append_batch_with_publication(segment_dir, rows, existing_rows, publication)
+        match source_identity {
+            Some(identity) => ColumnFile::append_batch_with_source_binding(
+                segment_dir,
+                rows,
+                existing_rows,
+                publication,
+                identity.namespace,
+                identity.generation,
+                identity.segment_id,
+            ),
+            None => ColumnFile::append_batch_with_publication(
+                segment_dir,
+                rows,
+                existing_rows,
+                publication,
+            ),
+        }
     }
 }
 
@@ -543,7 +570,9 @@ pub(crate) fn repack_sparse_bundle(
         return Ok(None);
     }
     let reader = SegmentReader::open(&dir)?;
-    if reader.bundle_reference() != Some(reference) || reader.generation() != descriptor.generation
+    if reader.bundle_reference() != Some(reference)
+        || reader.generation() != descriptor.generation
+        || reader.source_namespace() != descriptor.source_namespace.map(|namespace| namespace.0)
     {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -1069,10 +1098,11 @@ fn verify_maintenance_source(
     paths: &StorageCatalogPaths,
     descriptor: &SegmentDescriptor,
 ) -> std::io::Result<()> {
-    if descriptor.column_bundle.is_some() {
+    if descriptor.row_count != 0 || descriptor.column_bundle.is_some() {
         let reader = SegmentReader::open_projected(&paths.segment_dir(descriptor.id), &[])?;
         if reader.generation() != descriptor.generation
             || reader.bundle_reference() != descriptor.column_bundle.as_ref()
+            || reader.source_namespace() != descriptor.source_namespace.map(|namespace| namespace.0)
         {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::WouldBlock,
@@ -1088,6 +1118,7 @@ thread_local! {
     static AFTER_REFRESH_CAPTURE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 
+#[cfg(test)]
 pub(crate) fn persist_segment_manifest(
     paths: &StorageCatalogPaths,
     descriptor: &SegmentDescriptor,
@@ -1141,6 +1172,7 @@ fn persist_manifest(
         column_bundle: descriptor.column_bundle.clone(),
         format_version: super::catalog::STORAGE_FORMAT_VERSION,
         segment_id: descriptor.id,
+        source_namespace: descriptor.source_namespace,
         generation: descriptor.generation,
         kind: descriptor.kind,
         min_block: descriptor.min_block,
@@ -2244,6 +2276,22 @@ mod tests {
             .collect()
     }
 
+    fn write_native_raw(dir: &Path, rows: &[LogRow], descriptor: &SegmentDescriptor) {
+        ColumnFile::write_batch_with_source_namespace(
+            dir,
+            rows,
+            None,
+            Publication::Ordered,
+            crate::column::SourceIdentity {
+                namespace: descriptor.source_namespace.unwrap().0,
+                generation: descriptor.generation,
+                segment_id: descriptor.id,
+                kind: descriptor.kind,
+            },
+        )
+        .unwrap();
+    }
+
     #[test]
     fn raw_compaction_preserves_a_captured_reader() {
         let tmp = TempDir::new().unwrap();
@@ -2257,7 +2305,21 @@ mod tests {
         let mut descriptor = catalog.allocate_segment(SegmentKind::Sealed).unwrap();
         let dir = paths.segment_dir(descriptor.id);
         let rows = &descending_rows()[..50];
-        append_rows(&dir, 0, rows).unwrap();
+        append_ingest_rows(
+            &dir,
+            0,
+            rows,
+            Publication::Ordered,
+            descriptor
+                .source_namespace
+                .map(|namespace| crate::column::SourceIdentity {
+                    namespace: namespace.0,
+                    generation: descriptor.generation,
+                    segment_id: descriptor.id,
+                    kind: descriptor.kind,
+                }),
+        )
+        .unwrap();
         apply_rows_to_descriptor(&mut descriptor, rows);
         persist_segment_manifest(&paths, &descriptor).unwrap();
         let captured = SegmentReader::open(&dir).unwrap();
@@ -2280,6 +2342,7 @@ mod tests {
         paths.ensure_base_dirs().unwrap();
         let mut descriptor = SegmentDescriptor {
             column_bundle: None,
+            source_namespace: None,
             id: 7,
             generation: 0,
             kind: SegmentKind::Sealed,
@@ -2637,6 +2700,7 @@ mod tests {
         paths.ensure_base_dirs().unwrap();
         let descriptor = SegmentDescriptor {
             column_bundle: None,
+            source_namespace: None,
             id: 7,
             generation: 0,
             kind: SegmentKind::Sealed,
@@ -2715,6 +2779,19 @@ mod tests {
         let dir = paths.segment_dir(descriptor.id);
         let rows = descending_rows()[..50].to_vec();
         apply_rows_to_descriptor(&mut descriptor, &rows);
+        ColumnFile::write_batch_with_source_namespace(
+            &dir,
+            &rows,
+            None,
+            Publication::Ordered,
+            crate::column::SourceIdentity {
+                namespace: descriptor.source_namespace.unwrap().0,
+                generation: descriptor.generation,
+                segment_id: descriptor.id,
+                kind: descriptor.kind,
+            },
+        )
+        .unwrap();
         let mut columns = write_compacted_rows(&dir, &rows).unwrap();
         for (name, values) in std::iter::once((
             "block_number",
@@ -2853,7 +2930,7 @@ mod tests {
         let dir = paths.segment_dir(descriptor.id);
         // This fixture switches to raw columns before taking any snapshots.
         fs::remove_file(paths.segment_manifest_path(descriptor.id)).unwrap();
-        append_rows(&dir, 0, &rows[..2]).unwrap();
+        write_native_raw(&dir, &rows[..2], &descriptor);
         descriptor.row_count = 2;
         persist_segment_manifest_with_columns(&paths, &descriptor, default_columns()).unwrap();
         let reader =
@@ -2903,7 +2980,7 @@ mod tests {
         let dir = paths.segment_dir(descriptor.id);
         // Use the generic raw representation that compaction will retire.
         fs::remove_file(paths.segment_manifest_path(descriptor.id)).unwrap();
-        append_rows(&dir, 0, &rows).unwrap();
+        write_native_raw(&dir, &rows, &descriptor);
         persist_segment_manifest_with_columns(&paths, &descriptor, default_columns()).unwrap();
         let (captured_tx, captured_rx) = std::sync::mpsc::channel();
         let (resume_tx, resume_rx) = std::sync::mpsc::channel();

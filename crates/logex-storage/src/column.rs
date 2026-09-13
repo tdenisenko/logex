@@ -1,10 +1,496 @@
 use crate::durability;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::thread;
 
+use crate::native::SegmentKind;
 use logex_types::LogRow;
+
+const SOURCE_MARKER_FILE: &str = ".source-publication";
+const SOURCE_MARKER_MAGIC: &[u8; 8] = b"LXSRC001";
+const SOURCE_MARKER_BYTES: usize = 8 + 1 + 16 + 8 + 8 + 8 + 1 + 4;
+const SOURCE_UPDATING: u8 = 1;
+const SOURCE_PREFIX_REWRITE: u8 = 2;
+const SOURCE_COMMITTED: u8 = 3;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SourceMarker {
+    state: u8,
+    namespace: [u8; 16],
+    prefix_rows: u64,
+    generation: u64,
+    segment_id: u64,
+    kind: SegmentKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SourceIdentity {
+    pub(crate) namespace: [u8; 16],
+    pub(crate) generation: u64,
+    pub(crate) segment_id: u64,
+    pub(crate) kind: SegmentKind,
+}
+
+impl SourceMarker {
+    fn new(identity: SourceIdentity, state: u8, prefix_rows: u64) -> Self {
+        Self {
+            state,
+            namespace: identity.namespace,
+            prefix_rows,
+            generation: identity.generation,
+            segment_id: identity.segment_id,
+            kind: identity.kind,
+        }
+    }
+}
+pub(crate) struct SourceWriteGuard {
+    file: File,
+    dir: std::path::PathBuf,
+}
+
+pub(crate) struct PrefixRecoveryGuard {
+    _owner: SourceWriteGuard,
+    dir: std::path::PathBuf,
+    namespace: [u8; 16],
+    prefix_rows: u64,
+    generation: u64,
+    segment_id: u64,
+    kind: SegmentKind,
+    pending: bool,
+    completed: std::cell::Cell<bool>,
+}
+
+impl PrefixRecoveryGuard {
+    pub(crate) fn namespace(&self) -> [u8; 16] {
+        self.namespace
+    }
+
+    pub(crate) fn prefix_rows(&self) -> u64 {
+        self.prefix_rows
+    }
+
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
+    }
+    pub(crate) fn segment_id(&self) -> u64 {
+        self.segment_id
+    }
+    pub(crate) fn pending(&self) -> bool {
+        self.pending
+    }
+    pub(crate) fn dir(&self) -> &Path {
+        &self.dir
+    }
+}
+
+pub(crate) fn verify_prefix_recovery_pending(
+    dir: &Path,
+    owner: &PrefixRecoveryGuard,
+) -> io::Result<()> {
+    if owner.dir != dir {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "prefix recovery capability belongs to another segment",
+        ));
+    }
+    match read_source_marker(dir)? {
+        Some(marker)
+            if marker.state == SOURCE_PREFIX_REWRITE
+                && marker.namespace == owner.namespace
+                && marker.prefix_rows == owner.prefix_rows
+                && marker.generation == owner.generation
+                && marker.segment_id == owner.segment_id
+                && marker.kind == owner.kind =>
+        {
+            Ok(())
+        }
+        _ => Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "verified prefix recovery marker changed during capture",
+        )),
+    }
+}
+
+impl SourceWriteGuard {
+    fn acquire(dir: &Path) -> io::Result<Self> {
+        fs::create_dir_all(dir)?;
+        // Use the segment directory inode, matching native maintenance
+        // ownership without creating another persistent lock namespace.
+        let file = File::open(dir)?;
+        file.try_lock().map_err(|error| match error {
+            TryLockError::WouldBlock => io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "raw source publication is already in progress",
+            ),
+            TryLockError::Error(error) => error,
+        })?;
+        Ok(Self {
+            file,
+            dir: dir.to_path_buf(),
+        })
+    }
+
+    pub(crate) fn acquire_bound(
+        dir: &Path,
+        namespace: [u8; 16],
+        generation: u64,
+        segment_id: u64,
+    ) -> io::Result<Self> {
+        let owner = Self::acquire(dir)?;
+        verify_owned_source(dir, namespace, generation, segment_id)?;
+        Ok(owner)
+    }
+
+    pub(crate) fn acquire_legacy(dir: &Path) -> io::Result<Self> {
+        let owner = Self::acquire(dir)?;
+        // Legacy native sources remain scan-readable but cannot acquire a
+        // trusted identity from their shape or an incidental standalone marker.
+        read_source_namespace(dir)?;
+        Ok(owner)
+    }
+}
+
+fn verify_owned_source(
+    dir: &Path,
+    namespace: [u8; 16],
+    generation: u64,
+    segment_id: u64,
+) -> io::Result<()> {
+    match read_source_marker(dir)? {
+        Some(marker)
+            if marker.state == SOURCE_COMMITTED
+                && marker.namespace == namespace
+                && marker.generation == generation
+                && marker.segment_id == segment_id =>
+        {
+            Ok(())
+        }
+        Some(SourceMarker {
+            state: SOURCE_COMMITTED,
+            ..
+        }) => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "raw source binding differs from native catalog",
+        )),
+        Some(_) => Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "raw source replacement is incomplete; verified recovery is required",
+        )),
+        None => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "raw source identity is missing",
+        )),
+    }
+}
+
+impl Drop for SourceWriteGuard {
+    fn drop(&mut self) {
+        if let Err(error) = self.file.unlock() {
+            tracing::warn!(%error, "failed to release raw source publication lock");
+        }
+    }
+}
+
+fn read_source_marker(dir: &Path) -> io::Result<Option<SourceMarker>> {
+    let path = dir.join(SOURCE_MARKER_FILE);
+    let mut file = match File::open(&path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            match fs::symlink_metadata(&path) {
+                Ok(_) => return Err(error),
+                Err(metadata_error) if metadata_error.kind() == io::ErrorKind::NotFound => {
+                    return Ok(None);
+                }
+                Err(metadata_error) => return Err(metadata_error),
+            }
+        }
+        Err(error) => return Err(error),
+    };
+    let mut bytes = [0; SOURCE_MARKER_BYTES];
+    file.read_exact(&mut bytes)?;
+    let mut trailing = [0; 1];
+    if file.read(&mut trailing)? != 0
+        || bytes.get(..8) != Some(SOURCE_MARKER_MAGIC.as_slice())
+        || crc32fast::hash(&bytes[..50]).to_le_bytes() != bytes[50..]
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid raw source publication marker",
+        ));
+    }
+    if !matches!(
+        bytes[8],
+        SOURCE_UPDATING | SOURCE_PREFIX_REWRITE | SOURCE_COMMITTED
+    ) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid raw source publication state",
+        ));
+    }
+    let namespace = bytes[9..25].try_into().map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid source namespace length",
+        )
+    })?;
+    let prefix_rows =
+        u64::from_le_bytes(bytes[25..33].try_into().map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidData, "invalid source prefix length")
+        })?);
+    let generation =
+        u64::from_le_bytes(bytes[33..41].try_into().map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidData, "invalid source generation")
+        })?);
+    let segment_id = u64::from_le_bytes(bytes[41..49].try_into().map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid source segment identity",
+        )
+    })?);
+    let kind = match bytes[49] {
+        0 => SegmentKind::Hot,
+        1 => SegmentKind::Sealed,
+        _ => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid source segment kind",
+            ));
+        }
+    };
+    Ok(Some(SourceMarker {
+        state: bytes[8],
+        namespace,
+        prefix_rows,
+        generation,
+        segment_id,
+        kind,
+    }))
+}
+
+pub(crate) fn read_source_namespace(dir: &Path) -> io::Result<Option<[u8; 16]>> {
+    Ok(read_source_binding(dir)?.map(|binding| binding.namespace))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SourceBinding {
+    pub(crate) namespace: [u8; 16],
+    pub(crate) generation: u64,
+    pub(crate) segment_id: u64,
+}
+
+pub(crate) fn read_source_binding(dir: &Path) -> io::Result<Option<SourceBinding>> {
+    match read_source_marker(dir)? {
+        None => Ok(None),
+        Some(SourceMarker {
+            state: SOURCE_COMMITTED,
+            namespace,
+            generation,
+            segment_id,
+            ..
+        }) => Ok(Some(SourceBinding {
+            namespace,
+            generation,
+            segment_id,
+        })),
+        Some(_) => Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "raw source replacement is incomplete; verified recovery is required",
+        )),
+    }
+}
+
+/// Complete only a private exact-prefix rewrite whose pending marker matches
+/// authoritative recovery metadata. Every old/new artifact encodes the same N
+/// logical rows, so any interrupted mixture remains that verified prefix.
+pub(crate) fn begin_prefix_recovery(
+    dir: &Path,
+    namespace: [u8; 16],
+    prefix_rows: u64,
+    generation: u64,
+    segment_id: u64,
+    kind: SegmentKind,
+) -> io::Result<PrefixRecoveryGuard> {
+    let owner = SourceWriteGuard::acquire(dir)?;
+    match read_source_marker(dir)? {
+        Some(marker)
+            if marker.state == SOURCE_PREFIX_REWRITE
+                && marker.namespace == namespace
+                && marker.prefix_rows == prefix_rows
+                && marker.generation == generation
+                && marker.segment_id == segment_id
+                && marker.kind == kind =>
+        {
+            Ok(PrefixRecoveryGuard {
+                _owner: owner,
+                dir: dir.to_path_buf(),
+                namespace,
+                prefix_rows,
+                generation,
+                segment_id,
+                kind,
+                pending: true,
+                completed: std::cell::Cell::new(false),
+            })
+        }
+        Some(SourceMarker {
+            state: SOURCE_PREFIX_REWRITE,
+            ..
+        }) => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "pending prefix rewrite differs from authoritative recovery metadata",
+        )),
+        Some(marker)
+            if prefix_rows == 0
+                && marker.state == SOURCE_UPDATING
+                && marker.namespace == namespace
+                && marker.generation == generation
+                && marker.segment_id == segment_id =>
+        {
+            Ok(PrefixRecoveryGuard {
+                _owner: owner,
+                dir: dir.to_path_buf(),
+                namespace,
+                prefix_rows,
+                generation,
+                segment_id,
+                kind,
+                pending: false,
+                completed: std::cell::Cell::new(false),
+            })
+        }
+        Some(SourceMarker {
+            state: SOURCE_UPDATING,
+            ..
+        }) => Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "arbitrary source replacement is incomplete and cannot use prefix recovery",
+        )),
+        Some(marker)
+            if marker.state == SOURCE_COMMITTED
+                && (marker.namespace != namespace
+                    || marker.generation != generation
+                    || marker.segment_id != segment_id) =>
+        {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "committed raw source namespace differs from recovery metadata",
+            ))
+        }
+        None
+        | Some(SourceMarker {
+            state: SOURCE_COMMITTED,
+            ..
+        }) => Ok(PrefixRecoveryGuard {
+            _owner: owner,
+            dir: dir.to_path_buf(),
+            namespace,
+            prefix_rows,
+            generation,
+            segment_id,
+            kind,
+            pending: false,
+            completed: std::cell::Cell::new(false),
+        }),
+        Some(_) => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid raw source recovery state",
+        )),
+    }
+}
+
+pub(crate) fn prefix_rewrite_pending(
+    dir: &Path,
+    namespace: [u8; 16],
+    prefix_rows: u64,
+    generation: u64,
+    segment_id: u64,
+    kind: SegmentKind,
+) -> io::Result<bool> {
+    match read_source_marker(dir)? {
+        Some(marker)
+            if marker.state == SOURCE_PREFIX_REWRITE
+                && marker.namespace == namespace
+                && marker.prefix_rows == prefix_rows
+                && marker.generation == generation
+                && marker.segment_id == segment_id
+                && marker.kind == kind =>
+        {
+            Ok(true)
+        }
+        Some(SourceMarker {
+            state: SOURCE_PREFIX_REWRITE,
+            ..
+        }) => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "pending prefix rewrite differs from authoritative segment metadata",
+        )),
+        Some(SourceMarker {
+            state: SOURCE_UPDATING,
+            ..
+        }) => Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "arbitrary source replacement is incomplete; verified recovery is required",
+        )),
+        _ => Ok(false),
+    }
+}
+
+fn write_source_marker(
+    dir: &Path,
+    marker: SourceMarker,
+    publication: durability::Publication,
+) -> io::Result<()> {
+    let mut bytes = [0; SOURCE_MARKER_BYTES];
+    bytes[..8].copy_from_slice(SOURCE_MARKER_MAGIC);
+    bytes[8] = marker.state;
+    bytes[9..25].copy_from_slice(&marker.namespace);
+    bytes[25..33].copy_from_slice(&marker.prefix_rows.to_le_bytes());
+    bytes[33..41].copy_from_slice(&marker.generation.to_le_bytes());
+    bytes[41..49].copy_from_slice(&marker.segment_id.to_le_bytes());
+    bytes[49] = match marker.kind {
+        SegmentKind::Hot => 0,
+        SegmentKind::Sealed => 1,
+    };
+    let checksum = crc32fast::hash(&bytes[..50]).to_le_bytes();
+    bytes[50..].copy_from_slice(&checksum);
+    let path = dir.join(SOURCE_MARKER_FILE);
+    if marker.state == SOURCE_COMMITTED && publication == durability::Publication::Durable {
+        // The committed marker publishes the complete replacement as one tree:
+        // every column payload and rename is durable before this name can be.
+        return durability::publish_tree(dir, &path, &bytes);
+    }
+    match publication {
+        durability::Publication::Deferred => durability::write_bytes_deferred(&path, &bytes),
+        durability::Publication::Ordered => durability::write_bytes_ordered(&path, &bytes),
+        durability::Publication::Durable => durability::write_bytes(&path, &bytes),
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn mark_prefix_rewrite_for_test(
+    dir: &Path,
+    namespace: [u8; 16],
+    prefix_rows: u64,
+    generation: u64,
+    segment_id: u64,
+    kind: SegmentKind,
+) -> io::Result<()> {
+    write_source_marker(
+        dir,
+        SourceMarker::new(
+            SourceIdentity {
+                namespace,
+                generation,
+                segment_id,
+                kind,
+            },
+            SOURCE_PREFIX_REWRITE,
+            prefix_rows,
+        ),
+        durability::Publication::Durable,
+    )
+}
 
 /// Magic bytes identifying a LogEx column file.
 const COLUMN_MAGIC: &[u8; 4] = b"LXCL";
@@ -164,12 +650,184 @@ impl ColumnFile {
         canonical: Option<&NullBitmap>,
         publication: durability::Publication,
     ) -> io::Result<()> {
+        let _owner = SourceWriteGuard::acquire(dir)?;
+        let mut namespace = [0; 16];
+        getrandom::fill(&mut namespace).map_err(|error| io::Error::other(error.to_string()))?;
+        Self::write_batch_with_owned_source(
+            dir,
+            rows,
+            canonical,
+            publication,
+            durability::Publication::Durable,
+            SourceIdentity {
+                namespace,
+                generation: 0,
+                segment_id: u64::MAX,
+                kind: SegmentKind::Hot,
+            },
+        )
+    }
+
+    pub(crate) fn write_batch_with_source_namespace(
+        dir: &Path,
+        rows: &[LogRow],
+        canonical: Option<&NullBitmap>,
+        publication: durability::Publication,
+        identity: SourceIdentity,
+    ) -> io::Result<()> {
+        let _owner = SourceWriteGuard::acquire(dir)?;
+        match read_source_marker(dir)? {
+            None => {}
+            Some(marker)
+                if (marker.state == SOURCE_COMMITTED
+                    || (marker.state == SOURCE_UPDATING && marker.prefix_rows == 0))
+                    && marker.namespace == identity.namespace
+                    && marker.generation == identity.generation
+                    && marker.segment_id == identity.segment_id => {}
+            Some(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "raw source has an incompatible incomplete publication",
+                ));
+            }
+        }
+        Self::write_batch_with_owned_source(
+            dir,
+            rows,
+            canonical,
+            publication,
+            publication,
+            identity,
+        )
+    }
+
+    pub(crate) fn rewrite_verified_prefix(
+        dir: &Path,
+        rows: &[LogRow],
+        canonical: &NullBitmap,
+        namespace: [u8; 16],
+        generation: u64,
+        owner: &PrefixRecoveryGuard,
+    ) -> io::Result<()> {
+        if canonical.len() != rows.len() as u64 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "verified prefix bitmap length differs from its rows",
+            ));
+        }
+        if owner.namespace != namespace
+            || owner.dir != dir
+            || owner.prefix_rows != rows.len() as u64
+            || owner.generation != generation
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "verified prefix differs from its recovery capability",
+            ));
+        }
+        write_source_marker(
+            dir,
+            SourceMarker::new(
+                SourceIdentity {
+                    namespace,
+                    generation,
+                    segment_id: owner.segment_id,
+                    kind: owner.kind,
+                },
+                SOURCE_PREFIX_REWRITE,
+                rows.len() as u64,
+            ),
+            durability::Publication::Ordered,
+        )?;
+        Self::write_batch_contents(dir, rows, Some(canonical), durability::Publication::Durable)?;
+        owner.completed.set(true);
+        Ok(())
+    }
+
+    pub(crate) fn rewrite_unidentified_prefix(
+        dir: &Path,
+        rows: &[LogRow],
+        canonical: &NullBitmap,
+    ) -> io::Result<()> {
+        if canonical.len() != rows.len() as u64 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "legacy prefix bitmap length differs from its rows",
+            ));
+        }
+        let _owner = SourceWriteGuard::acquire(dir)?;
+        Self::write_batch_contents(dir, rows, Some(canonical), durability::Publication::Durable)
+    }
+
+    pub(crate) fn finish_verified_prefix(
+        dir: &Path,
+        owner: &PrefixRecoveryGuard,
+    ) -> io::Result<()> {
+        if owner.dir != dir {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "prefix recovery capability belongs to another segment",
+            ));
+        }
+        if !owner.completed.get() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "prefix rewrite has not completed",
+            ));
+        }
+        verify_prefix_recovery_pending(dir, owner)?;
+        write_source_marker(
+            dir,
+            SourceMarker::new(
+                SourceIdentity {
+                    namespace: owner.namespace,
+                    generation: owner.generation,
+                    segment_id: owner.segment_id,
+                    kind: owner.kind,
+                },
+                SOURCE_COMMITTED,
+                owner.prefix_rows,
+            ),
+            durability::Publication::Durable,
+        )
+    }
+
+    fn write_batch_with_owned_source(
+        dir: &Path,
+        rows: &[LogRow],
+        canonical: Option<&NullBitmap>,
+        publication: durability::Publication,
+        marker_publication: durability::Publication,
+        identity: SourceIdentity,
+    ) -> io::Result<()> {
         if canonical.is_some_and(|bitmap| bitmap.len() != rows.len() as u64) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "canonical bitmap length differs from replacement rows",
             ));
         }
+        fs::create_dir_all(dir)?;
+        // The recovery-required state must reach the directory ordering point
+        // before any column replacement rename can become observable.
+        write_source_marker(
+            dir,
+            SourceMarker::new(identity, SOURCE_UPDATING, 0),
+            durability::Publication::Ordered,
+        )?;
+        Self::write_batch_contents(dir, rows, canonical, publication)?;
+        write_source_marker(
+            dir,
+            SourceMarker::new(identity, SOURCE_COMMITTED, rows.len() as u64),
+            marker_publication,
+        )
+    }
+
+    fn write_batch_contents(
+        dir: &Path,
+        rows: &[LogRow],
+        canonical: Option<&NullBitmap>,
+        publication: durability::Publication,
+    ) -> io::Result<()> {
         fs::create_dir_all(dir)?;
         let row_count = rows.len() as u64;
         let replacements = durability::ReplacementBatch::new(publication);
@@ -311,10 +969,35 @@ impl ColumnFile {
         existing_rows: u64,
         publication: durability::Publication,
     ) -> io::Result<()> {
-        if !dir.exists() {
-            return Self::write_batch_with_publication(dir, rows, None, publication);
+        let initialize = !dir.try_exists()?;
+        let _owner = SourceWriteGuard::acquire(dir)?;
+        if initialize {
+            let mut namespace = [0; 16];
+            getrandom::fill(&mut namespace).map_err(|error| io::Error::other(error.to_string()))?;
+            return Self::write_batch_with_owned_source(
+                dir,
+                rows,
+                None,
+                publication,
+                durability::Publication::Durable,
+                SourceIdentity {
+                    namespace,
+                    generation: 0,
+                    segment_id: u64::MAX,
+                    kind: SegmentKind::Hot,
+                },
+            );
         }
+        read_source_namespace(dir)?;
+        Self::append_batch_owned(dir, rows, existing_rows, publication)
+    }
 
+    fn append_batch_owned(
+        dir: &Path,
+        rows: &[LogRow],
+        existing_rows: u64,
+        publication: durability::Publication,
+    ) -> io::Result<()> {
         let new_row_count = existing_rows + rows.len() as u64;
         let replacements = durability::ReplacementBatch::new(publication);
 
@@ -461,6 +1144,20 @@ impl ColumnFile {
         })?;
 
         replacements.publish()
+    }
+
+    pub(crate) fn append_batch_with_source_binding(
+        dir: &Path,
+        rows: &[LogRow],
+        existing_rows: u64,
+        publication: durability::Publication,
+        namespace: [u8; 16],
+        generation: u64,
+        segment_id: u64,
+    ) -> io::Result<()> {
+        let _owner = SourceWriteGuard::acquire(dir)?;
+        verify_owned_source(dir, namespace, generation, segment_id)?;
+        Self::append_batch_owned(dir, rows, existing_rows, publication)
     }
 
     fn write_fixed_col(
@@ -715,7 +1412,24 @@ impl ColumnFile {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn replace_canonical_bitmap(dir: &Path, bitmap: &NullBitmap) -> io::Result<()> {
+        let owner = SourceWriteGuard::acquire(dir)?;
+        read_source_namespace(dir)?;
+        Self::replace_canonical_bitmap_owned(dir, bitmap, &owner)
+    }
+
+    pub(crate) fn replace_canonical_bitmap_owned(
+        dir: &Path,
+        bitmap: &NullBitmap,
+        owner: &SourceWriteGuard,
+    ) -> io::Result<()> {
+        if owner.dir != dir {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "raw source owner belongs to another segment",
+            ));
+        }
         durability::atomic_write(&dir.join("canonical.bitmap"), |writer| {
             bitmap.write_to(writer)
         })
@@ -798,6 +1512,44 @@ fn write_optional_b256(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy_primitives::{Address, B256, Bytes};
+    use logex_types::Source;
+
+    fn row() -> LogRow {
+        LogRow {
+            block_number: 1,
+            block_hash: B256::repeat_byte(1),
+            timestamp: 2,
+            tx_hash: B256::repeat_byte(2),
+            tx_index: 0,
+            log_index: 0,
+            address: Address::repeat_byte(3),
+            topic0: None,
+            topic1: None,
+            topic2: None,
+            topic3: None,
+            data: Bytes::new(),
+            data_len: 0,
+            source: Source::Receipt,
+        }
+    }
+
+    #[test]
+    fn append_initializes_an_absent_source_without_reacquiring_ownership() {
+        let parent = tempfile::tempdir().unwrap();
+        let dir = parent.path().join("new-source");
+        ColumnFile::append_batch(&dir, &[row()], 0).unwrap();
+        let namespace = read_source_namespace(&dir).unwrap();
+        ColumnFile::append_batch(&dir, &[row()], 1).unwrap();
+        assert_eq!(read_source_namespace(&dir).unwrap(), namespace);
+        assert_eq!(
+            crate::SegmentReader::open(&dir)
+                .unwrap()
+                .read_log_rows(None)
+                .unwrap(),
+            vec![row(), row()]
+        );
+    }
 
     #[test]
     fn test_column_header_roundtrip() {
@@ -878,5 +1630,101 @@ mod tests {
         assert!(!bitmap.is_present(0));
         assert!(bitmap.is_present(15));
         assert!(NullBitmap::read_from(&u64::MAX.to_le_bytes()).is_none());
+    }
+
+    #[test]
+    fn source_marker_distinguishes_missing_committed_and_interrupted_state() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(read_source_namespace(dir.path()).unwrap(), None);
+        let namespace = [7; 16];
+        write_source_marker(
+            dir.path(),
+            SourceMarker::new(
+                SourceIdentity {
+                    namespace,
+                    generation: 0,
+                    segment_id: u64::MAX,
+                    kind: SegmentKind::Hot,
+                },
+                SOURCE_COMMITTED,
+                0,
+            ),
+            durability::Publication::Deferred,
+        )
+        .unwrap();
+        assert_eq!(read_source_namespace(dir.path()).unwrap(), Some(namespace));
+        assert!(begin_prefix_recovery(dir.path(), [8; 16], 0, 0, 1, SegmentKind::Hot,).is_err());
+        write_source_marker(
+            dir.path(),
+            SourceMarker::new(
+                SourceIdentity {
+                    namespace,
+                    generation: 0,
+                    segment_id: u64::MAX,
+                    kind: SegmentKind::Hot,
+                },
+                SOURCE_UPDATING,
+                0,
+            ),
+            durability::Publication::Deferred,
+        )
+        .unwrap();
+        assert_eq!(
+            read_source_namespace(dir.path()).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+
+        write_source_marker(
+            dir.path(),
+            SourceMarker::new(
+                SourceIdentity {
+                    namespace,
+                    generation: 4,
+                    segment_id: 9,
+                    kind: SegmentKind::Sealed,
+                },
+                SOURCE_PREFIX_REWRITE,
+                12,
+            ),
+            durability::Publication::Deferred,
+        )
+        .unwrap();
+        assert!(
+            begin_prefix_recovery(dir.path(), namespace, 11, 4, 9, SegmentKind::Sealed).is_err()
+        );
+        assert!(
+            begin_prefix_recovery(dir.path(), namespace, 12, 4, 10, SegmentKind::Sealed).is_err()
+        );
+        assert_eq!(
+            crate::SegmentReader::open(dir.path()).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        assert_eq!(
+            read_source_namespace(dir.path()).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        let owner =
+            begin_prefix_recovery(dir.path(), namespace, 12, 4, 9, SegmentKind::Sealed).unwrap();
+        assert!(
+            ColumnFile::rewrite_verified_prefix(
+                dir.path(),
+                &[],
+                &NullBitmap::new(),
+                namespace,
+                4,
+                &owner,
+            )
+            .is_err()
+        );
+        assert_eq!(
+            read_source_namespace(dir.path()).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        assert!(ColumnFile::finish_verified_prefix(dir.path(), &owner).is_err());
+        assert_eq!(
+            read_source_namespace(dir.path()).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        drop(owner);
     }
 }

@@ -10,7 +10,8 @@ use serde::{Deserialize, Serialize};
 use crate::{BundleReference, SegmentReader, durability};
 
 pub(crate) const INDEX_CHECKPOINT_FILE: &str = "index-checkpoint";
-const MAGIC: &[u8; 8] = b"LXICP004";
+const MAGIC: &[u8; 8] = b"LXICP005";
+const UNBOUND_SOURCE_MAGIC: &[u8; 8] = b"LXICP004";
 const UNBOUND_MAGIC: &[u8; 8] = b"LXICP003";
 const LEGACY_MAGIC: &[u8; 8] = b"LXICP002";
 const MAX_CHECKPOINT_BYTES: usize = 4_096;
@@ -20,6 +21,7 @@ const MAX_ARTIFACT_NAME_BYTES: usize = 64;
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Identity {
+    source_namespace: FixedBytes<16>,
     rows: u64,
     generation: u64,
     bundle: Option<BundleReference>,
@@ -61,7 +63,14 @@ fn validate_artifact_name(name: &str) -> io::Result<()> {
 
 impl Identity {
     fn read(reader: &SegmentReader) -> io::Result<Self> {
+        let source_namespace = reader.source_namespace().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::Unsupported,
+                "source identity is missing; complete a storage-owned rewrite before indexing",
+            )
+        })?;
         Ok(Self {
+            source_namespace: FixedBytes::from(source_namespace),
             rows: reader.read_row_count()?,
             generation: reader.generation(),
             bundle: reader.bundle_reference().cloned(),
@@ -88,6 +97,9 @@ pub struct IndexReadCheckpoint {
 
 impl IndexReadCheckpoint {
     pub fn open(dir: &Path, reader: &SegmentReader) -> io::Result<Option<Self>> {
+        if reader.source_namespace().is_none() {
+            return Ok(None);
+        }
         let index_dir = dir.join("indexes");
         let file = match File::open(&index_dir) {
             Ok(file) => file,
@@ -136,6 +148,9 @@ pub struct IndexBuildCheckpoint {
 
 impl IndexBuildCheckpoint {
     pub fn begin(dir: &Path) -> io::Result<Self> {
+        // Establish eligibility before creating or withdrawing publication
+        // state. Legacy sources without an identity remain scan-only.
+        let identity = Identity::read(&SegmentReader::open_projected(dir, &[])?)?;
         let index_dir = dir.join("indexes");
         fs::create_dir_all(&index_dir)?;
         let file = File::open(&index_dir)?;
@@ -147,7 +162,6 @@ impl IndexBuildCheckpoint {
             TryLockError::Error(error) => error,
         })?;
         let lock = DirectoryLock(file);
-        let identity = Identity::read(&SegmentReader::open_projected(dir, &[])?)?;
         let previous = match read_checkpoint(&index_dir) {
             Ok(previous) => previous,
             Err(error) if error.kind() == io::ErrorKind::InvalidData => None,
@@ -256,7 +270,10 @@ fn read_checkpoint(index_dir: &Path) -> io::Result<Option<Checkpoint>> {
         .read_to_end(&mut bytes)?;
     if bytes.len() > MAX_CHECKPOINT_BYTES
         || bytes.len() < 40
-        || (&bytes[..8] != MAGIC && &bytes[..8] != UNBOUND_MAGIC && &bytes[..8] != LEGACY_MAGIC)
+        || (&bytes[..8] != MAGIC
+            && &bytes[..8] != UNBOUND_SOURCE_MAGIC
+            && &bytes[..8] != UNBOUND_MAGIC
+            && &bytes[..8] != LEGACY_MAGIC)
         || checkpoint_digest(&bytes[..8], &bytes[40..]).as_slice() != &bytes[8..40]
     {
         return Err(io::Error::new(
@@ -495,6 +512,25 @@ mod tests {
     }
 
     #[test]
+    fn legacy_source_without_identity_is_scan_readable_but_index_ineligible() {
+        let dir = tempfile::tempdir().unwrap();
+        ColumnFile::write_batch(dir.path(), &[row()]).unwrap();
+        fs::remove_file(dir.path().join(".source-publication")).unwrap();
+
+        let reader = SegmentReader::open(dir.path()).unwrap();
+        assert_eq!(reader.read_row_count().unwrap(), 1);
+        assert_eq!(reader.source_namespace(), None);
+        assert!(
+            IndexReadCheckpoint::open(dir.path(), &reader)
+                .unwrap()
+                .is_none()
+        );
+        let error = IndexBuildCheckpoint::begin(dir.path()).err().unwrap();
+        assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+        assert!(!dir.path().join("indexes").exists());
+    }
+
+    #[test]
     fn artifact_registration_is_bounded_and_rejects_duplicates_without_mutation() {
         let dir = tempfile::tempdir().unwrap();
         ColumnFile::write_batch(dir.path(), &[row()]).unwrap();
@@ -605,6 +641,7 @@ mod tests {
         for artifacts in [duplicate, invalid, oversized] {
             let payload = serde_json::to_vec(&Checkpoint {
                 identity: Identity {
+                    source_namespace: identity.source_namespace,
                     rows: identity.rows,
                     generation: identity.generation,
                     bundle: identity.bundle.clone(),
@@ -627,27 +664,29 @@ mod tests {
     }
 
     #[test]
-    fn unbound_checkpoint_version_requires_rebuilding() {
-        let dir = tempfile::tempdir().unwrap();
-        ColumnFile::write_batch(dir.path(), &[row()]).unwrap();
-        IndexBuildCheckpoint::begin(dir.path())
-            .unwrap()
-            .publish()
-            .unwrap();
-        let marker = dir.path().join("indexes").join(INDEX_CHECKPOINT_FILE);
-        let mut bytes = fs::read(&marker).unwrap();
-        bytes[..8].copy_from_slice(UNBOUND_MAGIC);
-        let digest = checkpoint_digest(UNBOUND_MAGIC, &bytes[40..]);
-        bytes[8..40].copy_from_slice(digest.as_slice());
-        fs::write(&marker, &bytes).unwrap();
-        let reader = SegmentReader::open(dir.path()).unwrap();
-        assert!(
-            IndexReadCheckpoint::open(dir.path(), &reader)
+    fn unbound_checkpoint_versions_require_rebuilding() {
+        for magic in [UNBOUND_SOURCE_MAGIC, UNBOUND_MAGIC] {
+            let dir = tempfile::tempdir().unwrap();
+            ColumnFile::write_batch(dir.path(), &[row()]).unwrap();
+            IndexBuildCheckpoint::begin(dir.path())
                 .unwrap()
-                .is_none()
-        );
-        let build = IndexBuildCheckpoint::begin(dir.path()).unwrap();
-        assert!(!build.can_reuse_existing());
+                .publish()
+                .unwrap();
+            let marker = dir.path().join("indexes").join(INDEX_CHECKPOINT_FILE);
+            let mut bytes = fs::read(&marker).unwrap();
+            bytes[..8].copy_from_slice(magic);
+            let digest = checkpoint_digest(magic, &bytes[40..]);
+            bytes[8..40].copy_from_slice(digest.as_slice());
+            fs::write(&marker, &bytes).unwrap();
+            let reader = SegmentReader::open(dir.path()).unwrap();
+            assert!(
+                IndexReadCheckpoint::open(dir.path(), &reader)
+                    .unwrap()
+                    .is_none()
+            );
+            let build = IndexBuildCheckpoint::begin(dir.path()).unwrap();
+            assert!(!build.can_reuse_existing());
+        }
     }
 
     #[test]

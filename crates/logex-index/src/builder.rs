@@ -24,6 +24,12 @@ impl IndexBuilder {
         profile: IndexBuildProfile,
     ) -> std::io::Result<bool> {
         let reader = SegmentReader::open_projected(partition_dir, &[])?;
+        if reader.source_namespace().is_none() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "source identity is missing; complete a storage-owned rewrite before indexing",
+            ));
+        }
         let Some(checkpoint) = IndexReadCheckpoint::open(partition_dir, &reader)? else {
             return Ok(true);
         };

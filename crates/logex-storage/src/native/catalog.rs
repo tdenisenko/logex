@@ -3,6 +3,7 @@ use std::io::{self, Read};
 
 use crate::SyncHead;
 use alloy_consensus::Header;
+use alloy_primitives::FixedBytes;
 use alloy_rlp::Decodable;
 use std::path::{Path, PathBuf};
 
@@ -102,6 +103,8 @@ pub struct SegmentDescriptor {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub column_bundle: Option<crate::BundleReference>,
     pub id: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_namespace: Option<FixedBytes<16>>,
     pub generation: u64,
     pub kind: SegmentKind,
     pub relative_path: PathBuf,
@@ -123,6 +126,8 @@ pub struct SegmentManifest {
     pub column_bundle: Option<crate::BundleReference>,
     pub format_version: u32,
     pub segment_id: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_namespace: Option<FixedBytes<16>>,
     pub generation: u64,
     pub kind: SegmentKind,
     #[serde(default)]
@@ -495,9 +500,13 @@ impl NativeStorageCatalog {
 
         let relative_path = PathBuf::from(SEGMENTS_DIR).join(format!("s_{id:016}"));
         let manifest_relative_path = relative_path.join("segment.json");
+        let mut source_namespace = [0; 16];
+        getrandom::fill(&mut source_namespace)
+            .map_err(|error| io::Error::other(error.to_string()))?;
         Ok(SegmentDescriptor {
             column_bundle: None,
             id,
+            source_namespace: Some(FixedBytes::from(source_namespace)),
             generation: 0,
             kind,
             relative_path,
