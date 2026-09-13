@@ -62,6 +62,51 @@ fn verify_page(
     Ok(())
 }
 
+// Both random and whole-file readers use the same header/extent rules.
+fn parse_header(header: &[u8], length: u64) -> io::Result<Option<(u64, [u8; 16])>> {
+    if header.get(..8) != Some(MAGIC.as_slice()) {
+        return Ok(None);
+    }
+    if header.len() < HEADER_BYTES
+        || crc32fast::hash(&header[..44]).to_le_bytes() != header[44..48]
+        || header[8..12] != VERSION.to_le_bytes()
+        || header[12..16] != (PAGE_BYTES as u32).to_le_bytes()
+        || header[40..44] != [0; 4]
+    {
+        return Err(invalid("invalid index integrity header"));
+    }
+    let logical_len = u64::from_le_bytes(header[16..24].try_into().unwrap());
+    if physical_len(logical_len)? != length {
+        return Err(invalid("index integrity file length mismatch"));
+    }
+    let mut file_id = [0; 16];
+    file_id.copy_from_slice(&header[24..40]);
+    Ok(Some((logical_len, file_id)))
+}
+
+fn verify_body(logical: &[u8], checksums: &[u8], context: &crc32fast::Hasher) -> io::Result<()> {
+    // Callers establish exact physical geometry before splitting the body.
+    for (index, page) in logical.chunks(PAGE_BYTES).enumerate() {
+        let offset = index * CHECKSUM_BYTES as usize;
+        let expected = checksums[offset..offset + 4].try_into().unwrap();
+        verify_page(logical.len() as u64, context, index as u64, page, expected)?;
+    }
+    Ok(())
+}
+
+/// Own the original physical bytes while exposing only their checked logical
+/// slice. Keeping the header in place avoids shifting the whole allocation.
+pub(crate) struct IndexData {
+    bytes: Vec<u8>,
+    logical: std::ops::Range<usize>,
+}
+
+impl IndexData {
+    pub(crate) fn as_slice(&self) -> &[u8] {
+        &self.bytes[self.logical.clone()]
+    }
+}
+
 fn read_at(file: &File, bytes: &mut [u8], offset: u64) -> io::Result<()> {
     #[cfg(unix)]
     {
@@ -104,32 +149,10 @@ impl IndexFile {
         let mut prefetch = [0; HEADER_BYTES + PAGE_BYTES + CHECKSUM_BYTES as usize];
         let prefetch_len = length.min(prefetch.len() as u64) as usize;
         read_at(&file, &mut prefetch[..prefetch_len], 0)?;
-        let header = &prefetch[..HEADER_BYTES];
-        let header_len = length.min(HEADER_BYTES as u64) as usize;
-        let protected = &header[..8] == MAGIC;
-        let logical_len = if protected {
-            if header_len != HEADER_BYTES
-                || crc32fast::hash(&header[..44]).to_le_bytes() != header[44..]
-                || header[8..12] != VERSION.to_le_bytes()
-                || header[12..16] != (PAGE_BYTES as u32).to_le_bytes()
-                || header[40..44] != [0; 4]
-            {
-                return Err(invalid("invalid index integrity header"));
-            }
-            let mut bytes = [0; 8];
-            bytes.copy_from_slice(&header[16..24]);
-            let logical_len = u64::from_le_bytes(bytes);
-            if physical_len(logical_len)? != length {
-                return Err(invalid("index integrity file length mismatch"));
-            }
-            logical_len
-        } else {
-            // Legacy bytes are exposed only to callers that explicitly validate
-            // their old encoding. They have no persisted integrity guarantee.
-            length
-        };
-        let mut file_id = [0; 16];
-        file_id.copy_from_slice(&header[24..40]);
+        let parsed = parse_header(&prefetch[..prefetch_len.min(HEADER_BYTES)], length)?;
+        let protected = parsed.is_some();
+        // Legacy bytes are exposed only to callers that validate their encoding.
+        let (logical_len, file_id) = parsed.unwrap_or((length, [0; 16]));
         // Keep a typical bloom's footer in one cache window without allocating
         // the full window for small indexes or unprotected legacy files.
         let checksum_capacity = if protected {
@@ -175,6 +198,37 @@ impl IndexFile {
         Ok(reader)
     }
 
+    /// Load a whole immutable file without constructing point-lookup caches.
+    /// Read only the opened handle's actual extent; safe std reads initialize the
+    /// reserved storage as they fill it, avoiding a separate whole-file zero fill.
+    pub(crate) fn read_all_from_path(path: &Path) -> io::Result<IndexData> {
+        let file = File::open(path)?;
+        let length = file.metadata()?.len();
+        let capacity = usize::try_from(length)
+            .map_err(|_| invalid("index file too large for this platform"))?;
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(capacity)
+            .map_err(|_| invalid("index allocation failed"))?;
+        file.take(length).read_to_end(&mut bytes)?;
+        if bytes.len() != capacity {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "truncated index file",
+            ));
+        }
+        let logical = if let Some((logical_len, file_id)) = parse_header(&bytes, length)? {
+            // Checked physical geometry bounds this sum by bytes.len().
+            let end = HEADER_BYTES + logical_len as usize;
+            let (body, checksums) = bytes[HEADER_BYTES..].split_at(logical_len as usize);
+            verify_body(body, checksums, &page_context(logical_len, &file_id))?;
+            HEADER_BYTES..end
+        } else {
+            0..bytes.len()
+        };
+        Ok(IndexData { bytes, logical })
+    }
+
     pub(crate) fn logical_len(&self) -> u64 {
         self.logical_len
     }
@@ -205,18 +259,7 @@ impl IndexFile {
         } else {
             read_at(&self.file, &mut data, HEADER_BYTES as u64)?;
             let (logical, checksums) = data.split_at(logical_len);
-            for (index, page) in logical.chunks(PAGE_BYTES).enumerate() {
-                let offset = index * CHECKSUM_BYTES as usize;
-                // The exact physical geometry fixes four footer bytes/page.
-                let expected = checksums[offset..offset + 4].try_into().unwrap();
-                verify_page(
-                    self.logical_len,
-                    &self.page_context,
-                    index as u64,
-                    page,
-                    expected,
-                )?;
-            }
+            verify_body(logical, checksums, &self.page_context)?;
             data.truncate(logical_len);
         }
         Ok(data)
@@ -551,6 +594,10 @@ mod tests {
             let expected = &original[..length];
             write(&path, expected);
             assert_eq!(
+                IndexFile::read_all_from_path(&path).unwrap().as_slice(),
+                expected
+            );
+            assert_eq!(
                 fs::metadata(&path).unwrap().len(),
                 physical_len(length as u64).unwrap()
             );
@@ -604,6 +651,7 @@ mod tests {
                 let mut reader = IndexFile::open(&path).unwrap();
                 let mut output = vec![0; logical.len()];
                 assert!(reader.read_exact(&mut output).is_err());
+                assert!(IndexFile::read_all_from_path(&path).is_err());
             }
         }
         // Even moving a whole page together with its checksum must fail because
@@ -664,11 +712,16 @@ mod tests {
         for end in (8..HEADER_BYTES).chain([HEADER_BYTES, PAGE_BYTES, complete.len() - 1]) {
             fs::write(&path, &complete[..end]).unwrap();
             assert!(IndexFile::open(&path).is_err(), "length {end}");
+            assert!(
+                IndexFile::read_all_from_path(&path).is_err(),
+                "length {end}"
+            );
         }
         let mut extended = complete.clone();
         extended.push(0);
         fs::write(&path, extended).unwrap();
         assert!(IndexFile::open(&path).is_err());
+        assert!(IndexFile::read_all_from_path(&path).is_err());
         for position in 8..HEADER_BYTES {
             let mut changed = complete.clone();
             changed[position] ^= 1;
@@ -677,6 +730,7 @@ mod tests {
                 IndexFile::open(&path).is_err(),
                 "header position {position}"
             );
+            assert!(IndexFile::read_all_from_path(&path).is_err());
         }
         // A self-consistent header with an impossible length is rejected before
         // allocating from it. The fixture remains exactly 48 bytes.
@@ -686,6 +740,7 @@ mod tests {
         header[44..48].copy_from_slice(&checksum.to_le_bytes());
         fs::write(&path, header).unwrap();
         assert!(IndexFile::open(&path).is_err());
+        assert!(IndexFile::read_all_from_path(&path).is_err());
     }
 
     #[test]

@@ -126,16 +126,19 @@ pub struct BTreeIndexReader {
 impl BTreeIndexReader {
     /// Load and structurally validate every entry and bitmap in an index.
     pub fn open(path: &Path) -> io::Result<Self> {
-        Self::open_file(IndexFile::open(path)?)
+        let data = IndexFile::read_all_from_path(path)?;
+        Self::open_data(data.as_slice())
     }
 
     fn open_file(file: IndexFile) -> io::Result<Self> {
-        // IndexFile has already bounded logical_len by the opened file's extent.
-        // Read it contiguously, then validate counts before allocating entries.
-        let logical_len = file.logical_len();
-        let data = file.read_all()?;
-        let header = IndexHeader::parse(&data)?;
-        header.validate_geometry(logical_len)?;
+        Self::open_data(&file.read_all()?)
+    }
+
+    fn open_data(data: &[u8]) -> io::Result<Self> {
+        // The actual file extent bounds this slice; validate counts before
+        // allocating keys, entry descriptors or decoded bitmaps.
+        let header = IndexHeader::parse(data)?;
+        header.validate_geometry(data.len() as u64)?;
         let count = usize::try_from(header.entry_count)
             .map_err(|_| invalid_index("too many index entries"))?;
         let mut entries = Vec::new();
@@ -150,7 +153,7 @@ impl BTreeIndexReader {
             INDEX_HEADER_LEN
         };
         for _ in 0..count {
-            let key = take_bytes(&data, &mut position, header.key_size)?;
+            let key = take_bytes(data, &mut position, header.key_size)?;
             if entries
                 .last()
                 .is_some_and(|(previous, _): &(Vec<u8>, RoaringBitmap)| previous.as_slice() >= key)
@@ -159,17 +162,17 @@ impl BTreeIndexReader {
             }
             if header.version == 2 {
                 let offset =
-                    u64::from_le_bytes(take_bytes(&data, &mut position, 8)?.try_into().unwrap());
+                    u64::from_le_bytes(take_bytes(data, &mut position, 8)?.try_into().unwrap());
                 if offset != payload_position as u64 {
                     return Err(invalid_index("noncontiguous index bitmap payload"));
                 }
             }
-            let len = u32::from_le_bytes(take_bytes(&data, &mut position, 4)?.try_into().unwrap())
+            let len = u32::from_le_bytes(take_bytes(data, &mut position, 4)?.try_into().unwrap())
                 as usize;
             let bitmap_data = if header.version == 2 {
-                take_bytes(&data, &mut payload_position, len)?
+                take_bytes(data, &mut payload_position, len)?
             } else {
-                take_bytes(&data, &mut position, len)?
+                take_bytes(data, &mut position, len)?
             };
             let bitmap = decode_bitmap(bitmap_data)?;
             let mut owned_key = Vec::new();
