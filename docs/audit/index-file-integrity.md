@@ -67,23 +67,23 @@ pending.
 ## Implementation under validation
 
 New derived files wrap their existing logical B-tree/bloom encoding in a page
-integrity container. Its 48-byte header fixes magic, version, 4096-byte page size,
+integrity container. Its 48-byte header fixes magic, version, 8192-byte page size,
 logical length, a per-file 128-bit random identity and reserved fields, protected by CRC32. The original logical
-bytes remain contiguous. The current experiment uses container version 5 and
+bytes remain contiguous. The current experiment uses container version 6 and
 one eight-byte metadata-seeded XXH3 fingerprint per page. Screens 1–16 used
 version 1 and four-byte CRC32 page checks; screen 17 used version 2 and XXH64.
 Each page fingerprint
 includes a domain tag, format version, logical length, file identity, page position and actual
 page length. Version 3 hashes that complete metadata into a seed and uses the
-standard seeded hash on the page bytes. Versions 4 and 5 retain this construction with
-2 and 4 KiB pages respectively and its own version domain. This is a distinct encoding from hashing
+standard seeded hash on the page bytes. Versions 4, 5 and 6 retain this construction with
+2, 4 and 8 KiB pages respectively and their own version domains. This is a distinct encoding from hashing
 the concatenated metadata and page. Exact physical extent is checked using the
 opened handle.
 
 Point lookups validate only bytes from pages they inspect, keeping logarithmic
 table search. Bloom exclusions verify the page containing the tested bit. Range
 readers retain contiguous whole-file reads and validate every page. A reader
-holds a 4 KiB data-page cache and a checksum cache capped at 16 KiB (smaller files
+holds an 8 KiB data-page cache and a checksum cache capped at 16 KiB (smaller files
 allocate only their footer size); no global validation cache or
 per-query full-file scrub is introduced. Writer fingerprint storage costs eight
 bytes per logical page, and B-tree payloads stream once instead of retaining all
@@ -477,3 +477,24 @@ checked size is capped before conversion to `usize`. Existing roundtrip,
 page-boundary and write-error checks remain unchanged; all 71 index unit tests,
 formatting and focused Clippy pass. This is a performance hypothesis until the
 fixed comparison against the preceding candidate completes.
+
+### Eight KiB page experiment
+
+Source `211cd7ad` uses version 6 with 8 KiB pages. The independent persisted
+framing oracle uses the exact new constants; all previous prototype versions,
+including version 5 with a matching recomputed header CRC, remain rejected.
+Existing cache-window, page-boundary, partial flush, error poisoning, exact-length
+and complete-file tests remain enabled. All 71 unit tests, formatting and focused
+Clippy pass. Larger pages halve the number of fingerprints for large files but
+increase point-read verification and page-cache size; the seven-layout original-
+baseline comparison must measure that tradeoff before acceptance.
+
+The bounded-buffer comparison does not establish a small-write speed gain:
+median -1.30%, p95 +6.24% against `f2885fa9`. It reduces actual transient buffer
+capacity for files below 64 KiB; no speed claim is made. Above-capacity gapped
+writes have unchanged capacities but vary +9.11% median / -11.68% p95, showing
+material host/process variability. A separate 4,800-iteration rotating I/O
+control retains every open/write/close timing. Single writes are faster than
+splitting the same bytes at 8 KiB, and the two generated file sizes have similar
+costs. This control excludes entropy and serialization and cannot replace the
+application comparison.
