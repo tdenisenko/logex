@@ -128,7 +128,17 @@ impl Erc20EventBloom {
 
 impl Erc20EventBloomReader {
     pub fn open(path: &Path) -> io::Result<Self> {
-        let (reader, bit_mask) = open_bloom(path, ERC20_EVENTS_MAGIC)?;
+        let (reader, bit_mask) = open_bloom(IndexFile::open(path)?, ERC20_EVENTS_MAGIC)?;
+        Ok(Self { reader, bit_mask })
+    }
+
+    /// Open a published bloom after matching the ID from a caller-held
+    /// publication checkpoint guard.
+    pub fn open_bound(path: &Path, expected_file_id: [u8; 16]) -> io::Result<Self> {
+        let (reader, bit_mask) = open_bloom(
+            IndexFile::open_bound(path, expected_file_id)?,
+            ERC20_EVENTS_MAGIC,
+        )?;
         Ok(Self { reader, bit_mask })
     }
 
@@ -252,7 +262,17 @@ impl TransferBloom {
 
 impl TransferBloomReader {
     pub fn open(path: &Path) -> io::Result<Self> {
-        let (reader, bit_mask) = open_bloom(path, TRANSFER_MAGIC)?;
+        let (reader, bit_mask) = open_bloom(IndexFile::open(path)?, TRANSFER_MAGIC)?;
+        Ok(Self { reader, bit_mask })
+    }
+
+    /// Open a published bloom after matching the ID from a caller-held
+    /// publication checkpoint guard.
+    pub fn open_bound(path: &Path, expected_file_id: [u8; 16]) -> io::Result<Self> {
+        let (reader, bit_mask) = open_bloom(
+            IndexFile::open_bound(path, expected_file_id)?,
+            TRANSFER_MAGIC,
+        )?;
         Ok(Self { reader, bit_mask })
     }
 
@@ -290,8 +310,7 @@ fn filter_bytes(row_count: usize) -> usize {
         .max(MIN_FILTER_BYTES)
 }
 
-fn open_bloom(path: &Path, expected_magic: &[u8; 8]) -> io::Result<(IndexFile, u64)> {
-    let mut reader = IndexFile::open(path)?;
+fn open_bloom(mut reader: IndexFile, expected_magic: &[u8; 8]) -> io::Result<(IndexFile, u64)> {
     if !reader.is_protected() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,

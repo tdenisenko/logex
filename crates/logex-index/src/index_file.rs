@@ -170,6 +170,7 @@ pub(crate) struct IndexFile {
     file: File,
     logical_len: u64,
     protected: bool,
+    file_id: Option<[u8; 16]>,
     file_context: FileContext,
     position: u64,
     page: Box<[u8; PAGE_BYTES]>,
@@ -210,6 +211,7 @@ impl IndexFile {
         checksums.resize(checksum_capacity, 0);
         let mut reader = Self {
             file,
+            file_id: protected.then_some(file_id),
             file_context: file_context(logical_len, &file_id),
             logical_len,
             protected,
@@ -240,16 +242,58 @@ impl IndexFile {
         Ok(reader)
     }
 
+    pub(crate) fn open_bound(path: &Path, expected_file_id: [u8; 16]) -> io::Result<Self> {
+        let reader = Self::open(path)?;
+        if reader.file_id != Some(expected_file_id) {
+            return Err(invalid(
+                "index artifact does not match its publication binding",
+            ));
+        }
+        Ok(reader)
+    }
+
+    pub(crate) fn protected_file_id(path: &Path) -> io::Result<[u8; 16]> {
+        let file = File::open(path)?;
+        let length = file.metadata()?.len();
+        let mut header = [0u8; HEADER_BYTES];
+        read_at(&file, &mut header, 0)?;
+        parse_header(&header, length)?
+            .map(|(_, file_id)| file_id)
+            .ok_or_else(|| invalid("index artifact has no publication identity"))
+    }
+
     /// Load a whole immutable file without constructing point-lookup caches.
     /// Read only the opened handle's actual extent; pinned nightly BorrowedBuf
     /// tracks initialized spare capacity, avoiding a separate whole-file zero fill.
     pub(crate) fn read_all_from_path(path: &Path) -> io::Result<IndexData> {
+        Self::read_all_from_path_expected(path, None)
+    }
+
+    pub(crate) fn read_all_from_path_bound(
+        path: &Path,
+        expected_file_id: [u8; 16],
+    ) -> io::Result<IndexData> {
+        Self::read_all_from_path_expected(path, Some(expected_file_id))
+    }
+
+    fn read_all_from_path_expected(
+        path: &Path,
+        expected_file_id: Option<[u8; 16]>,
+    ) -> io::Result<IndexData> {
         let mut file = File::open(path)?;
         let length = file.metadata()?.len();
         let capacity = usize::try_from(length)
             .map_err(|_| invalid("index file too large for this platform"))?;
         let bytes = read_exact_initialized(&mut file, capacity)?;
-        let logical = if let Some((logical_len, file_id)) = parse_header(&bytes, length)? {
+        let parsed = parse_header(&bytes, length)?;
+        if let Some(expected) = expected_file_id
+            && parsed.map(|(_, file_id)| file_id) != Some(expected)
+        {
+            return Err(invalid(
+                "index artifact does not match its publication binding",
+            ));
+        }
+        let logical = if let Some((logical_len, file_id)) = parsed {
             // Checked physical geometry bounds this sum by bytes.len().
             let end = HEADER_BYTES + logical_len as usize;
             let (body, checksums) = bytes[HEADER_BYTES..].split_at(logical_len as usize);

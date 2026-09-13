@@ -2004,8 +2004,8 @@ fn scan_native_data_sum_partition(
     let mut row_bitmap = RoaringBitmap::new();
     let reader = SegmentReader::open(path)?;
     let checkpoint = logex_storage::IndexReadCheckpoint::open(path, &reader)?;
-    let bloom_exclusions = if checkpoint.is_some() {
-        erc20_event_bloom_exclusions(&path.join("indexes"), &scan.candidate_filters)?
+    let bloom_exclusions = if let Some(checkpoint) = checkpoint.as_ref() {
+        erc20_event_bloom_exclusions(&path.join("indexes"), checkpoint, &scan.candidate_filters)?
     } else {
         None
     };

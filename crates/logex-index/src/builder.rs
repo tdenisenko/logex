@@ -5,6 +5,7 @@ use logex_storage::{IndexBuildCheckpoint, IndexReadCheckpoint, SegmentReader};
 
 use crate::btree::BTreeIndex;
 use crate::composite::CompositeIndexBuilder;
+use crate::index_file::IndexFile;
 use crate::transfer_bloom::{ERC20_EVENTS_BLOOM_FILE, Erc20EventBloom};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -23,14 +24,31 @@ impl IndexBuilder {
         profile: IndexBuildProfile,
     ) -> std::io::Result<bool> {
         let reader = SegmentReader::open_projected(partition_dir, &[])?;
-        let checkpoint = IndexReadCheckpoint::open(partition_dir, &reader)?;
-        if checkpoint.is_none() {
+        let Some(checkpoint) = IndexReadCheckpoint::open(partition_dir, &reader)? else {
             return Ok(true);
-        }
+        };
         let index_dir = partition_dir.join("indexes");
-        Ok(Self::required_index_files(profile)
-            .iter()
-            .any(|name| !index_dir.join(name).is_file()))
+        for name in Self::required_index_files(profile) {
+            let Some(expected) = checkpoint.artifact_id(name) else {
+                return Ok(true);
+            };
+            match IndexFile::protected_file_id(&index_dir.join(name)) {
+                Ok(actual) if actual == expected => {}
+                Ok(_) => return Ok(true),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::NotFound
+                            | std::io::ErrorKind::InvalidData
+                            | std::io::ErrorKind::UnexpectedEof
+                    ) =>
+                {
+                    return Ok(true);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(false)
     }
 
     /// Build all indexes (primary + composite) for a partition.
@@ -60,7 +78,7 @@ impl IndexBuilder {
                 Erc20EventBloom::build(partition_dir, &index_dir)?;
             }
         }
-        checkpoint.publish()?;
+        Self::publish(partition_dir, checkpoint)?;
         Ok(())
     }
 
@@ -87,20 +105,41 @@ impl IndexBuilder {
             }
         }
 
-        checkpoint.publish()?;
+        Self::publish(partition_dir, checkpoint)?;
         Ok(())
     }
 
     fn begin_publication(partition_dir: &Path) -> std::io::Result<IndexBuildCheckpoint> {
         let checkpoint = IndexBuildCheckpoint::begin(partition_dir)?;
-        if !checkpoint.can_reuse_existing() {
-            // Unpublished files can be incomplete or describe a previous row
-            // boundary. Preserve custom artifacts; rebuild all known query files.
-            for name in Self::required_index_files(IndexBuildProfile::All)
-                .iter()
-                .copied()
-                .chain([crate::TRANSFER_BLOOM_FILE])
-            {
+        // Unpublished, unregistered, replaced, and malformed known artifacts
+        // are never adopted into a new publication merely because they exist.
+        for name in Self::required_index_files(IndexBuildProfile::All)
+            .iter()
+            .copied()
+            .chain([crate::TRANSFER_BLOOM_FILE])
+        {
+            let path = partition_dir.join("indexes").join(name);
+            let reusable = if !checkpoint.can_reuse_existing() {
+                false
+            } else if let Some(expected) = checkpoint.previous_artifact_id(name) {
+                match IndexFile::protected_file_id(&path) {
+                    Ok(actual) => actual == expected,
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::NotFound
+                                | std::io::ErrorKind::InvalidData
+                                | std::io::ErrorKind::UnexpectedEof
+                        ) =>
+                    {
+                        false
+                    }
+                    Err(error) => return Err(error),
+                }
+            } else {
+                false
+            };
+            if !reusable {
                 match fs::remove_file(partition_dir.join("indexes").join(name)) {
                     Ok(()) => {}
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -109,6 +148,23 @@ impl IndexBuilder {
             }
         }
         Ok(checkpoint)
+    }
+
+    fn publish(partition_dir: &Path, mut checkpoint: IndexBuildCheckpoint) -> std::io::Result<()> {
+        let index_dir = partition_dir.join("indexes");
+        for name in Self::required_index_files(IndexBuildProfile::All)
+            .iter()
+            .copied()
+            .chain([crate::TRANSFER_BLOOM_FILE])
+        {
+            let path = index_dir.join(name);
+            match IndexFile::protected_file_id(&path) {
+                Ok(file_id) => checkpoint.register_artifact(name, file_id)?,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
+        checkpoint.publish()
     }
 
     pub fn required_index_files(profile: IndexBuildProfile) -> &'static [&'static str] {
@@ -144,7 +200,7 @@ impl IndexBuilder {
     pub fn build_log_query_primary_indexes(partition_dir: &Path) -> std::io::Result<()> {
         let checkpoint = Self::begin_publication(partition_dir)?;
         Self::build_log_query_primary_indexes_unpublished(partition_dir)?;
-        checkpoint.publish()?;
+        Self::publish(partition_dir, checkpoint)?;
         Ok(())
     }
 
@@ -217,7 +273,7 @@ impl IndexBuilder {
     pub fn build_primary_indexes(partition_dir: &Path) -> std::io::Result<()> {
         let checkpoint = Self::begin_publication(partition_dir)?;
         Self::build_primary_indexes_unpublished(partition_dir)?;
-        checkpoint.publish()?;
+        Self::publish(partition_dir, checkpoint)?;
         Ok(())
     }
 
@@ -436,6 +492,59 @@ mod tests {
             let matches = reader.get(rows[0].address.as_slice()).unwrap();
             assert_eq!(matches.len(), 2);
         }
+    }
+
+    #[test]
+    fn missing_replaced_and_unregistered_artifacts_are_repaired_before_publication() {
+        let dir = TempDir::new().unwrap();
+        let rows = make_test_rows();
+        ColumnFile::write_batch(dir.path(), &rows).unwrap();
+        IndexBuilder::build_all_indexes(dir.path()).unwrap();
+        let index_dir = dir.path().join("indexes");
+
+        fs::copy(
+            index_dir.join("timestamp.bptree"),
+            index_dir.join("block_number.bptree"),
+        )
+        .unwrap();
+        fs::remove_file(index_dir.join("address.bptree")).unwrap();
+        assert!(IndexBuilder::indexes_missing(dir.path(), IndexBuildProfile::All).unwrap());
+        IndexBuilder::build_missing_indexes(dir.path(), IndexBuildProfile::All).unwrap();
+        assert!(!IndexBuilder::indexes_missing(dir.path(), IndexBuildProfile::All).unwrap());
+        let blocks = BTreeIndexReader::open(&index_dir.join("block_number.bptree")).unwrap();
+        assert_eq!(
+            blocks
+                .get(&100u64.to_be_bytes())
+                .unwrap()
+                .iter()
+                .collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+
+        let profile_dir = TempDir::new().unwrap();
+        ColumnFile::write_batch(profile_dir.path(), &rows).unwrap();
+        IndexBuilder::build_indexes(profile_dir.path(), IndexBuildProfile::Erc20Transfer).unwrap();
+        let profile_indexes = profile_dir.path().join("indexes");
+        let mut unregistered = BTreeIndex::new(20);
+        unregistered.insert(Address::repeat_byte(0x44).as_slice(), 0);
+        unregistered
+            .write_to_file(&profile_indexes.join("address.bptree"))
+            .unwrap();
+        IndexBuilder::build_missing_indexes(profile_dir.path(), IndexBuildProfile::All).unwrap();
+        let addresses = BTreeIndexReader::open(&profile_indexes.join("address.bptree")).unwrap();
+        assert!(
+            addresses
+                .get(Address::repeat_byte(0x44).as_slice())
+                .is_none()
+        );
+        assert_eq!(
+            addresses
+                .get(Address::repeat_byte(0xAA).as_slice())
+                .unwrap()
+                .iter()
+                .collect::<Vec<_>>(),
+            vec![0, 2]
+        );
     }
 
     #[test]
