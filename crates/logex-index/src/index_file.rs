@@ -8,9 +8,9 @@ use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 const MAGIC: &[u8; 8] = b"LXIDX001";
-const VERSION: u32 = 5;
+const VERSION: u32 = 6;
 const HEADER_BYTES: usize = 48;
-const PAGE_BYTES: usize = 4096;
+const PAGE_BYTES: usize = 8192;
 const CHECKSUM_BYTES: u64 = 8;
 const CHECKSUM_CACHE_BYTES: usize = 16 * 1024;
 const WRITE_BUFFER_BYTES: usize = 64 * 1024;
@@ -648,20 +648,20 @@ mod tests {
             let logical = &original[..length];
             write(&path, logical);
             let physical = fs::read(&path).unwrap();
-            assert_eq!(&physical[8..12], &5u32.to_le_bytes());
-            assert_eq!(&physical[12..16], &4096u32.to_le_bytes());
-            assert_eq!(physical.len(), 48 + length + length.div_ceil(4096) * 8);
+            assert_eq!(&physical[8..12], &6u32.to_le_bytes());
+            assert_eq!(&physical[12..16], &8192u32.to_le_bytes());
+            assert_eq!(physical.len(), 48 + length + length.div_ceil(8192) * 8);
             assert_eq!(&physical[48..48 + length], logical);
             assert_eq!(
                 crc32fast::hash(&physical[..44]).to_le_bytes(),
                 physical[44..48]
             );
-            for (index, page) in logical.chunks(4096).enumerate() {
+            for (index, page) in logical.chunks(8192).enumerate() {
                 // Independently construct metadata for the seed without using
                 // the writer's fixed context/extent helpers. Hash the page in a
-                // separate standard seeded invocation, as required by version 5.
+                // separate standard seeded invocation, as required by version 6.
                 let mut bytes = b"LogEx index page".to_vec();
-                bytes.extend_from_slice(&5u32.to_le_bytes());
+                bytes.extend_from_slice(&6u32.to_le_bytes());
                 bytes.extend_from_slice(&(length as u64).to_le_bytes());
                 bytes.extend_from_slice(&physical[24..40]);
                 bytes.extend_from_slice(&(index as u64).to_le_bytes());
@@ -790,7 +790,7 @@ mod tests {
         }
         // Discarded prototype versions do not become readable merely by
         // updating the header CRC to agree with their version field.
-        for version in [1u32, 2, 3, 4] {
+        for version in [1u32, 2, 3, 4, 5] {
             let mut old_version = complete.clone();
             old_version[8..12].copy_from_slice(&version.to_le_bytes());
             let checksum = crc32fast::hash(&old_version[..44]);
