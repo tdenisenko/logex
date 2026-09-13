@@ -1,0 +1,55 @@
+{
+  "scope": "Two finite two-row source identity regressions against the merged artifact-binding fix",
+  "head": "ebd9e5509c1331319fe14adb97d622573c2f5b89",
+  "branch": "audit/source-publication-identity",
+  "toolchain": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+  "patch_sha256": "113b98f5f16f5665ff9a00d29a671d241fba28b797af0dacf59a4c42ebeee68e",
+  "checks": [
+    {
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "logex-query",
+        "--lib",
+        "--locked",
+        "native::tests::complete_checkpoint_and_indexes_copied_across_legacy_sources_are_not_silently_trusted",
+        "--",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit": 101,
+      "start": "2026-09-13T06:44:23.336637+00:00",
+      "finish": "2026-09-13T06:44:36.695594+00:00",
+      "log": "/private/tmp/logex-source-identity-reproduction-1/0.log",
+      "log_sha256": "3a68785bd4a545008646af72592d09a4e3b8cdf9b22985315451bc1f6bd5c1f2"
+    },
+    {
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "logex-query",
+        "--lib",
+        "--locked",
+        "native::tests::equal_row_legacy_source_replacement_does_not_silently_reuse_old_indexes",
+        "--",
+        "--exact",
+        "--nocapture",
+        "--test-threads=1"
+      ],
+      "exit": 101,
+      "start": "2026-09-13T06:44:36.696350+00:00",
+      "finish": "2026-09-13T06:44:37.388271+00:00",
+      "log": "/private/tmp/logex-source-identity-reproduction-1/1.log",
+      "log_sha256": "ef513a92f6ad0686818666f440d23685198704cfb6f1d8bf17859792ffd45de4"
+    }
+  ],
+  "archive": {
+    "path": "2026-09-13-source-identity-reproduction-1.json.gz",
+    "sha256": "bb0c91e5e31037698cee08c006c5f947b24c394cca3a127a2e7ef4c8beb956d6",
+    "bytes": 3341
+  },
+  "disposition": "Both expected failures return no indexed rows while the independent full scan finds row 0. No implementation or benchmark acceptance is claimed."
+}
