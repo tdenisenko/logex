@@ -364,3 +364,63 @@ snapshot; startup, maintenance and writers continue to honor the recovery marker
 This distinction does not permit queries during node recovery or waive catalog
 and WAL verification. All interleavings, recovery phases, compatibility behavior
 and performance still require validation before this design can be retained.
+
+Caller review exposed two necessary integration changes. Startup integrity and
+maintenance validation previously obtained sidecar checks indirectly through
+`SegmentReader`. Once identified query snapshots use the canonical envelope,
+those callers need explicit sidecar authority checks. Otherwise a coherent
+query snapshot could incorrectly authorize startup or further mutation after
+missing, foreign or incomplete recovery metadata.
+
+Paged unbundled append also lacked segment-source ownership: its preceding
+compaction releases the segment lock before append begins. The native data
+directory lock uses a different inode from standalone column replacement's
+segment lock. Append must acquire that same source owner through inspection and
+publication. Bundled append retains its existing path. These changes belong to
+the source-identity contract and require focused regressions; they are not
+evidence that the implementation has already passed validation.
+
+The canonical experiment is committed as
+`0841db0d11380ed2d461a7639f684cc7e819dd37`.
+[Focused attempt 15](baselines/2026-09-13-source-identity-canonical-focused-1.json)
+passes formatting, strict workspace Clippy, 262 storage tests, 80 index tests,
+13 native query tests and 11 background tests. Five existing storage checks
+remain ignored. The final source patch is identical after every passing check
+and exactly matches the committed source diff. Attempt 14 stopped on two newly
+test-only helpers; its initial patch and complete logs remain retained, without
+claiming a post-format failure snapshot that the older runner did not collect.
+
+The raw envelope has a 54-byte checked header followed by the unchanged bitmap
+length and bits. Header validation covers version, state, binding and row count;
+the count must match the bitmap length and supported addressing, and the physical
+framed length is exact. This header checksum does not authenticate bitmap bits.
+Legacy query decoding and valid relative canonical paths remain supported;
+legacy writer/integrity paths retain their stricter exact-length checks.
+
+Regression coverage includes replacement before and after canonical capture,
+all canonical descriptor alias fields, append rejection before column mutation,
+and interrupted verified-prefix publication at five stages, including the final
+directory-order barrier. Reopen must recover the exact three committed rows and
+preserve a noncanonical bit while discarding the two-row unpublished suffix.
+Both pending and completed canonical metadata with an unfinished sidecar are
+covered. Missing sidecar evidence cannot be reconstructed from a coherent query
+snapshot, even when an appended tail would otherwise initiate recovery. Bundled
+recovery remains separate and does not require a raw sidecar.
+
+The [predefined isolated ten-pair comparison](baselines/2026-09-13-source-identity-canonical-release.json)
+against `b6505ee3` retains 10,000 timings, 100 warmups and 20 RSS observations
+from unchanged release fixtures. Median/p95 changes are -3.75%/-6.57% for block
+hash, +2.93%/+0.42% for block number, +2.93%/-3.75% for timestamp,
+-1.83%/-8.67% for present topic and -5.75%/-8.60% for absent topic. RSS changes
++0.08% median/+2.69% p95. This supports continuing the experiment but does not
+establish a direct baseline pass or improvement on every path.
+
+Further review found an authority/capture race in `0841db0d` startup integrity:
+the explicit sidecar check preceded query capture without owning the segment.
+A standalone writer could enter its pending state between those operations,
+while the new query reader correctly accepted the still-coherent old canonical
+snapshot. Integrity validation must retain the bound/legacy source owner across
+all its file reads. Its callers do not retain a segment guard; maintenance already
+does and must not recursively acquire it. This correction and its regression are
+required before direct six-workload baseline acceptance and complete gates.
+No live or external-volume operations have been performed.
