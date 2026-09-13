@@ -35,6 +35,16 @@ fn sample<T>(name: &str, iteration: usize, run: impl FnOnce() -> T) -> T {
 #[test]
 #[ignore = "release performance fixture; configure and retain repeated equivalent runs"]
 fn index_io_performance() {
+    index_io_performance_with_stride(1);
+}
+
+#[test]
+#[ignore = "release performance fixture; configure and retain repeated equivalent runs"]
+fn index_gapped_payload_performance() {
+    index_io_performance_with_stride(2);
+}
+
+fn index_io_performance_with_stride(stride: u32) {
     let keys = parameter("LOGEX_INDEX_KEYS", 8192, 131072);
     let rows = parameter("LOGEX_INDEX_ROWS", 65536, 1048576);
     let repeats = parameter("LOGEX_INDEX_REPEATS", 50, 1000);
@@ -45,7 +55,10 @@ fn index_io_performance() {
     let path = dir.path().join("numeric.bptree");
     let mut index = BTreeIndex::new(8);
     for row in 0..rows {
-        index.insert(&((row % keys * 2) as u64).to_be_bytes(), row as u32);
+        index.insert(
+            &((row % keys * 2) as u64).to_be_bytes(),
+            row as u32 * stride,
+        );
     }
     index.write_to_file(&path).unwrap();
     // Warm the relevant file path once. No cache eviction is attempted.
@@ -61,11 +74,9 @@ fn index_io_performance() {
         .unwrap()
         .unwrap();
         assert_eq!(found.len(), expected_per_key);
-        assert!(
-            found
-                .iter()
-                .all(|row| (row as usize) < rows && (row as usize % keys * 2) as u64 == key)
-        );
+        assert!(found.iter().all(|row| row.is_multiple_of(stride)
+            && ((row / stride) as usize) < rows
+            && ((row / stride) as usize % keys * 2) as u64 == key));
         black_box(found);
         let absent = sample("point_absent", iteration, || {
             BTreeIndexReader::get_from_file(&path, &absent_key_bytes)
@@ -83,11 +94,9 @@ fn index_io_performance() {
         })
         .unwrap();
         assert_eq!(found.len(), expected_per_key * (upper / 2));
-        assert!(
-            found
-                .iter()
-                .all(|row| (row as usize) < rows && (row as usize % keys * 2) < upper as usize)
-        );
+        assert!(found.iter().all(|row| row.is_multiple_of(stride)
+            && ((row / stride) as usize) < rows
+            && ((row / stride) as usize % keys * 2) < upper as usize));
         black_box(found);
     }
     for iteration in 0..writes {
