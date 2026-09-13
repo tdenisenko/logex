@@ -1,0 +1,106 @@
+{
+  "schema": 1,
+  "disposition": "FROZEN_PREPARATION_ONLY_NOT_EXECUTED",
+  "source_performance_accepted": false,
+  "revisions": {
+    "baseline": "9c0a58fc64fac3da7f5a50b3a20b7ab729f029e9",
+    "candidate": "c229ace0345dd7b6b8c07388d3c0aed8a9c6a771"
+  },
+  "pending": "Remote baseline compilation remains active at packaging. Exact baseline/candidate binary inputs and verified build proof hashes will be frozen separately before execution.",
+  "schedule": {
+    "rounds": 24,
+    "suites": 6,
+    "processes": 576,
+    "measured_timings": 96000,
+    "explicit_native_warmups": 480,
+    "rss_records": 576,
+    "source_pairs_per_suite": 24,
+    "identical_control_pairs_per_binary_per_suite": 12,
+    "order_seed": 2026091411,
+    "details": "process-schedule.json",
+    "randomization": "Fixed permutation of the original 24 balanced rounds; no performance-driven choices."
+  },
+  "analysis": {
+    "metrics": 31,
+    "endpoints": 62,
+    "statistics": [
+      "median",
+      "nearest-rank p95"
+    ],
+    "source_slowdown_limit_percent": 10,
+    "bootstrap_draws": 4000,
+    "bootstrap_seed": 2026091412,
+    "details": [
+      "bootstrap-design.json",
+      "decision-rules.json",
+      "PROPOSAL.md"
+    ],
+    "rule": "PASS requires all 62 endpoints CLEAR: point and interval upper bound strictly below 10%, without an unresolved attribution issue. Supported regression requires point and lower bound above 10% plus retained repeatability/control review. All other cases INCONCLUSIVE; equality remains unresolved.",
+    "review": "Investigate observed source increases above 5%, report controls/order/round/tail contributors. No automatic 5% control precision gate, control subtraction, exclusions or repeat-until-pass."
+  },
+  "preparation_cooldown": {
+    "seconds": 600,
+    "repetitions": 1,
+    "placement": "After all remote compilation and source/artifact preparation, before measurement.",
+    "observations": "Root orchestrates and retains host observations before and after the fixed interval.",
+    "policy": "No automatic cooldown retry and no CPU or control precision exclusion. Operational/correctness/identity failures still stop with retained evidence."
+  },
+  "invariants": [
+    "All six original fixture bytes, configurations, row oracles, repetitions and default native one-warmup behavior remain unchanged.",
+    "Earlier observations and dispositions remain intact and separate; no pooling, replacements, adaptive additions or source acceptance from the warmup diagnostic.",
+    "Runner invokes existing compiled fixtures; no production or SQL edits. Every log/config/sample/warmup/RSS record retained, with bounded owned-process supervision and stop-on-failure.",
+    "Symmetric host probes precede each complete pair outside query timers; no probe occurs between pair members."
+  ],
+  "tooling": {
+    "tools/source_run.py": {
+      "sha256": "d51c3a33afffb611b8beda435ba9aa8cf12cc11fd112fe44cc80d397d44092d7",
+      "local_path": "/private/tmp/logex-source-identity-quiet-window-1/source-comparison-randomized-1/tools/source_run.py",
+      "raw_file_key": "tools/source_run.py"
+    },
+    "analysis-tools/analyze.py": {
+      "sha256": "26ba58160d3dd1d21487e37c232457d5f2f933b404466f37a7418d87d0de7ed1",
+      "local_path": "/private/tmp/logex-source-identity-quiet-window-1/source-comparison-randomized-1/analysis-tools/analyze.py",
+      "raw_file_key": "analysis-tools/analyze.py"
+    },
+    "analysis-tools/arithmetic.py": {
+      "sha256": "75f21ab7e77e16fcea8517c25cca1b84c01d4d7a114498450ef08cbedf6ddfb0",
+      "local_path": "/private/tmp/logex-source-identity-quiet-window-1/source-comparison-randomized-1/analysis-tools/arithmetic.py",
+      "raw_file_key": "analysis-tools/arithmetic.py"
+    }
+  },
+  "instrumentation_hygiene": {
+    "details": "tools/checkpoint-byte-estimate.json",
+    "old_estimated_checkpoint_bytes": 6891665288,
+    "revised_estimated_checkpoint_and_preflight_bytes": 11231981,
+    "scope": "Synthetic serialization-volume estimate with 1500 input hashes and representative command/path lengths; not a measured production improvement.",
+    "change": "Write static provenance once and compact progress during timing. Complete append-only command/observation journals and full final result remain unchanged. Before-compact and before-quantile revisions and all checks are retained.",
+    "bootstrap_cleanup": "Avoid unused mean computation when only pooled median/p95 are required; identical numeric results checked on synthetic draws. No speed claim."
+  },
+  "verification": {
+    "root_structure": "root-structure-verification.json",
+    "runner_checks": "tools/preparation.json",
+    "analyzer_checks": "analysis-tools/preparation.json",
+    "archive_roundtrip": "Every file in the complete preparation directory decoded, SHA256/length checked and compared byte-for-byte to its original."
+  },
+  "original_draft": {
+    "path": "/private/tmp/logex-source-identity-quiet-window-1/source-comparison-draft",
+    "included": false,
+    "unchanged": true,
+    "files_sha256": {
+      "PROPOSAL.md": "b3bca02175adbb9b938c0f29d5a2150cc2b446411a9b3f26c576004307083bc0",
+      "balance-verification.json": "ab7d533b3a5a20a8ef249a7af5206d96e946723e39c938725d9529c864f66ae2",
+      "fixtures-and-config.json": "83df9af0ff2dbc82663642bbe218f36f5093590791d089bbce6968370adcb945",
+      "manifest.json": "0c9e615fc686a9c7db3b1a294d6f63a7322bb8bb17944fda31e3c8d752f4f572",
+      "process-schedule.json": "009b30867581d809935d07901261702c54f019585231a78bb3d7b9b753843d22",
+      "root-structure-check.json": "c3aea66ca3076eaa3c0469383fd2f56d474ac260002e31a5635f3cbb28091e53",
+      "rounds.json": "b4a7c5f37c213908c1a9b1d9dbbb87fb501da25dec739231437d2f9fe8c9e0ca"
+    }
+  },
+  "raw_packet": {
+    "path": "2026-09-14-source-identity-direct-design-1-raw.json.gz",
+    "sha256": "4b6174b1bc043867d8c40ed723ae7e18d0ba106c178ad85d5783d3a2c8b4dafa",
+    "bytes": 44725,
+    "uncompressed_json_bytes": 494958,
+    "files": 35
+  }
+}
