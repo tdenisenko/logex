@@ -6,10 +6,12 @@ The current source checkpoint is `c229ace0`, with production behavior restored t
 `179e0ff7` and all nine local workspace/release gates passing. The completed fixed
 release comparison leaves [performance disposition](#final-direct-performance-disposition)
 unresolved for several query tails. The subsequent identical-binary mac-mini
-control packet is inconclusive under its predeclared precision rules. A more
-stable test environment, performance clearance, exact-head CI and merge remain
-pending. Earlier candidates and rejected experiments are retained below as audit
-history, not separate accepted implementations.
+control packet is inconclusive under its predeclared precision rules. The user
+subsequently stopped most mac-mini workloads and made it available for isolated
+testing; a separately identified quiet-environment control packet is being
+prepared. Performance clearance, exact-head CI and merge remain pending.
+Earlier candidates and rejected experiments are retained below as audit history,
+not separate accepted implementations.
 
 ## Confirmed failures
 
@@ -940,3 +942,19 @@ environment clarification remains unresolved. All earlier source-tail findings
 and the user's 10% limit remain in force. Local correctness gates pass, while
 performance clearance, CI and PR/merge remain incomplete. No production data,
 external-volume contents, services or global power settings were changed.
+
+The user has now supplied the requested quiet window by stopping most running
+mac-mini processes and authorizing testing inside a specifically named temporary
+folder. The [new frozen quiet-environment design](baselines/2026-09-13-source-identity-quiet-design-1.json)
+uses `/private/tmp/logex-audit-source-identity-quiet-20260913.YSSYXA` for every new
+test output and reads the prior exact-source build artifacts without changing
+them. Preflight reverified all 796 source files and both saved binary hashes.
+The unchanged workloads, 12 pairs per suite, 72 total processes, 4,000 bootstrap
+draws and precision/order bounds remain in force. A fixed ten-minute cooling
+period precedes the packet; both endpoint probes must report CPU speed and
+scheduler limits of 100 with six available CPUs. Failure of admission does not
+trigger an automatic extra cooling/retry cycle. Host samples during the packet
+are retained without mid-run exclusions. This new environment is evaluated
+separately from the first inconclusive packet; neither packet can establish
+source-performance acceptance on its own. No new benchmark result is claimed
+by this preparation record.
