@@ -1,0 +1,1353 @@
+{
+  "schema": 1,
+  "disposition": "INCONCLUSIVE",
+  "source_performance_accepted": false,
+  "scope": "One separately identified control packet after the user stopped most mac-mini workloads. Same candidate binaries for both labels; no source comparison, extra observations, exclusions or retries.",
+  "candidate_commit": "c229ace0345dd7b6b8c07388d3c0aed8a9c6a771",
+  "source_head_during_measurements": "f67dfea55ed9b2788f3e188a82fea5b14c375c8c",
+  "design_evidence": "2026-09-13-source-identity-quiet-design-1.json",
+  "prior_environment_evidence": "2026-09-13-source-identity-remote-controls-1.json",
+  "started": "2026-09-13T16:21:29.698615+00:00",
+  "finished": "2026-09-13T16:31:45.199877+00:00",
+  "counts": {
+    "measured_timings": 14640,
+    "processes": 72,
+    "rss_records": 72,
+    "warmups": 120
+  },
+  "metrics": [
+    {
+      "effect_percent": {
+        "median": 0.695133893755262,
+        "p95": 1.5863729715657637
+      },
+      "intervals": {
+        "drift": {
+          "median": [
+            -0.8247027395957285,
+            10.741261574468385
+          ],
+          "p95": [
+            -5.8762447491692456,
+            10.348494315888491
+          ]
+        },
+        "effect": {
+          "median": [
+            -2.39373383846484,
+            3.776197296789041
+          ],
+          "p95": [
+            -3.6627140974967,
+            6.537879556553539
+          ]
+        }
+      },
+      "label_summaries": {
+        "A": {
+          "max": 2.8863220000000003,
+          "median": 1.183513,
+          "min": 1.0765259999999999,
+          "n": 1200,
+          "p95": 1.38284
+        },
+        "B": {
+          "max": 2.873231,
+          "median": 1.1917399999999998,
+          "min": 1.099824,
+          "n": 1200,
+          "p95": 1.4047770000000002
+        }
+      },
+      "metric": "binding_block_hash_point",
+      "order_drift_pp": {
+        "median": 5.437141355701436,
+        "p95": 2.629953080930303
+      },
+      "required": true,
+      "suite": "index_binding_paths",
+      "within_precision_budget": false
+    },
+    {
+      "effect_percent": {
+        "median": -0.6980452551464511,
+        "p95": 3.0232330026343845
+      },
+      "intervals": {
+        "drift": {
+          "median": [
+            -0.46905723502812524,
+            10.523413856179232
+          ],
+          "p95": [
+            -2.5290913858323827,
+            10.288984962170266
+          ]
+        },
+        "effect": {
+          "median": [
+            -3.4796998487831465,
+            2.5850197308325162
+          ],
+          "p95": [
+            -1.2004124040347341,
+            8.107565410476191
+          ]
+        }
+      },
+      "label_summaries": {
+        "A": {
+          "max": 3.476545,
+          "median": 1.375269,
+          "min": 1.2516669999999999,
+          "n": 1200,
+          "p95": 1.5700079999999998
+        },
+        "B": {
+          "max": 3.4680269999999997,
+          "median": 1.365669,
+          "min": 1.253765,
+          "n": 1200,
+          "p95": 1.617473
+        }
+      },
+      "metric": "binding_block_number_range",
+      "order_drift_pp": {
+        "median": 5.686392787043748,
+        "p95": 4.123695739013922
+      },
+      "required": true,
+      "suite": "index_binding_paths",
+      "within_precision_budget": false
+    },
+    {
+      "effect_percent": {
+        "median": -0.05576158027116307,
+        "p95": 5.273742625970557
+      },
+      "intervals": {
+        "drift": {
+          "median": [
+            -0.6727347976406839,
+            10.900446326131929
+          ],
+          "p95": [
+            -6.072722725203827,
+            6.5682387841955014
+          ]
+        },
+        "effect": {
+          "median": [
+            -3.008024734961534,
+            3.459823802736861
+          ],
+          "p95": [
+            -0.6014162944717683,
+            7.903458255483575
+          ]
+        }
+      },
+      "label_summaries": {
+        "A": {
+          "max": 3.050416,
+          "median": 1.3342519999999998,
+          "min": 1.206253,
+          "n": 1200,
+          "p95": 1.543932
+        },
+        "B": {
+          "max": 3.5374339999999997,
+          "median": 1.3335080000000001,
+          "min": 1.216496,
+          "n": 1200,
+          "p95": 1.6253549999999999
+        }
+      },
+      "metric": "binding_timestamp_range",
+      "order_drift_pp": {
+        "median": 5.300509199198322,
+        "p95": 1.3187605917537093
+      },
+      "required": true,
+      "suite": "index_binding_paths",
+      "within_precision_budget": false
+    },
+    {
+      "effect_percent": {
+        "median": 0.11555517789130221,
+        "p95": 2.7826640114245293
+      },
+      "intervals": {
+        "drift": {
+          "median": [
+            -1.6058772469534577,
+            8.847820098600433
+          ],
+          "p95": [
+            -4.2566009258202975,
+            11.79733214076567
+          ]
+        },
+        "effect": {
+          "median": [
+            -2.732209254627982,
+            3.2081229825628554
+          ],
+          "p95": [
+            -1.0628336499756919,
+            6.931864689238099
+          ]
+        }
+      },
+      "label_summaries": {
+        "A": {
+          "max": 6.490357,
+          "median": 2.9773655000000003,
+          "min": 2.710629,
+          "n": 1200,
+          "p95": 3.4081010000000003
+        },
+        "B": {
+          "max": 6.117872,
+          "median": 2.980806,
+          "min": 2.7550220000000003,
+          "n": 1200,
+          "p95": 3.5029369999999997
+        }
+      },
+      "metric": "binding_erc20_topic1_present",
+      "order_drift_pp": {
+        "median": 4.835638356913008,
+        "p95": 3.821613945061886
+      },
+      "required": true,
+      "suite": "index_binding_paths",
+      "within_precision_budget": false
+    },
+    {
+      "effect_percent": {
+        "median": 1.002798328669452,
+        "p95": 2.1736605068448878
+      },
+      "intervals": {
+        "drift": {
+          "median": [
+            -2.0730549962615363,
+            6.967837107699637
+          ],
+          "p95": [
+            -8.535555561018526,
+            10.584585637114309
+          ]
+        },
+        "effect": {
+          "median": [
+            -1.2711161318112452,
+            3.102140959014066
+          ],
+          "p95": [
+            -2.6498930513427,
+            7.573801257104118
+          ]
+        }
+      },
+      "label_summaries": {
+        "A": {
+          "max": 0.965216,
+          "median": 0.5869575,
+          "min": 0.552028,
+          "n": 1200,
+          "p95": 0.671448
+        },
+        "B": {
+          "max": 1.271758,
+          "median": 0.5928435000000001,
+          "min": 0.558214,
+          "n": 1200,
+          "p95": 0.686043
+        }
+      },
+      "metric": "binding_erc20_topic1_absent",
+      "order_drift_pp": {
+        "median": 0.9543865640012639,
+        "p95": 4.040860324898443
+      },
+      "required": true,
+      "suite": "index_binding_paths",
+      "within_precision_budget": false
+    },
+    {
+      "effect_percent": {
+        "median": -0.0027234332081627066,
+        "p95": -0.2715852814827113
+      },
+      "intervals": {
+        "drift": {
+          "median": [
+            -0.9987134544560905,
+            0.889992086589575
+          ],
+          "p95": [
+            -3.5896735925502465,
+            0.7452049082717127
+          ]
+        },
+        "effect": {
+          "median": [
+            -0.4853242997261975,
+            0.4988299028345633
+          ],
+          "p95": [
+            -1.4013662505573121,
+            1.018589207409426
+          ]
+        }
+      },
+      "label_summaries": {
+        "A": {
+          "max": 480.088374,
+          "median": 445.9077595,
+          "min": 382.081978,
+          "n": 120,
+          "p95": 468.45248499999997
+        },
+        "B": {
+          "max": 470.153204,
+          "median": 445.8956155,
+          "min": 378.158597,
+          "n": 120,
+          "p95": 467.180237
+        }
+      },
+      "metric": "live_storage_publication",
+      "order_drift_pp": {
+        "median": -0.14546798735179944,
+        "p95": -1.1575120152876095
+      },
+      "required": true,
+      "suite": "publication",
+      "within_precision_budget": true
+    },
+    {
+      "effect_percent": {
+        "median": 0.09373972975854628,
+        "p95": 0.8330149708597467
+      },
+      "intervals": {
+        "drift": {
+          "median": [
+            -2.982458199115634,
+            0.6933586276385295
+          ],
+          "p95": [
+            -6.539518615020123,
+            8.738457061997728
+          ]
+        },
+        "effect": {
+          "median": [
+            -1.2177466860662012,
+            0.8526904503924904
+          ],
+          "p95": [
+            -2.853314328125167,
+            5.017482242922688
+          ]
+        }
+      },
+      "label_summaries": {
+        "A": {
+          "max": 24.681388,
+          "median": 20.897756,
+          "min": 19.264642,
+          "n": 120,
+          "p95": 23.050246
+        },
+        "B": {
+          "max": 24.477149,
+          "median": 20.9173455,
+          "min": 19.083161,
+          "n": 120,
+          "p95": 23.242258
+        }
+      },
+      "metric": "historical_storage_publication",
+      "order_drift_pp": {
+        "median": -1.6511496408683435,
+        "p95": 0.9214029956496894
+      },
+      "required": true,
+      "suite": "publication",
+      "within_precision_budget": false
+    },
+    {
+      "effect_percent": {
+        "median": 0.003208684747457724,
+        "p95": -0.24013400372218108
+      },
+      "intervals": {
+        "drift": {
+          "median": [
+            -1.1387587365948026,
+            0.3742521754757755
+          ],
+          "p95": [
+            -7.958521207801928,
+            5.362165438323707
+          ]
+        },
+        "effect": {
+          "median": [
+            -0.26419557915562386,
+            0.43906134243463235
+          ],
+          "p95": [
+            -4.179075017659506,
+            2.4320678743419366
+          ]
+        }
+      },
+      "label_summaries": {
+        "A": {
+          "max": 218.974503,
+          "median": 185.73030599999998,
+          "min": 179.024971,
+          "n": 120,
+          "p95": 193.023892
+        },
+        "B": {
+          "max": 219.951423,
+          "median": 185.7362655,
+          "min": 179.060144,
+          "n": 120,
+          "p95": 192.56037600000002
+        }
+      },
+      "metric": "live_storage_ingest",
+      "order_drift_pp": {
+        "median": -0.5601435648090347,
+        "p95": -0.7600464956015518
+      },
+      "required": false,
+      "suite": "integrated_sparse",
+      "within_precision_budget": false
+    },
+    {
+      "effect_percent": {
+        "median": -0.2114948123005167,
+        "p95": -0.9827586535406052
+      },
+      "intervals": {
+        "drift": {
+          "median": [
+            -0.6416347367194541,
+            1.7414303744893167
+          ],
+          "p95": [
+            -0.008018874054038783,
+            4.890217060856539
+          ]
+        },
+        "effect": {
+          "median": [
+            -0.6717606404501919,
+            0.5157418725421525
+          ],
+          "p95": [
+            -1.8648773480745562,
+            0.17901843781775728
+          ]
+        }
+      },
+      "label_summaries": {
+        "A": {
+          "max": 172.806095,
+          "median": 149.9235355,
+          "min": 144.796952,
+          "n": 120,
+          "p95": 155.351672
+        },
+        "B": {
+          "max": 173.407074,
+          "median": 149.60645499999998,
+          "min": 145.391843,
+          "n": 120,
+          "p95": 153.82494
+        }
+      },
+      "metric": "index_build",
+      "order_drift_pp": {
+        "median": 0.29019549922344456,
+        "p95": 2.3875070865673975
+      },
+      "required": false,
+      "suite": "integrated_sparse",
+      "within_precision_budget": true
+    },
+    {
+      "effect_percent": {
+        "median": -0.3196342084361592,
+        "p95": -0.7415316162884489
+      },
+      "intervals": {
+        "drift": {
+          "median": [
+            -0.6615583469772868,
+            0.9675165332018176
+          ],
+          "p95": [
+            -5.353381079764596,
+            8.439732142100464
+          ]
+        },
+        "effect": {
+          "median": [
+            -0.8156831422147293,
+            0.12851319543938367
+          ],
+          "p95": [
+            -3.673339883915483,
+            3.6560948293710815
+          ]
+        }
+      },
+      "label_summaries": {
+        "A": {
+          "max": 68.399768,
+          "median": 62.388973,
+          "min": 59.229308,
+          "n": 120,
+          "p95": 64.627858
+        },
+        "B": {
+          "max": 84.29445100000001,
+          "median": 62.1895565,
+          "min": 59.3168,
+          "n": 120,
+          "p95": 64.148622
+        }
+      },
+      "metric": "compaction",
+      "order_drift_pp": {
+        "median": 0.04555146357787532,
+        "p95": -0.4026959768407945
+      },
+      "required": false,
+      "suite": "integrated_sparse",
+      "within_precision_budget": false
+    },
+    {
+      "effect_percent": {
+        "median": 0.30690998043221285,
+        "p95": -0.09650152777871401
+      },
+      "intervals": {
+        "drift": {
+          "median": [
+            -0.8842126283009843,
+            0.7513904571740615
+          ],
+          "p95": [
+            -0.29108712250306423,
+            5.615874235681728
+          ]
+        },
+        "effect": {
+          "median": [
+            0.09855117842247907,
+            0.8366355673152137
+          ],
+          "p95": [
+            -0.8851141450615052,
+            0.6784497708720139
+          ]
+        }
+      },
+      "label_summaries": {
+        "A": {
+          "max": 28.874177,
+          "median": 23.8910445,
+          "min": 22.22175,
+          "n": 120,
+          "p95": 24.671111999999997
+        },
+        "B": {
+          "max": 29.147574,
+          "median": 23.9643685,
+          "min": 22.127067,
+          "n": 120,
+          "p95": 24.647304
+        }
+      },
+      "metric": "reopen",
+      "order_drift_pp": {
+        "median": -0.05384358220061891,
+        "p95": 1.2415837613971248
+      },
+      "required": false,
+      "suite": "integrated_sparse",
+      "within_precision_budget": false
+    },
+    {
+      "effect_percent": {
+        "median": 1.2398545791237003,
+        "p95": 0.42896634501345954
+      },
+      "intervals": {
+        "drift": {
+          "median": [
+            -4.16624380106736,
+            3.506026332234957
+          ],
+          "p95": [
+            -6.029528989410471,
+            9.576841744380449
+          ]
+        },
+        "effect": {
+          "median": [
+            -0.6198067894504833,
+            3.085399044004933
+          ],
+          "p95": [
+            -1.7258889185452597,
+            5.662448833732658
+          ]
+        }
+      },
+      "label_summaries": {
+        "A": {
+          "max": 26.931231999999998,
+          "median": 22.3608885,
+          "min": 21.083825,
+          "n": 120,
+          "p95": 24.346199
+        },
+        "B": {
+          "max": 27.076104,
+          "median": 22.638130999999998,
+          "min": 21.145727,
+          "n": 120,
+          "p95": 24.450636000000003
+        }
+      },
+      "metric": "native_filter",
+      "order_drift_pp": {
+        "median": -0.473027783820279,
+        "p95": 0.4092760725450395
+      },
+      "required": false,
+      "suite": "integrated_sparse",
+      "within_precision_budget": false
+    },
+    {
+      "effect_percent": {
+        "median": 1.4078977460135311,
+        "p95": 1.7227540475357017
+      },
+      "intervals": {
+        "drift": {
+          "median": [
+            -2.1680177703190306,
+            3.772039419171125
+          ],
+          "p95": [
+            -20.197217436427884,
+            25.565961808946124
+          ]
+        },
+        "effect": {
+          "median": [
+            -0.2836330299401002,
+            2.704259190639635
+          ],
+          "p95": [
+            -15.664872050787547,
+            12.449547253523296
+          ]
+        }
+      },
+      "label_summaries": {
+        "A": {
+          "max": 3.626868,
+          "median": 2.2147205000000003,
+          "min": 2.034272,
+          "n": 120,
+          "p95": 2.611342
+        },
+        "B": {
+          "max": 3.840779,
+          "median": 2.2459015,
+          "min": 2.023164,
+          "n": 120,
+          "p95": 2.656329
+        }
+      },
+      "metric": "sql_count",
+      "order_drift_pp": {
+        "median": 0.6555085491871893,
+        "p95": -0.3282676024047637
+      },
+      "required": false,
+      "suite": "integrated_sparse",
+      "within_precision_budget": false
+    },
+    {
+      "effect_percent": {
+        "median": 0.5408390687494213,
+        "p95": -3.5355096075123993
+      },
+      "intervals": {
+        "drift": {
+          "median": [
+            -2.790383316467371,
+            0.22766502857496373
+          ],
+          "p95": [
+            -17.137620591316892,
+            3.006008161848362
+          ]
+        },
+        "effect": {
+          "median": [
+            -0.22538524873308985,
+            1.3459948603823824
+          ],
+          "p95": [
+            -7.384503799596698,
+            4.090733966396853
+          ]
+        }
+      },
+      "label_summaries": {
+        "A": {
+          "max": 10.726058,
+          "median": 7.6673455,
+          "min": 7.244456,
+          "n": 120,
+          "p95": 9.09965
+        },
+        "B": {
+          "max": 9.627187000000001,
+          "median": 7.7088135,
+          "min": 7.084975,
+          "n": 120,
+          "p95": 8.777930999999999
+        }
+      },
+      "metric": "sql_ordered",
+      "order_drift_pp": {
+        "median": -1.2143042863385967,
+        "p95": -11.962641779828997
+      },
+      "required": false,
+      "suite": "integrated_sparse",
+      "within_precision_budget": false
+    },
+    {
+      "effect_percent": {
+        "median": 0.8200470665889581,
+        "p95": 2.342822013089707
+      },
+      "intervals": {
+        "drift": {
+          "median": [
+            -0.251104991366935,
+            4.040640712336419
+          ],
+          "p95": [
+            -1.5195753163824932,
+            5.503305876806963
+          ]
+        },
+        "effect": {
+          "median": [
+            -0.5377672771959108,
+            1.5032786628526251
+          ],
+          "p95": [
+            0.8674733959149972,
+            4.008933405026105
+          ]
+        }
+      },
+      "label_summaries": {
+        "A": {
+          "max": 37.808683,
+          "median": 32.23943,
+          "min": 30.471391,
+          "n": 120,
+          "p95": 35.42783
+        },
+        "B": {
+          "max": 38.804166,
+          "median": 32.5038085,
+          "min": 30.660777,
+          "n": 120,
+          "p95": 36.257841
+        }
+      },
+      "metric": "concurrent_native_queries",
+      "order_drift_pp": {
+        "median": 1.6871121524655752,
+        "p95": 1.8417900757430772
+      },
+      "required": true,
+      "suite": "integrated_sparse",
+      "within_precision_budget": false
+    },
+    {
+      "effect_percent": {
+        "median": -0.1394989051138773,
+        "p95": -0.029533523760782998
+      },
+      "intervals": {
+        "drift": {
+          "median": [
+            -1.8064607665069676,
+            0.4090565288835335
+          ],
+          "p95": [
+            -2.8336488333080556,
+            3.3365280148619725
+          ]
+        },
+        "effect": {
+          "median": [
+            -1.0491838910503648,
+            0.08549058920934716
+          ],
+          "p95": [
+            -0.7205313296487437,
+            1.7665834579485784
+          ]
+        }
+      },
+      "label_summaries": {
+        "A": {
+          "max": 175.467238,
+          "median": 165.84144500000002,
+          "min": 158.57958299999999,
+          "n": 120,
+          "p95": 169.712224
+        },
+        "B": {
+          "max": 176.41167099999998,
+          "median": 165.610098,
+          "min": 155.873874,
+          "n": 120,
+          "p95": 169.662102
+        }
+      },
+      "metric": "historical_storage_ingest",
+      "order_drift_pp": {
+        "median": -0.6806856597837085,
+        "p95": 0.8218078334432444
+      },
+      "required": false,
+      "suite": "integrated_sparse",
+      "within_precision_budget": true
+    }
+  ],
+  "numerical_verification": {
+    "status": "VERIFIED",
+    "seed": 2026091304,
+    "draws": 4000,
+    "metrics": 16,
+    "required_metrics": 8,
+    "required_bounds": 32,
+    "seeded_index_records": 12000,
+    "numeric_draw_records": 64000,
+    "numeric_draw_values": 256000,
+    "script_sha256": "25c1b5880d13e597982f3eb1eaaec80605d941ab6588badfaa80c186f8ce8b9b"
+  },
+  "host_conditions": {
+    "scope": "Recorded operating conditions only; reported CPU limits are not direct frequency measurements or proof of causality. Load includes the benchmark.",
+    "started": "2026-09-13T16:21:29.698615+00:00",
+    "finished": "2026-09-13T16:31:45.199877+00:00",
+    "reported_cpu_speed_limit": {
+      "samples": 36,
+      "min": 100,
+      "max": 100,
+      "median": 100.0,
+      "below_100": 0
+    },
+    "one_minute_load": {
+      "min": 1.13,
+      "max": 2.65,
+      "median": 1.95
+    },
+    "cpu_samples": [
+      {
+        "name": "round-01-index_binding_paths-A-host-thermal",
+        "started": "2026-09-13T16:21:31.523915+00:00",
+        "CPU_Speed_Limit": 100,
+        "CPU_Scheduler_Limit": 100,
+        "CPU_Available_CPUs": 6
+      },
+      {
+        "name": "round-01-publication-A-host-thermal",
+        "started": "2026-09-13T16:21:36.096887+00:00",
+        "CPU_Speed_Limit": 100,
+        "CPU_Scheduler_Limit": 100,
+        "CPU_Available_CPUs": 6
+      },
+      {
+        "name": "round-01-integrated_sparse-A-host-thermal",
+        "started": "2026-09-13T16:21:59.134839+00:00",
+        "CPU_Speed_Limit": 100,
+        "CPU_Scheduler_Limit": 100,
+        "CPU_Available_CPUs": 6
+      },
+      {
+        "name": "round-02-publication-B-host-thermal",
+        "started": "2026-09-13T16:22:22.348125+00:00",
+        "CPU_Speed_Limit": 100,
+        "CPU_Scheduler_Limit": 100,
+        "CPU_Available_CPUs": 6
+      },
+      {
+        "name": "round-02-integrated_sparse-B-host-thermal",
+        "started": "2026-09-13T16:22:45.563240+00:00",
+        "CPU_Speed_Limit": 100,
+        "CPU_Scheduler_Limit": 100,
+        "CPU_Available_CPUs": 6
+      },
+      {
+        "name": "round-02-index_binding_paths-B-host-thermal",
+        "started": "2026-09-13T16:23:08.879384+00:00",
+        "CPU_Speed_Limit": 100,
+        "CPU_Scheduler_Limit": 100,
+        "CPU_Available_CPUs": 6
+      },
+      {
+        "name": "round-03-integrated_sparse-A-host-thermal",
+        "started": "2026-09-13T16:23:13.488191+00:00",
+        "CPU_Speed_Limit": 100,
+        "CPU_Scheduler_Limit": 100,
+        "CPU_Available_CPUs": 6
+      },
+      {
+        "name": "round-03-index_binding_paths-A-host-thermal",
+        "started": "2026-09-13T16:23:36.810116+00:00",
+        "CPU_Speed_Limit": 100,
+        "CPU_Scheduler_Limit": 100,
+        "CPU_Available_CPUs": 6
+      },
+      {
+        "name": "round-03-publication-A-host-thermal",
+        "started": "2026-09-13T16:23:41.418670+00:00",
+        "CPU_Speed_Limit": 100,
+        "CPU_Scheduler_Limit": 100,
+        "CPU_Available_CPUs": 6
+      },
+      {
+        "name": "round-04-index_binding_paths-B-host-thermal",
+        "started": "2026-09-13T16:24:04.509115+00:00",
+        "CPU_Speed_Limit": 100,
+        "CPU_Scheduler_Limit": 100,
+        "CPU_Available_CPUs": 6
+      },
+      {
+        "name": "round-04-publication-B-host-thermal",
+        "started": "2026-09-13T16:24:09.119528+00:00",
+        "CPU_Speed_Limit": 100,
+        "CPU_Scheduler_Limit": 100,
+        "CPU_Available_CPUs": 6
+      },
+      {
+        "name": "round-04-integrated_sparse-B-host-thermal",
+        "started": "2026-09-13T16:24:32.211470+00:00",
+        "CPU_Speed_Limit": 100,
+        "CPU_Scheduler_Limit": 100,
+        "CPU_Available_CPUs": 6
+      },
+      {
+        "name": "round-05-publication-A-host-thermal",
+        "started": "2026-09-13T16:24:55.383992+00:00",
+        "CPU_Speed_Limit": 100,
+        "CPU_Scheduler_Limit": 100,
+        "CPU_Available_CPUs": 6
+      },
+      {
+        "name": "round-05-integrated_sparse-A-host-thermal",
+        "started": "2026-09-13T16:25:18.498770+00:00",
+        "CPU_Speed_Limit": 100,
+        "CPU_Scheduler_Limit": 100,
+        "CPU_Available_CPUs": 6
+      },
+      {
+        "name": "round-05-index_binding_paths-A-host-thermal",
+        "started": "2026-09-13T16:25:41.618508+00:00",
+        "CPU_Speed_Limit": 100,
+        "CPU_Scheduler_Limit": 100,
+        "CPU_Available_CPUs": 6
+      },
+      {
+        "name": "round-06-integrated_sparse-B-host-thermal",
+        "started": "2026-09-13T16:25:46.250724+00:00",
+        "CPU_Speed_Limit": 100,
+        "CPU_Scheduler_Limit": 100,
+        "CPU_Available_CPUs": 6
+      },
+      {
+        "name": "round-06-index_binding_paths-B-host-thermal",
+        "started": "2026-09-13T16:26:09.609637+00:00",
+        "CPU_Speed_Limit": 100,
+        "CPU_Scheduler_Limit": 100,
+        "CPU_Available_CPUs": 6
+      },
+      {
+        "name": "round-06-publication-B-host-thermal",
+        "started": "2026-09-13T16:26:14.197808+00:00",
+        "CPU_Speed_Limit": 100,
+        "CPU_Scheduler_Limit": 100,
+        "CPU_Available_CPUs": 6
+      },
+      {
+        "name": "round-07-index_binding_paths-A-host-thermal",
+        "started": "2026-09-13T16:26:37.530614+00:00",
+        "CPU_Speed_Limit": 100,
+        "CPU_Scheduler_Limit": 100,
+        "CPU_Available_CPUs": 6
+      },
+      {
+        "name": "round-07-publication-A-host-thermal",
+        "started": "2026-09-13T16:26:42.216117+00:00",
+        "CPU_Speed_Limit": 100,
+        "CPU_Scheduler_Limit": 100,
+        "CPU_Available_CPUs": 6
+      },
+      {
+        "name": "round-07-integrated_sparse-A-host-thermal",
+        "started": "2026-09-13T16:27:05.366575+00:00",
+        "CPU_Speed_Limit": 100,
+        "CPU_Scheduler_Limit": 100,
+        "CPU_Available_CPUs": 6
+      },
+      {
+        "name": "round-08-publication-B-host-thermal",
+        "started": "2026-09-13T16:27:28.576948+00:00",
+        "CPU_Speed_Limit": 100,
+        "CPU_Scheduler_Limit": 100,
+        "CPU_Available_CPUs": 6
+      },
+      {
+        "name": "round-08-integrated_sparse-B-host-thermal",
+        "started": "2026-09-13T16:27:51.716345+00:00",
+        "CPU_Speed_Limit": 100,
+        "CPU_Scheduler_Limit": 100,
+        "CPU_Available_CPUs": 6
+      },
+      {
+        "name": "round-08-index_binding_paths-B-host-thermal",
+        "started": "2026-09-13T16:28:14.985474+00:00",
+        "CPU_Speed_Limit": 100,
+        "CPU_Scheduler_Limit": 100,
+        "CPU_Available_CPUs": 6
+      },
+      {
+        "name": "round-09-integrated_sparse-A-host-thermal",
+        "started": "2026-09-13T16:28:19.644099+00:00",
+        "CPU_Speed_Limit": 100,
+        "CPU_Scheduler_Limit": 100,
+        "CPU_Available_CPUs": 6
+      },
+      {
+        "name": "round-09-index_binding_paths-A-host-thermal",
+        "started": "2026-09-13T16:28:43.001245+00:00",
+        "CPU_Speed_Limit": 100,
+        "CPU_Scheduler_Limit": 100,
+        "CPU_Available_CPUs": 6
+      },
+      {
+        "name": "round-09-publication-A-host-thermal",
+        "started": "2026-09-13T16:28:47.691555+00:00",
+        "CPU_Speed_Limit": 100,
+        "CPU_Scheduler_Limit": 100,
+        "CPU_Available_CPUs": 6
+      },
+      {
+        "name": "round-10-index_binding_paths-B-host-thermal",
+        "started": "2026-09-13T16:29:10.867079+00:00",
+        "CPU_Speed_Limit": 100,
+        "CPU_Scheduler_Limit": 100,
+        "CPU_Available_CPUs": 6
+      },
+      {
+        "name": "round-10-publication-B-host-thermal",
+        "started": "2026-09-13T16:29:15.560205+00:00",
+        "CPU_Speed_Limit": 100,
+        "CPU_Scheduler_Limit": 100,
+        "CPU_Available_CPUs": 6
+      },
+      {
+        "name": "round-10-integrated_sparse-B-host-thermal",
+        "started": "2026-09-13T16:29:38.761636+00:00",
+        "CPU_Speed_Limit": 100,
+        "CPU_Scheduler_Limit": 100,
+        "CPU_Available_CPUs": 6
+      },
+      {
+        "name": "round-11-publication-A-host-thermal",
+        "started": "2026-09-13T16:30:02.040457+00:00",
+        "CPU_Speed_Limit": 100,
+        "CPU_Scheduler_Limit": 100,
+        "CPU_Available_CPUs": 6
+      },
+      {
+        "name": "round-11-integrated_sparse-A-host-thermal",
+        "started": "2026-09-13T16:30:25.634462+00:00",
+        "CPU_Speed_Limit": 100,
+        "CPU_Scheduler_Limit": 100,
+        "CPU_Available_CPUs": 6
+      },
+      {
+        "name": "round-11-index_binding_paths-A-host-thermal",
+        "started": "2026-09-13T16:30:49.046283+00:00",
+        "CPU_Speed_Limit": 100,
+        "CPU_Scheduler_Limit": 100,
+        "CPU_Available_CPUs": 6
+      },
+      {
+        "name": "round-12-integrated_sparse-B-host-thermal",
+        "started": "2026-09-13T16:30:53.736230+00:00",
+        "CPU_Speed_Limit": 100,
+        "CPU_Scheduler_Limit": 100,
+        "CPU_Available_CPUs": 6
+      },
+      {
+        "name": "round-12-index_binding_paths-B-host-thermal",
+        "started": "2026-09-13T16:31:17.013409+00:00",
+        "CPU_Speed_Limit": 100,
+        "CPU_Scheduler_Limit": 100,
+        "CPU_Available_CPUs": 6
+      },
+      {
+        "name": "round-12-publication-B-host-thermal",
+        "started": "2026-09-13T16:31:21.720750+00:00",
+        "CPU_Speed_Limit": 100,
+        "CPU_Scheduler_Limit": 100,
+        "CPU_Available_CPUs": 6
+      }
+    ],
+    "load_samples": [
+      1.14,
+      1.13,
+      1.8,
+      1.71,
+      2.43,
+      2.17,
+      2.17,
+      2.18,
+      2.08,
+      2.13,
+      2.04,
+      2.43,
+      2.6,
+      2.26,
+      1.95,
+      1.95,
+      1.82,
+      1.84,
+      2.34,
+      2.34,
+      2.65,
+      2.04,
+      1.68,
+      1.63,
+      1.66,
+      1.81,
+      1.74,
+      1.97,
+      1.9,
+      2.12,
+      1.87,
+      1.95,
+      1.77,
+      1.87,
+      1.8,
+      1.9
+    ]
+  },
+  "cooling": {
+    "started": "2026-09-13T16:10:36.995477+00:00",
+    "required_seconds": 600,
+    "endpoints": [
+      {
+        "name": "before",
+        "started": "2026-09-13T16:10:36.995741+00:00",
+        "commands": [
+          {
+            "name": "load",
+            "argv": [
+              "/usr/sbin/sysctl",
+              "hw.ncpu",
+              "vm.loadavg"
+            ],
+            "started": "2026-09-13T16:10:36.995748+00:00",
+            "returncode": 0,
+            "finished": "2026-09-13T16:10:36.998997+00:00",
+            "stdout": "/private/tmp/logex-audit-source-identity-quiet-20260913.YSSYXA/cooling/before-load.stdout",
+            "stdout_sha256": "eb2e5519bdee525a518b3030185ace47c1c1c97a42994339d55a6a7eb935dea1",
+            "stderr": "/private/tmp/logex-audit-source-identity-quiet-20260913.YSSYXA/cooling/before-load.stderr",
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          {
+            "name": "memory",
+            "argv": [
+              "/usr/bin/vm_stat"
+            ],
+            "started": "2026-09-13T16:10:36.999809+00:00",
+            "returncode": 0,
+            "finished": "2026-09-13T16:10:37.002990+00:00",
+            "stdout": "/private/tmp/logex-audit-source-identity-quiet-20260913.YSSYXA/cooling/before-memory.stdout",
+            "stdout_sha256": "b71042b50a5c2e2533f8743af86917fb3a6f9cdf1ca6807603f1a5ed78055158",
+            "stderr": "/private/tmp/logex-audit-source-identity-quiet-20260913.YSSYXA/cooling/before-memory.stderr",
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          {
+            "name": "thermal",
+            "argv": [
+              "/usr/bin/pmset",
+              "-g",
+              "therm"
+            ],
+            "started": "2026-09-13T16:10:37.003453+00:00",
+            "returncode": 0,
+            "finished": "2026-09-13T16:10:37.016472+00:00",
+            "stdout": "/private/tmp/logex-audit-source-identity-quiet-20260913.YSSYXA/cooling/before-thermal.stdout",
+            "stdout_sha256": "d0ed82545cf201b5975c9117df0ec3f36022504f6589c62a881769131384a1b0",
+            "stderr": "/private/tmp/logex-audit-source-identity-quiet-20260913.YSSYXA/cooling/before-thermal.stderr",
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          }
+        ],
+        "cpu_count": 6,
+        "cpu_limits": {
+          "CPU_Speed_Limit": 100,
+          "CPU_Scheduler_Limit": 100,
+          "CPU_Available_CPUs": 6
+        },
+        "admitted": true,
+        "finished": "2026-09-13T16:10:37.017493+00:00"
+      },
+      {
+        "name": "after",
+        "started": "2026-09-13T16:20:37.072925+00:00",
+        "commands": [
+          {
+            "name": "load",
+            "argv": [
+              "/usr/sbin/sysctl",
+              "hw.ncpu",
+              "vm.loadavg"
+            ],
+            "started": "2026-09-13T16:20:37.072953+00:00",
+            "returncode": 0,
+            "finished": "2026-09-13T16:20:37.077645+00:00",
+            "stdout": "/private/tmp/logex-audit-source-identity-quiet-20260913.YSSYXA/cooling/after-load.stdout",
+            "stdout_sha256": "228c5a882fd15b749bc9925e6138f9aa06af1773ef8b25d48b1b3db2cefd220d",
+            "stderr": "/private/tmp/logex-audit-source-identity-quiet-20260913.YSSYXA/cooling/after-load.stderr",
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          {
+            "name": "memory",
+            "argv": [
+              "/usr/bin/vm_stat"
+            ],
+            "started": "2026-09-13T16:20:37.078192+00:00",
+            "returncode": 0,
+            "finished": "2026-09-13T16:20:37.081255+00:00",
+            "stdout": "/private/tmp/logex-audit-source-identity-quiet-20260913.YSSYXA/cooling/after-memory.stdout",
+            "stdout_sha256": "07b841600979d4c5c66a2afdaecc29c1ee0949d5cde0945e4b55e98686f2543d",
+            "stderr": "/private/tmp/logex-audit-source-identity-quiet-20260913.YSSYXA/cooling/after-memory.stderr",
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          {
+            "name": "thermal",
+            "argv": [
+              "/usr/bin/pmset",
+              "-g",
+              "therm"
+            ],
+            "started": "2026-09-13T16:20:37.081686+00:00",
+            "returncode": 0,
+            "finished": "2026-09-13T16:20:37.094132+00:00",
+            "stdout": "/private/tmp/logex-audit-source-identity-quiet-20260913.YSSYXA/cooling/after-thermal.stdout",
+            "stdout_sha256": "bb1d360aca9919582770d41d557ed5d3a9a165b6dab6e580582bc48d55210a39",
+            "stderr": "/private/tmp/logex-audit-source-identity-quiet-20260913.YSSYXA/cooling/after-thermal.stderr",
+            "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          }
+        ],
+        "cpu_count": 6,
+        "cpu_limits": {
+          "CPU_Speed_Limit": 100,
+          "CPU_Scheduler_Limit": 100,
+          "CPU_Available_CPUs": 6
+        },
+        "admitted": true,
+        "finished": "2026-09-13T16:20:37.094655+00:00"
+      }
+    ],
+    "errors": [],
+    "status": "ADMITTED",
+    "design_sha256": "d7edf0b2229ca8441144d2c640fa1dc95dee616f44e7ad07355ee6d29a909cb2",
+    "interval_started": "2026-09-13T16:10:37.017506+00:00",
+    "elapsed_seconds": 600.002626553,
+    "finished": "2026-09-13T16:20:37.094753+00:00"
+  },
+  "conclusion": "Every fixture process returned correct results. Only live storage publication meets all declared precision/order bounds; seven required metrics remain outside at least one bound. No CPU speed limiting was reported in the 36 new host samples. This does not establish source performance or explain remaining order/settling variation.",
+  "source_comparison": "Baseline archive, build procedure and balanced all-six-suite comparison were prepared locally only. No baseline build, transfer or source comparison ran remotely.",
+  "next_step": "Investigate the demonstrated within-process settling and remaining order variation in the native fixture; distinguish benchmark-method limitations from production defects. No unchanged control rerun or performance waiver.",
+  "mac_mini_release": {
+    "status": "mac_mini_testing_finished",
+    "checked_at": "2026-09-13T16:38:14.662045+00:00",
+    "checks": [
+      {
+        "name": "owned-processes",
+        "remote_command": "/usr/bin/pgrep -fl '[/]private/tmp/logex-audit-source-identity-quiet-20260913.YSSYXA|[/]private/tmp/logex-source-identity-controls-4.uHyHMD/target/retained-binaries'",
+        "returncode": 1,
+        "stdout": "",
+        "stderr": "",
+        "finished": "2026-09-13T16:38:14.481576+00:00"
+      },
+      {
+        "name": "test-folder-size",
+        "remote_command": "/usr/bin/du -sk /private/tmp/logex-audit-source-identity-quiet-20260913.YSSYXA",
+        "returncode": 0,
+        "stdout": "12064\t/private/tmp/logex-audit-source-identity-quiet-20260913.YSSYXA\n",
+        "stderr": "",
+        "finished": "2026-09-13T16:38:14.661978+00:00"
+      }
+    ],
+    "retained_folder": "/private/tmp/logex-audit-source-identity-quiet-20260913.YSSYXA",
+    "baseline_build_or_source_comparison_executed": false,
+    "next_work": "Local verification and measurement-method investigation only; no additional remote workload scheduled."
+  },
+  "collection_check_correction": {
+    "status": "verified_no_format_defect",
+    "artifact": "control-admission.json",
+    "trailer_codepoints": [
+      10
+    ],
+    "strict_json_valid": true,
+    "correction": "The earlier provisional note misread an escaped tool display. Original collected bytes contain a normal newline, and strict json.loads succeeds. The erroneous note is preserved as retracted; no remote record was changed.",
+    "collection_check": "Initial post-collection assertion expected the mistaken literal trailer and failed. Collection itself completed; original archive/extracted files remained unchanged. The corrected verification uses strict JSON and validates original recorded hashes. No measurements or analysis were rerun."
+  },
+  "raw_evidence": {
+    "path": "2026-09-13-source-identity-quiet-controls-1-raw.json.gz",
+    "sha256": "717dab8506080dff855321c508eebf861471dc8d8a94e2670cfe0b19708de636",
+    "bytes": 3990140,
+    "files": 338,
+    "binary_files": 53
+  },
+  "limitations": [
+    "Hardware preflight is not proof of memory pressure or timing stability; low unused memory alone is insufficient.",
+    "Five percent is a precision budget, not permission for source regressions.",
+    "Intervals are conditional descriptive bootstrap intervals, not simultaneous guarantees.",
+    "Twelve pairs may not resolve publication tails; this produces INCONCLUSIVE.",
+    "Eligibility covers declared required metrics in this packet, not sustained host quietness.",
+    "A subsequent source comparison still requires a separate predeclared design and contemporary controls.",
+    "Build/source/binary identity is linked to supplied build and runner provenance; this analyzer does not rehash the entire remote build tree."
+  ]
+}

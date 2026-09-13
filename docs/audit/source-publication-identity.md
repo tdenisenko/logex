@@ -7,9 +7,11 @@ The current source checkpoint is `c229ace0`, with production behavior restored t
 release comparison leaves [performance disposition](#final-direct-performance-disposition)
 unresolved for several query tails. The subsequent identical-binary mac-mini
 control packet is inconclusive under its predeclared precision rules. The user
-subsequently stopped most mac-mini workloads and made it available for isolated
-testing; a separately identified quiet-environment control packet is being
-prepared. Performance clearance, exact-head CI and merge remain pending.
+subsequently supplied a quiet test window. That separate packet is now complete:
+all correctness checks pass, but only live publication satisfies every declared
+precision/order bound. No reported CPU speed limit was below 100. Mac-mini testing
+is finished; local investigation of benchmark settling continues. Performance
+clearance, exact-head CI and merge remain pending.
 Earlier candidates and rejected experiments are retained below as audit history,
 not separate accepted implementations.
 
@@ -958,3 +960,48 @@ are retained without mid-run exclusions. This new environment is evaluated
 separately from the first inconclusive packet; neither packet can establish
 source-performance acceptance on its own. No new benchmark result is claimed
 by this preparation record.
+
+## Completed quiet-window controls
+
+The [quiet-window result](baselines/2026-09-13-source-identity-quiet-controls-1.json)
+retains all 72 processes, 14,640 measured timings, 120 warmups and 72 RSS records.
+The ten-minute admission passed, and all 36 subsequent host probes reported CPU
+speed/scheduler limits of 100 and six available CPUs. Every fixture returned
+correct results. Independent verification agrees with all 256,000 resampled
+values and all 32 required bounds. No observation was replaced or excluded.
+
+The overall disposition remains **INCONCLUSIVE**. Live publication satisfies all
+four required bounds. Historical publication, sparse concurrent queries and all
+five short native query cases each fail at least one precision/order bound. The
+same-binary live median/p95 difference is -0.003%/-0.272%; historical publication
+is +0.094%/+0.833%. These compare identical executable bytes under two labels,
+so they are measurement controls, not estimates of a source-change effect. Small
+point estimates do not override wide intervals: historical publication's p95
+effect upper bound is 5.017%, and sparse concurrency's p95 order-drift upper
+bound is 5.503 percentage points, both outside the declared five-unit bounds.
+The earlier source-tail findings and 10% source-regression limit remain open.
+
+The requested quiet environment was provided. These observations do not establish
+that unrelated user processes caused the remaining variation, nor do reported
+CPU limits establish actual clock frequency. Inspection of all 24 retained native
+processes instead identifies within-process settling as a measurement-method
+lead: across the first process of each pair, the median last-20 versus first-20
+change ranges from -2.81% to -5.03% by case; across the second processes it ranges
+from -0.16% to +0.67%. This exploratory window analysis retains the full original
+observations and is not an acceptance calculation. It does not identify the
+underlying CPU, allocator or filesystem mechanism. A bounded local diagnostic
+will compare one versus 100 explicit warmup passes using identical production
+code, unchanged measured queries and the same row oracle. It cannot establish
+source acceptance or replace burst/startup measurements.
+
+Mac-mini was released at 2026-09-13 16:38 UTC after checking that no test process
+remained. New writes stayed inside
+`/private/tmp/logex-audit-source-identity-quiet-20260913.YSSYXA` (12,064 KiB
+retained). Prior build artifacts were read-only; no baseline build or source
+comparison ran remotely. External-volume contents, other files, services and
+global power settings were unchanged. The raw archive contains 338 files,
+including the complete collection/verification record and unexecuted local
+source-comparison preparations. An initially mistaken collection assertion about
+an escaped display of a newline is also retained and explicitly retracted:
+strict JSON validation of the original bytes passes; no remote artifact needed
+repair and no measurement or analysis was repeated.
