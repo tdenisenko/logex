@@ -715,3 +715,42 @@ Existing tree publication also flushes the new sidecar. Codecs, worker/write
 logic and maintenance locking are unchanged; no compaction random draw or raw
 canonical rewrite was added. These are attribution leads, not measured removable
 latency or permission to omit integrity/durability checks.
+
+The [retained-data analysis](baselines/2026-09-13-source-identity-distribution-1.json)
+reuses 44,800 selected observations and 400 warmups from the archived schedule;
+it creates no new workload measurements. Configuration and seeds were declared
+before each analysis. A paired process bootstrap uses 4,000 draws per domain and
+workload family, preserving initial/confirmation strata and keeping controls
+separate. Independent verification checks the completed-file inventory, input
+hashes, original result-line references, process summaries, every selected pair
+in the random sequence, all 80,000 resampling draws and all 44 published point
+comparisons. All outputs and draws remain archived.
+
+For the five short-query paths, 127–129 baseline and 119–123 candidate observations
+in each 151-observation pooled upper tail come from the initial phase, although
+that phase supplies only a third of the source timings. Initial pairs 4 and 5 are
+the largest contributors. They remain included. Descriptive p95-change intervals
+for block-number, timestamp and absent-topic queries are respectively
+[+2.26%, +12.91%], [+1.69%, +13.79%] and [-1.34%, +12.02%]. Their median changes
+remain positive. Sparse concurrent-query p95 has [+3.67%, +21.90%], and historical
+publication p95 [-4.39%, +25.71%]. These unadjusted conditional intervals neither
+establish a performance pass nor prove a greater-than-10% causal source cost.
+They do not replace the fixed comparison or provide simultaneous guarantees.
+
+An analysis-manifest provenance limitation is explicit in the packet: an
+intermediate manifest hashed its redirected log before the final status line,
+and an early finalizer refreshed that metadata. Refreshed manifests and labeled
+reconstructions are retained; reconstructed metadata is not presented as a
+preserved original. The final stable inventory seals the completed files.
+Benchmark inputs, scripts, configurations, timing records and resampling draws
+remain unchanged, and the independent verification above uses the committed
+benchmark evidence rather than trusting the intermediate manifests.
+
+Performance acceptance remains unresolved. The next diagnostic applies equal
+stage instrumentation to disposable baseline/candidate copies of the native
+filter implementation and existing five-case fixture. It must preserve the
+rotating case order, repeat bounds, independent oracle, errors, early exits and
+teardown, with no per-row timers or additional storage reads. Stage sums must
+reconcile per query; instrumented observations remain separate from acceptance.
+Source changes require demonstrated correctness or measured benefit, not a
+favorable subset of the existing timings.
