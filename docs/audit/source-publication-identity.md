@@ -2,11 +2,14 @@
 
 This batch follows merged PR #149 and is in progress. It addresses source identity
 behind derived indexes; it does not claim the rest of the offline audit is done.
-The current candidate is `179e0ff7`, with passing focused checks and a completed
-fixed release comparison. [Performance disposition](#final-direct-performance-disposition)
-remains unresolved for several query tails; full gates, CI and merge remain
-pending. Earlier candidates and rejected experiments are retained below as the
-audit history, not separate accepted implementations.
+The current source checkpoint is `c229ace0`, with production behavior restored to
+`179e0ff7` and all nine local workspace/release gates passing. The completed fixed
+release comparison leaves [performance disposition](#final-direct-performance-disposition)
+unresolved for several query tails. The subsequent identical-binary mac-mini
+control packet is inconclusive under its predeclared precision rules. A more
+stable test environment, performance clearance, exact-head CI and merge remain
+pending. Earlier candidates and rejected experiments are retained below as audit
+history, not separate accepted implementations.
 
 ## Confirmed failures
 
@@ -896,6 +899,44 @@ The [completed remote build](baselines/2026-09-13-source-identity-remote-build-f
 passes all 16 recorded commands and produces both release harnesses. Independent
 verification matches every one of the 796 source files and modes to the original
 `c229ace0` Git archive, checks all command-log hashes, and confirms fresh harness
-artifacts with the expected Zstd version/features. The fixed control packet is
-next; successful compilation is not itself a correctness-oracle or performance
-acceptance result.
+artifacts with the expected Zstd version/features. That preparation preceded the
+fixed control packet below; successful compilation alone was not a
+correctness-oracle or performance acceptance result.
+
+The [completed fixed remote controls](baselines/2026-09-13-source-identity-remote-controls-1.json)
+return **INCONCLUSIVE**. All 72 sequential fixture processes passed their
+correctness checks: 14,640 measured timings, 120 explicit warmups and 72 RSS
+records. Both labels used the same saved candidate binaries. No source comparison,
+replacement process, timing retry, trimming or control subtraction occurred.
+Original logs, all 16 metric summaries, 12,000 seeded resampling-index records
+and 64,000 numeric draw records are retained losslessly, including binary Python
+cache artifacts. Independent verification reconstructs the observations from raw
+logs and agrees with all 256,000 draw values, interval endpoints and 32 required
+precision/order bounds. Input hashes remained unchanged. The evidence packaging
+also retains its initial directory-entry handling failure, which occurred before
+writing an archive; correcting the packager did not rerun analysis or measurements.
+
+All eight required metrics fail at least one predeclared bound. For example,
+block-hash p95 label-effect interval is [-1.83%, +4.85%], but its order-drift
+interval is [+1.11, +15.65] percentage points. Historical-publication p95 effect
+is [-3.11%, +5.29%] and order drift is [-17.76, -1.08] percentage points. These
+conditional descriptive intervals characterize identical-binary variation; they
+do not measure a change caused by source code or override the earlier source
+comparisons. Small pooled point effects alone do not meet the fixed precision
+criterion.
+
+The 36 host samples report macOS CPU speed limits ranging from 78 to 100,
+median 88.5, with 33 below 100. These are reported limits, not measured frequency
+ratios or proof of the cause of timing variation. The one-minute load ranges from
+3.02 to 5.10 on six CPUs and includes this workload; it cannot all be attributed
+to unrelated activity. The absence of a recorded thermal warning does not imply
+absence of CPU speed limiting.
+
+The tested conditions do not qualify a new source comparison. Do not repeat this
+packet unchanged or relax the performance budget. Further performance clearance
+requires a materially more stable environment or a quiet/cool test window, then
+a design fixed before measurements with contemporary controls. The pending
+environment clarification remains unresolved. All earlier source-tail findings
+and the user's 10% limit remain in force. Local correctness gates pass, while
+performance clearance, CI and PR/merge remain incomplete. No production data,
+external-volume contents, services or global power settings were changed.
