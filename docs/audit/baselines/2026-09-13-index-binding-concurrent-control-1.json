@@ -1,0 +1,253 @@
+{
+  "schema": 1,
+  "environment": {
+    "base_commit": "26a8818c765b345d7cec09705b67767e6d8068e6",
+    "candidate_commit": "f996c990f3908ddee3240105be4725f2f8aad490",
+    "recorded_at_utc": "2026-09-13T06:08:06.283368+00:00",
+    "runner_path": "/private/tmp/logex-storage-decode-tail-checks.py",
+    "runner_sha256": "eaaa5964095c2cddfd087da0692af1536d50190738b50f6402cc0cd053200ba1",
+    "runner_source": "\"\"\"Retain fixed dense storage confirmation and identical-executable controls.\"\"\"\nfrom pathlib import Path\nfrom collections import Counter\nfrom datetime import datetime, timezone\nimport hashlib\nimport json\nimport math\nimport os\nimport re\nimport statistics\nimport subprocess\nimport sys\n\nREPO = Path('/Users/tdenisenko/code/logex')\nMANIFEST = Path(sys.argv[1])\nROOT = Path(sys.argv[2])\nPLAN = json.loads(MANIFEST.read_text())\nROOT.mkdir(exist_ok=False)\n\n\ndef sha(path):\n    return hashlib.sha256(path.read_bytes()).hexdigest()\n\n\ndef output(command, cwd=REPO):\n    return subprocess.check_output(command, cwd=cwd, text=True).strip()\n\n\ndef append(path, record):\n    with path.open('a') as stream:\n        stream.write(json.dumps(record) + '\\n')\n\n\ndef stats(values):\n    assert values and all(math.isfinite(v) and v >= 0 for v in values)\n    return {'samples': len(values), 'median': statistics.median(values),\n            'p95': sorted(values)[math.ceil(len(values) * .95) - 1]}\n\n\ndef counters(log):\n    lines = log.read_text().splitlines()\n    timing = None\n    values = {}\n    for index, line in enumerate(lines):\n        match = re.match(r'^\\s*([0-9.]+) real\\s+([0-9.]+) user\\s+([0-9.]+) sys\\s*$', line)\n        if match:\n            assert timing is None, log\n            timing = index\n            values.update(zip(['real_seconds', 'user_seconds', 'sys_seconds'],\n                              map(float, match.groups())))\n        elif timing is not None:\n            match = re.match(r'^\\s*(\\d+)\\s{2,}(.+?)\\s*$', line)\n            assert match is not None, (log, line)\n            values[match.group(2).replace(' ', '_')] = int(match.group(1))\n    assert timing is not None and 'maximum_resident_set_size' in values, log\n    return {'counters': values, 'raw_time_output': '\\n'.join(lines[timing:])}\n\n\ndef timed(command, log, additions):\n    started_at = datetime.now(timezone.utc).isoformat()\n    command = ['/usr/bin/time', '-l', *command]\n    # Explicit benchmark parameters below must not inherit another experiment's settings.\n    env = {key: value for key, value in os.environ.items()\n           if not key.startswith(('LOGEX_BENCH_', 'LOGEX_PUBLICATION_', 'LOGEX_INLIST_'))}\n    env.update({'TMPDIR': '/private/tmp', **additions})\n    with log.open('w') as stream:\n        result = subprocess.run(command, stdout=stream, stderr=subprocess.STDOUT, env=env)\n    return {'command': command, 'started_at_utc': started_at,\n            'finished_at_utc': datetime.now(timezone.utc).isoformat(),\n            'environment_overrides': additions, 'exit': result.returncode,\n            'log': str(log), 'log_sha256': sha(log), **counters(log)}\n\n\ninitial = Path(PLAN['confirmation']['initial_directory'])\noriginal = json.loads((initial / 'environment.json').read_text())\nassert sha(initial / 'results.jsonl') == PLAN['confirmation']['initial_results_sha256']\nassert output(['git', 'rev-parse', 'HEAD']) == PLAN['candidate_commit'] == original['candidate_commit']\nfor entry in PLAN['fixtures']:\n    assert sha(REPO / entry['path']) == entry['sha256']\nfor suite in PLAN['benchmarks']:\n    assert len(suite['process_order']) == suite['pairs']\n    assert Counter(order[0] for order in suite['process_order']) == {'base': suite['pairs'] // 2, 'candidate': suite['pairs'] // 2}\n    assert all(sorted(order) == ['base', 'candidate'] for order in suite['process_order'])\n    for label in ('base', 'candidate'):\n        binary = initial / f\"{label}-{suite['target']}\"\n        assert sha(binary) == original['builds'][label]['artifacts'][suite['target']]['binary_sha256']\nmetadata = {\n    'base_commit': original['base_commit'], 'candidate_commit': original['candidate_commit'],\n    'recorded_at_utc': datetime.now(timezone.utc).isoformat(),\n    'runner_path': str(Path(__file__)), 'runner_sha256': sha(Path(__file__)),\n    'runner_source': Path(__file__).read_text(), 'plan': PLAN, 'plan_sha256': sha(MANIFEST),\n    'hardware': output(['sysctl', '-n', 'hw.model', 'hw.memsize', 'hw.ncpu']),\n    'os': output(['sw_vers']), 'rustc': output(['rustc', '-Vv']), 'cargo': output(['cargo', '-V']),\n    'filesystem': output(['df', '-h', '/private/tmp']),\n    'memory_before': output(['vm_stat']),\n    'original_environment_sha256': sha(initial / 'environment.json'),\n    'binaries': {suite['target']: original['binary_comparisons'][suite['target']] for suite in PLAN['benchmarks']},\n}\n(ROOT / 'environment.json').write_text(json.dumps(metadata))\nall_records = []\nfor suite in PLAN['benchmarks']:\n    name = suite['name']\n    suite_records = []\n    for pair, order in enumerate(suite['process_order']):\n        for label in order:\n            target = suite['target']\n            log = ROOT / f'{name}-{pair}-{label}.log'\n            binary_revision = suite['binary_revisions'][label]\n            command = [str(initial / f'{binary_revision}-{target}'), suite['test'], '--exact',\n                       '--ignored', '--nocapture', '--test-threads=1']\n            memory_before = output(['vm_stat'])\n            load_before = output(['sysctl', '-n', 'vm.loadavg'])\n            run = {'kind': 'run', 'suite': name, 'pair': pair, 'revision': label,\n                   'binary_revision': binary_revision, 'memory_before': memory_before, 'load_before': load_before,\n                   **timed(command, log, suite['environment'])}\n            run['memory_after'] = output(['vm_stat'])\n            run['load_after'] = output(['sysctl', '-n', 'vm.loadavg'])\n            append(ROOT / 'results.jsonl', run)\n            assert run['exit'] == 0, log\n            parsed = []\n            for line in log.read_text().splitlines():\n                if '{' not in line:\n                    continue\n                try:\n                    record = json.loads(line[line.index('{'):])\n                except json.JSONDecodeError:\n                    continue\n                record = {'raw_record': record, 'suite': name, 'pair': pair, 'revision': label}\n                parsed.append(record)\n                append(ROOT / 'results.jsonl', {'kind': 'fixture_record', **record})\n            configs = [r['raw_record'] for r in parsed if r['raw_record'].get('kind') == 'config']\n            samples = [r['raw_record'] for r in parsed if r['raw_record'].get('kind') == 'sample']\n            assert len(configs) == 1, log\n            assert Counter(r['metric'] for r in samples) == Counter(suite['samples_per_process']), log\n            for metric, expected in suite['samples_per_process'].items():\n                iterations = [r['iteration'] for r in samples if r['metric'] == metric]\n                assert len(iterations) == expected and len(set(iterations)) == expected, log\n            rss = {'raw_record': {'kind': 'rss', 'bytes': run['counters']['maximum_resident_set_size']},\n                   'suite': name, 'pair': pair, 'revision': label}\n            parsed.append(rss)\n            append(ROOT / 'results.jsonl', {'kind': 'fixture_record', **rss})\n            suite_records.extend(parsed)\n            for metric in [*suite['samples_per_process'], 'peak_rss']:\n                values = ([rss['raw_record']['bytes']] if metric == 'peak_rss' else\n                          [r['elapsed_ms'] for r in samples if r['metric'] == metric])\n                append(ROOT / 'results.jsonl', {'kind': 'process_summary', 'suite': name,\n                       'pair': pair, 'revision': label, 'metric': metric, **stats(values)})\n            print(name, pair, label, len(samples), 'samples retained', flush=True)\n    configs = [r['raw_record'] for r in suite_records if r['raw_record'].get('kind') == 'config']\n    assert len(configs) == suite['pairs'] * 2 and len({json.dumps(c, sort_keys=True) for c in configs}) == 1, name\n    for metric in [*suite['samples_per_process'], 'peak_rss']:\n        values = {}\n        for label in ('base', 'candidate'):\n            records = [r['raw_record'] for r in suite_records if r['revision'] == label]\n            values[label] = ([r['bytes'] for r in records if r.get('kind') == 'rss']\n                             if metric == 'peak_rss' else\n                             [r['elapsed_ms'] for r in records if r.get('kind') == 'sample'\n                              and r['metric'] == metric])\n            expected = suite['pairs'] if metric == 'peak_rss' else suite['pairs'] * suite['samples_per_process'][metric]\n            assert len(values[label]) == expected, (name, metric, label)\n        summarized = {label: stats(v) for label, v in values.items()}\n        record = {'kind': 'comparison', 'suite': name, 'metric': metric, 'values': summarized}\n        for measure in ('median', 'p95'):\n            before, after = (summarized[label][measure] for label in ('base', 'candidate'))\n            record[f'{measure}_change_percent'] = 100 * (after / before - 1)\n        append(ROOT / 'results.jsonl', record)\n        print(record, flush=True)\n    all_records.extend(suite_records)\n\nmetadata['retained_counts'] = dict(Counter(r['raw_record']['kind'] for r in all_records))\nassert metadata['retained_counts']['sample'] == PLAN['confirmation']['expected_samples']\nassert metadata['retained_counts']['rss'] == PLAN['confirmation']['expected_rss']\nmetadata['memory_after'] = output(['vm_stat'])\nfor name in ('results.jsonl',):\n    metadata[name] = {'path': str(ROOT / name), 'sha256': sha(ROOT / name)}\n(ROOT / 'environment.json').write_text(json.dumps(metadata))\nprint('Complete:', metadata['retained_counts'], flush=True)\n",
+    "plan": {
+      "base_commit": "26a8818c765b345d7cec09705b67767e6d8068e6",
+      "candidate_commit": "f996c990f3908ddee3240105be4725f2f8aad490",
+      "fixtures": [
+        {
+          "path": "crates/logex-query/tests/audit_harness.rs",
+          "package": "logex-query",
+          "target": "audit_harness",
+          "sha256": "f70018f9aa42a3de4d05e86281406d14e039214d4ad02d82a56fa7a44c21f1b4",
+          "unchanged_from_baseline": false,
+          "changed_dependency_expected": true
+        }
+      ],
+      "confirmation": {
+        "initial_directory": "/private/tmp/logex-index-binding-concurrent-1",
+        "initial_results_sha256": "59fc0633374213cdd9b8ceae1b94bc5cf529572ea09e446f12410f9e2b92d691",
+        "expected_samples": 10000,
+        "expected_rss": 20,
+        "reason": "Predeclared ten balanced identical-candidate pairs for the steady diagnostic. Reuse exact saved artifact and unchanged parameters; record all batch and individual-worker wall timings, explicit warmups, memory and process counters. These controls complement the 20 source pairs and the retained mixed-workload result; no observation is discarded.",
+        "interpretation": "Base/candidate are only scheduling labels here. Both execute the same saved candidate binary. Do not pool controls into source comparisons."
+      },
+      "benchmarks": [
+        {
+          "name": "steady_concurrent_sparse_same_candidate",
+          "target": "audit_harness",
+          "test": "benchmark_steady_concurrent_native_queries",
+          "environment": {
+            "LOGEX_CONCURRENT_PROFILE": "sparse",
+            "LOGEX_CONCURRENT_ROWS": "20000",
+            "LOGEX_CONCURRENT_REPEATS": "100",
+            "LOGEX_CONCURRENT_WORKERS": "4",
+            "LOGEX_CONCURRENT_SEGMENT_ROWS": "8192"
+          },
+          "samples_per_process": {
+            "steady_concurrent_batch": 100,
+            "steady_concurrent_worker_0": 100,
+            "steady_concurrent_worker_1": 100,
+            "steady_concurrent_worker_2": 100,
+            "steady_concurrent_worker_3": 100
+          },
+          "pairs": 10,
+          "process_order": [
+            [
+              "candidate",
+              "base"
+            ],
+            [
+              "base",
+              "candidate"
+            ],
+            [
+              "candidate",
+              "base"
+            ],
+            [
+              "base",
+              "candidate"
+            ],
+            [
+              "candidate",
+              "base"
+            ],
+            [
+              "base",
+              "candidate"
+            ],
+            [
+              "candidate",
+              "base"
+            ],
+            [
+              "base",
+              "candidate"
+            ],
+            [
+              "candidate",
+              "base"
+            ],
+            [
+              "base",
+              "candidate"
+            ]
+          ],
+          "binary_revisions": {
+            "base": "candidate",
+            "candidate": "candidate"
+          }
+        }
+      ]
+    },
+    "plan_sha256": "0a63510fef70693952febe1d0ce83feefc6ebb4c5bcdc834fe3f00027c99da50",
+    "hardware": "Mac14,15\n17179869184\n8",
+    "os": "ProductName:\t\tmacOS\nProductVersion:\t\t26.6.2\nBuildVersion:\t\t25G83",
+    "rustc": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+    "cargo": "cargo 1.100.0-nightly (e8cb624d5 2026-08-22)",
+    "filesystem": "Filesystem      Size    Used   Avail Capacity iused ifree %iused  Mounted on\n/dev/disk3s5   926Gi   883Gi    11Gi    99%    6.1M  118M    5%   /System/Volumes/Data",
+    "memory_before": "Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages free:                                     4508.\nPages active:                                 267443.\nPages inactive:                               265623.\nPages speculative:                              1045.\nPages throttled:                                   0.\nPages wired down:                             176936.\nPages purgeable:                                1106.\n\"Translation faults\":                    10340258949.\nPages copy-on-write:                       397998496.\nPages zero filled:                        3649578824.\nPages reactivated:                        2469912872.\nPages purged:                              140376386.\nFile-backed pages:                            132243.\nAnonymous pages:                              401868.\nPages stored in compressor:                  1718218.\nPages occupied by compressor:                 282417.\nDecompressions:                           2075451205.\nCompressions:                             2305540449.\nPageins:                                   200886660.\nPageouts:                                    4885700.\nSwapins:                                     5439403.\nSwapouts:                                    7409279.",
+    "original_environment_sha256": "6276e39b0bc12487ad05c7e90639be02869621fa4484db2e5b76a1279c35734b",
+    "binaries": {
+      "audit_harness": {
+        "sha256": {
+          "base": "2ac845b5d8bfb2803c80e7ca4d50aeba18efe7b6459e1dcdde5c2e76ac107764",
+          "candidate": "a29f6c421d5e4a42a6ec15beb67702fb4de76872bce1b789f98c6448835ebc81"
+        },
+        "distinct": true,
+        "changed_dependency_expected": true
+      }
+    },
+    "retained_counts": {
+      "config": 20,
+      "warmup": 100,
+      "sample": 10000,
+      "rss": 20
+    },
+    "memory_after": "Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages free:                                    12919.\nPages active:                                 267688.\nPages inactive:                               263063.\nPages speculative:                              4416.\nPages throttled:                                   0.\nPages wired down:                             169650.\nPages purgeable:                                1396.\n\"Translation faults\":                    10343822776.\nPages copy-on-write:                       399572501.\nPages zero filled:                        3649779748.\nPages reactivated:                        2469978611.\nPages purged:                              140376768.\nFile-backed pages:                            130473.\nAnonymous pages:                              404694.\nPages stored in compressor:                  1713110.\nPages occupied by compressor:                 280369.\nDecompressions:                           2075496658.\nCompressions:                             2305588203.\nPageins:                                   200893524.\nPageouts:                                    4885836.\nSwapins:                                     5439462.\nSwapouts:                                    7409279.",
+    "results.jsonl": {
+      "path": "/private/tmp/logex-index-binding-concurrent-control-1/results.jsonl",
+      "sha256": "808c32efe66f3d1dd47d473659edfb824c0c76f55c912cdf8b9e238b182a1c65"
+    }
+  },
+  "comparisons": [
+    {
+      "kind": "comparison",
+      "suite": "steady_concurrent_sparse_same_candidate",
+      "metric": "steady_concurrent_batch",
+      "values": {
+        "base": {
+          "samples": 1000,
+          "median": 12.260333,
+          "p95": 12.740458
+        },
+        "candidate": {
+          "samples": 1000,
+          "median": 12.316728999999999,
+          "p95": 13.448292
+        }
+      },
+      "median_change_percent": 0.45998750604896443,
+      "p95_change_percent": 5.555797130683993
+    },
+    {
+      "kind": "comparison",
+      "suite": "steady_concurrent_sparse_same_candidate",
+      "metric": "steady_concurrent_worker_0",
+      "values": {
+        "base": {
+          "samples": 1000,
+          "median": 12.1482915,
+          "p95": 12.5725
+        },
+        "candidate": {
+          "samples": 1000,
+          "median": 12.220104,
+          "p95": 12.970291
+        }
+      },
+      "median_change_percent": 0.5911325061635164,
+      "p95_change_percent": 3.1639769337840518
+    },
+    {
+      "kind": "comparison",
+      "suite": "steady_concurrent_sparse_same_candidate",
+      "metric": "steady_concurrent_worker_1",
+      "values": {
+        "base": {
+          "samples": 1000,
+          "median": 12.1522495,
+          "p95": 12.621417
+        },
+        "candidate": {
+          "samples": 1000,
+          "median": 12.2183125,
+          "p95": 12.992625
+        }
+      },
+      "median_change_percent": 0.5436277456284833,
+      "p95_change_percent": 2.9410960750286597
+    },
+    {
+      "kind": "comparison",
+      "suite": "steady_concurrent_sparse_same_candidate",
+      "metric": "steady_concurrent_worker_2",
+      "values": {
+        "base": {
+          "samples": 1000,
+          "median": 12.133875499999998,
+          "p95": 12.599416
+        },
+        "candidate": {
+          "samples": 1000,
+          "median": 12.215625,
+          "p95": 13.03525
+        }
+      },
+      "median_change_percent": 0.6737295104107588,
+      "p95_change_percent": 3.4591603293359086
+    },
+    {
+      "kind": "comparison",
+      "suite": "steady_concurrent_sparse_same_candidate",
+      "metric": "steady_concurrent_worker_3",
+      "values": {
+        "base": {
+          "samples": 1000,
+          "median": 12.1641875,
+          "p95": 12.628125
+        },
+        "candidate": {
+          "samples": 1000,
+          "median": 12.226063,
+          "p95": 13.064582999999999
+        }
+      },
+      "median_change_percent": 0.5086694035257189,
+      "p95_change_percent": 3.4562375649591637
+    },
+    {
+      "kind": "comparison",
+      "suite": "steady_concurrent_sparse_same_candidate",
+      "metric": "peak_rss",
+      "values": {
+        "base": {
+          "samples": 10,
+          "median": 116695040.0,
+          "p95": 126976000
+        },
+        "candidate": {
+          "samples": 10,
+          "median": 115752960.0,
+          "p95": 124387328
+        }
+      },
+      "median_change_percent": -0.8073008073008037,
+      "p95_change_percent": -2.038709677419359
+    }
+  ],
+  "combined_source_comparisons": [],
+  "interpretation": "Control labels base/candidate execute the same candidate binary; they are never pooled with source comparisons. The original source comparison remains separately recorded. Every control sample and warmup is retained; no observations are removed.",
+  "raw_evidence": {
+    "path": "2026-09-13-index-binding-concurrent-control-1-raw.json.gz",
+    "sha256": "9aa594edf41a55be7a2deb535aa3544ba262fc29b3b1b81bb63bba6c69de0318",
+    "files": 25
+  }
+}
