@@ -746,11 +746,42 @@ Benchmark inputs, scripts, configurations, timing records and resampling draws
 remain unchanged, and the independent verification above uses the committed
 benchmark evidence rather than trusting the intermediate manifests.
 
-Performance acceptance remains unresolved. The next diagnostic applies equal
-stage instrumentation to disposable baseline/candidate copies of the native
-filter implementation and existing five-case fixture. It must preserve the
-rotating case order, repeat bounds, independent oracle, errors, early exits and
-teardown, with no per-row timers or additional storage reads. Stage sums must
-reconcile per query; instrumented observations remain separate from acceptance.
-Source changes require demonstrated correctness or measured benefit, not a
-favorable subset of the existing timings.
+Performance acceptance remains unresolved. The completed
+[native stage diagnostic](baselines/2026-09-13-source-identity-attribution-1.json)
+uses identical instrumentation in disposable `9c0a58fc`/`179e0ff7` source copies.
+The predefined 12 rounds interleave source pairs with identical-baseline and
+identical-candidate controls, balancing process and pair order. All 48 processes,
+24,000 measured queries, 240 warmups and 20 separate smoke queries passed the
+existing independent row oracle. Stage sums reconcile exactly for every query;
+all expected index checkpoints were available. Source archives, original and
+formatted patches, fresh workspace-selected release builds, raw logs, counters,
+analysis and scripts are retained. Independent verification matches all 48,570
+fixture records to original log lines and recomputes group statistics and actual
+tail-query stage contributions. No instrumentation enters production.
+
+Absent-topic queries always exit through three bloom exclusions, with no candidate
+lookup, canonical bitmap read or row materialization. Their internal mean grows
+15.20 microseconds: projected capture contributes 9.71, checkpoint validation
+4.56 and bloom checks 0.84 microseconds. Full capture contributes 7.60–10.17
+microseconds of mean difference for the two range cases and 25.41 for present-topic
+queries. Candidate round 03 supplies 38–53 of the 61 observations at or above each
+case's pooled p95. All remain included; the separate identical-candidate
+present-topic control itself has a +13.65% p95 difference. Actual total-query tail
+vectors are retained; stage quantiles are never summed.
+
+Instrumentation perturbs timing and these results do not establish acceptance or
+source causality. They identify file capture and checkpoint validation as the
+next areas to examine. The schema-name BTreeSet and selected-path Vec already
+exist in the baseline, so they are not newly introduced allocation costs. The
+current narrow experiment removes a seek from the new canonical metadata read
+on Unix by reading exactly at offset zero. It retains the same pinned file,
+metadata length, bounded prefix, mutex and all parsing/identity checks; other
+platforms retain the existing seek/read fallback. A framed/legacy regression
+checks metadata after complete reads have advanced the captured handle to EOF.
+Focused19 passes formatting, strict workspace Clippy, 280 storage tests
+(five existing ignored), 80 index tests, 13 native-query tests and 11 background
+tests. Independent review found no validation or pinned-handle defect. An
+equivalent release comparison remains pending; no benefit or retention decision
+is claimed yet. Cursor non-mutation is not a new public contract: the regression
+checks metadata correctness after a previous read, and performance measurements
+will determine whether the syscall change is worth retaining.

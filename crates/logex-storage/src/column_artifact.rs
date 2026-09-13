@@ -270,8 +270,16 @@ impl ColumnArtifacts {
             let len = file.metadata()?.len();
             let mut prefix = [0; crate::column::CANONICAL_PREFIX_BYTES];
             let count = len.min(prefix.len() as u64) as usize;
-            file.seek(SeekFrom::Start(0))?;
-            file.read_exact(&mut prefix[..count])?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::FileExt;
+                file.read_exact_at(&mut prefix[..count], 0)?;
+            }
+            #[cfg(not(unix))]
+            {
+                file.seek(SeekFrom::Start(0))?;
+                file.read_exact(&mut prefix[..count])?;
+            }
             crate::column::RawCanonicalMetadata::parse(&prefix[..count], len)
         };
         match &self.pinned {
@@ -445,6 +453,43 @@ fn invalid(reason: &str) -> io::Error {
 mod tests {
     use super::*;
     use crate::column::NullBitmap;
+
+    #[test]
+    fn raw_canonical_metadata_remains_correct_after_reading_captured_bitmap() {
+        let dir = tempfile::tempdir().unwrap();
+        for binding in [
+            None,
+            Some(crate::column::SourceBinding {
+                namespace: [7; 16],
+                generation: 3,
+                segment_id: 11,
+            }),
+        ] {
+            let mut bitmap = NullBitmap::new();
+            for row in 0..20 {
+                bitmap.push(row % 2 == 0);
+            }
+            let mut bytes = Vec::new();
+            crate::column::write_raw_canonical(&mut bytes, &bitmap, binding).unwrap();
+            fs::write(dir.path().join("canonical.bitmap"), &bytes).unwrap();
+            let artifacts = ColumnArtifacts::open_projected(dir.path(), None, Some(&[])).unwrap();
+            let expected = artifacts
+                .raw_canonical_metadata("canonical.bitmap")
+                .unwrap()
+                .validate_committed(binding, 20)
+                .unwrap();
+            for _ in 0..2 {
+                // Reading the full bitmap leaves the same captured handle at EOF.
+                assert_eq!(artifacts.read("canonical.bitmap").unwrap(), bytes);
+                assert_eq!(
+                    artifacts
+                        .raw_canonical_metadata("canonical.bitmap")
+                        .unwrap(),
+                    expected
+                );
+            }
+        }
+    }
 
     #[test]
     fn bundled_bitmaps_roundtrip_sparse_dense_and_random_nulls() {
