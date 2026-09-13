@@ -1,0 +1,528 @@
+{
+  "attempt": 1,
+  "conclusion": "success",
+  "createdAt": "2026-09-13T03:54:00Z",
+  "databaseId": 34736607062,
+  "event": "pull_request",
+  "headSha": "0ed1b7182d003216a07a103aa269052c2db7adf3",
+  "jobs": [
+    {
+      "completedAt": "2026-09-13T03:59:11Z",
+      "conclusion": "success",
+      "databaseId": 103669044036,
+      "name": "Test",
+      "startedAt": "2026-09-13T03:54:02Z",
+      "status": "completed",
+      "steps": [
+        {
+          "completedAt": "2026-09-13T03:54:04Z",
+          "conclusion": "success",
+          "name": "Set up job",
+          "number": 1,
+          "startedAt": "2026-09-13T03:54:03Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-13T03:54:06Z",
+          "conclusion": "success",
+          "name": "Run actions/checkout@v4",
+          "number": 2,
+          "startedAt": "2026-09-13T03:54:04Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-13T03:54:15Z",
+          "conclusion": "success",
+          "name": "Run dtolnay/rust-toolchain@7c8d7d138f5c09cef361f8214cf96882cd029cdb",
+          "number": 3,
+          "startedAt": "2026-09-13T03:54:06Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-13T03:54:20Z",
+          "conclusion": "success",
+          "name": "Run arduino/setup-protoc@v3",
+          "number": 4,
+          "startedAt": "2026-09-13T03:54:15Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-13T03:54:37Z",
+          "conclusion": "success",
+          "name": "Run Swatinem/rust-cache@v2",
+          "number": 5,
+          "startedAt": "2026-09-13T03:54:20Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-13T03:58:23Z",
+          "conclusion": "success",
+          "name": "Run cargo test --workspace --all-targets --locked",
+          "number": 6,
+          "startedAt": "2026-09-13T03:54:37Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-13T03:58:45Z",
+          "conclusion": "success",
+          "name": "Run cargo test --workspace --doc --locked",
+          "number": 7,
+          "startedAt": "2026-09-13T03:58:23Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-13T03:59:09Z",
+          "conclusion": "success",
+          "name": "Post Run Swatinem/rust-cache@v2",
+          "number": 13,
+          "startedAt": "2026-09-13T03:58:45Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-13T03:59:10Z",
+          "conclusion": "success",
+          "name": "Post Run actions/checkout@v4",
+          "number": 14,
+          "startedAt": "2026-09-13T03:59:09Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-13T03:59:10Z",
+          "conclusion": "success",
+          "name": "Complete job",
+          "number": 15,
+          "startedAt": "2026-09-13T03:59:10Z",
+          "status": "completed"
+        }
+      ],
+      "url": "https://github.com/tdenisenko/logex/actions/runs/34736607062/job/103669044036"
+    },
+    {
+      "completedAt": "2026-09-13T03:58:48Z",
+      "conclusion": "success",
+      "databaseId": 103669044135,
+      "name": "macOS Test",
+      "startedAt": "2026-09-13T03:54:06Z",
+      "status": "completed",
+      "steps": [
+        {
+          "completedAt": "2026-09-13T03:54:08Z",
+          "conclusion": "success",
+          "name": "Set up job",
+          "number": 1,
+          "startedAt": "2026-09-13T03:54:06Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-13T03:54:12Z",
+          "conclusion": "success",
+          "name": "Run actions/checkout@v4",
+          "number": 2,
+          "startedAt": "2026-09-13T03:54:08Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-13T03:54:18Z",
+          "conclusion": "success",
+          "name": "Run dtolnay/rust-toolchain@7c8d7d138f5c09cef361f8214cf96882cd029cdb",
+          "number": 3,
+          "startedAt": "2026-09-13T03:54:12Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-13T03:54:25Z",
+          "conclusion": "success",
+          "name": "Run arduino/setup-protoc@v3",
+          "number": 4,
+          "startedAt": "2026-09-13T03:54:18Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-13T03:54:42Z",
+          "conclusion": "success",
+          "name": "Run Swatinem/rust-cache@v2",
+          "number": 5,
+          "startedAt": "2026-09-13T03:54:25Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-13T03:57:51Z",
+          "conclusion": "success",
+          "name": "Run cargo test --workspace --all-targets --locked",
+          "number": 6,
+          "startedAt": "2026-09-13T03:54:42Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-13T03:58:10Z",
+          "conclusion": "success",
+          "name": "Run cargo test --workspace --doc --locked",
+          "number": 7,
+          "startedAt": "2026-09-13T03:57:51Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-13T03:58:45Z",
+          "conclusion": "success",
+          "name": "Post Run Swatinem/rust-cache@v2",
+          "number": 13,
+          "startedAt": "2026-09-13T03:58:10Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-13T03:58:45Z",
+          "conclusion": "success",
+          "name": "Post Run actions/checkout@v4",
+          "number": 14,
+          "startedAt": "2026-09-13T03:58:45Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-13T03:58:46Z",
+          "conclusion": "success",
+          "name": "Complete job",
+          "number": 15,
+          "startedAt": "2026-09-13T03:58:45Z",
+          "status": "completed"
+        }
+      ],
+      "url": "https://github.com/tdenisenko/logex/actions/runs/34736607062/job/103669044135"
+    },
+    {
+      "completedAt": "2026-09-13T04:02:38Z",
+      "conclusion": "success",
+      "databaseId": 103669044155,
+      "name": "Release Build",
+      "startedAt": "2026-09-13T03:54:03Z",
+      "status": "completed",
+      "steps": [
+        {
+          "completedAt": "2026-09-13T03:54:05Z",
+          "conclusion": "success",
+          "name": "Set up job",
+          "number": 1,
+          "startedAt": "2026-09-13T03:54:04Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-13T03:54:09Z",
+          "conclusion": "success",
+          "name": "Run actions/checkout@v4",
+          "number": 2,
+          "startedAt": "2026-09-13T03:54:05Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-13T03:54:17Z",
+          "conclusion": "success",
+          "name": "Run dtolnay/rust-toolchain@7c8d7d138f5c09cef361f8214cf96882cd029cdb",
+          "number": 3,
+          "startedAt": "2026-09-13T03:54:09Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-13T03:54:22Z",
+          "conclusion": "success",
+          "name": "Run arduino/setup-protoc@v3",
+          "number": 4,
+          "startedAt": "2026-09-13T03:54:17Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-13T03:54:33Z",
+          "conclusion": "success",
+          "name": "Run Swatinem/rust-cache@v2",
+          "number": 5,
+          "startedAt": "2026-09-13T03:54:22Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-13T04:02:23Z",
+          "conclusion": "success",
+          "name": "Run cargo build -p logex-node --release --locked",
+          "number": 6,
+          "startedAt": "2026-09-13T03:54:33Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-13T04:02:35Z",
+          "conclusion": "success",
+          "name": "Post Run Swatinem/rust-cache@v2",
+          "number": 11,
+          "startedAt": "2026-09-13T04:02:23Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-13T04:02:36Z",
+          "conclusion": "success",
+          "name": "Post Run actions/checkout@v4",
+          "number": 12,
+          "startedAt": "2026-09-13T04:02:35Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-13T04:02:36Z",
+          "conclusion": "success",
+          "name": "Complete job",
+          "number": 13,
+          "startedAt": "2026-09-13T04:02:36Z",
+          "status": "completed"
+        }
+      ],
+      "url": "https://github.com/tdenisenko/logex/actions/runs/34736607062/job/103669044155"
+    },
+    {
+      "completedAt": "2026-09-13T03:54:18Z",
+      "conclusion": "success",
+      "databaseId": 103669044159,
+      "name": "Format",
+      "startedAt": "2026-09-13T03:54:02Z",
+      "status": "completed",
+      "steps": [
+        {
+          "completedAt": "2026-09-13T03:54:04Z",
+          "conclusion": "success",
+          "name": "Set up job",
+          "number": 1,
+          "startedAt": "2026-09-13T03:54:03Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-13T03:54:07Z",
+          "conclusion": "success",
+          "name": "Run actions/checkout@v4",
+          "number": 2,
+          "startedAt": "2026-09-13T03:54:04Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-13T03:54:15Z",
+          "conclusion": "success",
+          "name": "Run dtolnay/rust-toolchain@7c8d7d138f5c09cef361f8214cf96882cd029cdb",
+          "number": 3,
+          "startedAt": "2026-09-13T03:54:07Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-13T03:54:16Z",
+          "conclusion": "success",
+          "name": "Run cargo fmt --all -- --check",
+          "number": 4,
+          "startedAt": "2026-09-13T03:54:15Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-13T03:54:16Z",
+          "conclusion": "success",
+          "name": "Post Run actions/checkout@v4",
+          "number": 8,
+          "startedAt": "2026-09-13T03:54:16Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-13T03:54:16Z",
+          "conclusion": "success",
+          "name": "Complete job",
+          "number": 9,
+          "startedAt": "2026-09-13T03:54:16Z",
+          "status": "completed"
+        }
+      ],
+      "url": "https://github.com/tdenisenko/logex/actions/runs/34736607062/job/103669044159"
+    },
+    {
+      "completedAt": "2026-09-13T03:55:09Z",
+      "conclusion": "success",
+      "databaseId": 103669044160,
+      "name": "Check",
+      "startedAt": "2026-09-13T03:54:02Z",
+      "status": "completed",
+      "steps": [
+        {
+          "completedAt": "2026-09-13T03:54:04Z",
+          "conclusion": "success",
+          "name": "Set up job",
+          "number": 1,
+          "startedAt": "2026-09-13T03:54:03Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-13T03:54:06Z",
+          "conclusion": "success",
+          "name": "Run actions/checkout@v4",
+          "number": 2,
+          "startedAt": "2026-09-13T03:54:04Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-13T03:54:06Z",
+          "conclusion": "success",
+          "name": "Verify vendored DataFusion crates",
+          "number": 3,
+          "startedAt": "2026-09-13T03:54:06Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-13T03:54:15Z",
+          "conclusion": "success",
+          "name": "Run dtolnay/rust-toolchain@7c8d7d138f5c09cef361f8214cf96882cd029cdb",
+          "number": 4,
+          "startedAt": "2026-09-13T03:54:06Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-13T03:54:19Z",
+          "conclusion": "success",
+          "name": "Run arduino/setup-protoc@v3",
+          "number": 5,
+          "startedAt": "2026-09-13T03:54:15Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-13T03:54:26Z",
+          "conclusion": "success",
+          "name": "Run Swatinem/rust-cache@v2",
+          "number": 6,
+          "startedAt": "2026-09-13T03:54:19Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-13T03:54:57Z",
+          "conclusion": "success",
+          "name": "Run cargo check --workspace --all-targets --locked",
+          "number": 7,
+          "startedAt": "2026-09-13T03:54:26Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-13T03:55:07Z",
+          "conclusion": "success",
+          "name": "Post Run Swatinem/rust-cache@v2",
+          "number": 13,
+          "startedAt": "2026-09-13T03:54:57Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-13T03:55:08Z",
+          "conclusion": "success",
+          "name": "Post Run actions/checkout@v4",
+          "number": 14,
+          "startedAt": "2026-09-13T03:55:07Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-13T03:55:08Z",
+          "conclusion": "success",
+          "name": "Complete job",
+          "number": 15,
+          "startedAt": "2026-09-13T03:55:08Z",
+          "status": "completed"
+        }
+      ],
+      "url": "https://github.com/tdenisenko/logex/actions/runs/34736607062/job/103669044160"
+    },
+    {
+      "completedAt": "2026-09-13T03:55:21Z",
+      "conclusion": "success",
+      "databaseId": 103669044192,
+      "name": "Clippy",
+      "startedAt": "2026-09-13T03:54:03Z",
+      "status": "completed",
+      "steps": [
+        {
+          "completedAt": "2026-09-13T03:54:05Z",
+          "conclusion": "success",
+          "name": "Set up job",
+          "number": 1,
+          "startedAt": "2026-09-13T03:54:04Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-13T03:54:07Z",
+          "conclusion": "success",
+          "name": "Run actions/checkout@v4",
+          "number": 2,
+          "startedAt": "2026-09-13T03:54:05Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-13T03:54:15Z",
+          "conclusion": "success",
+          "name": "Run dtolnay/rust-toolchain@7c8d7d138f5c09cef361f8214cf96882cd029cdb",
+          "number": 3,
+          "startedAt": "2026-09-13T03:54:07Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-13T03:54:22Z",
+          "conclusion": "success",
+          "name": "Run arduino/setup-protoc@v3",
+          "number": 4,
+          "startedAt": "2026-09-13T03:54:15Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-13T03:54:34Z",
+          "conclusion": "success",
+          "name": "Run Swatinem/rust-cache@v2",
+          "number": 5,
+          "startedAt": "2026-09-13T03:54:22Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-13T03:55:06Z",
+          "conclusion": "success",
+          "name": "Run cargo clippy --workspace --all-targets --locked -- -D warnings",
+          "number": 6,
+          "startedAt": "2026-09-13T03:54:34Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-13T03:55:18Z",
+          "conclusion": "success",
+          "name": "Post Run Swatinem/rust-cache@v2",
+          "number": 11,
+          "startedAt": "2026-09-13T03:55:06Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-13T03:55:18Z",
+          "conclusion": "success",
+          "name": "Post Run actions/checkout@v4",
+          "number": 12,
+          "startedAt": "2026-09-13T03:55:18Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-09-13T03:55:18Z",
+          "conclusion": "success",
+          "name": "Complete job",
+          "number": 13,
+          "startedAt": "2026-09-13T03:55:18Z",
+          "status": "completed"
+        }
+      ],
+      "url": "https://github.com/tdenisenko/logex/actions/runs/34736607062/job/103669044192"
+    }
+  ],
+  "status": "completed",
+  "updatedAt": "2026-09-13T04:02:38Z",
+  "url": "https://github.com/tdenisenko/logex/actions/runs/34736607062",
+  "pull_request": {
+    "baseRefOid": "ae4c01c913f89e8448a2c98d5905733525c51047",
+    "headRefOid": "0ed1b7182d003216a07a103aa269052c2db7adf3",
+    "mergeCommit": {
+      "oid": "e317a5295856da23d0078b621099e46e44195908"
+    },
+    "mergedAt": "2026-09-13T04:06:02Z",
+    "number": 148,
+    "state": "MERGED",
+    "title": "fix: validate derived index files and publication",
+    "url": "https://github.com/tdenisenko/logex/pull/148"
+  },
+  "merge_verification": {
+    "head_tree": "e944474ef9086c0016de3de5a8e80d8fb5d097dc",
+    "merged_tree": "e944474ef9086c0016de3de5a8e80d8fb5d097dc",
+    "equal": true
+  }
+}

@@ -1,9 +1,12 @@
 # Derived index file integrity
 
-This batch is in progress on `audit/index-file-integrity`, based on PR #147
-merge `ae4c01c913f89e8448a2c98d5905733525c51047`. Final performance comparisons and all nine local validation gates are complete;
-PR CI and merge remain pending. It changes derived indexes, not log columns or ingestion
-transactions. Whole-file source identity and the rest of batch 6 remain open.
+This milestone merged in [PR #148](https://github.com/tdenisenko/logex/pull/148)
+as `e317a5295856da23d0078b621099e46e44195908`, based on PR #147 merge `ae4c01c9`.
+All nine local gates and all six exact-head CI jobs passed; the merged tree
+matches head `0ed1b718`. [The CI record](baselines/2026-09-13-index-integrity-ci-final.json)
+retains run `34736607062`, attempt1, and merge verification. Log columns and
+ingestion transactions retain their formats. Whole-file source identity and
+the rest of batch6 remain separate open work.
 
 **Measurement correction:** screens 1–13 timed the row-ID correctness oracle
 inside `point_present` and `open_range`. For the large-payload fixture this adds
@@ -697,4 +700,5 @@ The validation archive independently checks the exact Git source tree, every
 command/exit/log hash, test totals and compressed-evidence roundtrip. Subsequent
 validation-document changes do not alter those production/configuration sources.
 Existing dependency future-compatibility warnings remain recorded in the audit
-ledger. CI on the PR head and merge remain required; the broader audit is open.
+ledger. All six PR-head CI jobs and merge subsequently passed as recorded above;
+the broader audit remains open.
