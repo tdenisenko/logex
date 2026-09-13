@@ -380,3 +380,29 @@ All 66 index unit tests, formatting and focused Clippy pass for this source;
 `/private/tmp/logex-index-integrity-focused-8` retains the parent revision, exact
 diff and logs. No validation path or old-format fallback was removed in either
 page-size experiment.
+
+
+## First larger comparison and writer follow-up
+
+The fixed protocol at `c794fda8` completes in
+`/private/tmp/logex-index-integrity-final-1`: 66,000 measurement timings/100 RSS,
+plus 3,720 separately labeled warm-up timings/20 RSS. Every original process and
+sample remains retained. The small full-read median/p95 is +3.97%/+3.23%, while
+typical/many-key full-read medians improve about52%. The large contiguous full
+read is +9.86%/+8.94%, close to the budget and retained as a sensitivity limit.
+The nonconsecutive-row full read is +11.86%/+11.90%, and its point-read p95 is
++15.48%. Small B-tree writes are +17.87% median/+26.98% p95. This candidate fails
+acceptance. Typical/many-key write p95 values are +26.30–46.75% despite large median
+gains; these tails also remain subject to investigation.
+
+Source review identifies an avoidable flush in B-tree serialization: calling
+`BufWriter::flush` forwards the flush through the container before its footer is
+appended. The follow-up drains the serializer with `into_inner`, propagating
+buffer-write errors and leaving the final page/footer/file flush to the container.
+Pinned standard-library source confirms that `into_inner` uses `flush_buf`, not
+the inner writer's `flush`. Existing container poisoning, length checks and final
+error propagation remain in effect. This changes no persisted encoding or reader.
+All 66 index unit tests, formatting and focused Clippy pass after draining the
+serializer buffer; parent revision, exact diff and logs are retained in
+`/private/tmp/logex-index-integrity-focused-9`. The remaining full-read regression
+requires further investigation before another acceptance comparison.

@@ -111,7 +111,12 @@ impl BTreeIndex {
             for bitmap in self.entries.values() {
                 bitmap.serialize_into(&mut writer)?;
             }
-            writer.flush()
+            // Drain only this serialization buffer. The container still has
+            // its final page/footer to append and owns the final file flush.
+            writer
+                .into_inner()
+                .map(|_| ())
+                .map_err(|error| error.into_error())
         })
     }
 }
