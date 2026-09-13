@@ -1,0 +1,564 @@
+{
+  "attempts": [
+    {
+      "command": [
+        "python3",
+        "tools/verify_datafusion_vendor.py"
+      ],
+      "elapsed_seconds": 0.05664666602388024,
+      "exit_code": 0,
+      "finished": "2026-09-13T22:55:08.272077+00:00",
+      "index": 1,
+      "log": "/private/tmp/logex-journal-origin-validation-1/01.log",
+      "log_sha256": "d8d80949d6f3378c14456842b531f0cade514179e4c94781b95ff9abb6447675",
+      "source_unchanged": true,
+      "started": "2026-09-13T22:55:08.215268+00:00",
+      "test_totals": {
+        "failed": 0,
+        "ignored": 0,
+        "passed": 0
+      }
+    },
+    {
+      "command": [
+        "cargo",
+        "+nightly-2026-08-24",
+        "fmt",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "elapsed_seconds": 0.7304852909874171,
+      "exit_code": 0,
+      "finished": "2026-09-13T22:55:09.015973+00:00",
+      "index": 2,
+      "log": "/private/tmp/logex-journal-origin-validation-1/02.log",
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "source_unchanged": true,
+      "started": "2026-09-13T22:55:08.285486+00:00",
+      "test_totals": {
+        "failed": 0,
+        "ignored": 0,
+        "passed": 0
+      }
+    },
+    {
+      "command": [
+        "cargo",
+        "+nightly-2026-08-24",
+        "check",
+        "--workspace",
+        "--all-targets",
+        "--locked",
+        "--offline"
+      ],
+      "elapsed_seconds": 5.746290541021153,
+      "exit_code": 0,
+      "finished": "2026-09-13T22:55:14.776013+00:00",
+      "index": 3,
+      "log": "/private/tmp/logex-journal-origin-validation-1/03.log",
+      "log_sha256": "71858e0dbcf736dd06c1784b60d6c83c330751adc508772b8688aaf12627a10d",
+      "source_unchanged": true,
+      "started": "2026-09-13T22:55:09.029694+00:00",
+      "test_totals": {
+        "failed": 0,
+        "ignored": 0,
+        "passed": 0
+      }
+    },
+    {
+      "command": [
+        "cargo",
+        "+nightly-2026-08-24",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--locked",
+        "--offline",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "elapsed_seconds": 5.925046207965352,
+      "exit_code": 0,
+      "finished": "2026-09-13T22:55:20.717481+00:00",
+      "index": 4,
+      "log": "/private/tmp/logex-journal-origin-validation-1/04.log",
+      "log_sha256": "f0915b2999b26fc0a49332eba3e6867c70811976f9b824431f1b8442b2a6a324",
+      "source_unchanged": true,
+      "started": "2026-09-13T22:55:14.792373+00:00",
+      "test_totals": {
+        "failed": 0,
+        "ignored": 0,
+        "passed": 0
+      }
+    },
+    {
+      "command": [
+        "cargo",
+        "+nightly-2026-08-24",
+        "test",
+        "--workspace",
+        "--all-targets",
+        "--locked",
+        "--offline"
+      ],
+      "elapsed_seconds": 276.5826337089529,
+      "exit_code": 0,
+      "finished": "2026-09-13T22:59:57.316885+00:00",
+      "index": 5,
+      "log": "/private/tmp/logex-journal-origin-validation-1/05.log",
+      "log_sha256": "cf12142fa5de781779bf46e3ff04ba7cd989a54c607e864a4f527469d6d90a5a",
+      "source_unchanged": true,
+      "started": "2026-09-13T22:55:20.736649+00:00",
+      "test_totals": {
+        "failed": 0,
+        "ignored": 23,
+        "passed": 1171
+      }
+    },
+    {
+      "command": [
+        "cargo",
+        "+nightly-2026-08-24",
+        "test",
+        "--workspace",
+        "--doc",
+        "--locked",
+        "--offline"
+      ],
+      "elapsed_seconds": 9.233941792044789,
+      "exit_code": 0,
+      "finished": "2026-09-13T23:00:06.591345+00:00",
+      "index": 6,
+      "log": "/private/tmp/logex-journal-origin-validation-1/06.log",
+      "log_sha256": "aa511b94bfbd91ffd56c159a0c7446038d364eead9587cf0ff225c77617ae09a",
+      "source_unchanged": true,
+      "started": "2026-09-13T22:59:57.357323+00:00",
+      "test_totals": {
+        "failed": 0,
+        "ignored": 0,
+        "passed": 0
+      }
+    },
+    {
+      "command": [
+        "cargo",
+        "+nightly-2026-08-24",
+        "build",
+        "-p",
+        "logex-node",
+        "--release",
+        "--locked",
+        "--offline"
+      ],
+      "elapsed_seconds": 51.22000691702124,
+      "exit_code": 0,
+      "finished": "2026-09-13T23:00:57.833773+00:00",
+      "index": 7,
+      "log": "/private/tmp/logex-journal-origin-validation-1/07.log",
+      "log_sha256": "324942f4b2d23d1ef816ed3e43969f2e61faa1cb041a2c28bbeace5bca31d586",
+      "source_unchanged": true,
+      "started": "2026-09-13T23:00:06.613191+00:00",
+      "test_totals": {
+        "failed": 0,
+        "ignored": 0,
+        "passed": 0
+      }
+    },
+    {
+      "command": [
+        "cargo",
+        "+nightly-2026-08-24",
+        "test",
+        "-p",
+        "logex-query",
+        "--release",
+        "--locked",
+        "--offline"
+      ],
+      "elapsed_seconds": 280.33779770799447,
+      "exit_code": 0,
+      "finished": "2026-09-13T23:05:38.207416+00:00",
+      "index": 8,
+      "log": "/private/tmp/logex-journal-origin-validation-1/08.log",
+      "log_sha256": "6e98eb7025daf5e067911447020ea5d125c7e2ed87ce26cadbed5bc239a1334b",
+      "source_unchanged": true,
+      "started": "2026-09-13T23:00:57.866300+00:00",
+      "test_totals": {
+        "failed": 0,
+        "ignored": 9,
+        "passed": 149
+      }
+    },
+    {
+      "command": [
+        "cargo",
+        "+nightly-2026-08-24",
+        "test",
+        "-p",
+        "logex-server",
+        "--release",
+        "--locked",
+        "--offline",
+        "--test",
+        "consistency"
+      ],
+      "elapsed_seconds": 65.2992603329476,
+      "exit_code": 0,
+      "finished": "2026-09-13T23:06:43.541888+00:00",
+      "index": 9,
+      "log": "/private/tmp/logex-journal-origin-validation-1/09.log",
+      "log_sha256": "e25722ccbad7e3d04ee0e524a05f8a41b238e445071dc6b76473eb0c9c36676b",
+      "source_unchanged": true,
+      "started": "2026-09-13T23:05:38.241881+00:00",
+      "test_totals": {
+        "failed": 0,
+        "ignored": 0,
+        "passed": 2
+      }
+    },
+    {
+      "command": [
+        "cargo",
+        "+nightly-2026-08-24",
+        "test",
+        "-p",
+        "logex-storage",
+        "--lib",
+        "journal_origin_commitment",
+        "--locked",
+        "--offline"
+      ],
+      "elapsed_seconds": 5.123048167093657,
+      "exit_code": 0,
+      "finished": "2026-09-13T22:50:08.802782+00:00",
+      "log": "/private/tmp/logex-source-identity-content-journal-review-1/after-fix/01.log",
+      "log_sha256": "8119f00d8febd45bd94c0b908c139a4f5055cf7ec94c569507e123a1ad424d33",
+      "source_unchanged": true,
+      "started": "2026-09-13T22:50:03.679206+00:00",
+      "test_totals": {
+        "failed": 0,
+        "ignored": 0,
+        "passed": 8
+      }
+    },
+    {
+      "command": [
+        "cargo",
+        "+nightly-2026-08-24",
+        "clippy",
+        "-p",
+        "logex-storage",
+        "--all-targets",
+        "--locked",
+        "--offline",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "elapsed_seconds": 1.576156041934155,
+      "exit_code": 0,
+      "finished": "2026-09-13T22:50:10.379967+00:00",
+      "log": "/private/tmp/logex-source-identity-content-journal-review-1/after-fix/02.log",
+      "log_sha256": "7cdbbbace70c4fbc3b753708c383cbf1b5fc3e0314eede2257bb5a92c095694d",
+      "source_unchanged": true,
+      "started": "2026-09-13T22:50:08.803764+00:00",
+      "test_totals": {
+        "failed": 0,
+        "ignored": 0,
+        "passed": 0
+      }
+    },
+    {
+      "command": [
+        "cargo",
+        "+nightly-2026-08-24",
+        "test",
+        "-p",
+        "logex-storage",
+        "--lib",
+        "--locked",
+        "--offline"
+      ],
+      "elapsed_seconds": 114.03161500010174,
+      "exit_code": 0,
+      "finished": "2026-09-13T22:52:04.413993+00:00",
+      "log": "/private/tmp/logex-source-identity-content-journal-review-1/after-fix/03.log",
+      "log_sha256": "33989095249a8f34b6d1e100b64cc8128af7d7461d7eab9295d263052b1a2a6e",
+      "source_unchanged": true,
+      "started": "2026-09-13T22:50:10.380847+00:00",
+      "test_totals": {
+        "failed": 0,
+        "ignored": 5,
+        "passed": 296
+      }
+    },
+    {
+      "command": [
+        "cargo",
+        "+nightly-2026-08-24",
+        "test",
+        "-p",
+        "logex-storage",
+        "--lib",
+        "journal_origin_commitment",
+        "--locked",
+        "--offline"
+      ],
+      "elapsed_seconds": 4.635801375028677,
+      "exit_code": 0,
+      "finished": "2026-09-13T22:53:27.235560+00:00",
+      "log": "/private/tmp/logex-source-identity-content-journal-review-1/after-cleanup/01.log",
+      "log_sha256": "3f5a5d3358283a36cfb963bf3045edaf01cf70c176be51af3845b77cd79b6997",
+      "source_unchanged": true,
+      "started": "2026-09-13T22:53:22.599465+00:00",
+      "test_totals": {
+        "failed": 0,
+        "ignored": 0,
+        "passed": 8
+      }
+    },
+    {
+      "command": [
+        "cargo",
+        "+nightly-2026-08-24",
+        "test",
+        "-p",
+        "logex-storage",
+        "--lib",
+        "recovery_rejects_a_divergent_clones_longer_logical_prefix",
+        "--locked",
+        "--offline"
+      ],
+      "elapsed_seconds": 0.6469361670315266,
+      "exit_code": 0,
+      "finished": "2026-09-13T22:53:27.884162+00:00",
+      "log": "/private/tmp/logex-source-identity-content-journal-review-1/after-cleanup/02.log",
+      "log_sha256": "4d43cb8092d345155dd4a1540ce716159337ee216b8fd65715c9216dec9913d7",
+      "source_unchanged": true,
+      "started": "2026-09-13T22:53:27.237188+00:00",
+      "test_totals": {
+        "failed": 0,
+        "ignored": 0,
+        "passed": 1
+      }
+    },
+    {
+      "command": [
+        "cargo",
+        "+nightly-2026-08-24",
+        "test",
+        "-p",
+        "logex-storage",
+        "--lib",
+        "legacy_wal_bytes_cannot_distinguish_new_rows_from_committed_replay",
+        "--locked",
+        "--offline"
+      ],
+      "elapsed_seconds": 0.3352029580855742,
+      "exit_code": 0,
+      "finished": "2026-09-13T22:53:28.220791+00:00",
+      "log": "/private/tmp/logex-source-identity-content-journal-review-1/after-cleanup/03.log",
+      "log_sha256": "5ec3ccbf39278a1038fca7b293f9a4a6627a0d7dc2ec6de866ff87fa33355ab0",
+      "source_unchanged": true,
+      "started": "2026-09-13T22:53:27.885556+00:00",
+      "test_totals": {
+        "failed": 0,
+        "ignored": 0,
+        "passed": 1
+      }
+    },
+    {
+      "command": [
+        "cargo",
+        "+nightly-2026-08-24",
+        "clippy",
+        "-p",
+        "logex-storage",
+        "--all-targets",
+        "--locked",
+        "--offline",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "elapsed_seconds": 1.4120441669365391,
+      "exit_code": 0,
+      "finished": "2026-09-13T22:53:29.633726+00:00",
+      "log": "/private/tmp/logex-source-identity-content-journal-review-1/after-cleanup/04.log",
+      "log_sha256": "78662876500fc4f73ad674239478d13692077f9019fa075d92d025690f6ba43f",
+      "source_unchanged": true,
+      "started": "2026-09-13T22:53:28.221645+00:00",
+      "test_totals": {
+        "failed": 0,
+        "ignored": 0,
+        "passed": 0
+      }
+    }
+  ],
+  "before_fix_production_equals_parent": true,
+  "focused_handoff": {
+    "after_cleanup": {
+      "affected_fixture_passed": 10,
+      "records": "after-cleanup/results.json",
+      "strict_clippy": "passed"
+    },
+    "after_fix_full_storage": {
+      "failed": 0,
+      "ignored": 5,
+      "passed": 296,
+      "records": "after-fix/results.json"
+    },
+    "before_fix": {
+      "cargo_exit_code": null,
+      "command": [
+        "cargo",
+        "+nightly-2026-08-24",
+        "test",
+        "-p",
+        "logex-storage",
+        "--lib",
+        "journal_origin_commitment",
+        "--locked",
+        "--offline"
+      ],
+      "exit_code_note": "The initial shell command printed the retained log with Python after Cargo; its final shell status was0. Cargo exit status was not separately captured. The untouched Cargo log explicitly records4 failed tests and its failure diagnostic; no exit value is reconstructed.",
+      "failed": 4,
+      "log_sha256": "32fce69669eafda6ecaae9c9c55c38c710690461fd898901204b4b4bfc29def9",
+      "passed": 4
+    },
+    "head": "b0650204ba61e66df436491d67527d9f55073913",
+    "patch_sha256": "4be1e7a829946602ffa2e7e001015fa32cf69bd9a7c8e9a7587d7637ac87ef5a",
+    "production_unchanged_by_test_helper_cleanup": true,
+    "scope": "Only storage.rs changed: recovery origin commitment comparison plus tiny normal-writer regressions/shared test helpers. No normal append, benchmark, SQL, journal format or sync barrier change. Root owns required gates/commit; no remote access or timing performed.",
+    "source_manifest_sha256": "daafafcad9d293d9745ad4843f5101fc0c18c441083f3084c63e258bdf7e8b90",
+    "status": "FOCUSED_CORRECTION_VALIDATED_UNCOMMITTED",
+    "storage_rs_sha256": "1fd43161d543d508c489949f1470fde0321b7d8802ce6a2f19e1ceb90befe8e8"
+  },
+  "limits": [
+    "Before-fix Cargo output reports four failed cases and four passing controls; the original wrapper did not retain Cargo exit separately. No exit value is inferred.",
+    "Full storage validation preceded test-helper consolidation; ten affected cases and strict Clippy passed afterward, followed by all nine gates on frozen final source.",
+    "Corrected-source performance, isolated distinct-mount tests, Linux/macOS CI, PR and merge remain pending.",
+    "The unmeasured b0650204 remote build predates this recovery-only fix and does not clear it."
+  ],
+  "parent_commit": "b0650204ba61e66df436491d67527d9f55073913",
+  "raw_evidence": {
+    "bytes": 367614,
+    "decoded_bytes": 1763463,
+    "files": 47,
+    "path": "2026-09-14-source-identity-journal-origin-1-raw.json.gz",
+    "sha256": "c7ee92debf13e7ddafa096ddd8b730bcb0dd1cf863bb6c0181919352666dd221"
+  },
+  "schema": 1,
+  "source_inventory": {
+    "Cargo.lock": "6fa31180fbacb1e40064507911d34c75a2cbd55eaef8d8f76807b94362a511dd",
+    "Cargo.toml": "5ece3c8c0c78ae1854831bedcfb693bae243dc4ed20c7d03e49b9ff1794ebfd2",
+    "crates/logex-cl/Cargo.toml": "f7c430f83ffb13398ab8edd41ee2dacd486002ae94ca3e3742b5ac829a16a6f6",
+    "crates/logex-cl/src/beacon_block.rs": "37d8e6d482d80be4ccc876215e810377c28675821be1f8c788d2e2e7992c3ce8",
+    "crates/logex-cl/src/chain.rs": "e27912d49270a7170aa111b24e6b768da6e619f63877aa2944106aa4aa16c801",
+    "crates/logex-cl/src/lib.rs": "3f65eccfda215e0b9b797e075526f94bc2eb0a74f5005102473a8060ae4bf933",
+    "crates/logex-cl/src/light_client.rs": "dc42588e5bfb50380f74dd1a622e4382a3f455a3500e64511acfad0726fc6905",
+    "crates/logex-cl/src/network.rs": "77fd65691adcf894024d77a8f305327ac6c16e58ff5948af2fd8577509969ab4",
+    "crates/logex-cl/src/rpc.rs": "6aaba97d14ce8e1d0f33c626ad83203a4cb518b40b4d2846b62a21197b10228e",
+    "crates/logex-index/Cargo.toml": "f2dc4175f78563a05b5f4370af099992477e3cde8846cc07aec895483c131585",
+    "crates/logex-index/src/bitmap.rs": "12c213a60a65e3abf412baae4744d2ccdba0eb7f852208cf4e38608ae8e90f44",
+    "crates/logex-index/src/btree.rs": "c18a0c6c50b6c3a3ee4aae6b19e869ff4eaea0a3b6775c3afca7a679d41338f5",
+    "crates/logex-index/src/builder.rs": "d4c127f4d1e7336455f6995c5c35a357d5e268ce60f475bd6f16148e6037d12c",
+    "crates/logex-index/src/composite.rs": "3dc6992e8cb634f9ecce2e9b85234abeb44644c7fe2d8c52cad32a360c71bd66",
+    "crates/logex-index/src/index_file.rs": "d64259c25f201e68e9f3066948ede0cd42ccaf99b93c5baa586fabbf64fff92f",
+    "crates/logex-index/src/lib.rs": "fd61f71eae03fc285110fa6999c5ec340cfc571929ca01ee204c988f77830061",
+    "crates/logex-index/src/transfer_bloom.rs": "92633aaa738093bcb311808418da7ee577e1a443be48369c0f6bada6ec572ff1",
+    "crates/logex-index/tests/index_performance.rs": "51edf3d5e16265842bdb8a961c9d7596fe940b6bb01a42af197e2d3ee050343a",
+    "crates/logex-node/Cargo.toml": "52b001c77274e4ec60010d68ed0f31c42d06a67562a4203f63b2e6d158b68f34",
+    "crates/logex-node/src/background.rs": "0fbf932e8082a8adb043a15bdb08ca6eb22529aece16da7fa774c77e1e86be8d",
+    "crates/logex-node/src/checkpoint.rs": "08268ada66013f797d42000333fe48f3cc30063b8730e5578ab2220bf7a9560f",
+    "crates/logex-node/src/cli.rs": "1383e32d4033e8f6f1bd33da2e9fed02ef83346f993f85b5f43d445a4bdcda3f",
+    "crates/logex-node/src/commands.rs": "cd88b3d00ef5e226bd4fa96cb6cf41480b5990f960d5a40339ad062f99fd9ec3",
+    "crates/logex-node/src/main.rs": "1812600ffccc6b263293bc71ba89acab4d20796ed0f48940075c08ca6d87e17f",
+    "crates/logex-node/src/runtime.rs": "8c4bf9a1d29333b3424078467451b485d377fe8c60e24421305d577f26175312",
+    "crates/logex-query/Cargo.toml": "0e565733dcd026b23dbd44acf41243622a2e541fd7c8634817f357d99b8d0684",
+    "crates/logex-query/src/json.rs": "1a06040dc0ea39ab2be754ed550da7b68b9cb205a31946d28732a5ac05815a57",
+    "crates/logex-query/src/lexer.rs": "f4c0c1a4ab084f156998627ff1aa7127ad8789a4d3e9c8ae4f35ad96117f5ea5",
+    "crates/logex-query/src/lib.rs": "f4505c3efbf061d8d5ccde171ae67720f179931fb33c20bd46153e59697ce6f7",
+    "crates/logex-query/src/native.rs": "71ff3b7954cc2c35d2d1f81d903d0f3281c08756eae0656cba17d4614426b9ea",
+    "crates/logex-query/src/sql.rs": "fa72ebc017c6c9c5e6a640b5ae87ef0ac343daf441639c9bf2f7620a05fa029a",
+    "crates/logex-query/tests/audit_harness.rs": "f70018f9aa42a3de4d05e86281406d14e039214d4ad02d82a56fa7a44c21f1b4",
+    "crates/logex-query/tests/pagination.rs": "918b46e2ab6b4acba5f523d4c6294eb2c42db383ceb6d06935a0fab72678cd75",
+    "crates/logex-query/tests/predicates.rs": "7e77ed9ff77427512f5d70ab0e3c9e6c072ec371035a7d62d694dcb946474424",
+    "crates/logex-query/tests/result_values.rs": "94abc377f92bff05cbf5092daa81fd2199b8c331af03cd080e5aa003e072489d",
+    "crates/logex-query/tests/snapshots.rs": "be8f56d0e7f6daa403d6fe0171db7dfadaf0d813750b1f8bb954c6cfa826f770",
+    "crates/logex-query/tests/sql_aggregates.rs": "724131b6bb099a8d8c216222624833a1c232ab2f7b6f0a6e8469859a87239678",
+    "crates/logex-query/tests/sql_grouping_aggregates.rs": "d5c15b02d9462cf6aaa72a0dd3501c28d582ef579a970af20125f2b9e34d55cb",
+    "crates/logex-query/tests/sql_identifiers.rs": "fb62fd353b4e03c3f6af4afc36b3a248d8ff60913d6b03a4491d16c600501c9a",
+    "crates/logex-query/tests/sql_limits.rs": "bfbbeabeea4cd1a0f18bad1849e0b80407cc1760e107097d06d30390b29041b7",
+    "crates/logex-query/tests/sql_metadata_semantics.rs": "f083f9442ba46af36bd0a83a02a6e1f5a9d46aae990d452ac279ad0654a9fb46",
+    "crates/logex-query/tests/sql_query_scope.rs": "2159137a2bcc4ad326de714e52fe231c17da84b1f08610e32daea472812544f9",
+    "crates/logex-query/tests/sql_syntax_eligibility.rs": "a8d4d3b34980db705659aa6580c297f1ba4748e9dc5b4f947650c025dc795f8d",
+    "crates/logex-server/Cargo.toml": "78b5c42af076a1abdf14be1a4149523298f5b52d3946f4d2bfe4a50622c534f6",
+    "crates/logex-server/build.rs": "f59737ffee5414ad249cdb156f647b90fbe2e65cdc7bde6c4add1395acb20dc1",
+    "crates/logex-server/src/eth_filter.rs": "c0b345325cfec09b91aa844b7557c1c969e474c434bb0aba2e6444668a77962d",
+    "crates/logex-server/src/grpc.rs": "4e97b08de043ea600fd4f0eb3e8e36c0edc635621ef21b643dec1eea91d0d767",
+    "crates/logex-server/src/handler.rs": "e06da2eceb84b538d7924c0b40576e94f170b042069eb178f625efca615c8ff2",
+    "crates/logex-server/src/jsonrpc.rs": "23486befd867b3569ba81c2e173d2fc214b67888d1ead555bdbf6996ee53f172",
+    "crates/logex-server/src/lib.rs": "71fe0a2ac9957b894c26d5ac661e5a8c3feb7701837c3d0cdb9ad2daf5c83cfe",
+    "crates/logex-server/src/rest.rs": "b164bd57197dbeaf09ab765b4da0078b286e052c078b99874a111cdfe51f4e27",
+    "crates/logex-server/src/storage_metrics.rs": "60b3527593e7130c6f1d0f43a65d6bb271b70778eecf6c37db0f2a02f73843f9",
+    "crates/logex-server/src/ws.rs": "eb8a61c96aaa825eb0c50346bfecf1651603743183ec5c9e769754812d0c02e7",
+    "crates/logex-server/tests/consistency.rs": "229d1c1894752e60ca539ba5e9f39d3a512f7afa0686930b28a912d76d968bbe",
+    "crates/logex-server/tests/query_latency.rs": "a9646a38920f6060796224dc56da70e274caa6cbfd50f64d54bb70bc4ae75dc3",
+    "crates/logex-storage/Cargo.toml": "60569fc34a01c68ebabe787a26b3c1c35611e40feb5fa21b35613e1b9a00f01c",
+    "crates/logex-storage/src/bundle.rs": "d101622a6cc7e933f5955b97c6a9813c5752381ab97be37f1d0ce8b065005a04",
+    "crates/logex-storage/src/column.rs": "2dbfe030a775bdcbaa363e4139f697fe9d6ee257fa858ab4f3c7aa3d36a88de1",
+    "crates/logex-storage/src/column_artifact.rs": "7f5ac7b93e8370aecc78f6da1d693c7fb7b444f62e85f4d3becf46205dd417a9",
+    "crates/logex-storage/src/commitment.rs": "57ac1ef175b8a31d7272f7cd8c0f86bc222d19e538086567dbd9d928c20f3fae",
+    "crates/logex-storage/src/compression.rs": "b4c3bfd6a8f12149d991999fffb879469659ac71b445d5bd83322c6672b45672",
+    "crates/logex-storage/src/durability.rs": "dc5c79fb443974e1b2f3a233a93ce560aace1254beb7e7612b0b5dacf8492299",
+    "crates/logex-storage/src/index_checkpoint.rs": "b5c816c05536df8a244193dacf595fec97980a03d98132027aad4ce4e2b469de",
+    "crates/logex-storage/src/lib.rs": "e32cbe0571c8810740891e9c5044722afbf224a047047e983cd775b3840f3193",
+    "crates/logex-storage/src/native/catalog.rs": "3eac3b7f83857ab223a59f57be9e5263b0a7ad113510d998827e710e9e7088c7",
+    "crates/logex-storage/src/native/filter.rs": "597c668be531e099bbd6fa9612fa4e74746553b77c63d67f386748551bcc9c9c",
+    "crates/logex-storage/src/native/mod.rs": "9c6e269db40134c5eb4c124dbba9e9d8a018f849324ad260e55c6be53bc863e3",
+    "crates/logex-storage/src/native/recovery.rs": "f1275e81497d3d9a4a6fa5bfa2e8d39ee9440575b62d3a5cb550b6616b9e6350",
+    "crates/logex-storage/src/native/segment.rs": "a45c3d505b22189d07ebce78c3b683958c970d304b46baf5cf57740cf9c59ea4",
+    "crates/logex-storage/src/native/storage.rs": "1fd43161d543d508c489949f1470fde0321b7d8802ce6a2f19e1ceb90befe8e8",
+    "crates/logex-storage/src/page.rs": "436360c0d114d6c55c0d5089827aa23784bc845388c6ae899423eb8078e798b3",
+    "crates/logex-storage/src/partition.rs": "bf2c2796b2c778a86808984c438ae9893b9b766baf7c1ee75aaa539a68200d99",
+    "crates/logex-storage/src/reader.rs": "f5902b88e94874991eb230cb70e7ad70798b7de2fec256e7ba01580dbf3a7fa7",
+    "crates/logex-storage/src/segment_reader.rs": "bc8b083c5bbe0f1475ae1c14dd42fb107478fd4582b75cb13e76434ee1acd25c",
+    "crates/logex-storage/src/state.rs": "c16e73e2f79523fea58ea0d3b47413bdc826ccbb99cd9036a8c58fd67cdd3f7f",
+    "crates/logex-storage/src/wal.rs": "51f09f4fc5b3627117b3e08eed01a3b4cbb21fefc7e2b396ce300f6d3c6a4637",
+    "crates/logex-storage/tests/ingestion_publication.rs": "c87085b1684937ee669cad376493c9a8d7f4008b2a82cf14228c3ba93e880f50",
+    "crates/logex-storage/tests/page_decode_performance.rs": "083eef31c23a455406c0c2e6e2b74b2f846d0b5bbb58a91a825d02ae993914b0",
+    "crates/logex-sync/Cargo.toml": "e6fbc9b705966cbde6b115920ff25382fc5a36a36c9b2ebfabaa18a642d5afa2",
+    "crates/logex-sync/src/engine/anchored.rs": "af1d2b98ec2ac951ca8333202bd09eda872cbf012844f6190fefb115c147077e",
+    "crates/logex-sync/src/engine/helpers.rs": "42c7dec60e2047c2ac9cb2171f77b57f9b3fc95c8d9675ba0070f5a6818dc88b",
+    "crates/logex-sync/src/engine/historical.rs": "d212dad25d1cc887047a98d6ff89c9f182d5a0d7a88176fba37e9426f733a00b",
+    "crates/logex-sync/src/engine/ingest.rs": "936204bc39c3ea014ada56c4bcf7b7247ec7beb2c72734cf454b000ec0e0f75b",
+    "crates/logex-sync/src/engine/live.rs": "0391d41a7c35a532a8ccc2227100b52d8631453746a5f08368ce68751ce7eb5f",
+    "crates/logex-sync/src/engine/mod.rs": "453509e1f64d7e519de2db4b298ca212d0b00d898bf9b06cef2ce905a1821920",
+    "crates/logex-sync/src/extract.rs": "371d174ac05044c2889c3155806bc00f93047fbb9fee28ab172182b5e3b5abfa",
+    "crates/logex-sync/src/head_tracker.rs": "3ab5ddd49595d6f8f9d863599cab4108c6f41fdd2f8ac85566b6c606fe7e5cbf",
+    "crates/logex-sync/src/lib.rs": "222455fc519556742b5315b40a021020b77587e6510ab04e788b52560c0f4b6f",
+    "crates/logex-sync/src/p2p/mod.rs": "e4ba28680152c8a75ff66c460500f17583b5df5bc7c048ae21e8d629fb0b0851",
+    "crates/logex-sync/src/p2p/peer_manager/lifecycle.rs": "95486bb6f80822d36de6593b34a6827852833d61b8821118df3c3e9c1d5cd6eb",
+    "crates/logex-sync/src/p2p/peer_manager/mod.rs": "f08285672917b6ea0390821825e05ef338d7c7c6d6b56b5e0a81d6ba874ee7a2",
+    "crates/logex-sync/src/p2p/peer_manager/requests.rs": "72523f5b7aae25703023a0fcce37c7becb0751bc8f34c72b3f172a63ed65ef87",
+    "crates/logex-sync/src/p2p/peer_manager/state.rs": "25945a5b0eba2de5bd74b38fbfd98c41089d0e96b126c79fc9ea2ce1b62702ee",
+    "crates/logex-sync/src/p2p/persistence.rs": "37f6300be755285a449f51c9844c6f2da9e996d9f50cfaefd9e125c26dceafa8",
+    "crates/logex-sync/src/p2p/serve_cache.rs": "6a591cfd39679972990f8e42eba63e15034ee013391601f40cc4b735f7a9355e",
+    "crates/logex-sync/src/primitives.rs": "b656669b0802d7e58495bafff902e08644e5b640d72db219b4a5dc031e0f2031",
+    "crates/logex-sync/src/progress.rs": "aa93744a7dbb1bff4bbdb0dcfaf099ed1c2d85a5bb458edf497cb575b285db89",
+    "crates/logex-sync/src/validation.rs": "c395c7c3d01af52bb61bf2a374aff12ae7cedeb3d96398d159ca1f270375e1ee",
+    "crates/logex-types/Cargo.toml": "a83fb766442578126afed84af02363a17ddfe6c16d794e7bdec0919262ceec8a",
+    "crates/logex-types/src/consensus.rs": "80af9a68a75d4c85f292d4e0de168f0088f3b975a85988e434ad9f8ded5ba563",
+    "crates/logex-types/src/lib.rs": "e739e7ba447bb5ee56372b14c5121f038fb4631ff01d59c2015a56f529635aaa",
+    "crates/logex-types/src/log_row.rs": "e1256215e34688acac04b0dc1dcd4ed0d18fbd66667e768bc3087076da8b81ee",
+    "crates/logex-types/src/partition.rs": "d1f5a087d07164b02fbbd0521d1084478b2ca6fa5c8be93a1ad2a5f0bfadddb8",
+    "crates/logex-types/src/sync.rs": "cf67a604309ede4f5565e1a8c1ffc1ffea6587727e6b68f02f918469cedd599a",
+    "rust-toolchain.toml": "9fdf6a644a249a8bb0417289da8894eecb0de8cdcae1a8267327ea24fa75a276"
+  },
+  "source_patch_sha256": "4be1e7a829946602ffa2e7e001015fa32cf69bd9a7c8e9a7587d7637ac87ef5a",
+  "status": "LOCAL_CORRECTNESS_GATES_PASSED_PERFORMANCE_PENDING",
+  "verification": "Root verified current source, final patch, exact log hashes, test totals and every archived byte."
+}

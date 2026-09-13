@@ -16,13 +16,21 @@ performance rules, with no declared stop. This clears that measured workload
 conditionally; it does not reclassify or pool the original packet. Mac-mini was
 released at 2026-09-13 21:36:37 UTC with no audit processes remaining.
 A newly reproduced divergent-copy identity failure required a further correction.
-The logical-prefix implementation now passes all nine local gates, including
+The logical-prefix implementation at `b0650204` passes all nine local gates, including
 1,163 workspace tests, 149 release query tests and two release API consistency
 tests. The [complete validation evidence](baselines/2026-09-14-source-identity-content-validation-1.json)
 retains the exact source, commands and logs, including the initial loopback
 permission failure and unchanged-source passing run with the required access.
 New-source performance validation, exact-head Linux/macOS CI, PR and merge remain
 pending. The earlier namespace measurements do not clear the new implementation.
+A further journal-origin regression confirms a missing recovery check, described
+below. Its recovery-only correction now passes all nine local gates: 1,171
+workspace tests (23 ignored), 149 release query tests (nine ignored), two release
+API consistency tests, documentation checks and the release node build. The
+[journal-origin evidence](baselines/2026-09-14-source-identity-journal-origin-1.json)
+retains the reproduction, exact final patch/source inventory and complete logs.
+The isolated Mac-mini
+build of `b0650204` is unmeasured and will not clear that subsequent correction.
 Earlier candidates and rejected experiments are retained below as audit history,
 not separate accepted implementations.
 
@@ -58,6 +66,30 @@ bit changes preserve the row commitment; legacy contents without one remain
 unidentified for indexing. No additional per-batch disk flush is added. Final
 integration checks and a new performance comparison remain required before
 acceptance.
+
+### Interrupted transactions from divergent copies
+
+Restart previously compared a journal's saved segment ID, generation, namespace
+and row boundary with the catalog, but omitted its saved logical-prefix root.
+An intact journal and WAL produced in one complete database copy could therefore
+be replayed onto a different copy with an equal-length but different prefix.
+This admits an unrelated transaction origin; it does not demonstrate a wrong
+commitment being assigned to the resulting rows.
+
+Eight small normal-writer cases cover both journal versions, with zero or one
+row already applied, for matching and divergent prefixes. Before the correction,
+all four divergent-origin cases fail and all four matching controls pass. The
+correction compares roots directly at the original row boundary. If the catalog
+has progressed, it extends the saved root over the already-read applied suffix
+and compares with the catalog's current root. This preserves valid interrupted
+progress without rereading the old prefix or adding work to normal ingestion.
+The divergent-origin cases require rejection before any catalog, segment, WAL or
+journal bytes change; valid recovery must produce exactly seven expected rows
+and retire the transaction. All nine corrected-source gates pass. The original
+before-fix wrapper did not separately capture Cargo's exit code; the untouched
+test log reports four failures and four passing controls, with no inferred exit
+value. The before-fix production source is verified identical to `b0650204`.
+Corrected-source performance and separate-mount checks remain pending.
 
 ## Logical-prefix commitment and compatibility
 
@@ -97,6 +129,8 @@ the marker or rewriting files. A donor with a longer but different committed
 prefix is rejected; a longer copy with the same retained prefix recovers exactly.
 The recovery capability binds the expected root and boundary. Missing legacy
 commitments are never inferred from a namespace or row count.
+Journal recovery additionally binds its saved transaction origin to the catalog
+root, accounting for any already-applied starting-segment suffix.
 
 | Persisted artifact | Current format and compatibility |
 |---|---|
@@ -119,7 +153,8 @@ binary; version fields must not be manually changed to bypass the fence.
 Regressions cover divergent indexes, recovery prefix substitution with a
 valid-copy control, append grouping and every row field, previous-prefix capture,
 legacy index eligibility, and public query snapshot behavior. All nine local
-workspace/release gates pass. The 23 existing ignored workspace tests include
+workspace/release gates also pass after the journal-origin correction.
+The 23 existing ignored workspace tests include
 four distinct-mount recovery tests still awaiting isolated execution. New-source
 performance and CI remain pending; these changes are not yet accepted for
 deployment.

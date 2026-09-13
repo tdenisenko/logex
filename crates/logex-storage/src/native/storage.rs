@@ -2098,6 +2098,18 @@ impl NativeStorage {
                 "WAL starting position no longer matches the catalog",
             ));
         }
+        let invalid_commitment = || {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "WAL starting prefix commitment does not match the catalog's transaction origin",
+            )
+        };
+        if start.source_commitment.is_some() != journal.start.source_commitment.is_some()
+            || (start.row_count == journal.start.row_count
+                && start.source_commitment != journal.start.source_commitment)
+        {
+            return Err(invalid_commitment());
+        }
         let mut segments = self
             .catalog
             .segments
@@ -2173,6 +2185,7 @@ impl NativeStorage {
             let end = u32::try_from(segment.row_count).map_err(|_| {
                 io::Error::new(io::ErrorKind::InvalidData, "WAL row address exceeds u32")
             })?;
+            let applied_before_segment = applied.len();
             let mut first = first;
             while first < end {
                 let chunk_end = first.saturating_add(8192).min(end);
@@ -2180,6 +2193,17 @@ impl NativeStorage {
                 applied.try_reserve(ids.len()).map_err(io::Error::other)?;
                 applied.extend(reader.read_log_rows(Some(&ids))?);
                 first = chunk_end;
+            }
+            if segment.id == journal.start.id {
+                // A legitimate interrupted transaction can advance the catalog.
+                // Bind its saved origin to that publication using only the WAL
+                // suffix already read above, without rereading the old prefix.
+                let expected = journal.start.source_commitment.map(|root| {
+                    crate::commitment::extend(root, &applied[applied_before_segment..])
+                });
+                if expected != segment.source_commitment {
+                    return Err(invalid_commitment());
+                }
             }
         }
         Ok(applied)
@@ -3018,6 +3042,33 @@ mod tests {
             assert!(current.is_valid());
             drop(storage);
             assert!(!current.is_valid());
+        }
+    }
+
+    fn copy_fixture_tree(source: &Path, destination: &Path) {
+        fs::create_dir_all(destination).unwrap();
+        for entry in fs::read_dir(source).unwrap() {
+            let source = entry.unwrap().path();
+            let destination = destination.join(source.file_name().unwrap());
+            if source.is_dir() {
+                copy_fixture_tree(&source, &destination);
+            } else {
+                fs::copy(source, destination).unwrap();
+            }
+        }
+    }
+
+    fn snapshot_fixture_tree(root: &Path, dir: &Path, files: &mut BTreeMap<PathBuf, Vec<u8>>) {
+        for entry in fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                snapshot_fixture_tree(root, &path, files);
+            } else {
+                files.insert(
+                    path.strip_prefix(root).unwrap().to_owned(),
+                    fs::read(path).unwrap(),
+                );
+            }
         }
     }
 
@@ -6615,6 +6666,139 @@ mod tests {
         assert_eq!(actual, expected);
     }
 
+    fn check_journal_origin_commitment(checkpoint: bool, applied: bool, divergent: bool) {
+        let target = TempDir::new().unwrap();
+        let donor = TempDir::new().unwrap();
+        let config = NativeStorageConfig {
+            data_dir: target.path().to_owned(),
+            hot_target_rows: 32,
+            compaction_safety_margin_blocks: 2_048,
+        };
+        let mut storage = NativeStorage::open(config.clone()).unwrap();
+        storage.write_batch(&make_rows(2, 100)).unwrap();
+        storage.checkpoint().unwrap();
+        drop(storage);
+        copy_fixture_tree(target.path(), donor.path());
+        let mut target_storage = NativeStorage::open(config.clone()).unwrap();
+        let mut donor_storage = NativeStorage::open(NativeStorageConfig {
+            data_dir: donor.path().to_owned(),
+            ..config.clone()
+        })
+        .unwrap();
+        target_storage.write_batch(&make_rows(2, 200)).unwrap();
+        donor_storage
+            .write_batch(&make_rows(2, if divergent { 300 } else { 200 }))
+            .unwrap();
+        target_storage.checkpoint().unwrap();
+        donor_storage.checkpoint().unwrap();
+        let id = target_storage.catalog.active_hot_segment.unwrap();
+        let target_prefix = SegmentReader::open(&target_storage.segment_path(id))
+            .unwrap()
+            .read_log_rows(None)
+            .unwrap();
+        let pending = make_rows(3, 400);
+        // Stop at existing writer phase boundaries; no journal bytes or checksums
+        // are synthesized. The donor has durable intent but no applied rows.
+        if checkpoint {
+            donor_storage
+                .begin_checkpoint_batch(&pending, IngestRoute::Live)
+                .unwrap();
+        } else {
+            donor_storage.begin_wal_batch(&pending).unwrap();
+        }
+        if applied {
+            // Existing WAL recovery phase helper publishes a committed prefix
+            // without retiring the whole transaction. This exercises a catalog
+            // commitment legitimately newer than the journal's starting root.
+            target_storage.begin_wal_batch(&pending).unwrap();
+            target_storage
+                .commit_rows_to_segments(&pending[..1])
+                .unwrap();
+        }
+        drop(target_storage);
+        drop(donor_storage);
+        for name in ["recovery.json", "pending.wal"] {
+            fs::copy(
+                donor.path().join("wal").join(name),
+                target.path().join("wal").join(name),
+            )
+            .unwrap();
+        }
+        let mut before = BTreeMap::new();
+        snapshot_fixture_tree(target.path(), target.path(), &mut before);
+        let result = NativeStorage::open(config);
+        if divergent {
+            let error = match result {
+                Ok(storage) => {
+                    drop(storage);
+                    panic!("foreign journal origin commitment was accepted");
+                }
+                Err(error) => error,
+            };
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+            assert!(
+                error.to_string().contains("WAL starting prefix commitment"),
+                "{error}"
+            );
+            let mut after = BTreeMap::new();
+            snapshot_fixture_tree(target.path(), target.path(), &mut after);
+            assert_eq!(
+                after, before,
+                "rejection changed catalog, source prefix or transaction evidence"
+            );
+        } else {
+            let storage = result.unwrap();
+            let actual = SegmentReader::open(&storage.segment_path(id))
+                .unwrap()
+                .read_log_rows(None)
+                .unwrap();
+            assert_eq!(actual, [target_prefix, pending].concat());
+            assert_eq!(storage.total_rows(), 7);
+            assert!(storage.wal.read_all().unwrap().is_empty());
+            assert!(!RecoveryJournal::path(&storage.paths).exists());
+        }
+    }
+
+    #[test]
+    fn journal_origin_commitment_batch_unapplied_matching() {
+        check_journal_origin_commitment(false, false, false);
+    }
+
+    #[test]
+    fn journal_origin_commitment_batch_unapplied_foreign() {
+        check_journal_origin_commitment(false, false, true);
+    }
+
+    #[test]
+    fn journal_origin_commitment_batch_partly_applied_matching() {
+        check_journal_origin_commitment(false, true, false);
+    }
+
+    #[test]
+    fn journal_origin_commitment_batch_partly_applied_foreign() {
+        check_journal_origin_commitment(false, true, true);
+    }
+
+    #[test]
+    fn journal_origin_commitment_checkpoint_unapplied_matching() {
+        check_journal_origin_commitment(true, false, false);
+    }
+
+    #[test]
+    fn journal_origin_commitment_checkpoint_unapplied_foreign() {
+        check_journal_origin_commitment(true, false, true);
+    }
+
+    #[test]
+    fn journal_origin_commitment_checkpoint_partly_applied_matching() {
+        check_journal_origin_commitment(true, true, false);
+    }
+
+    #[test]
+    fn journal_origin_commitment_checkpoint_partly_applied_foreign() {
+        check_journal_origin_commitment(true, true, true);
+    }
+
     #[test]
     fn journal_replay_rejects_mismatched_payload_and_committed_prefix() {
         for damage in 0..4 {
@@ -7638,18 +7822,6 @@ mod tests {
 
     #[test]
     fn recovery_rejects_a_divergent_clones_longer_logical_prefix() {
-        fn copy_tree(source: &Path, destination: &Path) {
-            fs::create_dir_all(destination).unwrap();
-            for entry in fs::read_dir(source).unwrap() {
-                let path = entry.unwrap().path();
-                let target = destination.join(path.file_name().unwrap());
-                if path.is_dir() {
-                    copy_tree(&path, &target);
-                } else {
-                    fs::copy(&path, &target).unwrap();
-                }
-            }
-        }
         for divergent in [false, true] {
             let target = TempDir::new().unwrap();
             let donor = TempDir::new().unwrap();
@@ -7662,7 +7834,7 @@ mod tests {
             storage.write_batch(&make_rows(2, 100)).unwrap();
             storage.checkpoint().unwrap();
             drop(storage);
-            copy_tree(target.path(), donor.path());
+            copy_fixture_tree(target.path(), donor.path());
             let mut target_storage = NativeStorage::open(config.clone()).unwrap();
             let mut donor_storage = NativeStorage::open(NativeStorageConfig {
                 data_dir: donor.path().to_owned(),
@@ -7692,7 +7864,7 @@ mod tests {
             drop(target_storage);
             drop(donor_storage);
             fs::remove_dir_all(&target_dir).unwrap();
-            copy_tree(&donor_dir, &target_dir);
+            copy_fixture_tree(&donor_dir, &target_dir);
             let canonical_before = fs::read(target_dir.join("canonical.bitmap")).unwrap();
             let marker_before = fs::read(target_dir.join(".source-publication")).unwrap();
             match NativeStorage::open(config) {
@@ -7726,32 +7898,6 @@ mod tests {
 
     #[test]
     fn legacy_wal_bytes_cannot_distinguish_new_rows_from_committed_replay() {
-        fn copy_tree(source: &Path, destination: &Path) {
-            for entry in fs::read_dir(source).unwrap() {
-                let path = entry.unwrap().path();
-                let target = destination.join(path.file_name().unwrap());
-                if path.is_dir() {
-                    fs::create_dir(&target).unwrap();
-                    copy_tree(&path, &target);
-                } else {
-                    fs::copy(path, target).unwrap();
-                }
-            }
-        }
-
-        fn snapshot(root: &Path, dir: &Path, files: &mut BTreeMap<PathBuf, Vec<u8>>) {
-            for entry in fs::read_dir(dir).unwrap() {
-                let path = entry.unwrap().path();
-                if path.is_dir() {
-                    snapshot(root, &path, files);
-                } else {
-                    files.insert(
-                        path.strip_prefix(root).unwrap().to_path_buf(),
-                        fs::read(path).unwrap(),
-                    );
-                }
-            }
-        }
         let initialized = TempDir::new().unwrap();
         let initial_config = NativeStorageConfig {
             data_dir: initialized.path().to_path_buf(),
@@ -7761,8 +7907,8 @@ mod tests {
         drop(NativeStorage::open(initial_config).unwrap());
         let new_batch = TempDir::new().unwrap();
         let committed_batch = TempDir::new().unwrap();
-        copy_tree(initialized.path(), new_batch.path());
-        copy_tree(initialized.path(), committed_batch.path());
+        copy_fixture_tree(initialized.path(), new_batch.path());
+        copy_fixture_tree(initialized.path(), committed_batch.path());
         let rows = make_rows(1, 100);
         for (dir, already_committed) in [(new_batch.path(), false), (committed_batch.path(), true)]
         {
@@ -7783,8 +7929,8 @@ mod tests {
         }
         let mut new_files = BTreeMap::new();
         let mut committed_files = BTreeMap::new();
-        snapshot(new_batch.path(), new_batch.path(), &mut new_files);
-        snapshot(
+        snapshot_fixture_tree(new_batch.path(), new_batch.path(), &mut new_files);
+        snapshot_fixture_tree(
             committed_batch.path(),
             committed_batch.path(),
             &mut committed_files,
