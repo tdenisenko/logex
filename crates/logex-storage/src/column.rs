@@ -207,11 +207,24 @@ fn read_source_marker(dir: &Path) -> io::Result<Option<SourceMarker>> {
         }
         Err(error) => return Err(error),
     };
+    // Marker publication always replaces an immutable inode. Checking length
+    // on this opened handle therefore describes the same bytes read below.
+    let marker_len = file.metadata()?.len();
+    if marker_len < SOURCE_MARKER_BYTES as u64 {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "truncated raw source publication marker",
+        ));
+    }
+    if marker_len > SOURCE_MARKER_BYTES as u64 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "oversized raw source publication marker",
+        ));
+    }
     let mut bytes = [0; SOURCE_MARKER_BYTES];
     file.read_exact(&mut bytes)?;
-    let mut trailing = [0; 1];
-    if file.read(&mut trailing)? != 0
-        || bytes.get(..8) != Some(SOURCE_MARKER_MAGIC.as_slice())
+    if bytes.get(..8) != Some(SOURCE_MARKER_MAGIC.as_slice())
         || crc32fast::hash(&bytes[..50]).to_le_bytes() != bytes[50..]
     {
         return Err(io::Error::new(
@@ -1786,5 +1799,41 @@ mod tests {
             assert_eq!(fs::read(&sentinel).unwrap(), b"unchanged");
             assert!(!dir.path().join("address.col").exists());
         }
+    }
+
+    #[test]
+    fn source_marker_rejects_truncated_and_oversized_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(SOURCE_MARKER_FILE);
+        let identity = SourceIdentity {
+            namespace: [4; 16],
+            generation: 2,
+            segment_id: 3,
+            kind: SegmentKind::Hot,
+        };
+        write_source_marker(
+            dir.path(),
+            SourceMarker::new(identity, SOURCE_COMMITTED, 0),
+            durability::Publication::Deferred,
+        )
+        .unwrap();
+        let exact = fs::read(&path).unwrap();
+        assert_eq!(
+            read_source_namespace(dir.path()).unwrap(),
+            Some(identity.namespace)
+        );
+
+        fs::write(&path, &exact[..exact.len() - 1]).unwrap();
+        assert_eq!(
+            read_source_namespace(dir.path()).unwrap_err().kind(),
+            io::ErrorKind::UnexpectedEof
+        );
+        let mut oversized = exact;
+        oversized.push(0);
+        fs::write(path, oversized).unwrap();
+        assert_eq!(
+            read_source_namespace(dir.path()).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
     }
 }
