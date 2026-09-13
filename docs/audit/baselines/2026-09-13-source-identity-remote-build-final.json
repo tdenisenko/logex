@@ -1,0 +1,600 @@
+{
+  "schema": 1,
+  "status": "built_not_executed",
+  "build": {
+    "acceptance_data": false,
+    "archive_sha256_after_builds": "e71ab97d8888fadc8c435498cd2fd5eca53534ed811a8b2d7c8d7cda502378df",
+    "archive_sha256_expected": "e71ab97d8888fadc8c435498cd2fd5eca53534ed811a8b2d7c8d7cda502378df",
+    "artifacts": [
+      {
+        "compiler_artifact": {
+          "executable": "/private/tmp/logex-source-identity-controls-4.uHyHMD/target/release/build/logex-query/a3ae423eb5cb1cbf/out/audit_harness-a3ae423eb5cb1cbf",
+          "features": [],
+          "filenames": [
+            "/private/tmp/logex-source-identity-controls-4.uHyHMD/target/release/build/logex-query/a3ae423eb5cb1cbf/out/audit_harness-a3ae423eb5cb1cbf"
+          ],
+          "fresh": false,
+          "manifest_path": "/private/tmp/logex-source-identity-controls-4.uHyHMD/source/crates/logex-query/Cargo.toml",
+          "package_id": "path+file:///private/tmp/logex-source-identity-controls-4.uHyHMD/source/crates/logex-query#0.1.0",
+          "profile": {
+            "debug_assertions": false,
+            "debuginfo": 0,
+            "opt_level": "3",
+            "overflow_checks": false,
+            "test": true
+          },
+          "reason": "compiler-artifact",
+          "target": {
+            "crate_types": [
+              "bin"
+            ],
+            "doc": false,
+            "doctest": false,
+            "edition": "2024",
+            "kind": [
+              "test"
+            ],
+            "name": "audit_harness",
+            "src_path": "/private/tmp/logex-source-identity-controls-4.uHyHMD/source/crates/logex-query/tests/audit_harness.rs",
+            "test": true
+          }
+        },
+        "original_path": "/private/tmp/logex-source-identity-controls-4.uHyHMD/target/release/build/logex-query/a3ae423eb5cb1cbf/out/audit_harness-a3ae423eb5cb1cbf",
+        "package": "logex-query",
+        "retained_path": "/private/tmp/logex-source-identity-controls-4.uHyHMD/target/retained-binaries/audit_harness",
+        "sha256": "36c6dc4eb04a86e08dc4b5dbd0be0fa4e0bf987550163f31c6eb52817d6978f7",
+        "target": "audit_harness",
+        "zstd_compiler_artifact": {
+          "executable": null,
+          "features": [
+            "arrays",
+            "default",
+            "experimental",
+            "legacy",
+            "zdict_builder"
+          ],
+          "filenames": [
+            "/private/tmp/logex-source-identity-controls-4.uHyHMD/target/release/build/zstd/36672561848f231d/out/libzstd-36672561848f231d.rlib",
+            "/private/tmp/logex-source-identity-controls-4.uHyHMD/target/release/build/zstd/36672561848f231d/out/libzstd-36672561848f231d.rmeta"
+          ],
+          "fresh": false,
+          "manifest_path": "/private/tmp/logex-source-identity-controls-4.uHyHMD/tmp/cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/zstd-0.13.3/Cargo.toml",
+          "package_id": "registry+https://github.com/rust-lang/crates.io-index#zstd@0.13.3",
+          "profile": {
+            "debug_assertions": false,
+            "debuginfo": 0,
+            "opt_level": "3",
+            "overflow_checks": false,
+            "test": false
+          },
+          "reason": "compiler-artifact",
+          "target": {
+            "crate_types": [
+              "lib"
+            ],
+            "doc": true,
+            "doctest": true,
+            "edition": "2018",
+            "kind": [
+              "lib"
+            ],
+            "name": "zstd",
+            "src_path": "/private/tmp/logex-source-identity-controls-4.uHyHMD/tmp/cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/zstd-0.13.3/src/lib.rs",
+            "test": true
+          }
+        },
+        "zstd_version": "0.13.3"
+      },
+      {
+        "compiler_artifact": {
+          "executable": "/private/tmp/logex-source-identity-controls-4.uHyHMD/target/release/build/logex-storage/d2bd2cb5cbc63457/out/ingestion_publication-d2bd2cb5cbc63457",
+          "features": [],
+          "filenames": [
+            "/private/tmp/logex-source-identity-controls-4.uHyHMD/target/release/build/logex-storage/d2bd2cb5cbc63457/out/ingestion_publication-d2bd2cb5cbc63457"
+          ],
+          "fresh": false,
+          "manifest_path": "/private/tmp/logex-source-identity-controls-4.uHyHMD/source/crates/logex-storage/Cargo.toml",
+          "package_id": "path+file:///private/tmp/logex-source-identity-controls-4.uHyHMD/source/crates/logex-storage#0.1.0",
+          "profile": {
+            "debug_assertions": false,
+            "debuginfo": 0,
+            "opt_level": "3",
+            "overflow_checks": false,
+            "test": true
+          },
+          "reason": "compiler-artifact",
+          "target": {
+            "crate_types": [
+              "bin"
+            ],
+            "doc": false,
+            "doctest": false,
+            "edition": "2024",
+            "kind": [
+              "test"
+            ],
+            "name": "ingestion_publication",
+            "src_path": "/private/tmp/logex-source-identity-controls-4.uHyHMD/source/crates/logex-storage/tests/ingestion_publication.rs",
+            "test": true
+          }
+        },
+        "original_path": "/private/tmp/logex-source-identity-controls-4.uHyHMD/target/release/build/logex-storage/d2bd2cb5cbc63457/out/ingestion_publication-d2bd2cb5cbc63457",
+        "package": "logex-storage",
+        "retained_path": "/private/tmp/logex-source-identity-controls-4.uHyHMD/target/retained-binaries/ingestion_publication",
+        "sha256": "73e50bddd87bbd55abb14f7ca6078d631c3667292527573fe18ea0c5a0594b91",
+        "target": "ingestion_publication",
+        "zstd_compiler_artifact": {
+          "executable": null,
+          "features": [
+            "arrays",
+            "default",
+            "experimental",
+            "legacy",
+            "zdict_builder"
+          ],
+          "filenames": [
+            "/private/tmp/logex-source-identity-controls-4.uHyHMD/target/release/build/zstd/36672561848f231d/out/libzstd-36672561848f231d.rlib",
+            "/private/tmp/logex-source-identity-controls-4.uHyHMD/target/release/build/zstd/36672561848f231d/out/libzstd-36672561848f231d.rmeta"
+          ],
+          "fresh": true,
+          "manifest_path": "/private/tmp/logex-source-identity-controls-4.uHyHMD/tmp/cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/zstd-0.13.3/Cargo.toml",
+          "package_id": "registry+https://github.com/rust-lang/crates.io-index#zstd@0.13.3",
+          "profile": {
+            "debug_assertions": false,
+            "debuginfo": 0,
+            "opt_level": "3",
+            "overflow_checks": false,
+            "test": false
+          },
+          "reason": "compiler-artifact",
+          "target": {
+            "crate_types": [
+              "lib"
+            ],
+            "doc": true,
+            "doctest": true,
+            "edition": "2018",
+            "kind": [
+              "lib"
+            ],
+            "name": "zstd",
+            "src_path": "/private/tmp/logex-source-identity-controls-4.uHyHMD/tmp/cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/zstd-0.13.3/src/lib.rs",
+            "test": true
+          }
+        },
+        "zstd_version": "0.13.3"
+      }
+    ],
+    "cache_capacity": {
+      "build_headroom_bytes": 42949672960,
+      "copy_mode": "clone-requested; full-copy fallback permitted",
+      "free_bytes": 110342205440,
+      "logical_bytes_total": 766381774,
+      "required_free_bytes": 43716054734
+    },
+    "cache_inventory": [
+      {
+        "device": 16777225,
+        "files": 31387,
+        "logical_bytes": 488242136,
+        "name": "registry",
+        "path": "/private/tmp/logex-source-identity-controls-3.PeHWi0/tmp/cargo-home/registry",
+        "root_device": 16777225
+      },
+      {
+        "device": 16777225,
+        "files": 1882,
+        "logical_bytes": 278139638,
+        "name": "git",
+        "path": "/private/tmp/logex-source-identity-controls-3.PeHWi0/tmp/cargo-home/git",
+        "root_device": 16777225
+      }
+    ],
+    "commands": [
+      {
+        "argv": [
+          "/bin/cp",
+          "-cR",
+          "/private/tmp/logex-source-identity-controls-3.PeHWi0/tmp/cargo-home/registry",
+          "/private/tmp/logex-source-identity-controls-4.uHyHMD/tmp/cargo-home/registry"
+        ],
+        "cwd": "/private/tmp/logex-source-identity-controls-4.uHyHMD/source",
+        "finished": "2026-09-13T14:43:49.438893+00:00",
+        "label": "copy-registry",
+        "returncode": 0,
+        "started": "2026-09-13T14:43:40.315864+00:00",
+        "stderr": "/private/tmp/logex-source-identity-controls-4.uHyHMD/tmp/logs/copy-registry.stderr.log",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stdout": "/private/tmp/logex-source-identity-controls-4.uHyHMD/tmp/logs/copy-registry.stdout.log",
+        "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "argv": [
+          "/bin/cp",
+          "-cR",
+          "/private/tmp/logex-source-identity-controls-3.PeHWi0/tmp/cargo-home/git",
+          "/private/tmp/logex-source-identity-controls-4.uHyHMD/tmp/cargo-home/git"
+        ],
+        "cwd": "/private/tmp/logex-source-identity-controls-4.uHyHMD/source",
+        "finished": "2026-09-13T14:43:50.133508+00:00",
+        "label": "copy-git",
+        "returncode": 0,
+        "started": "2026-09-13T14:43:49.440110+00:00",
+        "stderr": "/private/tmp/logex-source-identity-controls-4.uHyHMD/tmp/logs/copy-git.stderr.log",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stdout": "/private/tmp/logex-source-identity-controls-4.uHyHMD/tmp/logs/copy-git.stdout.log",
+        "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "argv": [
+          "/Users/gremlinmaster/.cargo/bin/rustup",
+          "toolchain",
+          "list"
+        ],
+        "cwd": "/private/tmp/logex-source-identity-controls-4.uHyHMD/source",
+        "finished": "2026-09-13T14:43:50.210747+00:00",
+        "label": "toolchain-list",
+        "returncode": 0,
+        "started": "2026-09-13T14:43:50.134976+00:00",
+        "stderr": "/private/tmp/logex-source-identity-controls-4.uHyHMD/tmp/logs/toolchain-list.stderr.log",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stdout": "/private/tmp/logex-source-identity-controls-4.uHyHMD/tmp/logs/toolchain-list.stdout.log",
+        "stdout_sha256": "2556c9169f7256cccdfd8d14ceef5b3a0f292b5b75f18248e39975a27fd50fc9"
+      },
+      {
+        "argv": [
+          "/Users/gremlinmaster/.cargo/bin/rustup",
+          "which",
+          "--toolchain",
+          "nightly-2026-08-24",
+          "rustc"
+        ],
+        "cwd": "/private/tmp/logex-source-identity-controls-4.uHyHMD/source",
+        "finished": "2026-09-13T14:43:50.231489+00:00",
+        "label": "resolve-rustc",
+        "returncode": 0,
+        "started": "2026-09-13T14:43:50.211893+00:00",
+        "stderr": "/private/tmp/logex-source-identity-controls-4.uHyHMD/tmp/logs/resolve-rustc.stderr.log",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stdout": "/private/tmp/logex-source-identity-controls-4.uHyHMD/tmp/logs/resolve-rustc.stdout.log",
+        "stdout_sha256": "53a40fd99c6064b56798ae8e192eaafc32610e90f950925e8508d8493cb32aa6"
+      },
+      {
+        "argv": [
+          "/Users/gremlinmaster/.cargo/bin/rustup",
+          "which",
+          "--toolchain",
+          "nightly-2026-08-24",
+          "rustdoc"
+        ],
+        "cwd": "/private/tmp/logex-source-identity-controls-4.uHyHMD/source",
+        "finished": "2026-09-13T14:43:50.251350+00:00",
+        "label": "resolve-rustdoc",
+        "returncode": 0,
+        "started": "2026-09-13T14:43:50.232996+00:00",
+        "stderr": "/private/tmp/logex-source-identity-controls-4.uHyHMD/tmp/logs/resolve-rustdoc.stderr.log",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stdout": "/private/tmp/logex-source-identity-controls-4.uHyHMD/tmp/logs/resolve-rustdoc.stdout.log",
+        "stdout_sha256": "cbf8ed73ca8d7408ebe1575326ce1a1045eeace2064dc9772d48de8527b4e647"
+      },
+      {
+        "argv": [
+          "/Users/gremlinmaster/.cargo/bin/rustup",
+          "run",
+          "nightly-2026-08-24",
+          "rustc",
+          "-vV"
+        ],
+        "cwd": "/private/tmp/logex-source-identity-controls-4.uHyHMD/source",
+        "finished": "2026-09-13T14:43:50.444093+00:00",
+        "label": "rustc-version",
+        "returncode": 0,
+        "started": "2026-09-13T14:43:50.253557+00:00",
+        "stderr": "/private/tmp/logex-source-identity-controls-4.uHyHMD/tmp/logs/rustc-version.stderr.log",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stdout": "/private/tmp/logex-source-identity-controls-4.uHyHMD/tmp/logs/rustc-version.stdout.log",
+        "stdout_sha256": "83348cde01b95741d598aa4dd093a4bee8749db29754811a496aafacd4e93183"
+      },
+      {
+        "argv": [
+          "/Users/gremlinmaster/.cargo/bin/rustup",
+          "run",
+          "nightly-2026-08-24",
+          "cargo",
+          "-V"
+        ],
+        "cwd": "/private/tmp/logex-source-identity-controls-4.uHyHMD/source",
+        "finished": "2026-09-13T14:43:50.479744+00:00",
+        "label": "cargo-version",
+        "returncode": 0,
+        "started": "2026-09-13T14:43:50.445330+00:00",
+        "stderr": "/private/tmp/logex-source-identity-controls-4.uHyHMD/tmp/logs/cargo-version.stderr.log",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stdout": "/private/tmp/logex-source-identity-controls-4.uHyHMD/tmp/logs/cargo-version.stdout.log",
+        "stdout_sha256": "ffaa6868afa1ecd521f385e5a52e88f8c76ad2565e9ab432fdf708ecf664409a"
+      },
+      {
+        "argv": [
+          "/usr/sbin/sysctl",
+          "hw.model",
+          "hw.ncpu",
+          "hw.memsize",
+          "vm.loadavg"
+        ],
+        "cwd": "/private/tmp/logex-source-identity-controls-4.uHyHMD/source",
+        "finished": "2026-09-13T14:43:50.489767+00:00",
+        "label": "hardware",
+        "returncode": 0,
+        "started": "2026-09-13T14:43:50.481417+00:00",
+        "stderr": "/private/tmp/logex-source-identity-controls-4.uHyHMD/tmp/logs/hardware.stderr.log",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stdout": "/private/tmp/logex-source-identity-controls-4.uHyHMD/tmp/logs/hardware.stdout.log",
+        "stdout_sha256": "67bf2f26a25facbd4d1e6e1dcaaf64fc5af3ee9a182dcca66a22f19509e48578"
+      },
+      {
+        "argv": [
+          "/usr/bin/vm_stat"
+        ],
+        "cwd": "/private/tmp/logex-source-identity-controls-4.uHyHMD/source",
+        "finished": "2026-09-13T14:43:50.498973+00:00",
+        "label": "memory",
+        "returncode": 0,
+        "started": "2026-09-13T14:43:50.491353+00:00",
+        "stderr": "/private/tmp/logex-source-identity-controls-4.uHyHMD/tmp/logs/memory.stderr.log",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stdout": "/private/tmp/logex-source-identity-controls-4.uHyHMD/tmp/logs/memory.stdout.log",
+        "stdout_sha256": "ffed1b5dfdbc006fe7a6dd5779495b79305cf6955f72b5da72b15cfe14795a62"
+      },
+      {
+        "argv": [
+          "/usr/bin/pmset",
+          "-g",
+          "therm"
+        ],
+        "cwd": "/private/tmp/logex-source-identity-controls-4.uHyHMD/source",
+        "finished": "2026-09-13T14:43:50.523498+00:00",
+        "label": "thermal",
+        "returncode": 0,
+        "started": "2026-09-13T14:43:50.500557+00:00",
+        "stderr": "/private/tmp/logex-source-identity-controls-4.uHyHMD/tmp/logs/thermal.stderr.log",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stdout": "/private/tmp/logex-source-identity-controls-4.uHyHMD/tmp/logs/thermal.stdout.log",
+        "stdout_sha256": "ad656d0a7174741bb78931f2e1e051982d9cc7718a54e1f6341e0d9d7ebe5d84"
+      },
+      {
+        "argv": [
+          "/usr/sbin/diskutil",
+          "info",
+          "-plist",
+          "/dev/disk1s1"
+        ],
+        "cwd": "/private/tmp/logex-source-identity-controls-4.uHyHMD/source",
+        "finished": "2026-09-13T14:43:50.704424+00:00",
+        "label": "filesystem",
+        "returncode": 0,
+        "started": "2026-09-13T14:43:50.525043+00:00",
+        "stderr": "/private/tmp/logex-source-identity-controls-4.uHyHMD/tmp/logs/filesystem.stderr.log",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stdout": "/private/tmp/logex-source-identity-controls-4.uHyHMD/tmp/logs/filesystem.stdout.log",
+        "stdout_sha256": "f1a85e6e4149b15d86fdb1c68b30d2a80ffd8d0b2903870b712276f00b7305f5"
+      },
+      {
+        "argv": [
+          "/bin/df",
+          "-k",
+          "/private/tmp/logex-source-identity-controls-4.uHyHMD"
+        ],
+        "cwd": "/private/tmp/logex-source-identity-controls-4.uHyHMD/source",
+        "finished": "2026-09-13T14:43:50.712275+00:00",
+        "label": "disk-space",
+        "returncode": 0,
+        "started": "2026-09-13T14:43:50.706013+00:00",
+        "stderr": "/private/tmp/logex-source-identity-controls-4.uHyHMD/tmp/logs/disk-space.stderr.log",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stdout": "/private/tmp/logex-source-identity-controls-4.uHyHMD/tmp/logs/disk-space.stdout.log",
+        "stdout_sha256": "b7416c9e524a71266e8281909883e4256c40e1c19066131a92647014d7fd6fdc"
+      },
+      {
+        "argv": [
+          "/Users/gremlinmaster/.cargo/bin/rustup",
+          "run",
+          "nightly-2026-08-24",
+          "cargo",
+          "fetch",
+          "--locked",
+          "--offline"
+        ],
+        "cwd": "/private/tmp/logex-source-identity-controls-4.uHyHMD/source",
+        "finished": "2026-09-13T14:43:54.213914+00:00",
+        "label": "fetch-locked-dependencies",
+        "returncode": 0,
+        "started": "2026-09-13T14:43:50.713837+00:00",
+        "stderr": "/private/tmp/logex-source-identity-controls-4.uHyHMD/tmp/logs/fetch-locked-dependencies.stderr.log",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stdout": "/private/tmp/logex-source-identity-controls-4.uHyHMD/tmp/logs/fetch-locked-dependencies.stdout.log",
+        "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "argv": [
+          "/Users/gremlinmaster/.cargo/bin/rustup",
+          "run",
+          "nightly-2026-08-24",
+          "cargo",
+          "metadata",
+          "--locked",
+          "--offline",
+          "--filter-platform",
+          "x86_64-apple-darwin",
+          "--format-version",
+          "1"
+        ],
+        "cwd": "/private/tmp/logex-source-identity-controls-4.uHyHMD/source",
+        "finished": "2026-09-13T14:43:55.678608+00:00",
+        "label": "cargo-metadata",
+        "returncode": 0,
+        "started": "2026-09-13T14:43:54.741055+00:00",
+        "stderr": "/private/tmp/logex-source-identity-controls-4.uHyHMD/tmp/logs/cargo-metadata.stderr.log",
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stdout": "/private/tmp/logex-source-identity-controls-4.uHyHMD/tmp/logs/cargo-metadata.stdout.log",
+        "stdout_sha256": "d3931b9a6a02eb150e703080c907a079745b51fa07d299cb787a44866bce5491"
+      },
+      {
+        "argv": [
+          "/Users/gremlinmaster/.cargo/bin/rustup",
+          "run",
+          "nightly-2026-08-24",
+          "cargo",
+          "test",
+          "--workspace",
+          "--release",
+          "--locked",
+          "--offline",
+          "--no-run",
+          "--test",
+          "audit_harness",
+          "--message-format=json-render-diagnostics"
+        ],
+        "cwd": "/private/tmp/logex-source-identity-controls-4.uHyHMD/source",
+        "finished": "2026-09-13T15:11:27.529766+00:00",
+        "label": "build-audit_harness",
+        "returncode": 0,
+        "started": "2026-09-13T14:43:55.759024+00:00",
+        "stderr": "/private/tmp/logex-source-identity-controls-4.uHyHMD/tmp/logs/build-audit_harness.stderr.log",
+        "stderr_sha256": "6218fb860b9ae90efd9010205bbc1d3633af16e8ff430c98934295c380854db3",
+        "stdout": "/private/tmp/logex-source-identity-controls-4.uHyHMD/tmp/logs/build-audit_harness.stdout.log",
+        "stdout_sha256": "45e8d534de86b1004874c640448eb4968e3a59471fffbe8d76dacda71464a1da"
+      },
+      {
+        "argv": [
+          "/Users/gremlinmaster/.cargo/bin/rustup",
+          "run",
+          "nightly-2026-08-24",
+          "cargo",
+          "test",
+          "--workspace",
+          "--release",
+          "--locked",
+          "--offline",
+          "--no-run",
+          "--test",
+          "ingestion_publication",
+          "--message-format=json-render-diagnostics"
+        ],
+        "cwd": "/private/tmp/logex-source-identity-controls-4.uHyHMD/source",
+        "finished": "2026-09-13T15:11:33.620066+00:00",
+        "label": "build-ingestion_publication",
+        "returncode": 0,
+        "started": "2026-09-13T15:11:29.535520+00:00",
+        "stderr": "/private/tmp/logex-source-identity-controls-4.uHyHMD/tmp/logs/build-ingestion_publication.stderr.log",
+        "stderr_sha256": "b21f9a3207de50aa3393d2e0f4c60bd5175b9d27f7219b6c4e1108316311d17b",
+        "stdout": "/private/tmp/logex-source-identity-controls-4.uHyHMD/tmp/logs/build-ingestion_publication.stdout.log",
+        "stdout_sha256": "7f033d8b62ca3678f6d205996d3e3b2d8c6857a3daad32ef2be4c3bf12592ec8"
+      }
+    ],
+    "commit": "c229ace0345dd7b6b8c07388d3c0aed8a9c6a771",
+    "dependency_fetch": {
+      "environment": {
+        "CARGO_BUILD_JOBS": "2",
+        "CARGO_HOME": "/private/tmp/logex-source-identity-controls-4.uHyHMD/tmp/cargo-home",
+        "CARGO_NET_OFFLINE": "true",
+        "CARGO_TARGET_DIR": "/private/tmp/logex-source-identity-controls-4.uHyHMD/target",
+        "CARGO_TERM_COLOR": "never",
+        "HOME": "/Users/gremlinmaster",
+        "LC_ALL": "C",
+        "PATH": "/Users/gremlinmaster/.rustup/toolchains/nightly-2026-08-24-x86_64-apple-darwin/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+        "RUSTC": "/Users/gremlinmaster/.rustup/toolchains/nightly-2026-08-24-x86_64-apple-darwin/bin/rustc",
+        "RUSTDOC": "/Users/gremlinmaster/.rustup/toolchains/nightly-2026-08-24-x86_64-apple-darwin/bin/rustdoc",
+        "RUSTUP_AUTO_INSTALL": "0",
+        "RUSTUP_HOME": "/Users/gremlinmaster/.rustup",
+        "RUSTUP_TOOLCHAIN": "nightly-2026-08-24",
+        "TEMP": "/private/tmp/logex-source-identity-controls-4.uHyHMD/tmp",
+        "TMP": "/private/tmp/logex-source-identity-controls-4.uHyHMD/tmp",
+        "TMPDIR": "/private/tmp/logex-source-identity-controls-4.uHyHMD/tmp",
+        "TZ": "UTC"
+      },
+      "locked": true,
+      "offline": true,
+      "scope": "all lockfile targets"
+    },
+    "environment": {
+      "CARGO_BUILD_JOBS": "2",
+      "CARGO_HOME": "/private/tmp/logex-source-identity-controls-4.uHyHMD/tmp/cargo-home",
+      "CARGO_NET_OFFLINE": "true",
+      "CARGO_TARGET_DIR": "/private/tmp/logex-source-identity-controls-4.uHyHMD/target",
+      "CARGO_TERM_COLOR": "never",
+      "HOME": "/Users/gremlinmaster",
+      "LC_ALL": "C",
+      "PATH": "/Users/gremlinmaster/.rustup/toolchains/nightly-2026-08-24-x86_64-apple-darwin/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+      "RUSTC": "/Users/gremlinmaster/.rustup/toolchains/nightly-2026-08-24-x86_64-apple-darwin/bin/rustc",
+      "RUSTDOC": "/Users/gremlinmaster/.rustup/toolchains/nightly-2026-08-24-x86_64-apple-darwin/bin/rustdoc",
+      "RUSTUP_AUTO_INSTALL": "0",
+      "RUSTUP_HOME": "/Users/gremlinmaster/.rustup",
+      "RUSTUP_TOOLCHAIN": "nightly-2026-08-24",
+      "TEMP": "/private/tmp/logex-source-identity-controls-4.uHyHMD/tmp",
+      "TMP": "/private/tmp/logex-source-identity-controls-4.uHyHMD/tmp",
+      "TMPDIR": "/private/tmp/logex-source-identity-controls-4.uHyHMD/tmp",
+      "TZ": "UTC"
+    },
+    "errors": [],
+    "finished": "2026-09-13T15:11:34.644358+00:00",
+    "host": {
+      "cpu_count": 6,
+      "machine": "x86_64",
+      "platform": "macOS-15.7.9-x86_64-i386-64bit",
+      "python": "3.9.6 (default, Apr 30 2025, 02:07:18) \n[Clang 17.0.0 (clang-1700.0.13.5)]",
+      "uname": [
+        "Darwin",
+        "Macmini",
+        "24.6.0",
+        "Darwin Kernel Version 24.6.0: Tue Jul 21 20:50:07 PDT 2026; root:xnu-11417.140.69.711.44~1/RELEASE_X86_64",
+        "x86_64",
+        "i386"
+      ]
+    },
+    "pinned_tools": {
+      "rustc": "/Users/gremlinmaster/.rustup/toolchains/nightly-2026-08-24-x86_64-apple-darwin/bin/rustc",
+      "rustdoc": "/Users/gremlinmaster/.rustup/toolchains/nightly-2026-08-24-x86_64-apple-darwin/bin/rustdoc"
+    },
+    "schema": "logex-remote-build-only-v1",
+    "script_sha256": "6a36bc11e324af7f9e4838c089af37e7f810f7ee7f9b95b6831544e645d59cfd",
+    "source_files_verified": 796,
+    "source_inventory_sha256": "55268b48c305a08e80a41e0ce05033ec3c08b8cf5c48a2a79293366606d6ac7c",
+    "source_unchanged_after_builds": true,
+    "started": "2026-09-13T14:43:34.292708+00:00",
+    "status": "built_not_executed",
+    "toolchain": "nightly-2026-08-24",
+    "workloads_executed": false,
+    "zstd": {
+      "dependencies": [
+        "registry+https://github.com/rust-lang/crates.io-index#zstd-safe@7.2.4"
+      ],
+      "deps": [
+        {
+          "dep_kinds": [
+            {
+              "kind": null,
+              "target": null
+            }
+          ],
+          "name": "zstd_safe",
+          "pkg": "registry+https://github.com/rust-lang/crates.io-index#zstd-safe@7.2.4"
+        }
+      ],
+      "features": [
+        "arrays",
+        "default",
+        "experimental",
+        "legacy",
+        "zdict_builder"
+      ],
+      "id": "registry+https://github.com/rust-lang/crates.io-index#zstd@0.13.3"
+    }
+  },
+  "verification": "All 16 commands passed; exact original Git archive matches all 796 source files and modes; command logs, compiler-artifact features, script and source-inventory hashes verified. Saved binaries are rehashed by the runner before every timing process.",
+  "raw_evidence": {
+    "path": "2026-09-13-source-identity-remote-build-final-raw.json.gz",
+    "sha256": "8b5139332a0f3e7fccdf15df4a1555020d2b98da66f9d9d5ee329bfa2a572030",
+    "files": 38
+  },
+  "limitation": "Successful compilation is not a correctness-oracle result or performance acceptance."
+}

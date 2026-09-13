@@ -891,3 +891,11 @@ passed offline dependency resolution and entered compilation. The
 are retained. Only the control design's private root and corresponding script
 hash changed; its fixture, schedule, analysis and stopping rules are identical.
 No source-performance result or new performance allowance is inferred.
+
+The [completed remote build](baselines/2026-09-13-source-identity-remote-build-final.json)
+passes all 16 recorded commands and produces both release harnesses. Independent
+verification matches every one of the 796 source files and modes to the original
+`c229ace0` Git archive, checks all command-log hashes, and confirms fresh harness
+artifacts with the expected Zstd version/features. The fixed control packet is
+next; successful compilation is not itself a correctness-oracle or performance
+acceptance result.
