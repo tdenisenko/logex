@@ -448,6 +448,9 @@ fn decode_bitmap(data: &[u8]) -> io::Result<RoaringBitmap> {
         if header[12..16] != 16u32.to_le_bytes() || data.len() != 16 + payload_len {
             return Err(invalid_index("invalid single Roaring container extent"));
         }
+        if cardinality > 4096 {
+            return decode_dense_bitmaps(&header[8..12], &data[16..]);
+        }
         return deserialize_bitmap(data);
     }
     // Inspect borrowed descriptors and run ranges before the dependency allocates.
@@ -477,6 +480,8 @@ fn decode_bitmap(data: &[u8]) -> io::Result<RoaringBitmap> {
     } else {
         None
     };
+    let payload_start = position;
+    let mut dense_only = count != 0;
     let mut previous = None;
     for (index, description) in descriptions.as_chunks::<4>().0.iter().enumerate() {
         let key = u16::from_le_bytes(description[..2].try_into().unwrap());
@@ -495,6 +500,7 @@ fn decode_bitmap(data: &[u8]) -> io::Result<RoaringBitmap> {
         let cardinality =
             usize::from(u16::from_le_bytes(description[2..4].try_into().unwrap())) + 1;
         if run_containers.is_some_and(|runs| runs[index / 8] & (1 << (index % 8)) != 0) {
+            dense_only = false;
             let run_count = usize::from(u16::from_le_bytes(
                 take_bytes(data, &mut position, 2)?.try_into().unwrap(),
             ));
@@ -519,6 +525,7 @@ fn decode_bitmap(data: &[u8]) -> io::Result<RoaringBitmap> {
             }
         } else {
             let bytes = if cardinality <= 4096 {
+                dense_only = false;
                 cardinality * 2
             } else {
                 8192
@@ -529,7 +536,43 @@ fn decode_bitmap(data: &[u8]) -> io::Result<RoaringBitmap> {
     if position != data.len() {
         return Err(invalid_index("trailing bitmap payload bytes"));
     }
+    if dense_only {
+        return decode_dense_bitmaps(descriptions, &data[payload_start..]);
+    }
     deserialize_bitmap(data)
+}
+
+fn decode_dense_bitmaps(descriptions: &[u8], payload: &[u8]) -> io::Result<RoaringBitmap> {
+    // Both callers prove nonempty ordered descriptors and exactly 8192 payload
+    // bytes each. The public constructor counts set bits and avoids the general
+    // decoder's zero-fill before copying a complete dense container.
+    let descriptions = descriptions.as_chunks::<4>().0;
+    if let [description] = descriptions {
+        return decode_dense_container(description, payload);
+    }
+    // Owned MultiOps moves distinct containers and uses cached cardinalities.
+    // Repeated `|=` would rescan the growing result's lengths for each merge.
+    descriptions
+        .iter()
+        .enumerate()
+        .map(|(index, description)| {
+            let start = index * 8192;
+            decode_dense_container(description, &payload[start..start + 8192])
+        })
+        .union()
+}
+
+fn decode_dense_container(description: &[u8; 4], payload: &[u8]) -> io::Result<RoaringBitmap> {
+    let key = u16::from_le_bytes(description[..2].try_into().unwrap());
+    let expected = u64::from(u16::from_le_bytes(description[2..].try_into().unwrap())) + 1;
+    // One container's aligned start plus 65535 fits u32, including key65535.
+    let bitmap = RoaringBitmap::from_lsb0_bytes(u32::from(key) << 16, payload);
+    if bitmap.len() != expected {
+        return Err(invalid_index(
+            "Roaring dense container cardinality mismatch",
+        ));
+    }
+    Ok(bitmap)
 }
 
 fn deserialize_bitmap(data: &[u8]) -> io::Result<RoaringBitmap> {
@@ -715,6 +758,127 @@ mod tests {
             }
         }
         payload
+    }
+
+    fn dense_bitmap_fixture(containers: &[(u16, usize, usize)]) -> Vec<u8> {
+        assert!(!containers.is_empty() && containers.len() <= 64);
+        let mut payload = 12346u32.to_le_bytes().to_vec();
+        payload.extend_from_slice(&(containers.len() as u32).to_le_bytes());
+        for &(key, declared_cardinality, _) in containers {
+            assert!((4097..=65536).contains(&declared_cardinality));
+            payload.extend_from_slice(&key.to_le_bytes());
+            payload.extend_from_slice(&((declared_cardinality - 1) as u16).to_le_bytes());
+        }
+        let mut offset = 8 + containers.len() * 8;
+        for _ in containers {
+            payload.extend_from_slice(&(offset as u32).to_le_bytes());
+            offset += 8192;
+        }
+        for &(_, _, actual_cardinality) in containers {
+            assert!(actual_cardinality <= 65536);
+            let mut words = [0u64; 1024];
+            for low in 0..actual_cardinality {
+                words[low / 64] |= 1 << (low % 64);
+            }
+            for word in words {
+                payload.extend_from_slice(&word.to_le_bytes());
+            }
+        }
+        payload
+    }
+
+    #[test]
+    fn bitmap_decode_dense_container_layouts_match_exact_rows() {
+        for containers in [
+            vec![(u16::MAX, 65536)],
+            vec![(1, 4097), (4, 5000), (19, 8193), (u16::MAX, 65536)],
+            vec![
+                (0, 4097),
+                (2, 5000),
+                (5, 6000),
+                (9, 7000),
+                (14, 8000),
+                (20, 9000),
+                (31, 10000),
+                (u16::MAX, 65536),
+            ],
+        ] {
+            let fixture = dense_bitmap_fixture(
+                &containers
+                    .iter()
+                    .map(|&(key, cardinality)| (key, cardinality, cardinality))
+                    .collect::<Vec<_>>(),
+            );
+            let decoded = decode_bitmap(&fixture).unwrap();
+            assert!(
+                decoded.iter().eq(containers
+                    .iter()
+                    .flat_map(|&(key, cardinality)| (0..cardinality)
+                        .map(move |low| (u32::from(key) << 16) | low as u32)))
+            );
+        }
+    }
+
+    #[test]
+    fn bitmap_decode_larger_dense_layouts_match_exact_rows() {
+        for count in [9, 49, 50, 51, 64] {
+            let containers = (0..count)
+                .map(|index| ((index * 3) as u16, 4097 + index))
+                .collect::<Vec<_>>();
+            let fixture = dense_bitmap_fixture(
+                &containers
+                    .iter()
+                    .map(|&(key, cardinality)| (key, cardinality, cardinality))
+                    .collect::<Vec<_>>(),
+            );
+            let decoded = decode_bitmap(&fixture).unwrap();
+            assert!(
+                decoded.iter().eq(containers
+                    .iter()
+                    .flat_map(|&(key, cardinality)| (0..cardinality)
+                        .map(move |low| (u32::from(key) << 16) | low as u32)))
+            );
+        }
+    }
+
+    #[test]
+    fn bitmap_decode_mixed_sparse_and_dense_containers_falls_back_with_exact_rows() {
+        let mut expected = RoaringBitmap::new();
+        expected.extend([3, 17, 41]);
+        expected.extend((0..5000).map(|low| (11 << 16) | low));
+        expected.insert((u32::from(u16::MAX) << 16) | 65535);
+        let mut fixture = Vec::new();
+        expected.serialize_into(&mut fixture).unwrap();
+        assert_eq!(decode_bitmap(&fixture).unwrap(), expected);
+    }
+
+    #[test]
+    fn bitmap_decode_checks_each_dense_container_cardinality() {
+        let fixture = dense_bitmap_fixture(&[(1, 4999, 5000), (8, 5001, 5000)]);
+        assert!(decode_bitmap(&fixture).is_err());
+
+        let containers = (0..64)
+            .map(|index| {
+                let declared = match index {
+                    52 => 4999,
+                    63 => 5001,
+                    _ => 5000,
+                };
+                (index as u16, declared, 5000)
+            })
+            .collect::<Vec<_>>();
+        assert!(decode_bitmap(&dense_bitmap_fixture(&containers)).is_err());
+    }
+
+    #[test]
+    fn bitmap_decode_rejects_declared_dense_containers_with_sparse_payloads() {
+        for actual_cardinality in [0, 17, 4096] {
+            let fixture = dense_bitmap_fixture(&[(3, 4097, actual_cardinality)]);
+            assert!(
+                decode_bitmap(&fixture).is_err(),
+                "actual cardinality {actual_cardinality}"
+            );
+        }
     }
 
     #[test]
