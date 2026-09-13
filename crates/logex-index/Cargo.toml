@@ -10,7 +10,7 @@ logex-storage = { workspace = true }
 alloy-primitives = { workspace = true }
 roaring = "0.10"
 crc32fast = "1"
-twox-hash = { version = "=2.1.2", default-features = false, features = ["xxhash64"] }
+twox-hash = { version = "=2.1.2", default-features = false, features = ["std", "xxhash3_64"] }
 getrandom = "0.3"
 tracing = { workspace = true }
 

@@ -69,11 +69,15 @@ pending.
 New derived files wrap their existing logical B-tree/bloom encoding in a page
 integrity container. Its 48-byte header fixes magic, version, 1024-byte page size,
 logical length, a per-file 128-bit random identity and reserved fields, protected by CRC32. The original logical
-bytes remain contiguous. The current experiment uses container version 2 and
-one eight-byte XXH64 fingerprint per page; earlier screens used version 1 and
-four-byte CRC32 page checks. Each page fingerprint
+bytes remain contiguous. The current experiment uses container version 3 and
+one eight-byte metadata-seeded XXH3 fingerprint per page. Screens 1–16 used
+version 1 and four-byte CRC32 page checks; screen 17 used version 2 and XXH64.
+Each page fingerprint
 includes a domain tag, format version, logical length, file identity, page position and actual
-page length. Exact physical extent is checked using the opened handle.
+page length. Version 3 hashes that complete metadata into a seed and uses the
+standard seeded hash on the page bytes. This is a distinct encoding from hashing
+the concatenated metadata and page. Exact physical extent is checked using the
+opened handle.
 
 Point lookups validate only bytes from pages they inspect, keeping logarithmic
 table search. Bloom exclusions verify the page containing the tested bit. Range
@@ -164,6 +168,31 @@ properties from CRC32; it does not inherit CRC burst-error guarantees or provide
 authentication. This use is limited to accidental persisted-byte changes.
 Complete artifact/source identity remains separate work.
 See the [algorithm's official documentation](https://github.com/Cyan4973/xxHash).
+
+Screen 17 (`540ad32c`) retains 7,440 timings and 40 RSS observations. XXH64
+improves the large contiguous point/full-open medians to +13.66%/+22.65%, but the
+gapped case remains +27.42%/+31.77%. The candidate is insufficient and unaccepted.
+Further finite diagnostics compare full copy/initialization costs with standard
+metadata-seeded XXH3. The latter measures 54.24 ns per 1 KiB page versus 102.24 ns
+for streaming XXH64 in the same rotated-order experiment. The earlier
+prepacked-only and slower scalar/copy variants remain retained. Across four
+diagnostic matrices, 612 original timings are preserved; 384 deterministic
+same-mode reference cases match between scalar and accelerated builds.
+
+The next candidate uses exactly that measured seeded construction, with flat
+44-byte file context and 60-byte per-page metadata. The footer geometry and all
+structural checks are unchanged from version 2. No page-copy buffer, per-page
+heap allocation or project `unsafe` block is introduced. Both discarded
+prototype versions are explicitly rejected. All 66 index tests pass.
+
+The dependency remains pinned at 2.1.2; its verified archive digest matches
+`Cargo.lock`. Enabling only `std` and `xxhash3_64` adds the `alloc` feature closure,
+but the selected one-shot APIs use fixed local buffers. Random/default features
+remain disabled. Inspection confirms runtime CPU guards before NEON/AVX2/SSE2
+dispatch and scalar fallback. Internal slice chunking uses bounded array views;
+the selected one-shot path uses the library's fixed valid 192-byte internal
+constant. This review and scalar/vector equivalence do not replace final
+workspace-feature measurements and macOS/Linux CI.
 
 ## First performance screening (not accepted)
 

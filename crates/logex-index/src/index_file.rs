@@ -1,20 +1,22 @@
 //! Integrity framing for immutable derived files. Page checks detect accidental
 //! changes without scanning the whole index for each point lookup. The header
-//! retains CRC32; page fingerprints use noncryptographic XXH64. Neither
+//! retains CRC32; page fingerprints use noncryptographic metadata-seeded XXH3. Neither
 //! authenticates a file or establishes that its rows describe a particular
-//! segment, and XXH64 does not provide CRC burst-error guarantees.
+//! segment, and XXH3 does not provide CRC burst-error guarantees.
 use std::fs::File;
-use std::hash::Hasher;
 use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 const MAGIC: &[u8; 8] = b"LXIDX001";
-const VERSION: u32 = 2;
+const VERSION: u32 = 3;
 const HEADER_BYTES: usize = 48;
 const PAGE_BYTES: usize = 1024;
 const CHECKSUM_BYTES: u64 = 8;
 const CHECKSUM_CACHE_BYTES: usize = 16 * 1024;
 const WRITE_BUFFER_BYTES: usize = 64 * 1024;
+const PAGE_DOMAIN: &[u8] = b"LogEx index page";
+const FILE_CONTEXT_BYTES: usize = PAGE_DOMAIN.len() + 4 + 8 + 16;
+type FileContext = [u8; FILE_CONTEXT_BYTES];
 
 fn invalid(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
@@ -29,35 +31,41 @@ fn physical_len(logical_len: u64) -> io::Result<u64> {
         .ok_or_else(|| invalid("index file length overflow"))
 }
 
-fn page_context(logical_len: u64, file_id: &[u8; 16]) -> twox_hash::XxHash64 {
-    let mut hash = twox_hash::XxHash64::with_seed(0);
-    hash.write(b"LogEx index page");
-    hash.write(&VERSION.to_le_bytes());
-    hash.write(&logical_len.to_le_bytes());
-    hash.write(file_id);
-    hash
+fn file_context(logical_len: u64, file_id: &[u8; 16]) -> FileContext {
+    let mut context = [0; FILE_CONTEXT_BYTES];
+    let version = PAGE_DOMAIN.len();
+    context[..version].copy_from_slice(PAGE_DOMAIN);
+    context[version..version + 4].copy_from_slice(&VERSION.to_le_bytes());
+    context[version + 4..version + 12].copy_from_slice(&logical_len.to_le_bytes());
+    context[version + 12..].copy_from_slice(file_id);
+    context
 }
 
-fn page_hasher(logical_len: u64, context: &twox_hash::XxHash64, index: u64) -> twox_hash::XxHash64 {
-    let mut hash = context.clone();
+fn page_fingerprint(
+    logical_len: u64,
+    context: &FileContext,
+    index: u64,
+    page: &[u8],
+) -> [u8; CHECKSUM_BYTES as usize] {
     let length = (logical_len - index * PAGE_BYTES as u64).min(PAGE_BYTES as u64);
-    let mut extent = [0; 16];
-    extent[..8].copy_from_slice(&index.to_le_bytes());
-    extent[8..].copy_from_slice(&length.to_le_bytes());
-    hash.write(&extent);
-    hash
+    let mut metadata = [0; FILE_CONTEXT_BYTES + 16];
+    metadata[..FILE_CONTEXT_BYTES].copy_from_slice(context);
+    metadata[FILE_CONTEXT_BYTES..FILE_CONTEXT_BYTES + 8].copy_from_slice(&index.to_le_bytes());
+    metadata[FILE_CONTEXT_BYTES + 8..].copy_from_slice(&length.to_le_bytes());
+    // Version 3 hashes the complete metadata into a seed, then uses standard
+    // seeded XXH3 on the page. This differs from hashing metadata || page.
+    let seed = twox_hash::XxHash3_64::oneshot(&metadata);
+    twox_hash::XxHash3_64::oneshot_with_seed(seed, page).to_le_bytes()
 }
 
 fn verify_page(
     logical_len: u64,
-    context: &twox_hash::XxHash64,
+    context: &FileContext,
     index: u64,
     page: &[u8],
     expected: [u8; CHECKSUM_BYTES as usize],
 ) -> io::Result<()> {
-    let mut hash = page_hasher(logical_len, context, index);
-    hash.write(page);
-    if hash.finish().to_le_bytes() != expected {
+    if page_fingerprint(logical_len, context, index, page) != expected {
         return Err(invalid(
             "index page checksum mismatch; rebuild derived indexes",
         ));
@@ -87,7 +95,7 @@ fn parse_header(header: &[u8], length: u64) -> io::Result<Option<(u64, [u8; 16])
     Ok(Some((logical_len, file_id)))
 }
 
-fn verify_body(logical: &[u8], checksums: &[u8], context: &twox_hash::XxHash64) -> io::Result<()> {
+fn verify_body(logical: &[u8], checksums: &[u8], context: &FileContext) -> io::Result<()> {
     // Callers establish exact physical geometry before splitting the body.
     for (index, page) in logical.chunks(PAGE_BYTES).enumerate() {
         let offset = index * CHECKSUM_BYTES as usize;
@@ -133,7 +141,7 @@ pub(crate) struct IndexFile {
     file: File,
     logical_len: u64,
     protected: bool,
-    page_context: twox_hash::XxHash64,
+    file_context: FileContext,
     position: u64,
     page: Box<[u8; PAGE_BYTES]>,
     page_index: Option<u64>,
@@ -173,7 +181,7 @@ impl IndexFile {
         checksums.resize(checksum_capacity, 0);
         let mut reader = Self {
             file,
-            page_context: page_context(logical_len, &file_id),
+            file_context: file_context(logical_len, &file_id),
             logical_len,
             protected,
             position: 0,
@@ -226,7 +234,7 @@ impl IndexFile {
             // Checked physical geometry bounds this sum by bytes.len().
             let end = HEADER_BYTES + logical_len as usize;
             let (body, checksums) = bytes[HEADER_BYTES..].split_at(logical_len as usize);
-            verify_body(body, checksums, &page_context(logical_len, &file_id))?;
+            verify_body(body, checksums, &file_context(logical_len, &file_id))?;
             HEADER_BYTES..end
         } else {
             0..bytes.len()
@@ -264,7 +272,7 @@ impl IndexFile {
         } else {
             read_at(&self.file, &mut data, HEADER_BYTES as u64)?;
             let (logical, checksums) = data.split_at(logical_len);
-            verify_body(logical, checksums, &self.page_context)?;
+            verify_body(logical, checksums, &self.file_context)?;
             data.truncate(logical_len);
         }
         Ok(data)
@@ -291,7 +299,7 @@ impl IndexFile {
         let expected = self.page_checksum(index)?;
         verify_page(
             self.logical_len,
-            &self.page_context,
+            &self.file_context,
             index,
             &self.page[..self.page_len],
             expected,
@@ -365,7 +373,7 @@ impl Read for IndexFile {
             for (offset, page) in output[..count].chunks(PAGE_BYTES).enumerate() {
                 let index = first + offset as u64;
                 let expected = self.page_checksum(index)?;
-                verify_page(self.logical_len, &self.page_context, index, page, expected)?;
+                verify_page(self.logical_len, &self.file_context, index, page, expected)?;
             }
             self.position += count as u64;
             return Ok(count);
@@ -445,7 +453,7 @@ pub(crate) fn write_index_file(
         page: [0; PAGE_BYTES],
         flushed: 0,
         failed: false,
-        page_context: page_context(logical_len, &file_id),
+        file_context: file_context(logical_len, &file_id),
         checksums,
     };
     write(&mut writer)?;
@@ -475,16 +483,19 @@ struct IndexWriter {
     // Bytes from the current page already emitted by an explicit flush.
     flushed: usize,
     failed: bool,
-    page_context: twox_hash::XxHash64,
+    file_context: FileContext,
     checksums: Vec<[u8; CHECKSUM_BYTES as usize]>,
 }
 
 impl IndexWriter {
     fn finish_buffered_page(&mut self, length: usize, index: u64) -> io::Result<()> {
         self.output.write_all(&self.page[self.flushed..length])?;
-        let mut hash = page_hasher(self.logical_len, &self.page_context, index);
-        hash.write(&self.page[..length]);
-        self.checksums.push(hash.finish().to_le_bytes());
+        self.checksums.push(page_fingerprint(
+            self.logical_len,
+            &self.file_context,
+            index,
+            &self.page[..length],
+        ));
         self.flushed = 0;
         Ok(())
     }
@@ -510,13 +521,12 @@ impl IndexWriter {
                     .iter()
                     .enumerate()
                 {
-                    let mut hash = page_hasher(
+                    self.checksums.push(page_fingerprint(
                         self.logical_len,
-                        &self.page_context,
+                        &self.file_context,
                         first + page_index as u64,
-                    );
-                    hash.write(page);
-                    self.checksums.push(hash.finish().to_le_bytes());
+                        page,
+                    ));
                 }
                 self.written += count as u64;
                 remaining = &remaining[count..];
@@ -629,7 +639,7 @@ mod tests {
     }
 
     #[test]
-    fn persisted_page_fingerprints_match_independent_oneshot_encoding() {
+    fn persisted_page_fingerprints_match_independent_seeded_encoding() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("fingerprints");
         let original = data();
@@ -637,7 +647,7 @@ mod tests {
             let logical = &original[..length];
             write(&path, logical);
             let physical = fs::read(&path).unwrap();
-            assert_eq!(&physical[8..12], &2u32.to_le_bytes());
+            assert_eq!(&physical[8..12], &3u32.to_le_bytes());
             assert_eq!(&physical[12..16], &1024u32.to_le_bytes());
             assert_eq!(physical.len(), 48 + length + length.div_ceil(1024) * 8);
             assert_eq!(&physical[48..48 + length], logical);
@@ -646,16 +656,17 @@ mod tests {
                 physical[44..48]
             );
             for (index, page) in logical.chunks(1024).enumerate() {
-                // Independently concatenate the complete byte stream instead
-                // of reusing streaming context/extent helpers from the writer.
+                // Independently construct metadata for the seed without using
+                // the writer's fixed context/extent helpers. Hash the page in a
+                // separate standard seeded invocation, as required by version 3.
                 let mut bytes = b"LogEx index page".to_vec();
-                bytes.extend_from_slice(&2u32.to_le_bytes());
+                bytes.extend_from_slice(&3u32.to_le_bytes());
                 bytes.extend_from_slice(&(length as u64).to_le_bytes());
                 bytes.extend_from_slice(&physical[24..40]);
                 bytes.extend_from_slice(&(index as u64).to_le_bytes());
                 bytes.extend_from_slice(&(page.len() as u64).to_le_bytes());
-                bytes.extend_from_slice(page);
-                let expected = twox_hash::XxHash64::oneshot(0, &bytes).to_le_bytes();
+                let seed = twox_hash::XxHash3_64::oneshot(&bytes);
+                let expected = twox_hash::XxHash3_64::oneshot_with_seed(seed, page).to_le_bytes();
                 let offset = 48 + length + index * 8;
                 assert_eq!(&physical[offset..offset + 8], &expected);
             }
@@ -778,13 +789,15 @@ mod tests {
         }
         // Discarded prototype versions do not become readable merely by
         // updating the header CRC to agree with their version field.
-        let mut old_version = complete.clone();
-        old_version[8..12].copy_from_slice(&1u32.to_le_bytes());
-        let checksum = crc32fast::hash(&old_version[..44]);
-        old_version[44..48].copy_from_slice(&checksum.to_le_bytes());
-        fs::write(&path, old_version).unwrap();
-        assert!(IndexFile::open(&path).is_err());
-        assert!(IndexFile::read_all_from_path(&path).is_err());
+        for version in [1u32, 2] {
+            let mut old_version = complete.clone();
+            old_version[8..12].copy_from_slice(&version.to_le_bytes());
+            let checksum = crc32fast::hash(&old_version[..44]);
+            old_version[44..48].copy_from_slice(&checksum.to_le_bytes());
+            fs::write(&path, old_version).unwrap();
+            assert!(IndexFile::open(&path).is_err());
+            assert!(IndexFile::read_all_from_path(&path).is_err());
+        }
         // A self-consistent header with an impossible length is rejected before
         // allocating from it. The fixture remains exactly 48 bytes.
         let mut header = complete[..HEADER_BYTES].to_vec();
@@ -884,7 +897,7 @@ mod tests {
             page: [0; PAGE_BYTES],
             flushed: 0,
             failed: false,
-            page_context: page_context(PAGE_BYTES as u64, &[0; 16]),
+            file_context: file_context(PAGE_BYTES as u64, &[0; 16]),
             checksums: Vec::new(),
         };
         writer.write_all(&[1; 19]).unwrap();
