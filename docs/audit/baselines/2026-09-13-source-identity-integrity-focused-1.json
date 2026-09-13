@@ -1,0 +1,182 @@
+{
+  "schema": 1,
+  "candidate_commit": "d46a6cdf35ce3cca675be9c0b9076b0f740e7cc6",
+  "focused_checks": {
+    "head": "7c878c520f723f51b8903cf1079cdd2c5a921ba7",
+    "branch": "audit/source-publication-identity",
+    "toolchain": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+    "runner_source": "\"\"\"Run bounded source-identity validation sequentially, retaining complete output.\"\"\"\nfrom pathlib import Path\nfrom datetime import datetime, timezone\nimport hashlib, json, os, subprocess, sys\nrepo=Path('/Users/tdenisenko/code/logex')\nroot=Path(sys.argv[1]); root.mkdir(exist_ok=False)\ndef out(c): return subprocess.check_output(c,cwd=repo,text=True).strip()\ndef sha(p): return hashlib.sha256(p.read_bytes()).hexdigest()\nrecord={'head':out(['git','rev-parse','HEAD']),'branch':out(['git','branch','--show-current']),'toolchain':out(['rustc','-Vv']),'runner_source':Path(__file__).read_text(),'checks':[]}\n(root/'initial.patch').write_bytes(subprocess.check_output(['git','diff','--binary'],cwd=repo))\ncommands=[('fmt',['cargo','fmt','--all']),('clippy',['cargo','clippy','--workspace','--all-targets','--locked','--','-D','warnings']),('storage',['cargo','test','-p','logex-storage','--lib','--locked']),('index',['cargo','test','-p','logex-index','--lib','--locked']),('native',['cargo','test','-p','logex-query','--lib','--locked','native::tests::']),('background',['cargo','test','-p','logex-node','--locked','background::tests::'])]\nfor name,cmd in commands:\n log=root/(name+'.log'); started=datetime.now(timezone.utc).isoformat()\n with log.open('w') as f: result=subprocess.run(cmd,cwd=repo,stdout=f,stderr=subprocess.STDOUT,env=os.environ|{'TMPDIR':'/private/tmp'})\n record['checks'].append({'name':name,'command':cmd,'exit':result.returncode,'started_at':started,'finished_at':datetime.now(timezone.utc).isoformat(),'log':str(log),'log_sha256':sha(log)})\n patch = subprocess.check_output(['git','diff','--binary'],cwd=repo)\n (root/'final.patch').write_bytes(patch)\n record['checks'][-1]['source_patch_sha256_after_check'] = hashlib.sha256(patch).hexdigest()\n assert out(['git','rev-parse','HEAD']) == record['head'], 'HEAD changed during validation'\n (root/'results.json').write_text(json.dumps(record,indent=2)+'\\n')\n print(name,'exit',result.returncode,flush=True)\n if result.returncode: sys.exit(result.returncode)\n(root/'final.patch').write_bytes(subprocess.check_output(['git','diff','--binary'],cwd=repo))\nprint('All focused checks passed',flush=True)\n",
+    "checks": [
+      {
+        "name": "fmt",
+        "command": [
+          "cargo",
+          "fmt",
+          "--all"
+        ],
+        "exit": 0,
+        "started_at": "2026-09-13T10:53:47.526024+00:00",
+        "finished_at": "2026-09-13T10:53:48.254725+00:00",
+        "log": "/private/tmp/logex-source-identity-focused-16/fmt.log",
+        "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "source_patch_sha256_after_check": "abc47d3ae7641462ede6341e8d59c393bd69122d7f726b0b912fe61e071fd1cc"
+      },
+      {
+        "name": "clippy",
+        "command": [
+          "cargo",
+          "clippy",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "exit": 0,
+        "started_at": "2026-09-13T10:53:48.270757+00:00",
+        "finished_at": "2026-09-13T10:53:56.950623+00:00",
+        "log": "/private/tmp/logex-source-identity-focused-16/clippy.log",
+        "log_sha256": "6e7ecb60a79cbd1303ea17ef9de6e06bca945147a75b7de9ad2c65f5ba4901f0",
+        "source_patch_sha256_after_check": "abc47d3ae7641462ede6341e8d59c393bd69122d7f726b0b912fe61e071fd1cc"
+      },
+      {
+        "name": "storage",
+        "command": [
+          "cargo",
+          "test",
+          "-p",
+          "logex-storage",
+          "--lib",
+          "--locked"
+        ],
+        "exit": 0,
+        "started_at": "2026-09-13T10:53:56.967537+00:00",
+        "finished_at": "2026-09-13T10:55:48.184338+00:00",
+        "log": "/private/tmp/logex-source-identity-focused-16/storage.log",
+        "log_sha256": "0d01457cacead8ed2507d31ce5400abde464b6ffc73e50a87db0d8b87e9b64f2",
+        "source_patch_sha256_after_check": "abc47d3ae7641462ede6341e8d59c393bd69122d7f726b0b912fe61e071fd1cc"
+      },
+      {
+        "name": "index",
+        "command": [
+          "cargo",
+          "test",
+          "-p",
+          "logex-index",
+          "--lib",
+          "--locked"
+        ],
+        "exit": 0,
+        "started_at": "2026-09-13T10:55:48.202878+00:00",
+        "finished_at": "2026-09-13T10:55:52.910100+00:00",
+        "log": "/private/tmp/logex-source-identity-focused-16/index.log",
+        "log_sha256": "18528820802a84c84811decee822c7818b7c1ff658ed0e5f0116e7dfb5f48ab7",
+        "source_patch_sha256_after_check": "abc47d3ae7641462ede6341e8d59c393bd69122d7f726b0b912fe61e071fd1cc"
+      },
+      {
+        "name": "native",
+        "command": [
+          "cargo",
+          "test",
+          "-p",
+          "logex-query",
+          "--lib",
+          "--locked",
+          "native::tests::"
+        ],
+        "exit": 0,
+        "started_at": "2026-09-13T10:55:52.937829+00:00",
+        "finished_at": "2026-09-13T10:56:05.023716+00:00",
+        "log": "/private/tmp/logex-source-identity-focused-16/native.log",
+        "log_sha256": "03074b8bdf1aabc974923feb1396cca6c0873343d51650bb93caf6bedecfc3cd",
+        "source_patch_sha256_after_check": "abc47d3ae7641462ede6341e8d59c393bd69122d7f726b0b912fe61e071fd1cc"
+      },
+      {
+        "name": "background",
+        "command": [
+          "cargo",
+          "test",
+          "-p",
+          "logex-node",
+          "--locked",
+          "background::tests::"
+        ],
+        "exit": 0,
+        "started_at": "2026-09-13T10:56:05.057358+00:00",
+        "finished_at": "2026-09-13T10:56:19.224139+00:00",
+        "log": "/private/tmp/logex-source-identity-focused-16/background.log",
+        "log_sha256": "3c08384b70d26b6b1d606c22f2689a545b99330d0b334c6e1ab61d266e59d201",
+        "source_patch_sha256_after_check": "abc47d3ae7641462ede6341e8d59c393bd69122d7f726b0b912fe61e071fd1cc"
+      }
+    ]
+  },
+  "before_fix_reproduction": {
+    "head": "7c878c520f723f51b8903cf1079cdd2c5a921ba7",
+    "toolchain": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+    "checks": [
+      {
+        "name": "fmt",
+        "command": [
+          "cargo",
+          "fmt",
+          "--all"
+        ],
+        "exit": 0,
+        "started_at": "2026-09-13T10:52:23.314715+00:00",
+        "finished_at": "2026-09-13T10:52:24.055748+00:00",
+        "log": "/private/tmp/logex-source-identity-integrity-reproduction-1/fmt.log",
+        "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "source_patch_sha256": "de6a5f53e563fec45bc75b505f0cc28d096d31c3aa1896b57eb8c0de24133562"
+      },
+      {
+        "name": "reproducer",
+        "command": [
+          "cargo",
+          "test",
+          "-p",
+          "logex-storage",
+          "--lib",
+          "--locked",
+          "native::storage::tests::integrity_verification_owns_source_through_canonical_capture",
+          "--",
+          "--exact"
+        ],
+        "exit": 101,
+        "started_at": "2026-09-13T10:52:24.055997+00:00",
+        "finished_at": "2026-09-13T10:52:28.072355+00:00",
+        "log": "/private/tmp/logex-source-identity-integrity-reproduction-1/reproducer.log",
+        "log_sha256": "85d3bee14fac0f7283f9f0c412cf25d2324502138fe0f2d17aeec665310181f9",
+        "source_patch_sha256": "de6a5f53e563fec45bc75b505f0cc28d096d31c3aa1896b57eb8c0de24133562"
+      }
+    ]
+  },
+  "test_counts": {
+    "storage": {
+      "passed": 263,
+      "failed": 0,
+      "ignored": 5
+    },
+    "index": {
+      "passed": 80,
+      "failed": 0,
+      "ignored": 0
+    },
+    "native": {
+      "passed": 13,
+      "failed": 0,
+      "ignored": 0
+    },
+    "background": {
+      "passed": 11,
+      "failed": 0,
+      "ignored": 0
+    }
+  },
+  "raw_evidence": {
+    "path": "2026-09-13-source-identity-integrity-focused-1.json.gz",
+    "sha256": "e3b7987b70686a80397f3edd2e0afcfdce8bad40e840008a38c1bad06cfa73a3",
+    "files": 14
+  },
+  "verification": "All focused exits/log hashes and full evidence roundtrip checked. The final tested production-source patch equals the Git diff from the recorded starting head to this committed candidate. Workspace/release acceptance and performance checks remain pending."
+}

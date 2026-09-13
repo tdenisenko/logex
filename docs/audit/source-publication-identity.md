@@ -15,7 +15,7 @@ source identity when its checkpoint is copied with the files.
 
 ## Implementation direction and invariants
 
-Storage will own a random namespace for each logical segment incarnation. Native
+Storage owns a random namespace for each logical segment incarnation. Native
 catalog descriptors and manifests carry the namespace; readers retain the
 captured namespace and indexes bind to it alongside existing row, generation and
 bundle metadata. Ordinary appends preserve the namespace and continue to publish
@@ -31,11 +31,12 @@ Only a pending exact-prefix repair binds its authoritative recovery row boundary
 Legacy/raw replacement publishes an explicit updating state before replacing
 same-name column files and a committed identity after completing publication.
 Manifestless, unidentified and zero-row readers validate the committed state
-before and after capturing handles. Identified nonempty native readers compare
-the committed marker after capture with the identity from that captured manifest,
-as detailed below. Publishing a marker only before or only after replacement
-cannot exclude a mixed capture.
-Native manifests and raw markers must agree; a standalone raw replacement cannot
+before and after capturing handles. Identified nonempty native readers capture
+selected columns first and canonical metadata last, then compare the canonical
+identity with the captured manifest. The canonical envelope and ordered publication
+protocol are detailed below; earlier marker-reader experiments remain recorded
+as history. Startup and writers additionally validate the sidecar under source
+ownership. A standalone raw replacement cannot
 silently keep using the former native identity. Captured raw row boundaries must
 remain fixed through prefix appends or yield an explicit error.
 
@@ -51,7 +52,7 @@ from equal row counts, silently clear an updating state, or schedule an endless
 background rebuild loop. Existing maintenance ownership and recovery boundaries
 must remain consistent; query capture must not recursively acquire writer locks.
 
-## Prefix-repair recovery boundary under implementation
+## Prefix-repair recovery boundary
 
 Native recovery can rewrite a catalog-authoritative prefix without changing its
 logical contents. Every old and replacement column must encode exactly the same
@@ -68,8 +69,8 @@ cover all source rows and canonical filtering happens during query execution.
 Changing canonical bits is not a prefix-preserving repair. The existing canonical
 publication path must serialize with prefix repair so it cannot change captured
 bits during the transaction. Compaction and other source writers must obey the
-same pending-state/ownership constraints. These are implementation requirements,
-not claims that the new recovery protocol has already passed validation.
+same pending-state/ownership constraints. The focused recovery checks are recorded below; complete acceptance remains
+pending.
 
 Review of the draft also requires native raw append to compare the expected
 namespace, generation and segment ID while holding source ownership, before any
@@ -424,3 +425,89 @@ all its file reads. Its callers do not retain a segment guard; maintenance alrea
 does and must not recursively acquire it. This correction and its regression are
 required before direct six-workload baseline acceptance and complete gates.
 No live or external-volume operations have been performed.
+
+The ownership race is fixed in
+`d46a6cdf35ce3cca675be9c0b9076b0f740e7cc6`. The
+[reproduction and focused validation](baselines/2026-09-13-source-identity-integrity-focused-1.json)
+retain the test-only before-fix patch: one compiled test failed because a writer
+acquired the source during canonical capture and integrity returned `Ok(())`.
+The corrected function owns the nonzero unbundled source through all validation
+reads. The regression checks both orderings: a writer is excluded during
+verification, and verification cannot begin while the writer owns the source.
+Bundled/zero-row paths and maintenance ownership are unchanged.
+
+Focused attempt 16 passes formatting, strict workspace Clippy, 263 storage tests,
+80 index tests, 13 native query tests and 11 background tests. Five existing storage
+checks remain ignored. The archive verifies the complete before-fix failure and
+equality of tested and committed source. The direct six-workload release
+comparison against merged PR #149 has completed; final performance acceptance,
+full gates, CI and merge remain pending.
+
+### Direct canonical baseline and fixed investigation
+
+The [direct comparison](baselines/2026-09-13-source-identity-canonical-baseline-release.json)
+of `d46a6cdf` with merged PR #149 retains all 20,000 timings, 100 explicit
+warmups and 120 process RSS observations. Actual live publication median/p95
+changes are +0.03%/-9.03%; historical publication -0.07%/-6.02%. Raw live
+ingestion medians are +3.69% dense/+2.02% sparse. The five short-query medians
+range +1.13% to +5.52%, with absent topic +2.91%.
+
+Block-number/timestamp medians +5.06%/+5.52%, sparse reopen p95 +14.94%,
+sparse ordered-query p95 +5.57%, and publication RSS median +5.43% trigger
+investigation. A fixed schedule adds 20 balanced source pairs and 10 identical-
+candidate pairs for each of the three complete affected suites, retaining
+36,600 timings, 300 warmups and 180 RSS observations. It reuses the exact saved
+binaries and fixture parameters. All initial and confirmation source samples
+will be reported separately and pooled; controls remain separate. No results
+are removed, and the schedule will not change in response to intermediate values.
+
+Read-only caller review during those measurements found a legacy recovery
+ownership gap: the unidentified branches of `restore_committed_prefix` and
+`rebuild_partial_raw_segment` capture rows/bits before the rewrite helper obtains
+its source lock, and release that helper's lock before publishing the manifest.
+A concurrent standalone replacement can enter those gaps. This requires a bounded
+regression and correction after the frozen comparison, preserving legacy index
+ineligibility and holding one owner through capture, rewrite and publication.
+
+The same unidentified rewrite emits a plain canonical bitmap even when a committed
+incidental sidecar exists. Later append expects the corresponding canonical
+binding and rejects that mismatch. The correction must preserve the borrowed
+owner's canonical binding while leaving catalog/manifest identity absent.
+Recover-then-append tests must exercise both incidental-sidecar and truly unbound
+legacy sources; ordinary reopen alone does not directly cover both recovery
+helpers.
+
+The [completed fixed investigation](baselines/2026-09-13-source-identity-canonical-tail-1.json)
+retains all 36,600 additional timings, 300 warmups and 180 RSS observations.
+Pooled short-query median/p95 changes are +1.91%/+1.87% block hash,
++4.69%/+4.31% block number, +5.05%/+3.97% timestamp, +0.75%/+0.53%
+present topic and +2.16%/+0.50% absent topic. Confirmation-only medians range
++0.72% to +4.76%; identical-candidate median differences range -0.16% to -0.29%.
+The remaining roughly 5% range-query cost is explicit.
+
+Pooled actual publication changes are +0.10%/-2.67% live and -0.27%/-12.29%
+historical, with RSS -0.59%/-1.22%. The initial RSS increase does not repeat.
+Pooled sparse live ingestion is +2.49% median/+11.13% p95, and reopen
++3.35%/+12.01%; these tails prevent performance acceptance. Confirmation-only
+tails are +9.89%/+8.02%, while identical-candidate tails change +0.21%/+1.33%.
+Neither the small medians nor the publication results excuse those observations.
+Sparse historical ingestion is +1.20%/+3.23%; all sparse query medians are within
+1%, with pooled p95 no higher than +2.10%. Every initial/source/control result
+remains visible.
+
+The [fifth profiling attempt](baselines/2026-09-13-source-identity-profiles-4.json)
+uses the exact saved baseline and candidate binaries sequentially with ten-second
+sampling of the complete sparse workload. Both workloads and samplers complete.
+All 1,440 instrumented timings are retained separately from acceptance. Reopen
+stacks include the existing root-directory device synchronization in both builds;
+source-marker and integrity reads also appear in the candidate. Multi-phase
+sampled counts do not prove which cost causes the tail difference or quantify
+removable latency. Required durability operations remain in place.
+
+The legacy regression patch compiles and runs ten tiny tests on the unchanged
+`d46a6cdf` production behavior: eight expected failures and two passing controls.
+Both private recovery branches allow replacement after capture and before manifest
+publication, read before obtaining a writer-first lock, and fail subsequent append
+when an incidental sidecar is retained. The two no-sidecar append controls pass.
+The complete patch, commands, toolchain, logs and hashes are retained for the
+focused correction's evidence packet.

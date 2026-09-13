@@ -1,0 +1,44 @@
+{
+  "schema": 1,
+  "candidate_commit": "d46a6cdf35ce3cca675be9c0b9076b0f740e7cc6",
+  "jobs": [
+    {
+      "attempt": 5,
+      "name": "base",
+      "source_commit": "9c0a58fc64fac3da7f5a50b3a20b7ab729f029e9",
+      "binary_sha256": "a29f6c421d5e4a42a6ec15beb67702fb4de76872bce1b789f98c6448835ebc81",
+      "exit": 0,
+      "sample_exit": 0,
+      "usable_sampled_stacks": true,
+      "instrumented_record_counts": {
+        "config": 1,
+        "sample": 720,
+        "storage": 80,
+        "summary": 9
+      }
+    },
+    {
+      "attempt": 5,
+      "name": "candidate",
+      "source_commit": "d46a6cdf35ce3cca675be9c0b9076b0f740e7cc6",
+      "binary_sha256": "24c8f85b917b529db261de2a99881a52d56d6938cf52402967417068b82bfae6",
+      "exit": 0,
+      "sample_exit": 0,
+      "usable_sampled_stacks": true,
+      "instrumented_record_counts": {
+        "config": 1,
+        "sample": 720,
+        "storage": 80,
+        "summary": 9
+      }
+    }
+  ],
+  "findings": [
+    "Attempt 5 profiles the exact saved merged-baseline and d46 candidate binaries sequentially against the unchanged sparse mixed fixture, 80 iterations each and ten-second sampling. Both workloads and samplers complete successfully. Reopen stacks in both include the existing root-directory device synchronization; candidate stacks also include source metadata and integrity validation. This is a multi-phase profile and sampled counts do not establish a removable source regression. All 1440 instrumented timings remain separate from performance acceptance. No system-wide profiling or production data was used."
+  ],
+  "raw_evidence": {
+    "path": "2026-09-13-source-identity-profiles-4.json.gz",
+    "sha256": "23c762c589c2b085512574a7316a1eea9fd8524aff96a5be44e1e11d6fedf923",
+    "files": 8
+  }
+}
