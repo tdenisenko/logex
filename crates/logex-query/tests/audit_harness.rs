@@ -705,6 +705,158 @@ async fn benchmark_index_publication_binding_query_paths() {
     }
 }
 
+fn concurrent_profile_env() -> Profile {
+    match std::env::var("LOGEX_CONCURRENT_PROFILE")
+        .unwrap_or_else(|_| "sparse".to_owned())
+        .as_str()
+    {
+        "sparse" => Profile::Sparse,
+        "dense" => Profile::Dense,
+        _ => panic!("LOGEX_CONCURRENT_PROFILE must be sparse or dense"),
+    }
+}
+
+fn concurrent_bounded_env(name: &str, default: usize, minimum: usize, maximum: usize) -> usize {
+    let value = positive_env(name, default);
+    assert!(
+        (minimum..=maximum).contains(&value),
+        "{name} must be in {minimum}..={maximum}"
+    );
+    value
+}
+
+type ConcurrentWorkerResult = (usize, Duration, std::io::Result<Vec<LogRow>>);
+
+fn concurrent_native_batch(
+    storage: &PartitionManager,
+    workers: usize,
+) -> (Duration, Vec<ConcurrentWorkerResult>) {
+    let barrier = Arc::new(Barrier::new(workers + 1));
+    std::thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(workers);
+        for worker in 0..workers {
+            let barrier = Arc::clone(&barrier);
+            handles.push(scope.spawn(move || {
+                barrier.wait();
+                let start = Instant::now();
+                let result = execute_log_filter(storage, &filter());
+                let elapsed = start.elapsed();
+                (worker, elapsed, result)
+            }));
+        }
+        let start = Instant::now();
+        barrier.wait();
+        let results = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect();
+        (start.elapsed(), results)
+    })
+}
+
+fn record_concurrent_batch(
+    kind: &'static str,
+    iteration: usize,
+    batch_elapsed: Duration,
+    worker_results: Vec<ConcurrentWorkerResult>,
+    expected: &[LogRow],
+) {
+    for (expected_worker, (worker, _, result)) in worker_results.iter().enumerate() {
+        assert_eq!(*worker, expected_worker);
+        assert_eq!(result.as_ref().unwrap(), expected);
+    }
+    println!(
+        "{}",
+        json!({
+            "kind": kind, "metric": "steady_concurrent_batch",
+            "scope": "batch", "iteration": iteration,
+            "elapsed_ns": batch_elapsed.as_nanos(),
+            "elapsed_ms": batch_elapsed.as_secs_f64() * 1000.0,
+            "result_rows_per_worker": expected.len(),
+            "workers": worker_results.len(),
+        })
+    );
+    for (worker, elapsed, result) in worker_results {
+        let result = result.unwrap();
+        let metric = format!("steady_concurrent_worker_{worker}");
+        println!(
+            "{}",
+            json!({
+                "kind": kind, "metric": metric, "scope": "worker",
+                "iteration": iteration, "worker": worker,
+                "elapsed_ns": elapsed.as_nanos(), "elapsed_ms": elapsed.as_secs_f64() * 1000.0,
+                "result_rows": result.len(),
+            })
+        );
+    }
+}
+
+#[tokio::test]
+#[ignore = "release steady concurrent native-query diagnostic"]
+async fn benchmark_steady_concurrent_native_queries() {
+    let profile = concurrent_profile_env();
+    let rows_count = concurrent_bounded_env("LOGEX_CONCURRENT_ROWS", 20_000, 4_096, 20_000);
+    let repeats = concurrent_bounded_env("LOGEX_CONCURRENT_REPEATS", 100, 1, 200);
+    let workers = concurrent_bounded_env("LOGEX_CONCURRENT_WORKERS", 4, 1, 8);
+    let segment_rows = concurrent_bounded_env("LOGEX_CONCURRENT_SEGMENT_ROWS", 8_192, 4_096, 8_192);
+    let rows = fixture(rows_count, profile);
+    let expected = expected_matches(&rows);
+    assert!(!expected.is_empty());
+
+    let tmp = tempfile::tempdir().unwrap();
+    let config = Config {
+        rows: rows_count,
+        repeats,
+        segment_rows,
+        batch_rows: 4_096,
+        workers,
+        profile,
+    };
+    let mut storage = PartitionManager::open(config.storage(tmp.path())).unwrap();
+    for batch in rows.chunks(config.batch_rows) {
+        storage.write_batch(batch).unwrap();
+    }
+    storage.checkpoint().unwrap();
+    for partition in storage
+        .sealed_partitions()
+        .iter()
+        .chain(std::iter::once(storage.hot_partition()))
+        .filter(|partition| partition.meta.row_count > 0)
+    {
+        IndexBuilder::build_all_indexes(&partition.meta.path).unwrap();
+    }
+    storage.compact_eligible_segments().unwrap();
+    drop(storage);
+    let storage = PartitionManager::open(config.storage(tmp.path())).unwrap();
+    assert_eq!(storage.total_rows(), rows_count as u64);
+
+    println!(
+        "{}",
+        json!({
+            "kind": "config", "fixture": "steady_concurrent_native_queries",
+            "fixture_version": FIXTURE_VERSION, "profile": profile.name(), "rows": rows_count,
+            "repeats": repeats, "workers": workers, "segment_rows": segment_rows,
+            "batch_rows": config.batch_rows,
+            "fixture_digest": keccak256(serde_json::to_vec(&rows).unwrap()).to_string(),
+            "expected_rows_per_worker": expected.len(),
+            "cache": "one compacted and reopened snapshot; one explicit warmup; OS cache not evicted",
+        })
+    );
+
+    let (batch_elapsed, worker_results) = concurrent_native_batch(&storage, workers);
+    record_concurrent_batch("warmup", 0, batch_elapsed, worker_results, &expected);
+    for iteration in 0..repeats {
+        let (batch_elapsed, worker_results) = concurrent_native_batch(&storage, workers);
+        record_concurrent_batch(
+            "sample",
+            iteration,
+            batch_elapsed,
+            worker_results,
+            &expected,
+        );
+    }
+}
+
 #[tokio::test]
 async fn audit_fixture_round_trips_through_live_and_historical_storage() {
     // CI exercises the same oracle and paths with rotation, split blocks, and a tail.
