@@ -522,8 +522,8 @@ A separate initialized-read API diagnostic retains 240 batch timings across
 each batch retains 8 MiB of outputs until the oracle and destruction. The pinned
 nightly borrowed-buffer API reduces median API cost by about 14.6% at 32 KiB and
 3.2–3.8% at 64/256 KiB. This is an API/allocator diagnostic, not application
-acceptance. No production initialized-read boundary or nightly feature has been
-added on this evidence alone.
+acceptance. A subsequent production comparison and initialization-contract review
+are recorded below.
 
 The next bounded point-read candidate uses an unverified prefix solely to choose
 whole-file verification for a matching single-entry v2 file larger than one page
@@ -533,4 +533,49 @@ B-tree and bitmap structure before a bitmap is moved out. Absent, wrong-width,
 large and multi-key lookups retain the ordinary path. This can save a separate
 footer read and partial-page copy, but also rereads the prefetched page; all 75 index tests, formatting and focused Clippy pass at `e3b809e4`.
 An isolated comparison against `3d723cb9` (same 4 KiB geometry and bounded write
-buffers) is required before claiming a performance improvement.
+buffers) retains 51,072 timings / 96 RSS observations. Present-point medians
+improve 3.92% / 4.00% / 6.08% for four/eight/32 dense containers; p95 improves
+2.89% / 11.90% / 3.03%. The unchanged small-point median is equal, with p95 +0.36%.
+Absent-point and full-read controls remain retained, including 32-container
+full-read p95 +7.97%. This is isolated evidence, not original-baseline acceptance.
+
+### Initialized full reads
+
+Implementation `7c99c9f4` replaces the path-based full reader's adaptive
+`Take::read_to_end` with a fallibly allocated exact spare-capacity read using the
+already pinned nightly's `BorrowedBuf` and `read_buf_exact` APIs. It uses one
+opened file's metadata and constrains the writable spare slice to that extent.
+An explicit filled-length check is mandatory even after success: a safe custom
+reader could otherwise report success without filling the buffer. The vector's
+length becomes visible only after that check; every error drops a zero-length
+vector. The consuming same-handle fallback still uses its existing zero-filled
+read. Header, extent, page, footer and structural checks are unchanged.
+
+The single new `unsafe` operation is documented at its call site. Review against
+nightly-2026-08-24 verifies `core/src/io/borrowed_buf.rs` (filled-length tracking,
+checked advance and append), `alloc/src/io/read.rs` (exact-read retry and EOF
+behavior), and the Unix File/read-buffer forwarding path. Safe cursor operations
+cannot claim initialized bytes without initializing them; operations which can
+bypass that property require their own unsafe contract. These unstable APIs must
+be revalidated when changing the pinned toolchain. No toolchain upgrade or new
+dependency is introduced.
+
+All 79 index tests, formatting and focused Clippy pass. Finite controls cover
+empty/exact/short input, bytes beyond the requested extent, interruption, partial
+I/O failure, and a reader that reports success without filling. The isolated
+comparison against `8ddb9b8c` retains 63,840 timings / 120 RSS observations. Full-
+read medians improve 2.94% / 2.83% / 2.47% / 2.54% / 3.23% for small/four/eight/
+nine/32-container layouts; p95 improves 3.76% / 0.25% / 3.63% / 3.78% / 7.29%.
+Unchanged point medians range from -0.41% to +1.81%; 32-container point p95 +5.67%
+remains in the evidence.
+
+Both isolated comparisons, focused validation and the initialized-read API
+diagnostic are independently verified in
+[read comparison evidence](baselines/2026-09-13-index-integrity-read-comparisons.json)
+and its compressed raw archive (114,912 application timings / 216 RSS).
+They use the predefined two warm-up and ten measured balanced process pairs,
+with 100 measured reads but only one incidental write/build sample per process.
+They therefore do not establish write-tail acceptance. The seven-layout original-
+baseline comparison retains 30 write/build samples per measured process. That
+comparison, mixed ingestion/query workloads, final workspace gates and CI remain
+required before accepting or merging this milestone.
