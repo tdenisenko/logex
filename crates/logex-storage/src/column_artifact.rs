@@ -270,16 +270,8 @@ impl ColumnArtifacts {
             let len = file.metadata()?.len();
             let mut prefix = [0; crate::column::CANONICAL_PREFIX_BYTES];
             let count = len.min(prefix.len() as u64) as usize;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::FileExt;
-                file.read_exact_at(&mut prefix[..count], 0)?;
-            }
-            #[cfg(not(unix))]
-            {
-                file.seek(SeekFrom::Start(0))?;
-                file.read_exact(&mut prefix[..count])?;
-            }
+            file.seek(SeekFrom::Start(0))?;
+            file.read_exact(&mut prefix[..count])?;
             crate::column::RawCanonicalMetadata::parse(&prefix[..count], len)
         };
         match &self.pinned {

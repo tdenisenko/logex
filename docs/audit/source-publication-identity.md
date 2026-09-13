@@ -785,3 +785,35 @@ equivalent release comparison remains pending; no benefit or retention decision
 is claimed yet. Cursor non-mutation is not a new public contract: the regression
 checks metadata correctness after a previous read, and performance measurements
 will determine whether the syscall change is worth retaining.
+
+
+The [fixed positional-read experiment](baselines/2026-09-13-source-identity-positional-release-1.json)
+compares `179e0ff7` with `8d61fa8e` using the unchanged native fixture. All 24
+source pairs and 12 interleaved identical-candidate pairs completed: 36,000
+measured queries, 360 warmups and 72 RSS observations. Equivalent fresh
+workspace-selected release builds use the exact declared Zstd feature union.
+Independent verification checks every original observation and all 180 paired
+metric effects. Source median changes range -0.37% to -1.05%; corresponding
+controls range -0.14% to -0.91%. Benefits exceed the absolute same-round control
+in only 5–9 of 24 source pairs per metric (3–7 for p95). Large source and control
+tail excursions remain retained. The experiment does not show a consistent
+benefit beyond variation and is not retained. This is not a new comparison with
+merged master and does not alter the earlier acceptance disposition.
+
+The Unix positional-read optimization is reverted; the framed/legacy regression
+remains. Formatting and that regression pass after reversion. Production
+behavior returns to `179e0ff7`; complete workspace/release gates are next. The
+[focused pre-revert evidence](baselines/2026-09-13-source-identity-positional-focused-1.json)
+also remains available. Independent review recommends stopping speculative
+micro-optimizations: required identity checks remain intact, and further timing
+work needs a materially quieter environment with a fixed precision criterion and
+pass/fail/inconclusive disposition declared before measurements.
+
+The correctness milestone is ready for complete validation, but performance
+clearance remains unresolved. In particular, the retained historical publication
+tail uncertainty deserves attention despite its stable median. Read-only
+suitability checks on the previously offered mac-mini observed approximately
+24% CPU use in the second sample, 15 GB physical memory used and 670 MB unused;
+no workload, source transfer, data change or service change was performed there.
+An idle host or quiet test window has been requested while local correctness
+validation proceeds. No performance waiver or release-readiness claim is made.
