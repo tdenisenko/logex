@@ -4,7 +4,7 @@
 //! authenticates a file or establishes that its rows describe a particular
 //! segment, and XXH3 does not provide CRC burst-error guarantees.
 use std::fs::File;
-use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
+use std::io::{self, BorrowedBuf, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 const MAGIC: &[u8; 8] = b"LXIDX001";
@@ -134,6 +134,35 @@ fn read_at(file: &File, bytes: &mut [u8], offset: u64) -> io::Result<()> {
     }
 }
 
+/// Read an exact, caller-bounded extent directly into uninitialized vector
+/// capacity. The pinned nightly API tracks which spare bytes a reader filled;
+/// the explicit length check defends against an incorrect `Read` implementation
+/// reporting success without satisfying that initialization contract.
+fn read_exact_initialized<R: Read>(reader: &mut R, length: usize) -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(length)
+        .map_err(|_| invalid("index allocation failed"))?;
+    {
+        // Constrain the writable cursor to the exact extent established from
+        // the opened file handle, even if the allocation has extra capacity.
+        let spare = &mut bytes.spare_capacity_mut()[..length];
+        let mut buffer = BorrowedBuf::from(spare);
+        reader.read_buf_exact(buffer.unfilled())?;
+        if buffer.len() != length {
+            return Err(invalid(
+                "index reader reported success without initializing its extent",
+            ));
+        }
+    }
+    // SAFETY: `try_reserve_exact` provided capacity for `length` bytes. The
+    // exact spare slice was tracked by BorrowedBuf, read_buf_exact succeeded,
+    // and the explicit filled-length check proved every byte initialized. All
+    // error paths return while the Vec length is still zero.
+    unsafe { bytes.set_len(length) };
+    Ok(bytes)
+}
+
 /// One opened handle and bounded caches of verified bytes. Index publication
 /// locks must remain held while callers use this reader; files are not rewritten
 /// in place while a published reader exists.
@@ -212,24 +241,14 @@ impl IndexFile {
     }
 
     /// Load a whole immutable file without constructing point-lookup caches.
-    /// Read only the opened handle's actual extent; safe std reads initialize the
-    /// reserved storage as they fill it, avoiding a separate whole-file zero fill.
+    /// Read only the opened handle's actual extent; pinned nightly BorrowedBuf
+    /// tracks initialized spare capacity, avoiding a separate whole-file zero fill.
     pub(crate) fn read_all_from_path(path: &Path) -> io::Result<IndexData> {
-        let file = File::open(path)?;
+        let mut file = File::open(path)?;
         let length = file.metadata()?.len();
         let capacity = usize::try_from(length)
             .map_err(|_| invalid("index file too large for this platform"))?;
-        let mut bytes = Vec::new();
-        bytes
-            .try_reserve_exact(capacity)
-            .map_err(|_| invalid("index allocation failed"))?;
-        file.take(length).read_to_end(&mut bytes)?;
-        if bytes.len() != capacity {
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "truncated index file",
-            ));
-        }
+        let bytes = read_exact_initialized(&mut file, capacity)?;
         let logical = if let Some((logical_len, file_id)) = parse_header(&bytes, length)? {
             // Checked physical geometry bounds this sum by bytes.len().
             let end = HEADER_BYTES + logical_len as usize;
@@ -593,6 +612,7 @@ impl Write for IndexWriter {
 mod tests {
     use super::*;
     use std::fs;
+    use std::io::{BorrowedCursor, Cursor};
 
     fn data() -> Vec<u8> {
         (0..PAGE_BYTES * 3 + 123).map(|i| (i / 97) as u8).collect()
@@ -607,6 +627,93 @@ mod tests {
             Ok(())
         })
         .unwrap();
+    }
+
+    #[test]
+    fn initialized_exact_read_handles_zero_exact_extra_and_short_inputs() {
+        let mut empty = Cursor::new(Vec::<u8>::new());
+        assert!(read_exact_initialized(&mut empty, 0).unwrap().is_empty());
+
+        let mut exact = Cursor::new(b"exact".to_vec());
+        assert_eq!(read_exact_initialized(&mut exact, 5).unwrap(), b"exact");
+
+        let mut extra = Cursor::new(b"prefix-and-unread".to_vec());
+        assert_eq!(read_exact_initialized(&mut extra, 6).unwrap(), b"prefix");
+        assert_eq!(extra.position(), 6);
+
+        let mut short = Cursor::new(b"short".to_vec());
+        assert_eq!(
+            read_exact_initialized(&mut short, 6).unwrap_err().kind(),
+            io::ErrorKind::UnexpectedEof
+        );
+    }
+
+    struct InterruptedOnce {
+        bytes: Cursor<Vec<u8>>,
+        interrupted: bool,
+    }
+
+    impl Read for InterruptedOnce {
+        fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+            if !self.interrupted {
+                self.interrupted = true;
+                return Err(io::Error::from(io::ErrorKind::Interrupted));
+            }
+            self.bytes.read(output)
+        }
+    }
+
+    #[test]
+    fn initialized_exact_read_retries_interrupted_reads() {
+        let mut reader = InterruptedOnce {
+            bytes: Cursor::new(b"complete".to_vec()),
+            interrupted: false,
+        };
+        assert_eq!(read_exact_initialized(&mut reader, 8).unwrap(), b"complete");
+    }
+
+    struct PartialFailure {
+        supplied: bool,
+    }
+
+    impl Read for PartialFailure {
+        fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+            if !self.supplied {
+                self.supplied = true;
+                output[..2].copy_from_slice(b"ok");
+                return Ok(2);
+            }
+            Err(io::Error::other("fixture read failure"))
+        }
+    }
+
+    #[test]
+    fn initialized_exact_read_does_not_publish_partial_io_failure() {
+        let error = read_exact_initialized(&mut PartialFailure { supplied: false }, 4).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        assert_eq!(error.to_string(), "fixture read failure");
+    }
+
+    struct SuccessWithoutFilling;
+
+    impl Read for SuccessWithoutFilling {
+        fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+            Ok(0)
+        }
+
+        fn read_buf_exact(&mut self, _: BorrowedCursor<'_, u8>) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn initialized_exact_read_rejects_success_without_filled_bytes() {
+        let error = read_exact_initialized(&mut SuccessWithoutFilling, 4).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(
+            error.to_string(),
+            "index reader reported success without initializing its extent"
+        );
     }
 
     #[test]
