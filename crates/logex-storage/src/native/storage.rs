@@ -29,6 +29,24 @@ use super::segment::{
     verify_raw_segment_files_complete, write_bundled_rows,
 };
 
+#[cfg(test)]
+thread_local! {
+    static AFTER_LEGACY_PREFIX_CAPTURE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    static BEFORE_LEGACY_PREFIX_MANIFEST: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn legacy_prefix_recovery_hook(before_manifest: bool) {
+    let hook = if before_manifest {
+        BEFORE_LEGACY_PREFIX_MANIFEST.with_borrow_mut(Option::take)
+    } else {
+        AFTER_LEGACY_PREFIX_CAPTURE.with_borrow_mut(Option::take)
+    };
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
 const HISTORICAL_STAGING_MAX_BLOCK_SPAN: u64 = 65_536;
 
 #[derive(Debug, Clone, Copy)]
@@ -917,6 +935,13 @@ impl NativeStorage {
                 )
             })
             .transpose()?;
+        // Legacy prefixes need the same capture-to-publication ownership as
+        // identified sources, without deriving a native identity from their rows.
+        let legacy_owner = if start.source_namespace.is_none() {
+            Some(crate::column::SourceWriteGuard::acquire_legacy(&dir)?)
+        } else {
+            None
+        };
         let mut rows = Vec::new();
         let mut canonical = NullBitmap::new();
         if start.row_count > 0 {
@@ -949,6 +974,10 @@ impl NativeStorage {
                 canonical.push(previous.is_present(row));
             }
         }
+        #[cfg(test)]
+        if start.source_namespace.is_none() {
+            legacy_prefix_recovery_hook(false);
+        }
         match start.source_namespace {
             Some(namespace) => {
                 let owner = source_owner.as_ref().ok_or_else(|| {
@@ -963,11 +992,20 @@ impl NativeStorage {
                     owner,
                 )?
             }
-            None => ColumnFile::rewrite_unidentified_prefix(&dir, &rows, &canonical)?,
+            None => {
+                let owner = legacy_owner.as_ref().ok_or_else(|| {
+                    io::Error::other("missing source owner for legacy prefix rewrite")
+                })?;
+                ColumnFile::rewrite_unidentified_prefix(&dir, &rows, &canonical, owner)?
+            }
         }
         let indexes = dir.join("indexes");
         if indexes.exists() {
             fs::remove_dir_all(indexes)?;
+        }
+        #[cfg(test)]
+        if start.source_namespace.is_none() {
+            legacy_prefix_recovery_hook(true);
         }
         super::segment::persist_segment_manifest_with_columns(
             &self.paths,
@@ -2257,6 +2295,14 @@ impl NativeStorage {
                 )
             })
             .transpose()?;
+        // Retain this owner through manifest and catalog publication below.
+        let legacy_owner = if descriptor.source_namespace.is_none() {
+            Some(crate::column::SourceWriteGuard::acquire_legacy(
+                &segment_dir,
+            )?)
+        } else {
+            None
+        };
         let pending_rewrite = source_owner.as_ref().is_some_and(|owner| owner.pending());
         if descriptor.row_count == 0 {
             // An interrupted first write may have created any subset of columns.
@@ -2333,6 +2379,10 @@ impl NativeStorage {
                 canonical.push(previous.is_present(row));
             }
         }
+        #[cfg(test)]
+        if descriptor.source_namespace.is_none() {
+            legacy_prefix_recovery_hook(false);
+        }
         match descriptor.source_namespace {
             Some(namespace) => {
                 let owner = source_owner.as_ref().ok_or_else(|| {
@@ -2348,8 +2398,20 @@ impl NativeStorage {
                 )?
             }
             None => {
-                ColumnFile::rewrite_unidentified_prefix(&segment_dir, &committed_rows, &canonical)?
+                let owner = legacy_owner.as_ref().ok_or_else(|| {
+                    io::Error::other("missing source owner for legacy prefix rewrite")
+                })?;
+                ColumnFile::rewrite_unidentified_prefix(
+                    &segment_dir,
+                    &committed_rows,
+                    &canonical,
+                    owner,
+                )?
             }
+        }
+        #[cfg(test)]
+        if descriptor.source_namespace.is_none() {
+            legacy_prefix_recovery_hook(true);
         }
         super::segment::persist_segment_manifest_with_columns(
             &self.paths,
@@ -7004,6 +7066,213 @@ mod tests {
             );
             drop(reopened);
         }
+    }
+
+    fn legacy_prefix_recovery_fixture(
+        incidental_sidecar: bool,
+    ) -> (TempDir, NativeStorage, usize, Vec<LogRow>) {
+        let tmp = TempDir::new().unwrap();
+        let config = NativeStorageConfig {
+            data_dir: tmp.path().to_path_buf(),
+            hot_target_rows: 32,
+            compaction_safety_margin_blocks: 2_048,
+        };
+        let mut storage = NativeStorage::open(config).unwrap();
+        let rows = make_rows(3, 100);
+        storage.write_batch(&rows).unwrap();
+        storage.mark_non_canonical(rows[0].block_hash).unwrap();
+        storage.checkpoint().unwrap();
+        let index = storage
+            .catalog
+            .segments
+            .iter()
+            .position(|segment| segment.row_count != 0)
+            .unwrap();
+        let id = storage.catalog.segments[index].id;
+        let dir = storage.segment_path(id);
+        ColumnFile::append_batch(&dir, &make_rows(1, 200), 3).unwrap();
+        if !incidental_sidecar {
+            let canonical = SegmentReader::open(&dir).unwrap().read_canonical().unwrap();
+            let mut bytes = Vec::new();
+            canonical.write_to(&mut bytes).unwrap();
+            fs::write(dir.join("canonical.bitmap"), bytes).unwrap();
+            crate::column::remove_source_marker_for_test(&dir).unwrap();
+        }
+        storage.catalog.segments[index].source_namespace = None;
+        let path = storage.paths.segment_manifest_path(id);
+        let mut manifest = SegmentManifest::load(&path).unwrap().unwrap();
+        manifest.source_namespace = None;
+        fs::write(path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        storage.persist_catalog().unwrap();
+        (tmp, storage, index, rows)
+    }
+
+    fn run_legacy_prefix_recovery(
+        storage: &mut NativeStorage,
+        index: usize,
+        restore: bool,
+    ) -> io::Result<()> {
+        if restore {
+            storage.restore_committed_prefix(&storage.catalog.segments[index])
+        } else {
+            storage
+                .rebuild_partial_raw_segment(index, "legacy-test")
+                .and_then(|rebuilt| {
+                    if rebuilt {
+                        Ok(())
+                    } else {
+                        Err(io::Error::other("test tail was not repaired"))
+                    }
+                })
+        }
+    }
+
+    fn assert_legacy_prefix_recovery_excludes_writer(restore: bool, before_manifest: bool) {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        let (_tmp, mut storage, index, rows) = legacy_prefix_recovery_fixture(true);
+        let dir = storage.segment_path(storage.catalog.segments[index].id);
+        let mut replacement = rows.clone();
+        for row in &mut replacement {
+            row.block_number += 1_000;
+        }
+        let writer_error = Rc::new(Cell::new(None));
+        let observed = Rc::clone(&writer_error);
+        let writer_dir = dir.clone();
+        let action: Box<dyn FnOnce()> = Box::new(move || {
+            // The actual full-replacement API obtains source ownership itself.
+            observed.set(
+                ColumnFile::write_batch(&writer_dir, &replacement)
+                    .err()
+                    .map(|error| error.kind()),
+            );
+        });
+        if before_manifest {
+            BEFORE_LEGACY_PREFIX_MANIFEST.with_borrow_mut(|hook| *hook = Some(action));
+        } else {
+            AFTER_LEGACY_PREFIX_CAPTURE.with_borrow_mut(|hook| *hook = Some(action));
+        }
+        let result = run_legacy_prefix_recovery(&mut storage, index, restore);
+        drop(AFTER_LEGACY_PREFIX_CAPTURE.with_borrow_mut(Option::take));
+        drop(BEFORE_LEGACY_PREFIX_MANIFEST.with_borrow_mut(Option::take));
+        assert_eq!(
+            writer_error.get(),
+            Some(io::ErrorKind::WouldBlock),
+            "replacement entered legacy recovery; recovery returned {result:?}"
+        );
+        result.unwrap();
+        let reader = SegmentReader::open(&dir).unwrap();
+        assert_eq!(reader.read_log_rows(None).unwrap(), rows);
+        assert!(!reader.read_canonical().unwrap().is_present(0));
+        assert_eq!(reader.source_namespace(), None);
+    }
+
+    fn assert_legacy_prefix_recovery_writer_first(restore: bool) {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        let (_tmp, mut storage, index, _) = legacy_prefix_recovery_fixture(true);
+        let dir = storage.segment_path(storage.catalog.segments[index].id);
+        let snapshot = || {
+            fs::read_dir(&dir)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .filter(|path| path.is_file())
+                .map(|path| {
+                    let bytes = fs::read(&path).unwrap();
+                    (path, bytes)
+                })
+                .collect::<std::collections::BTreeMap<_, _>>()
+        };
+        let before = snapshot();
+        let catalog_before = fs::read(storage.paths.catalog_path()).unwrap();
+        let captured = Rc::new(Cell::new(false));
+        let observed = Rc::clone(&captured);
+        AFTER_LEGACY_PREFIX_CAPTURE
+            .with_borrow_mut(|hook| *hook = Some(Box::new(move || observed.set(true))));
+        let _owner = crate::column::SourceWriteGuard::acquire_legacy(&dir).unwrap();
+        let error = run_legacy_prefix_recovery(&mut storage, index, restore).unwrap_err();
+        drop(AFTER_LEGACY_PREFIX_CAPTURE.with_borrow_mut(Option::take));
+        assert_eq!(snapshot(), before);
+        assert_eq!(
+            fs::read(storage.paths.catalog_path()).unwrap(),
+            catalog_before
+        );
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        assert!(
+            !captured.get(),
+            "legacy recovery captured rows before obtaining source ownership"
+        );
+    }
+
+    fn assert_legacy_prefix_recovery_allows_append(restore: bool, incidental_sidecar: bool) {
+        let (_tmp, mut storage, index, rows) = legacy_prefix_recovery_fixture(incidental_sidecar);
+        let id = storage.catalog.segments[index].id;
+        let dir = storage.segment_path(id);
+        let binding = crate::column::read_source_namespace(&dir).unwrap();
+        run_legacy_prefix_recovery(&mut storage, index, restore).unwrap();
+        let appended = make_rows(1, 300);
+        storage.write_batch(&appended).unwrap();
+        let reader = SegmentReader::open(&dir).unwrap();
+        assert_eq!(
+            reader.read_log_rows(None).unwrap(),
+            [rows, appended].concat()
+        );
+        assert!(!reader.read_canonical().unwrap().is_present(0));
+        assert_eq!(reader.source_namespace(), None);
+        assert_eq!(storage.catalog.segments[index].source_namespace, None);
+        assert_eq!(crate::column::read_source_namespace(&dir).unwrap(), binding);
+    }
+
+    #[test]
+    fn legacy_prefix_recovery_restore_excludes_writer_after_capture() {
+        assert_legacy_prefix_recovery_excludes_writer(true, false);
+    }
+
+    #[test]
+    fn legacy_prefix_recovery_restore_excludes_writer_before_manifest() {
+        assert_legacy_prefix_recovery_excludes_writer(true, true);
+    }
+
+    #[test]
+    fn legacy_prefix_recovery_rebuild_excludes_writer_after_capture() {
+        assert_legacy_prefix_recovery_excludes_writer(false, false);
+    }
+
+    #[test]
+    fn legacy_prefix_recovery_rebuild_excludes_writer_before_manifest() {
+        assert_legacy_prefix_recovery_excludes_writer(false, true);
+    }
+
+    #[test]
+    fn legacy_prefix_recovery_restore_excludes_writer_first() {
+        assert_legacy_prefix_recovery_writer_first(true);
+    }
+
+    #[test]
+    fn legacy_prefix_recovery_rebuild_excludes_writer_first() {
+        assert_legacy_prefix_recovery_writer_first(false);
+    }
+
+    #[test]
+    fn legacy_prefix_recovery_restore_then_append_with_sidecar() {
+        assert_legacy_prefix_recovery_allows_append(true, true);
+    }
+
+    #[test]
+    fn legacy_prefix_recovery_restore_then_append_without_sidecar() {
+        assert_legacy_prefix_recovery_allows_append(true, false);
+    }
+
+    #[test]
+    fn legacy_prefix_recovery_rebuild_then_append_with_sidecar() {
+        assert_legacy_prefix_recovery_allows_append(false, true);
+    }
+
+    #[test]
+    fn legacy_prefix_recovery_rebuild_then_append_without_sidecar() {
+        assert_legacy_prefix_recovery_allows_append(false, false);
     }
 
     #[test]

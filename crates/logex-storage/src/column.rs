@@ -1024,6 +1024,7 @@ impl ColumnFile {
         dir: &Path,
         rows: &[LogRow],
         canonical: &NullBitmap,
+        owner: &SourceWriteGuard,
     ) -> io::Result<()> {
         if canonical.len() != rows.len() as u64 {
             return Err(io::Error::new(
@@ -1031,13 +1032,20 @@ impl ColumnFile {
                 "legacy prefix bitmap length differs from its rows",
             ));
         }
-        let _owner = SourceWriteGuard::acquire(dir)?;
+        if owner.dir != dir {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "legacy prefix owner belongs to another segment",
+            ));
+        }
+        // Keep an existing incidental sidecar binding usable by future raw
+        // appends. Native descriptor/manifest namespaces remain unidentified.
         Self::write_batch_contents(
             dir,
             rows,
             Some(canonical),
             durability::Publication::Durable,
-            None,
+            owner.binding,
             false,
         )
     }
