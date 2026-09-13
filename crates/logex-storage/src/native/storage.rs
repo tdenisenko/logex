@@ -2517,20 +2517,22 @@ fn verify_segment_integrity(
         ));
     }
 
-    // Startup/maintenance still require the sidecar authority even though
-    // query snapshots can trust a coherent canonical-last publication alone.
-    if descriptor.column_bundle.is_none() && descriptor.row_count != 0 {
-        if let Some(namespace) = descriptor.source_namespace {
-            crate::column::verify_owned_source(
+    // Integrity verification must retain writer authority through the complete
+    // capture and validation. A pre-capture sidecar check alone allows a writer
+    // to enter its pending state while queries still see a coherent old bitmap.
+    let _source_owner = if descriptor.column_bundle.is_none() && descriptor.row_count != 0 {
+        Some(match descriptor.source_namespace {
+            Some(namespace) => crate::column::SourceWriteGuard::acquire_bound(
                 &dir,
                 namespace.0,
                 descriptor.generation,
                 descriptor.id,
-            )?;
-        } else {
-            crate::column::read_source_binding(&dir)?;
-        }
-    }
+            )?,
+            None => crate::column::SourceWriteGuard::acquire_legacy(&dir)?,
+        })
+    } else {
+        None
+    };
     let reader = SegmentReader::open_projected(&dir, &["block_number"])?;
     if reader.source_namespace() != descriptor.source_namespace.map(|namespace| namespace.0) {
         return Err(io::Error::new(
@@ -7002,6 +7004,91 @@ mod tests {
             );
             drop(reopened);
         }
+    }
+
+    #[test]
+    fn integrity_verification_owns_source_through_canonical_capture() {
+        use std::cell::{Cell, RefCell};
+        use std::rc::Rc;
+
+        let tmp = TempDir::new().unwrap();
+        let config = NativeStorageConfig {
+            data_dir: tmp.path().to_path_buf(),
+            hot_target_rows: 32,
+            compaction_safety_margin_blocks: 2_048,
+        };
+        let mut storage = NativeStorage::open(config).unwrap();
+        storage.write_batch(&make_rows(3, 100)).unwrap();
+        storage.checkpoint().unwrap();
+        let descriptor = storage
+            .segments()
+            .iter()
+            .find(|segment| segment.row_count != 0)
+            .unwrap()
+            .clone();
+        let dir = storage.segment_path(descriptor.id);
+        let namespace = descriptor.source_namespace.unwrap().0;
+        let writer_error = Rc::new(Cell::new(None));
+        let writer_owner = Rc::new(RefCell::new(None));
+        let observed_error = Rc::clone(&writer_error);
+        let retained_owner = Rc::clone(&writer_owner);
+        let writer_dir = dir.clone();
+        let writer_descriptor = descriptor.clone();
+        crate::column_artifact::BEFORE_CANONICAL_CAPTURE.with_borrow_mut(|hook| {
+            *hook = Some(Box::new(move || {
+                match crate::column::SourceWriteGuard::acquire_bound(
+                    &writer_dir,
+                    namespace,
+                    writer_descriptor.generation,
+                    writer_descriptor.id,
+                ) {
+                    Ok(owner) => {
+                        // Pause a real source owner after its pending sidecar,
+                        // before any canonical fence or column replacement.
+                        crate::column::mark_source_updating_for_test(
+                            &writer_dir,
+                            crate::column::SourceIdentity {
+                                namespace,
+                                generation: writer_descriptor.generation,
+                                segment_id: writer_descriptor.id,
+                                kind: writer_descriptor.kind,
+                            },
+                        )
+                        .unwrap();
+                        *retained_owner.borrow_mut() = Some(owner);
+                    }
+                    Err(error) => observed_error.set(Some(error.kind())),
+                }
+            }));
+        });
+
+        let verified = verify_segment_integrity(&storage.paths, &descriptor);
+        assert_eq!(
+            writer_error.get(),
+            Some(io::ErrorKind::WouldBlock),
+            "a writer acquired ownership during integrity capture; verification returned {verified:?}"
+        );
+        verified.unwrap();
+        assert_eq!(
+            crate::column::read_source_namespace(&dir).unwrap(),
+            Some(namespace)
+        );
+
+        // The opposite ordering is excluded too: startup integrity cannot begin
+        // while a legitimate source writer already owns this segment.
+        let _owner = crate::column::SourceWriteGuard::acquire_bound(
+            &dir,
+            namespace,
+            descriptor.generation,
+            descriptor.id,
+        )
+        .unwrap();
+        assert_eq!(
+            verify_segment_integrity(&storage.paths, &descriptor)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::WouldBlock
+        );
     }
 
     #[test]
