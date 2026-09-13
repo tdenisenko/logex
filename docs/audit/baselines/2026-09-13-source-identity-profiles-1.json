@@ -1,0 +1,50 @@
+{
+  "schema": 1,
+  "candidate_commit": "d117f8eb745c614cdc62069376350c117a3a8dbb",
+  "jobs": [
+    {
+      "attempt": 1,
+      "name": "query_paths",
+      "exit": 101,
+      "sample_exit": 255,
+      "usable_sampled_stacks": false,
+      "instrumented_record_counts": {}
+    },
+    {
+      "attempt": 2,
+      "name": "query_paths",
+      "exit": 0,
+      "sample_exit": 0,
+      "usable_sampled_stacks": false,
+      "instrumented_record_counts": {
+        "config": 1,
+        "warmup": 5,
+        "sample": 1000
+      }
+    },
+    {
+      "attempt": 2,
+      "name": "raw_mixed",
+      "exit": 0,
+      "sample_exit": 0,
+      "usable_sampled_stacks": true,
+      "instrumented_record_counts": {
+        "config": 1,
+        "sample": 720,
+        "storage": 80,
+        "summary": 9
+      }
+    }
+  ],
+  "findings": [
+    "Attempt1 requested5000 query repetitions and failed the existing finite limit200 before measuring; sampler could not attach to the exited process.",
+    "Attempt2 query workload passed within200 repetitions, but the sampling report contains no sampled call stacks and cannot support hotspot attribution.",
+    "Attempt2 raw mixed workload passed80 repetitions and produced usable stacks. Two initial source-marker publication callsites contain412 and396 stack samples, including ordered file/barrier calls; these are sampled counts, not estimates of removable elapsed time.",
+    "Complete instrumented timing records and sampling reports remain separate from the20000 uninstrumented acceptance observations."
+  ],
+  "raw_evidence": {
+    "path": "2026-09-13-source-identity-profiles-1.json.gz",
+    "sha256": "429a8ac068dd9cfc975e21fb783fcea39a80bf4037ddc2a4276a46a440ab0220",
+    "files": 12
+  }
+}
