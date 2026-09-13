@@ -137,6 +137,13 @@ impl BTreeIndexReader {
         Self::open_data(data.as_slice())
     }
 
+    /// Open a complete published index and reject an artifact substituted
+    /// beneath its caller-held publication checkpoint guard.
+    pub fn open_bound(path: &Path, expected_file_id: [u8; 16]) -> io::Result<Self> {
+        let data = IndexFile::read_all_from_path_bound(path, expected_file_id)?;
+        Self::open_data(data.as_slice())
+    }
+
     fn open_file(file: IndexFile) -> io::Result<Self> {
         Self::open_data(&file.read_all()?)
     }
@@ -207,7 +214,20 @@ impl BTreeIndexReader {
     /// files require full structural validation before their keys are searched.
     /// Structural validation alone cannot detect valid-looking data mutations.
     pub fn get_from_file(path: &Path, key: &[u8]) -> io::Result<Option<RoaringBitmap>> {
-        let mut file = IndexFile::open(path)?;
+        Self::get_from_index_file(IndexFile::open(path)?, key)
+    }
+
+    /// Read a published point result only after matching its registered file
+    /// identity. The caller must retain the publication checkpoint guard.
+    pub fn get_from_file_bound(
+        path: &Path,
+        expected_file_id: [u8; 16],
+        key: &[u8],
+    ) -> io::Result<Option<RoaringBitmap>> {
+        Self::get_from_index_file(IndexFile::open_bound(path, expected_file_id)?, key)
+    }
+
+    fn get_from_index_file(mut file: IndexFile, key: &[u8]) -> io::Result<Option<RoaringBitmap>> {
         if single_entry_bulk_route_hint(&file, key) {
             let reader = Self::open_file(file)?;
             if reader.key_size != key.len() || reader.entries.len() != 1 {

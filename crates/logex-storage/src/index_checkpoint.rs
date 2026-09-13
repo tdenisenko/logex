@@ -1,17 +1,21 @@
 //! Bind derived indexes to the segment state they describe, without ingestion writes.
+use std::collections::{BTreeMap, btree_map::Entry};
 use std::fs::{self, File, TryLockError};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
-use alloy_primitives::keccak256;
+use alloy_primitives::{FixedBytes, keccak256};
 use serde::{Deserialize, Serialize};
 
 use crate::{BundleReference, SegmentReader, durability};
 
 pub(crate) const INDEX_CHECKPOINT_FILE: &str = "index-checkpoint";
-const MAGIC: &[u8; 8] = b"LXICP003";
+const MAGIC: &[u8; 8] = b"LXICP004";
+const UNBOUND_MAGIC: &[u8; 8] = b"LXICP003";
 const LEGACY_MAGIC: &[u8; 8] = b"LXICP002";
-const MAX_CHECKPOINT_BYTES: usize = 1_024;
+const MAX_CHECKPOINT_BYTES: usize = 4_096;
+const MAX_ARTIFACTS: usize = 12;
+const MAX_ARTIFACT_NAME_BYTES: usize = 64;
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -19,6 +23,40 @@ struct Identity {
     rows: u64,
     generation: u64,
     bundle: Option<BundleReference>,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ArtifactBinding {
+    name: String,
+    // FixedBytes uses compact 0x-prefixed hex in human-readable serde formats.
+    // Its deserializer also accepts the pre-merge V4 decimal arrays, so those
+    // experimental checkpoints retain the same validation and rebuild rules.
+    file_id: FixedBytes<16>,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Checkpoint {
+    identity: Identity,
+    artifacts: Vec<ArtifactBinding>,
+}
+
+fn validate_artifact_name(name: &str) -> io::Result<()> {
+    if name.is_empty()
+        || name.len() > MAX_ARTIFACT_NAME_BYTES
+        || name == "."
+        || name == ".."
+        || name
+            .bytes()
+            .any(|byte| !(byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-')))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "invalid index artifact name",
+        ));
+    }
+    Ok(())
 }
 
 impl Identity {
@@ -45,6 +83,7 @@ impl Drop for DirectoryLock {
 /// progress, callers can scan columns immediately instead of waiting for it.
 pub struct IndexReadCheckpoint {
     _lock: DirectoryLock,
+    artifacts: Vec<ArtifactBinding>,
 }
 
 impl IndexReadCheckpoint {
@@ -61,13 +100,26 @@ impl IndexReadCheckpoint {
             Err(TryLockError::Error(error)) => return Err(error),
         }
         let lock = DirectoryLock(file);
-        let Some(identity) = read_checkpoint(&index_dir)? else {
+        let Some(checkpoint) = read_checkpoint(&index_dir)? else {
             return Ok(None);
         };
-        if identity != Identity::read(reader)? {
+        if checkpoint.identity != Identity::read(reader)? {
             return Ok(None);
         }
-        Ok(Some(Self { _lock: lock }))
+        Ok(Some(Self {
+            _lock: lock,
+            artifacts: checkpoint.artifacts,
+        }))
+    }
+
+    /// Return the opaque ID registered for a published artifact. The shared
+    /// checkpoint guard must remain alive while the artifact reader uses it.
+    /// This detects file substitution; it does not authenticate source data.
+    pub fn artifact_id(&self, name: &str) -> Option<[u8; 16]> {
+        self.artifacts
+            .binary_search_by(|binding| binding.name.as_str().cmp(name))
+            .ok()
+            .map(|index| self.artifacts[index].file_id.0)
     }
 }
 
@@ -78,6 +130,8 @@ pub struct IndexBuildCheckpoint {
     dir: PathBuf,
     identity: Identity,
     reuse_existing: bool,
+    previous_artifacts: BTreeMap<String, [u8; 16]>,
+    artifacts: BTreeMap<String, [u8; 16]>,
 }
 
 impl IndexBuildCheckpoint {
@@ -106,13 +160,53 @@ impl IndexBuildCheckpoint {
         Ok(Self {
             _lock: lock,
             dir: dir.to_owned(),
-            reuse_existing: previous.as_ref() == Some(&identity),
+            reuse_existing: previous
+                .as_ref()
+                .is_some_and(|checkpoint| checkpoint.identity == identity),
+            previous_artifacts: previous
+                .map(|checkpoint| {
+                    checkpoint
+                        .artifacts
+                        .into_iter()
+                        .map(|binding| (binding.name, binding.file_id.0))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            artifacts: BTreeMap::new(),
             identity,
         })
     }
 
     pub fn can_reuse_existing(&self) -> bool {
         self.reuse_existing
+    }
+
+    pub fn previous_artifact_id(&self, name: &str) -> Option<[u8; 16]> {
+        self.previous_artifacts.get(name).copied()
+    }
+
+    /// Register one opaque, canonical artifact name and ID for publication.
+    /// Storage validates shape and bounds without interpreting the ID.
+    pub fn register_artifact(&mut self, name: &str, file_id: [u8; 16]) -> io::Result<()> {
+        validate_artifact_name(name)?;
+        if self.artifacts.len() >= MAX_ARTIFACTS && !self.artifacts.contains_key(name) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "too many index artifacts",
+            ));
+        }
+        match self.artifacts.entry(name.to_owned()) {
+            Entry::Vacant(entry) => {
+                entry.insert(file_id);
+            }
+            Entry::Occupied(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "duplicate index artifact",
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// If ingestion advanced while building, leave indexes unpublished and
@@ -124,7 +218,24 @@ impl IndexBuildCheckpoint {
                 "segment changed while building indexes; retry the build",
             ));
         }
-        let payload = serde_json::to_vec(&self.identity).map_err(io::Error::other)?;
+        let checkpoint = Checkpoint {
+            identity: self.identity,
+            artifacts: self
+                .artifacts
+                .into_iter()
+                .map(|(name, file_id)| ArtifactBinding {
+                    name,
+                    file_id: FixedBytes::from(file_id),
+                })
+                .collect(),
+        };
+        let payload = serde_json::to_vec(&checkpoint).map_err(io::Error::other)?;
+        if payload.len() + 40 > MAX_CHECKPOINT_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "index checkpoint exceeds size limit",
+            ));
+        }
         let mut bytes = MAGIC.to_vec();
         bytes.extend_from_slice(checkpoint_digest(MAGIC, &payload).as_slice());
         bytes.extend_from_slice(&payload);
@@ -134,7 +245,7 @@ impl IndexBuildCheckpoint {
     }
 }
 
-fn read_checkpoint(index_dir: &Path) -> io::Result<Option<Identity>> {
+fn read_checkpoint(index_dir: &Path) -> io::Result<Option<Checkpoint>> {
     let file = match File::open(index_dir.join(INDEX_CHECKPOINT_FILE)) {
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -145,7 +256,7 @@ fn read_checkpoint(index_dir: &Path) -> io::Result<Option<Identity>> {
         .read_to_end(&mut bytes)?;
     if bytes.len() > MAX_CHECKPOINT_BYTES
         || bytes.len() < 40
-        || (&bytes[..8] != MAGIC && &bytes[..8] != LEGACY_MAGIC)
+        || (&bytes[..8] != MAGIC && &bytes[..8] != UNBOUND_MAGIC && &bytes[..8] != LEGACY_MAGIC)
         || checkpoint_digest(&bytes[..8], &bytes[40..]).as_slice() != &bytes[8..40]
     {
         return Err(io::Error::new(
@@ -153,11 +264,35 @@ fn read_checkpoint(index_dir: &Path) -> io::Result<Option<Identity>> {
             "invalid index checkpoint",
         ));
     }
-    let identity = serde_json::from_slice(&bytes[40..])
+    if &bytes[..8] != MAGIC {
+        return Ok(None);
+    }
+    let mut checkpoint: Checkpoint = serde_json::from_slice(&bytes[40..])
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-    // Older derived sets have no page integrity checks. Scan the source columns
-    // until they are rebuilt, even if their row/generation identity still matches.
-    Ok((&bytes[..8] == MAGIC).then_some(identity))
+    if checkpoint.artifacts.len() > MAX_ARTIFACTS {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "too many index artifacts",
+        ));
+    }
+    for binding in &checkpoint.artifacts {
+        validate_artifact_name(&binding.name)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    }
+    checkpoint
+        .artifacts
+        .sort_unstable_by(|left, right| left.name.cmp(&right.name));
+    if checkpoint
+        .artifacts
+        .windows(2)
+        .any(|pair| pair[0].name == pair[1].name)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "duplicate index artifact",
+        ));
+    }
+    Ok(Some(checkpoint))
 }
 
 fn checkpoint_digest(magic: &[u8], payload: &[u8]) -> alloy_primitives::B256 {
@@ -357,6 +492,162 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+    }
+
+    #[test]
+    fn artifact_registration_is_bounded_and_rejects_duplicates_without_mutation() {
+        let dir = tempfile::tempdir().unwrap();
+        ColumnFile::write_batch(dir.path(), &[row()]).unwrap();
+        let mut build = IndexBuildCheckpoint::begin(dir.path()).unwrap();
+        let first = [1u8; 16];
+        build.register_artifact("address.bptree", first).unwrap();
+        assert_eq!(
+            build
+                .register_artifact("address.bptree", [2u8; 16])
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert_eq!(build.artifacts.get("address.bptree"), Some(&first));
+        for invalid in ["", ".", "..", "nested/address.bptree", "bad\\name"] {
+            assert_eq!(
+                build
+                    .register_artifact(invalid, [3u8; 16])
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::InvalidInput
+            );
+        }
+        for index in 1..MAX_ARTIFACTS {
+            build
+                .register_artifact(&format!("artifact-{index}"), [index as u8; 16])
+                .unwrap();
+        }
+        assert_eq!(
+            build
+                .register_artifact("one-too-many", [9u8; 16])
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
+    }
+
+    #[test]
+    fn artifact_ids_round_trip_as_hex_and_lookup_in_sorted_order() {
+        let dir = tempfile::tempdir().unwrap();
+        ColumnFile::write_batch(dir.path(), &[row()]).unwrap();
+        let mut build = IndexBuildCheckpoint::begin(dir.path()).unwrap();
+        build.register_artifact("z.bptree", [0x22; 16]).unwrap();
+        build.register_artifact("a.bptree", [0x11; 16]).unwrap();
+        build.publish().unwrap();
+
+        let marker_path = dir.path().join("indexes").join(INDEX_CHECKPOINT_FILE);
+        let marker = fs::read(&marker_path).unwrap();
+        let marker = std::str::from_utf8(&marker[40..]).unwrap();
+        assert!(marker.contains("0x11111111111111111111111111111111"));
+        assert!(marker.contains("0x22222222222222222222222222222222"));
+        assert!(!marker.contains("[17,17,17"));
+
+        let reader = SegmentReader::open(dir.path()).unwrap();
+        let legacy_z = vec![0x22u8; 16];
+        let legacy_a = vec![0x11u8; 16];
+        let payload = serde_json::to_vec(&serde_json::json!({
+            "identity": Identity::read(&reader).unwrap(),
+            "artifacts": [
+                {"name": "z.bptree", "file_id": legacy_z},
+                {"name": "a.bptree", "file_id": legacy_a},
+            ],
+        }))
+        .unwrap();
+        let mut legacy_array_marker = MAGIC.to_vec();
+        legacy_array_marker.extend_from_slice(checkpoint_digest(MAGIC, &payload).as_slice());
+        legacy_array_marker.extend_from_slice(&payload);
+        fs::write(&marker_path, legacy_array_marker).unwrap();
+
+        let checkpoint = IndexReadCheckpoint::open(dir.path(), &reader)
+            .unwrap()
+            .unwrap();
+        assert_eq!(checkpoint.artifact_id("a.bptree"), Some([0x11; 16]));
+        assert_eq!(checkpoint.artifact_id("z.bptree"), Some([0x22; 16]));
+        assert_eq!(checkpoint.artifact_id("missing.bptree"), None);
+    }
+
+    #[test]
+    fn checkpoint_deserialization_rejects_invalid_artifact_registries() {
+        let dir = tempfile::tempdir().unwrap();
+        ColumnFile::write_batch(dir.path(), &[row()]).unwrap();
+        let reader = SegmentReader::open(dir.path()).unwrap();
+        let identity = Identity::read(&reader).unwrap();
+        let marker = dir.path().join("indexes").join(INDEX_CHECKPOINT_FILE);
+        fs::create_dir_all(marker.parent().unwrap()).unwrap();
+
+        let duplicate = vec![
+            ArtifactBinding {
+                name: "address.bptree".to_owned(),
+                file_id: FixedBytes::from([1; 16]),
+            },
+            ArtifactBinding {
+                name: "address.bptree".to_owned(),
+                file_id: FixedBytes::from([2; 16]),
+            },
+        ];
+        let invalid = vec![ArtifactBinding {
+            name: "nested/address.bptree".to_owned(),
+            file_id: FixedBytes::from([3; 16]),
+        }];
+        let oversized = (0..=MAX_ARTIFACTS)
+            .map(|index| ArtifactBinding {
+                name: format!("artifact-{index}"),
+                file_id: FixedBytes::from([index as u8; 16]),
+            })
+            .collect::<Vec<_>>();
+
+        for artifacts in [duplicate, invalid, oversized] {
+            let payload = serde_json::to_vec(&Checkpoint {
+                identity: Identity {
+                    rows: identity.rows,
+                    generation: identity.generation,
+                    bundle: identity.bundle.clone(),
+                },
+                artifacts,
+            })
+            .unwrap();
+            let mut bytes = MAGIC.to_vec();
+            bytes.extend_from_slice(checkpoint_digest(MAGIC, &payload).as_slice());
+            bytes.extend_from_slice(&payload);
+            fs::write(&marker, bytes).unwrap();
+            assert_eq!(
+                IndexReadCheckpoint::open(dir.path(), &reader)
+                    .err()
+                    .unwrap()
+                    .kind(),
+                io::ErrorKind::InvalidData
+            );
+        }
+    }
+
+    #[test]
+    fn unbound_checkpoint_version_requires_rebuilding() {
+        let dir = tempfile::tempdir().unwrap();
+        ColumnFile::write_batch(dir.path(), &[row()]).unwrap();
+        IndexBuildCheckpoint::begin(dir.path())
+            .unwrap()
+            .publish()
+            .unwrap();
+        let marker = dir.path().join("indexes").join(INDEX_CHECKPOINT_FILE);
+        let mut bytes = fs::read(&marker).unwrap();
+        bytes[..8].copy_from_slice(UNBOUND_MAGIC);
+        let digest = checkpoint_digest(UNBOUND_MAGIC, &bytes[40..]);
+        bytes[8..40].copy_from_slice(digest.as_slice());
+        fs::write(&marker, &bytes).unwrap();
+        let reader = SegmentReader::open(dir.path()).unwrap();
+        assert!(
+            IndexReadCheckpoint::open(dir.path(), &reader)
+                .unwrap()
+                .is_none()
+        );
+        let build = IndexBuildCheckpoint::begin(dir.path()).unwrap();
+        assert!(!build.can_reuse_existing());
     }
 
     #[test]

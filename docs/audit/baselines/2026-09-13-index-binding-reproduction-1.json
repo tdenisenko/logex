@@ -1,0 +1,31 @@
+{
+  "schema": 1,
+  "status": "all three expected before-fix failures reproduced",
+  "base_commit": "26a8818c765b345d7cec09705b67767e6d8068e6",
+  "command": [
+    "cargo",
+    "test",
+    "-p",
+    "logex-query",
+    "--lib",
+    "--locked",
+    "native::tests::complete_"
+  ],
+  "source_sha256": "abf0444fbcb93ed56354d505822a80f3b1f0c927d7ad6ddce3a0465f4433de81",
+  "exit": 101,
+  "elapsed_seconds": 38.29465913772583,
+  "rustc": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+  "test_scope": "Three two-row temporary legacy source datasets. Full scan is independent of index lookup; each wrongly returns empty for a known matching row.",
+  "milestone_scope": "Individual complete artifact/source-kind mismatch fixed in current milestone; complete checkpoint+set copying retained as separate open source-publication finding.",
+  "archive": {
+    "path": "docs/audit/baselines/2026-09-13-index-binding-reproduction-1.json.gz",
+    "sha256": "d39ba71d2f730b839dfaf152336f2542fc89eba2f7240325159f4a97c7e8f652",
+    "bytes": 3204,
+    "files": {
+      "before-fix.patch": "04f2081f8a89175adafa63a612700bddfe941eefadd2ab46e91fe147710ac047",
+      "result.json": "873bca85e562d89317efc8c27fafbb2647e5132385fb6edbf161d97f78258842",
+      "tests.log": "02a6e385abc881878aa4762e675c474c78e58c1dee618b7bbf7afcf399a22808"
+    }
+  },
+  "warnings": "Existing linker unwind-table size warning and proc-macro-error2 future incompatibility warning; compilation succeeds. See complete log."
+}

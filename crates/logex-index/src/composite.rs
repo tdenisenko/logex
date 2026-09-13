@@ -281,6 +281,18 @@ impl CompositeQuery {
         BTreeIndexReader::get_from_file(path, &key)
     }
 
+    pub fn get_address_topic0_from_file_bound(
+        path: &Path,
+        expected_file_id: [u8; 16],
+        address: &[u8; 20],
+        topic0: &[u8; 32],
+    ) -> std::io::Result<Option<roaring::RoaringBitmap>> {
+        let mut key = [0u8; ADDR_TOPIC0_KEY_SIZE];
+        key[..20].copy_from_slice(address);
+        key[20..].copy_from_slice(topic0);
+        BTreeIndexReader::get_from_file_bound(path, expected_file_id, &key)
+    }
+
     /// Look up (address, topic0, topic1) in the composite index.
     pub fn get_address_topic0_topic1(
         reader: &BTreeIndexReader,
@@ -309,6 +321,20 @@ impl CompositeQuery {
         BTreeIndexReader::get_from_file(path, &key)
     }
 
+    pub fn get_address_topic0_topic1_from_file_bound(
+        path: &Path,
+        expected_file_id: [u8; 16],
+        address: &[u8; 20],
+        topic0: &[u8; 32],
+        topic1: &[u8; 32],
+    ) -> std::io::Result<Option<roaring::RoaringBitmap>> {
+        let mut key = [0u8; ADDR_TOPIC0_TOPIC1_KEY_SIZE];
+        key[..20].copy_from_slice(address);
+        key[20..52].copy_from_slice(topic0);
+        key[52..].copy_from_slice(topic1);
+        BTreeIndexReader::get_from_file_bound(path, expected_file_id, &key)
+    }
+
     /// Look up (address, topic0, topic2) in the composite index.
     pub fn get_address_topic0_topic2(
         reader: &BTreeIndexReader,
@@ -335,6 +361,20 @@ impl CompositeQuery {
         key[20..52].copy_from_slice(topic0);
         key[52..].copy_from_slice(topic2);
         BTreeIndexReader::get_from_file(path, &key)
+    }
+
+    pub fn get_address_topic0_topic2_from_file_bound(
+        path: &Path,
+        expected_file_id: [u8; 16],
+        address: &[u8; 20],
+        topic0: &[u8; 32],
+        topic2: &[u8; 32],
+    ) -> std::io::Result<Option<roaring::RoaringBitmap>> {
+        let mut key = [0u8; ADDR_TOPIC0_TOPIC2_KEY_SIZE];
+        key[..20].copy_from_slice(address);
+        key[20..52].copy_from_slice(topic0);
+        key[52..].copy_from_slice(topic2);
+        BTreeIndexReader::get_from_file_bound(path, expected_file_id, &key)
     }
 
     /// Prefix scan: all rows for a given address across all topic0 values.
@@ -430,6 +470,18 @@ impl CompositeQuery {
         key[..32].copy_from_slice(topic0);
         key[32..].copy_from_slice(topic1);
         BTreeIndexReader::get_from_file(path, &key)
+    }
+
+    pub fn get_topic0_topic1_from_file_bound(
+        path: &Path,
+        expected_file_id: [u8; 16],
+        topic0: &[u8; 32],
+        topic1: &[u8; 32],
+    ) -> std::io::Result<Option<roaring::RoaringBitmap>> {
+        let mut key = [0u8; TOPIC0_TOPIC1_KEY_SIZE];
+        key[..32].copy_from_slice(topic0);
+        key[32..].copy_from_slice(topic1);
+        BTreeIndexReader::get_from_file_bound(path, expected_file_id, &key)
     }
 
     /// Prefix scan: all rows for a given topic0 across all topic1 values.

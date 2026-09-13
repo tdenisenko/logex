@@ -270,10 +270,9 @@ pub(crate) fn candidate_row_ids_for_reader(
     } else {
         None
     };
-    let use_indexes = checkpoint.is_some();
-    if use_indexes
+    if let Some(checkpoint) = checkpoint.as_ref()
         && !event_bloom_prechecked
-        && erc20_event_bloom_excludes(&dir.join("indexes"), filter)?
+        && erc20_event_bloom_excludes(&dir.join("indexes"), checkpoint, filter)?
     {
         return Ok(Vec::new());
     }
@@ -282,8 +281,8 @@ pub(crate) fn candidate_row_ids_for_reader(
         return Ok(Vec::new());
     }
 
-    let bitmap = if use_indexes {
-        build_candidate_bitmap(dir, reader, filter, row_count)?
+    let bitmap = if let Some(checkpoint) = checkpoint.as_ref() {
+        build_candidate_bitmap(dir, reader, checkpoint, filter, row_count)?
     } else if refine_filter {
         refine_candidate_bitmap_from_columns(reader, filter, row_count, None)?
             .unwrap_or_else(|| (0..row_count as u32).collect())
@@ -397,6 +396,7 @@ pub fn matches_native_filter(row: &LogRow, filter: &NativeLogFilter) -> bool {
 fn build_candidate_bitmap(
     dir: &Path,
     segment_reader: &SegmentReader,
+    checkpoint: &IndexReadCheckpoint,
     filter: &NativeLogFilter,
     row_count: u64,
 ) -> std::io::Result<RoaringBitmap> {
@@ -408,10 +408,12 @@ fn build_candidate_bitmap(
 
     if let Some(block_hash) = filter.block_hash {
         let block_hash_path = index_dir.join("block_hash.bptree");
-        if block_hash_path.exists() {
-            if let Some(bitmap) =
-                BTreeIndexReader::get_from_file(&block_hash_path, block_hash.as_slice())?
-            {
+        if let Some(file_id) = checkpoint.artifact_id("block_hash.bptree") {
+            if let Some(bitmap) = BTreeIndexReader::get_from_file_bound(
+                &block_hash_path,
+                file_id,
+                block_hash.as_slice(),
+            )? {
                 result = Some(intersect_optional(result, bitmap));
             } else {
                 return Ok(RoaringBitmap::new());
@@ -425,11 +427,12 @@ fn build_candidate_bitmap(
         topic_values(&filter.topics[1]),
     ) {
         let composite_path = index_dir.join("address_topic0_topic1.bptree");
-        if composite_path.exists() {
+        if let Some(file_id) = checkpoint.artifact_id("address_topic0_topic1.bptree") {
             let mut union = RoaringBitmap::new();
             for topic1 in topic1_values {
-                if let Some(bitmap) = CompositeQuery::get_address_topic0_topic1_from_file(
+                if let Some(bitmap) = CompositeQuery::get_address_topic0_topic1_from_file_bound(
                     &composite_path,
+                    file_id,
                     &address,
                     &topic0,
                     &topic1,
@@ -453,11 +456,12 @@ fn build_candidate_bitmap(
         topic_values(&filter.topics[2]),
     ) {
         let composite_path = index_dir.join("address_topic0_topic2.bptree");
-        if composite_path.exists() {
+        if let Some(file_id) = checkpoint.artifact_id("address_topic0_topic2.bptree") {
             let mut union = RoaringBitmap::new();
             for topic2 in topic2_values {
-                if let Some(bitmap) = CompositeQuery::get_address_topic0_topic2_from_file(
+                if let Some(bitmap) = CompositeQuery::get_address_topic0_topic2_from_file_bound(
                     &composite_path,
+                    file_id,
                     &address,
                     &topic0,
                     &topic2,
@@ -483,8 +487,8 @@ fn build_candidate_bitmap(
     ) {
         (Some(address), Some(topic0), Some(from), Some(to)) => {
             let composite_path = index_dir.join("address_topic0_block.bptree");
-            if composite_path.exists() {
-                let reader = BTreeIndexReader::open(&composite_path)?;
+            if let Some(file_id) = checkpoint.artifact_id("address_topic0_block.bptree") {
+                let reader = BTreeIndexReader::open_bound(&composite_path, file_id)?;
                 let bitmap = CompositeQuery::range_address_topic0_blocks_inclusive(
                     &reader, &address, &topic0, from, to,
                 );
@@ -496,9 +500,10 @@ fn build_candidate_bitmap(
         }
         (Some(address), Some(topic0), _, _) => {
             let composite_path = index_dir.join("address_topic0.bptree");
-            if composite_path.exists() {
-                if let Some(bitmap) = CompositeQuery::get_address_topic0_from_file(
+            if let Some(file_id) = checkpoint.artifact_id("address_topic0.bptree") {
+                if let Some(bitmap) = CompositeQuery::get_address_topic0_from_file_bound(
                     &composite_path,
+                    file_id,
                     &address,
                     &topic0,
                 )? {
@@ -518,12 +523,17 @@ fn build_candidate_bitmap(
         topic_values(&filter.topics[1]),
     ) {
         let composite_path = index_dir.join("topic0_topic1.bptree");
-        if composite_path.exists() && (!covered_topics[0] || !covered_topics[1]) {
+        if let Some(file_id) = checkpoint.artifact_id("topic0_topic1.bptree")
+            && (!covered_topics[0] || !covered_topics[1])
+        {
             let mut union = RoaringBitmap::new();
             for topic1 in topic1_values {
-                if let Some(bitmap) =
-                    CompositeQuery::get_topic0_topic1_from_file(&composite_path, &topic0, &topic1)?
-                {
+                if let Some(bitmap) = CompositeQuery::get_topic0_topic1_from_file_bound(
+                    &composite_path,
+                    file_id,
+                    &topic0,
+                    &topic1,
+                )? {
                     union |= bitmap;
                 }
             }
@@ -538,12 +548,14 @@ fn build_candidate_bitmap(
 
     if !filter.addresses.is_empty() && !covered_addresses {
         let address_path = index_dir.join("address.bptree");
-        if address_path.exists() {
+        if let Some(file_id) = checkpoint.artifact_id("address.bptree") {
             let mut union = RoaringBitmap::new();
             for address in &filter.addresses {
-                if let Some(bitmap) =
-                    BTreeIndexReader::get_from_file(&address_path, address.as_slice())?
-                {
+                if let Some(bitmap) = BTreeIndexReader::get_from_file_bound(
+                    &address_path,
+                    file_id,
+                    address.as_slice(),
+                )? {
                     union |= bitmap;
                 }
             }
@@ -555,7 +567,7 @@ fn build_candidate_bitmap(
     }
 
     if !covered_topics[0]
-        && let Some(topic_bitmap) = build_topic0_bitmap(&index_dir, &filter.topics[0])?
+        && let Some(topic_bitmap) = build_topic0_bitmap(&index_dir, checkpoint, &filter.topics[0])?
     {
         if topic_bitmap.is_empty() {
             return Ok(RoaringBitmap::new());
@@ -565,8 +577,8 @@ fn build_candidate_bitmap(
 
     if !covered_block_range && (filter.from_block.is_some() || filter.to_block.is_some()) {
         let block_path = index_dir.join("block_number.bptree");
-        if block_path.exists() {
-            let reader = BTreeIndexReader::open(&block_path)?;
+        if let Some(file_id) = checkpoint.artifact_id("block_number.bptree") {
+            let reader = BTreeIndexReader::open_bound(&block_path, file_id)?;
             let from = filter.from_block.unwrap_or(0);
             let to = filter.to_block.unwrap_or(u64::MAX);
             let bitmap = reader.range_inclusive(&from.to_be_bytes(), &to.to_be_bytes());
@@ -579,8 +591,8 @@ fn build_candidate_bitmap(
 
     if filter.from_timestamp.is_some() || filter.to_timestamp.is_some() {
         let timestamp_path = index_dir.join("timestamp.bptree");
-        if timestamp_path.exists() {
-            let reader = BTreeIndexReader::open(&timestamp_path)?;
+        if let Some(file_id) = checkpoint.artifact_id("timestamp.bptree") {
+            let reader = BTreeIndexReader::open_bound(&timestamp_path, file_id)?;
             let from = filter.from_timestamp.unwrap_or(0);
             let to = filter.to_timestamp.unwrap_or(u64::MAX);
             let bitmap = reader.range_inclusive(&from.to_be_bytes(), &to.to_be_bytes());
@@ -596,16 +608,20 @@ fn build_candidate_bitmap(
     Ok(result.unwrap_or_else(|| (0..row_count as u32).collect()))
 }
 
-fn erc20_event_bloom_excludes(index_dir: &Path, filter: &NativeLogFilter) -> io::Result<bool> {
+fn erc20_event_bloom_excludes(
+    index_dir: &Path,
+    checkpoint: &IndexReadCheckpoint,
+    filter: &NativeLogFilter,
+) -> io::Result<bool> {
     let common_bloom_path = index_dir.join(ERC20_EVENTS_BLOOM_FILE);
-    if common_bloom_path.is_file() {
-        let mut reader = Erc20EventBloomReader::open(&common_bloom_path)?;
+    if let Some(file_id) = checkpoint.artifact_id(ERC20_EVENTS_BLOOM_FILE) {
+        let mut reader = Erc20EventBloomReader::open_bound(&common_bloom_path, file_id)?;
         return erc20_event_bloom_reader_excludes(&mut reader, filter);
     }
 
     let legacy_transfer_bloom_path = index_dir.join(TRANSFER_BLOOM_FILE);
-    if legacy_transfer_bloom_path.is_file() {
-        let mut reader = TransferBloomReader::open(&legacy_transfer_bloom_path)?;
+    if let Some(file_id) = checkpoint.artifact_id(TRANSFER_BLOOM_FILE) {
+        let mut reader = TransferBloomReader::open_bound(&legacy_transfer_bloom_path, file_id)?;
         return legacy_transfer_bloom_reader_excludes(&mut reader, filter);
     }
 
@@ -614,11 +630,12 @@ fn erc20_event_bloom_excludes(index_dir: &Path, filter: &NativeLogFilter) -> io:
 
 pub(crate) fn erc20_event_bloom_exclusions(
     index_dir: &Path,
+    checkpoint: &IndexReadCheckpoint,
     filters: &[NativeLogFilter],
 ) -> io::Result<Option<Vec<bool>>> {
     let common_bloom_path = index_dir.join(ERC20_EVENTS_BLOOM_FILE);
-    if common_bloom_path.is_file() {
-        let mut reader = Erc20EventBloomReader::open(&common_bloom_path)?;
+    if let Some(file_id) = checkpoint.artifact_id(ERC20_EVENTS_BLOOM_FILE) {
+        let mut reader = Erc20EventBloomReader::open_bound(&common_bloom_path, file_id)?;
         return filters
             .iter()
             .map(|filter| erc20_event_bloom_reader_excludes(&mut reader, filter))
@@ -627,8 +644,8 @@ pub(crate) fn erc20_event_bloom_exclusions(
     }
 
     let legacy_transfer_bloom_path = index_dir.join(TRANSFER_BLOOM_FILE);
-    if legacy_transfer_bloom_path.is_file() {
-        let mut reader = TransferBloomReader::open(&legacy_transfer_bloom_path)?;
+    if let Some(file_id) = checkpoint.artifact_id(TRANSFER_BLOOM_FILE) {
+        let mut reader = TransferBloomReader::open_bound(&legacy_transfer_bloom_path, file_id)?;
         return filters
             .iter()
             .map(|filter| legacy_transfer_bloom_reader_excludes(&mut reader, filter))
@@ -870,23 +887,25 @@ fn topic_matches_constraint(topic: Option<B256>, constraint: &TopicConstraint) -
 
 fn build_topic0_bitmap(
     index_dir: &Path,
+    checkpoint: &IndexReadCheckpoint,
     constraint: &TopicConstraint,
 ) -> std::io::Result<Option<RoaringBitmap>> {
     let topic_path = index_dir.join("topic0.bptree");
-    if !topic_path.exists() {
+    let Some(file_id) = checkpoint.artifact_id("topic0.bptree") else {
         return Ok(None);
-    }
+    };
 
     let bitmap = match constraint {
         TopicConstraint::Any => return Ok(None),
         TopicConstraint::One(topic) => {
-            BTreeIndexReader::get_from_file(&topic_path, topic.as_slice())?.unwrap_or_default()
+            BTreeIndexReader::get_from_file_bound(&topic_path, file_id, topic.as_slice())?
+                .unwrap_or_default()
         }
         TopicConstraint::AnyOf(topics) => {
             let mut union = RoaringBitmap::new();
             for topic in topics {
                 if let Some(bitmap) =
-                    BTreeIndexReader::get_from_file(&topic_path, topic.as_slice())?
+                    BTreeIndexReader::get_from_file_bound(&topic_path, file_id, topic.as_slice())?
                 {
                     union |= bitmap;
                 }
@@ -934,9 +953,12 @@ fn native_log_sort_key(row: &LogRow) -> (u64, u32, u32) {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::path::Path;
+
     use alloy_primitives::{Address, B256, bytes};
     use logex_index::IndexBuilder;
-    use logex_storage::PartitionManagerConfig;
+    use logex_storage::{ColumnFile, PartitionManagerConfig};
     use logex_types::Source;
     use tempfile::TempDir;
 
@@ -979,6 +1001,52 @@ mod tests {
         ]
     }
 
+    fn make_alternate_rows() -> Vec<LogRow> {
+        let mut rows = make_test_rows();
+        rows[0].block_hash = B256::repeat_byte(0x31);
+        rows[0].address = Address::repeat_byte(0xCC);
+        rows[1].block_hash = B256::repeat_byte(0x32);
+        rows[1].address = Address::repeat_byte(0xDD);
+        rows
+    }
+
+    fn write_legacy_source(dir: &Path, rows: &[LogRow]) {
+        ColumnFile::write_batch(dir, rows).unwrap();
+        assert!(
+            !dir.join("segment.json").exists(),
+            "fixture must exercise the legacy source identity"
+        );
+    }
+
+    fn full_scan_row_ids(dir: &Path, filter: &NativeLogFilter) -> Vec<u32> {
+        SegmentReader::open(dir)
+            .unwrap()
+            .read_log_rows(None)
+            .unwrap()
+            .into_iter()
+            .enumerate()
+            .filter_map(|(row_id, row)| {
+                matches_native_filter(&row, filter).then_some(row_id as u32)
+            })
+            .collect()
+    }
+
+    fn assert_indexed_result_matches_scan_or_errors(
+        dir: &Path,
+        filter: &NativeLogFilter,
+        context: &str,
+    ) {
+        let expected = full_scan_row_ids(dir, filter);
+        assert!(!expected.is_empty(), "the scan oracle must find a row");
+        let visible_rows = SegmentReader::open(dir).unwrap().read_row_count().unwrap();
+        if let Ok(actual) = candidate_row_ids(dir, filter, true, visible_rows) {
+            assert_eq!(
+                actual, expected,
+                "{context} must produce the scan result or an explicit integrity error"
+            );
+        }
+    }
+
     fn setup_storage() -> (TempDir, PartitionManager) {
         let tmp = TempDir::new().unwrap();
         let mut storage = PartitionManager::open(PartitionManagerConfig {
@@ -991,6 +1059,120 @@ mod tests {
         IndexBuilder::build_all_indexes(&storage.hot_partition().meta.path).unwrap();
         storage.checkpoint().unwrap();
         (tmp, storage)
+    }
+
+    #[test]
+    fn complete_same_kind_index_copied_across_sources_is_not_silently_trusted() {
+        let tmp = TempDir::new().unwrap();
+        let source = tmp.path().join("source");
+        let target = tmp.path().join("target");
+        write_legacy_source(&source, &make_test_rows());
+        write_legacy_source(&target, &make_alternate_rows());
+        IndexBuilder::build_all_indexes(&source).unwrap();
+        IndexBuilder::build_all_indexes(&target).unwrap();
+
+        fs::copy(
+            source.join("indexes/block_hash.bptree"),
+            target.join("indexes/block_hash.bptree"),
+        )
+        .unwrap();
+        let filter = NativeLogFilter::new().with_block_hash(B256::repeat_byte(0x32));
+
+        assert_indexed_result_matches_scan_or_errors(
+            &target,
+            &filter,
+            "a complete block-hash index from another source",
+        );
+    }
+
+    #[test]
+    fn complete_same_width_different_kind_index_is_not_silently_trusted() {
+        let tmp = TempDir::new().unwrap();
+        write_legacy_source(tmp.path(), &make_test_rows());
+        IndexBuilder::build_all_indexes(tmp.path()).unwrap();
+
+        fs::copy(
+            tmp.path().join("indexes/timestamp.bptree"),
+            tmp.path().join("indexes/block_number.bptree"),
+        )
+        .unwrap();
+        let filter = NativeLogFilter::new().with_block_range(Some(100), Some(100));
+
+        assert_indexed_result_matches_scan_or_errors(
+            tmp.path(),
+            &filter,
+            "a complete timestamp index substituted for the block-number index",
+        );
+    }
+
+    #[test]
+    fn complete_same_width_composite_index_is_not_silently_trusted() {
+        let tmp = TempDir::new().unwrap();
+        write_legacy_source(tmp.path(), &make_test_rows());
+        IndexBuilder::build_all_indexes(tmp.path()).unwrap();
+
+        fs::copy(
+            tmp.path().join("indexes/address_topic0_topic2.bptree"),
+            tmp.path().join("indexes/address_topic0_topic1.bptree"),
+        )
+        .unwrap();
+        let filter = NativeLogFilter::new()
+            .with_addresses(vec![Address::repeat_byte(0xAA)])
+            .with_topic(0, TopicConstraint::One(B256::repeat_byte(0x10)))
+            .with_topic(1, TopicConstraint::One(B256::repeat_byte(0x20)));
+
+        assert_indexed_result_matches_scan_or_errors(
+            tmp.path(),
+            &filter,
+            "a complete topic2 composite substituted for the same-width topic1 composite",
+        );
+    }
+
+    #[test]
+    fn complete_bloom_copied_across_sources_is_not_silently_trusted() {
+        let tmp = TempDir::new().unwrap();
+        let source = tmp.path().join("source");
+        let target = tmp.path().join("target");
+        let mut source_rows = make_test_rows();
+        let mut target_rows = make_alternate_rows();
+        for rows in [&mut source_rows, &mut target_rows] {
+            rows[0].topic0 = Some(transfer_topic0());
+        }
+        write_legacy_source(&source, &source_rows);
+        write_legacy_source(&target, &target_rows);
+        IndexBuilder::build_all_indexes(&source).unwrap();
+        IndexBuilder::build_all_indexes(&target).unwrap();
+
+        fs::copy(
+            source.join("indexes").join(ERC20_EVENTS_BLOOM_FILE),
+            target.join("indexes").join(ERC20_EVENTS_BLOOM_FILE),
+        )
+        .unwrap();
+        let filter = NativeLogFilter::new()
+            .with_addresses(vec![Address::repeat_byte(0xCC)])
+            .with_topic(0, TopicConstraint::One(transfer_topic0()))
+            .with_topic(1, TopicConstraint::One(B256::repeat_byte(0x20)));
+
+        let segment = SegmentReader::open(&target).unwrap();
+        let checkpoint = IndexReadCheckpoint::open(&target, &segment)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            erc20_event_bloom_exclusions(
+                &target.join("indexes"),
+                &checkpoint,
+                std::slice::from_ref(&filter),
+            )
+            .unwrap_err()
+            .kind(),
+            io::ErrorKind::InvalidData
+        );
+
+        assert_indexed_result_matches_scan_or_errors(
+            &target,
+            &filter,
+            "a complete ERC-20 bloom from another source",
+        );
     }
 
     #[test]
