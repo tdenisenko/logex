@@ -34,6 +34,22 @@ build of `b0650204` is unmeasured and will not clear that subsequent correction.
 Earlier candidates and rejected experiments are retained below as audit history,
 not separate accepted implementations.
 
+The user has explicitly removed backward-compatibility and migration requirements
+for the remaining audit. Fresh sync and beneficial format changes are allowed.
+The format table below describes the present implementation; legacy support is
+subject to simplification in the storage audit, rather than a compatibility
+requirement. Existing user data remains untouched.
+
+The [superseded content build](baselines/2026-09-14-source-identity-superseded-content-build-1.json)
+finished successfully on Mac-mini without running workloads. Its exact source,
+compiler logs and artifact hashes are retained. Corrected `b6c4741c` is being
+built in a fresh private child. The [platform preparation](baselines/2026-09-14-source-identity-platform-preparation-1.json)
+records the separate storage-test build, disposable-image recovery checks,
+bounded cooldown and evidence collection tools before those workloads execute.
+Preparation checks exposed two collector integration mistakes, both corrected
+before workload execution: terminal mount outcomes and nested sample result
+files now receive the appropriate handling. Earlier tool versions remain retained.
+
 ## Confirmed failures
 
 Two bounded regressions on `ebd9e550` use disposable two-row datasets. Copying

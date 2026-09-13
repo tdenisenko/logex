@@ -1,0 +1,58 @@
+{
+  "artifact_hashes": {
+    "audit_harness": "839ec5a3f7242af6331cbc8cb55351f691a6ea8d482f52488e65847b44b8bf38",
+    "ingestion_publication": "942853241d682a2aeaa6ab64b6a71245348dc820d3f2001824a8eff883200d64"
+  },
+  "collection": {
+    "counts": null,
+    "errors": [],
+    "extracted": false,
+    "files": 54,
+    "missing_expected": [
+      "cooling-result.json",
+      "cooling",
+      "packet-1/execution-result.json",
+      "packet-1/logs",
+      "tools",
+      "design"
+    ],
+    "status": "VERIFIED_STREAM_AND_ALL_MEMBERS",
+    "stderr_sha256": "d46119f56507a7e65e02bb5211e76929fbe0c9392f04cc37331171cf06d59c0f",
+    "tar_bytes": 5877760,
+    "tar_sha256": "306c8d41c979be1a5d9704c119fc4eb01bd482d97581e57b10cdd6102de5b033",
+    "terminal_states": [
+      {
+        "actionable_cleanup_failure": false,
+        "cleanup_errors": [],
+        "counts": {
+          "completed_processes": null,
+          "explicit_warmups": null,
+          "measured_timings": null,
+          "rss_records": null
+        },
+        "diagnostic_success_count_mismatch": false,
+        "errors": [],
+        "finished": "2026-09-13T23:07:04.347053+00:00",
+        "host_clean_claim": false,
+        "path": "/private/tmp/logex-audit-source-identity-quiet-20260913.YSSYXA/content-diagnostic-b0650204-20260914/build-result.json",
+        "status": "built_not_executed"
+      }
+    ]
+  },
+  "commit": "b0650204ba61e66df436491d67527d9f55073913",
+  "corrected_commit": "b6c4741cc77e5fa476f1c11cbbab8386b27b040e",
+  "disposition": "The journal-origin fix was discovered during this frozen build. No workload, cooldown or measurement ran. Retained in full as superseded build evidence; does not clear the corrected source.",
+  "finished": "2026-09-13T23:07:04.347053+00:00",
+  "limits": "Compiler source/target/cache/archive trees are represented by the retained build inventory and hashes. The old tools/design folders used longer names, so generic collector name warnings are retained; the complete actual folders are archived. Missing cooldown/packet files reflect intentional nonexecution. Mac mini was immediately reused for the corrected source and is not declared released.",
+  "raw_evidence": {
+    "bytes": 805917,
+    "decoded_bytes": 7803520,
+    "files": 61,
+    "path": "2026-09-14-source-identity-superseded-content-build-1-raw.json.gz",
+    "sha256": "52e87f75f76643f339f8b3debc090b002979e78509abb6652868bc2973b4bada"
+  },
+  "schema": 1,
+  "source_files": 835,
+  "started": "2026-09-13T22:40:12.061842+00:00",
+  "status": "SUCCESSFUL_UNMEASURED_BUILD_SUPERSEDED"
+}
