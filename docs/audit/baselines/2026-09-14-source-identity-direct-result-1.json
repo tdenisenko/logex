@@ -1,0 +1,97 @@
+{
+  "schema": 1,
+  "disposition": "COMPLETE_EVIDENCE_ENGINEERING_DISPOSITION_SEPARATE",
+  "source_performance_accepted": false,
+  "design": "2026-09-14-source-identity-direct-design-1.json",
+  "builds_and_inputs": "2026-09-14-source-identity-direct-build-1.json",
+  "counts": {
+    "processes": 576,
+    "measured_timings": 96000,
+    "explicit_warmups": 480,
+    "rss_records": 576,
+    "commands": 1440,
+    "host_probes": 864,
+    "collected_source_members": 2925
+  },
+  "packet_chronology": {
+    "packet_started": "2026-09-13T18:07:07.481886+00:00",
+    "packet_finished": "2026-09-13T19:38:25.136449+00:00",
+    "packet_wall_seconds": 5477.654563
+  },
+  "numeric_result": {
+    "status": "ANALYZED_REVIEW_PENDING",
+    "numeric_disposition": "NUMERICALLY_INCONCLUSIVE",
+    "numeric_endpoint_counts": {
+      "NUMERICALLY_BELOW_LIMIT": 61,
+      "NUMERICALLY_UNRESOLVED": 1
+    },
+    "acceptance_granted": false,
+    "engineering_review": "Root finalizes separately; all originals and endpoints retained.",
+    "raw_result": "direct-source-result-1/analysis-1/result.json"
+  },
+  "independent_verification": {
+    "status": "VERIFIED_WITH_DECLARED_SAMPLING_LIMIT",
+    "metric_points_checked": 744,
+    "primary_endpoints_checked": 62,
+    "interval_pairs_checked": 744,
+    "seeded_draw_records_checked": 4000,
+    "replicate_vectors_recomputed": 496,
+    "replicate_values_recomputed": 11904,
+    "retained_draw_vectors_validated": 124000,
+    "limit": "All retained vectors validated, but only the declared496vectors/11904values independently recomputed; no claim of independent arithmetic reconstruction for every replicate.",
+    "raw_result": "direct-source-result-1/independent-verification-1/verification-result.json"
+  },
+  "host_context": {
+    "raw_review": "direct-source-result-1/host-review/summary.json",
+    "speed_limit_range": [
+      78,
+      100
+    ],
+    "scheduler_limit": 100,
+    "available_cpus": 6,
+    "observations": "238of288CPU speed-limit readings below100. Descriptive only; no environmental exclusions or causal attribution."
+  },
+  "release": {
+    "finished": "2026-09-13T19:39:38.318107+00:00",
+    "matching_processes": [],
+    "parent_root_kib": 2483512,
+    "remote_access_after_release": false,
+    "raw_report": "direct-source-result-1/post-run-report.json"
+  },
+  "evidence_groups": [
+    "direct-source-result-1",
+    "direct-execution-preparation",
+    "count-path-review",
+    "independent-verifier-tooling",
+    "collection-tooling"
+  ],
+  "count_path_review": "count-path-review/review.md",
+  "archive": {
+    "path": "2026-09-14-source-identity-direct-result-1-raw.jsonl.gz",
+    "format": "gzip-compressed UTF-8 JSON Lines; first header, then complete file records with encoding/content and exact paths/lengths/SHA256. Stream line-by-line to decode; no extraction needed.",
+    "sha256": "ac2c990a43452f56cd4a6de2cdfe5fac3a7023e0dd568fa5b1c62ced9012ce45",
+    "compressed_bytes": 30411370,
+    "uncompressed_jsonl_bytes": 280614776,
+    "payload_source_files": 2992,
+    "archive_file_records": 2993,
+    "payload_source_bytes": 257087995,
+    "decoded_bytes_including_generated_manifest": 258282235,
+    "manifest_record": "packaging/manifest.json",
+    "packaging_script_record": "packaging/package.py",
+    "roundtrip": "Every file record decoded and compared byte-for-byte to original, with length/SHA256 checks. All2925collectedmember hashes independently rechecked before packaging."
+  },
+  "omitted_redundant_containers": [
+    {
+      "path": "/private/tmp/logex-source-identity-quiet-window-1/direct-source-result-1/packet.tar",
+      "bytes": 100300800,
+      "sha256": "15be9a54a9d11fc0f5188430a4862b2ddc6813562f5c88e0427667485e501930",
+      "reason": "Only redundant tar container omitted; its full verified contents, generated collection manifest, streaming/collection hashes and proof retained."
+    }
+  ],
+  "limits": [
+    "No raw observation, log, failed/status record, bootstrap draw or verifier result was excluded. All requested root contents plus verifier/collection tooling are retained.",
+    "Source trees, compiled binaries and earlier independent packets are linked through already archived build/design evidence and exact hashes; not duplicated here.",
+    "Original analysis-start records can contain provisional default statuses; final result.json remains authoritative. No original artifact was changed.",
+    "This packaging task does not adjudicate causality or relax the fixed62endpoint10%guardrail. Root engineering disposition remains separate."
+  ]
+}

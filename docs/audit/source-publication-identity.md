@@ -3,18 +3,15 @@
 This batch follows merged PR #149 and is in progress. It addresses source identity
 behind derived indexes; it does not claim the rest of the offline audit is done.
 The current source checkpoint is `c229ace0`, with production behavior restored to
-`179e0ff7` and all nine local workspace/release gates passing. The completed fixed
-release comparison leaves [performance disposition](#final-direct-performance-disposition)
-unresolved for several query tails. The subsequent identical-binary mac-mini
-control packet is inconclusive under its predeclared precision rules. The user
-subsequently supplied a quiet test window. That separate packet is now complete:
-all correctness checks pass, but only live publication satisfies every declared
-precision/order bound. No reported CPU speed limit was below 100. The local
-warmup diagnostic is also complete and does not establish a reliable measurement
-fix. A prospective direct source comparison now replaces the separate control
-admission strategy. Both release builds and all 1,590 frozen inputs are now
-verified; a fixed cooldown precedes its single execution in the same isolated
-mac-mini test folder. Performance clearance, exact-head CI and merge remain pending.
+`179e0ff7` and all nine local workspace/release gates passing. The latest
+[direct mac-mini comparison](#completed-direct-mac-mini-comparison) completed
+576 fixture processes and 96,000 measured timings with every correctness check
+passing. Independent arithmetic review agrees with the result: 61 of 62 primary
+endpoints are numerically below the 10% limit; sparse COUNT p95 remains uncertain.
+The full packet remains INCONCLUSIVE. Read-only query-path review found no
+COUNT-specific defect or unnecessary work. Mac-mini was released at
+2026-09-13 19:39:38 UTC, with no audit processes remaining. Performance clearance,
+exact-head Linux/macOS CI, PR and merge remain pending.
 Earlier candidates and rejected experiments are retained below as audit history,
 not separate accepted implementations.
 
@@ -1070,9 +1067,75 @@ Git archive, all 32 command logs, and the workspace-selected compiler records.
 A separate remote check rehashes all 1,590 baseline/candidate input files,
 including the compiled binaries. The original six fixtures are byte-identical.
 
-The fixed 600-second cooldown is operational preparation, with before/after host
-conditions retained and no environmental admission thresholds. Its active log
-will be retained with the execution packet. No benchmark has started at this
-checkpoint. The 70-file build/preparation archive has been decoded and compared
+The fixed 600-second cooldown was operational preparation, with before/after host
+conditions retained and no environmental admission thresholds. Its final log
+is retained with the execution packet below. No benchmark had started at the
+build-evidence checkpoint. The 70-file build/preparation archive has been decoded and compared
 byte-for-byte to the retained originals; it establishes provenance, not source
 performance clearance.
+
+## Completed direct mac-mini comparison
+
+The [complete direct result](baselines/2026-09-14-source-identity-direct-result-1.json)
+retains the execution, raw measurements, analysis, independent verification,
+host observations and final release check. The frozen schedule completed once
+from 2026-09-13 18:07:07 to 19:38:25 UTC: 576 processes, 96,000 measured timings,
+480 explicit warmups and 576 RSS observations. All fixture oracles, configuration
+checks and before/after input hashes pass. Collection independently verified all
+2,925 original evidence files. No measurement was discarded or replaced.
+
+The original conditional 95% intervals put 61 of 62 primary endpoints below
+10%. The remaining endpoint is `integrated_sparse.sql_count` p95: +4.06%, with
+interval [-5.38%, +12.65%]. Its median changes +0.25%, with interval
+[-1.29%, +1.97%]. This is an uncertain tail estimate, not demonstrated
+above-limit overhead. The full packet remains **INCONCLUSIVE** under its frozen
+rules. Earlier packets retain their original dispositions.
+
+Actual publication results are:
+
+| Workload | Median change | p95 change | p95 interval |
+| --- | ---: | ---: | ---: |
+| Live publication | +0.08% | -0.61% | [-2.44%, +2.47%] |
+| Historical publication | +0.01% | +2.76% | [-4.66%, +6.03%] |
+| Dense raw live ingestion | +0.81% | -0.50% | [-1.29%, +1.19%] |
+| Sparse raw live ingestion | +1.24% | +1.90% | [+0.40%, +3.07%] |
+| Dense raw historical ingestion | +0.32% | +0.93% | [+0.06%, +2.07%] |
+| Sparse raw historical ingestion | -0.10% | +0.91% | [-0.93%, +1.85%] |
+
+The exact intervals and all 31 metric reviews are retained in the
+[engineering disposition](baselines/2026-09-14-source-identity-direct-engineering-1.json).
+The short absent-topic p95 increase of +5.90% was investigated: its upper bound
+is +7.94%, with the prior stage attribution and unsuccessful positional-read
+experiment retained. Required source identity validation may cost several percent
+on small queries. No supported optimization was removed, and controls are never
+subtracted from a source result.
+
+Sparse COUNT's order-specific p95 estimates are +13.39% and -2.48%. Identical
+baseline and candidate controls also show substantial order variation. The old
+schedule couples source order to control order, so those factors cannot be
+separated retrospectively. Inspecting all tail contributors shows observations
+from multiple processes; removing an isolated observation would neither be
+justified nor resolve this limitation. The read-only COUNT review confirms that
+its parser, native aggregate implementation and fixture are unchanged. The
+candidate adds bounded identity validation shared by the native filter, COUNT
+and ordered-query paths. No COUNT-specific bug or redundant operation was found.
+
+Independent verification checked all 744 point estimates, 744 interval pairs,
+62 endpoint dispositions, 4,000 seeded index selections and 124,000 vector
+identities. It also independently recomputed 496 vectors (11,904 values) at
+16 fixed draw indices; it did not independently recompute every vector's
+arithmetic. All checks agree. The analysis remains conditional on these
+measurements; it does not establish simultaneous coverage for all endpoints,
+a sequential error guarantee over prior experiments or future-host performance.
+
+All 864 host probes and 576 wrapper logs were independently reviewed. Reported
+CPU speed limits range 78–100, with 238 of 288 readings below 100. Scheduler
+limit and available CPUs remain 100 and six; swap/pageout counters do not
+increase. These readings do not identify the cause of timing variation.
+
+Mac-mini was released at 2026-09-13 19:39:38 UTC after collection and a read-only
+process check found no matching audit processes. New files remain exclusively
+under `/private/tmp/logex-audit-source-identity-quiet-20260913.YSSYXA`, totaling
+2,483,512 KiB. Existing external-volume contents were not accessed. Any later
+confirmation must have a separately reviewed, prospectively fixed design that
+addresses the order coupling; this packet cannot be repeated until it passes.

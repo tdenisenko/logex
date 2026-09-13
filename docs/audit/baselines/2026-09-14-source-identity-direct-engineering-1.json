@@ -1,0 +1,4028 @@
+{
+  "status": "INCONCLUSIVE",
+  "acceptance_granted": false,
+  "baseline": "9c0a58fc64fac3da7f5a50b3a20b7ab729f029e9",
+  "candidate": "c229ace0345dd7b6b8c07388d3c0aed8a9c6a771",
+  "production_equivalent": "179e0ff7c7b2816c96d1a62195fa75b2cf8d3b09",
+  "inputs": [
+    {
+      "path": "/private/tmp/logex-source-identity-quiet-window-1/direct-source-result-1/analysis-1/result.json",
+      "bytes": 2028682,
+      "sha256": "642257401648d258d27a18ae79d53ea74dc018a8ac2befe95f0b9fec17c83751"
+    },
+    {
+      "path": "/private/tmp/logex-source-identity-quiet-window-1/direct-source-result-1/analysis-1/metric-results.json",
+      "bytes": 190354,
+      "sha256": "96f4b2941f0cd6c51da0d824ff5b2fcafb3b79e8c67b3ab153601ef6f9175190"
+    },
+    {
+      "path": "/private/tmp/logex-source-identity-quiet-window-1/direct-source-result-1/analysis-1/pooled-tails.json",
+      "bytes": 5012404,
+      "sha256": "c31e409c47dd6403616f830476cd3fbe02512b0f2863c3cc90c318360aeceaf5"
+    },
+    {
+      "path": "/private/tmp/logex-source-identity-quiet-window-1/direct-source-result-1/host-review/summary.json",
+      "bytes": 28995,
+      "sha256": "d902d33d138ee5ca2b5fab74e7040ba96e77475e08ff2bcba609a547e1b24d4e"
+    },
+    {
+      "path": "/private/tmp/logex-source-identity-quiet-window-1/direct-source-result-1/independent-verification-1/verification-result.json",
+      "bytes": 1371438,
+      "sha256": "fc0ec8bf17e6e6578aaac71244beb9c9c357d2c390795f02e948d292c5c3e69c"
+    },
+    {
+      "path": "/private/tmp/logex-source-identity-count-path-review-1/review.md",
+      "bytes": 8763,
+      "sha256": "7cb90fc97426c1009192c31e2ced5b6b2d4d813c72907da529878f2ff38a3fb9"
+    },
+    {
+      "path": "/private/tmp/logex-source-identity-count-path-review-1/evidence.json",
+      "bytes": 3548,
+      "sha256": "11a63ef82e8a46a1f7784133c5aceb0be97b44b1748db6b5eb8199b1b575034b"
+    }
+  ],
+  "counts": {
+    "processes": 576,
+    "timings": 96000,
+    "explicit_warmups": 480,
+    "rss": 576,
+    "primary_endpoints": 62,
+    "numerically_below_limit": 61,
+    "numerically_unresolved": 1,
+    "metrics_with_review_flags": 20
+  },
+  "overall_review": "The numerical outcome remains INCONCLUSIVE. Review found no additional code defect; source identity validation remains required. Sparse COUNT p95 has unresolved order variation and an upper bound above10%. No earlier observation or disposition is overwritten, and no automatic follow-up measurement is authorized by this record.",
+  "limits": [
+    "Intervals are the original conditional non-simultaneous 95% percentile intervals, not simultaneous coverage for62endpoints or a general production bound.",
+    "All4000 seeded resampling indices,124000 vector identities,744 effect estimates,744 interval pairs and62endpoint dispositions were independently checked. Independent raw arithmetic recomputed496/124000vectors (11904values) at16fixed draw indices; remaining vector arithmetic was not independently re-executed.",
+    "CPU speed limits range78-100 with238/288 samples below100. Scheduler limit100/available CPUs6 throughout; no swap/pageout counter growth. This does not identify timing causality or actual frequency.",
+    "Original control order and source order are coupled. Their separation cannot be inferred from this packet.",
+    "No control subtraction, exclusions, changed warmups, favorable subgroup replacement or accepted optimization claim."
+  ],
+  "metrics": [
+    {
+      "suite": "integrated_dense",
+      "metric": "live_storage_ingest",
+      "source": {
+        "source.drift.median": 0.5835135916201217,
+        "source.drift.p95": -0.44072021103604975,
+        "source.order0.median": 1.0888275605037245,
+        "source.order0.p95": -0.49483266654430924,
+        "source.order1.median": 0.5053139688836028,
+        "source.order1.p95": -0.054112455508259494,
+        "source.pooled.median": 0.808115159942302,
+        "source.pooled.p95": -0.5026078270427115
+      },
+      "source_intervals": {
+        "source.drift.median": [
+          -1.766212833289893,
+          4.827147267676124
+        ],
+        "source.drift.p95": [
+          -3.545926410266642,
+          2.3354533526838694
+        ],
+        "source.order0.median": [
+          -0.47852493691868947,
+          5.276387639916336
+        ],
+        "source.order0.p95": [
+          -2.0534712087527884,
+          1.571186139098879
+        ],
+        "source.order1.median": [
+          -0.4407282897678999,
+          2.145141271778117
+        ],
+        "source.order1.p95": [
+          -3.2923152656852195,
+          2.3174988356731596
+        ],
+        "source.pooled.median": [
+          -0.3040650572800896,
+          2.0920298286592143
+        ],
+        "source.pooled.p95": [
+          -1.291747876796856,
+          1.1944015099740302
+        ]
+      },
+      "review_flags": [],
+      "precision_warnings": [
+        {
+          "bounds": [
+            -5.106606840871175,
+            1.325479348004066
+          ],
+          "field": "baseline_control.order1.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -0.3381557044885297,
+            5.337212160316707
+          ],
+          "field": "candidate_control.order0.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -0.07908558641304131,
+            8.06104121286424
+          ],
+          "field": "candidate_control.order1.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -5.993096641415208,
+            4.519275402425094
+          ],
+          "field": "candidate_control.drift.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        }
+      ],
+      "disposition": "NO_ADDITIONAL_ENGINEERING_BLOCKER_IDENTIFIED_IN_THIS_METRIC",
+      "assessment": "No declared point-estimate review flag. Both pooled source endpoints are numerically below the limit. This is conditional evidence for the measured workload and environment, not a future-environment guarantee."
+    },
+    {
+      "suite": "integrated_dense",
+      "metric": "index_build",
+      "source": {
+        "source.drift.median": -1.2751909350652846,
+        "source.drift.p95": -0.3088526195569541,
+        "source.order0.median": -1.2992977114134274,
+        "source.order0.p95": -1.8246879948482508,
+        "source.order1.median": -0.024106776348142844,
+        "source.order1.p95": -1.5158353752912967,
+        "source.pooled.median": -0.6251175321668634,
+        "source.pooled.p95": -1.4416350656527688
+      },
+      "source_intervals": {
+        "source.drift.median": [
+          -3.667622911986812,
+          0.7108031547104599
+        ],
+        "source.drift.p95": [
+          -2.7931717855407046,
+          2.921976569143292
+        ],
+        "source.order0.median": [
+          -3.380984849817481,
+          0.09544818524902521
+        ],
+        "source.order0.p95": [
+          -3.122069841737918,
+          0.7931091406341517
+        ],
+        "source.order1.median": [
+          -1.3981133529798573,
+          1.1283466931718777
+        ],
+        "source.order1.p95": [
+          -3.695143400266654,
+          0.8390350738249897
+        ],
+        "source.pooled.median": [
+          -2.020749937788502,
+          0.34133849464437205
+        ],
+        "source.pooled.p95": [
+          -2.7629961390737034,
+          0.20373438587697468
+        ]
+      },
+      "review_flags": [],
+      "precision_warnings": [
+        {
+          "bounds": [
+            -1.8017871859003054,
+            5.841366737808573
+          ],
+          "field": "candidate_control.order0.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        }
+      ],
+      "disposition": "NO_ADDITIONAL_ENGINEERING_BLOCKER_IDENTIFIED_IN_THIS_METRIC",
+      "assessment": "No declared point-estimate review flag. Both pooled source endpoints are numerically below the limit. This is conditional evidence for the measured workload and environment, not a future-environment guarantee."
+    },
+    {
+      "suite": "integrated_dense",
+      "metric": "compaction",
+      "source": {
+        "source.drift.median": -1.369211583626706,
+        "source.drift.p95": 0.29201994617018556,
+        "source.order0.median": -0.6289735835632859,
+        "source.order0.p95": -0.3727227984100523,
+        "source.order1.median": 0.7402380000634201,
+        "source.order1.p95": -0.6647427445802379,
+        "source.pooled.median": 0.0953679386254569,
+        "source.pooled.p95": -0.6780500875838813
+      },
+      "source_intervals": {
+        "source.drift.median": [
+          -3.0574307279454205,
+          0.0533072786848221
+        ],
+        "source.drift.p95": [
+          -3.1795710555059253,
+          4.592926227588546
+        ],
+        "source.order0.median": [
+          -2.0460815632623475,
+          0.4312596852130479
+        ],
+        "source.order0.p95": [
+          -2.913863216834678,
+          1.8828407482897935
+        ],
+        "source.order1.median": [
+          -0.2230701033608007,
+          1.6554121119563003
+        ],
+        "source.order1.p95": [
+          -5.097500763671969,
+          2.0612132799324723
+        ],
+        "source.pooled.median": [
+          -0.7727042857749389,
+          0.8109945693650422
+        ],
+        "source.pooled.p95": [
+          -2.081490666001762,
+          1.2695974478106775
+        ]
+      },
+      "review_flags": [],
+      "precision_warnings": [],
+      "disposition": "NO_ADDITIONAL_ENGINEERING_BLOCKER_IDENTIFIED_IN_THIS_METRIC",
+      "assessment": "No declared point-estimate review flag. Both pooled source endpoints are numerically below the limit. This is conditional evidence for the measured workload and environment, not a future-environment guarantee."
+    },
+    {
+      "suite": "integrated_dense",
+      "metric": "reopen",
+      "source": {
+        "source.drift.median": -1.255303275002384,
+        "source.drift.p95": -1.6736527128991097,
+        "source.order0.median": 0.08573053074918402,
+        "source.order0.p95": -1.1178786120309092,
+        "source.order1.median": 1.341033805751568,
+        "source.order1.p95": 0.5557741008682004,
+        "source.pooled.median": 0.7116766862150348,
+        "source.pooled.p95": 0.07645578390529373
+      },
+      "source_intervals": {
+        "source.drift.median": [
+          -2.003728077333511,
+          -0.21118058484261848
+        ],
+        "source.drift.p95": [
+          -6.022031231317138,
+          1.2366213182511077
+        ],
+        "source.order0.median": [
+          -0.24535209815971237,
+          0.5990095020640629
+        ],
+        "source.order0.p95": [
+          -1.6368599324276367,
+          -0.28324312252742123
+        ],
+        "source.order1.median": [
+          0.48371627301933007,
+          2.0108944348486313
+        ],
+        "source.order1.p95": [
+          -2.176513792405521,
+          4.611933138753277
+        ],
+        "source.pooled.median": [
+          0.42879034896843304,
+          1.128956375978274
+        ],
+        "source.pooled.p95": [
+          -1.6426512334744459,
+          0.8492024708675716
+        ]
+      },
+      "review_flags": [],
+      "precision_warnings": [
+        {
+          "bounds": [
+            -7.322974480996636,
+            7.595327512413563
+          ],
+          "field": "baseline_control.order1.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -7.131679966460935,
+            7.698468298905913
+          ],
+          "field": "baseline_control.drift.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -5.258936922861301,
+            1.9877451077363162
+          ],
+          "field": "candidate_control.drift.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        }
+      ],
+      "disposition": "NO_ADDITIONAL_ENGINEERING_BLOCKER_IDENTIFIED_IN_THIS_METRIC",
+      "assessment": "No declared point-estimate review flag. Both pooled source endpoints are numerically below the limit. This is conditional evidence for the measured workload and environment, not a future-environment guarantee."
+    },
+    {
+      "suite": "integrated_dense",
+      "metric": "native_filter",
+      "source": {
+        "source.drift.median": -2.415766991345336,
+        "source.drift.p95": -4.072880323369543,
+        "source.order0.median": -3.280451033420284,
+        "source.order0.p95": -3.615857296719982,
+        "source.order1.median": -0.864684042074948,
+        "source.order1.p95": 0.4570230266495612,
+        "source.pooled.median": -2.216789715980727,
+        "source.pooled.p95": -0.555421058543315
+      },
+      "source_intervals": {
+        "source.drift.median": [
+          -6.528658997005998,
+          1.5623758634524143
+        ],
+        "source.drift.p95": [
+          -7.493884607741552,
+          1.4990853304713836
+        ],
+        "source.order0.median": [
+          -5.5259152728223455,
+          0.44737589410441814
+        ],
+        "source.order0.p95": [
+          -6.368053906820359,
+          0.668666142227825
+        ],
+        "source.order1.median": [
+          -2.7111794963551317,
+          2.7110861131293795
+        ],
+        "source.order1.p95": [
+          -2.9124353966964334,
+          2.3700312987448457
+        ],
+        "source.pooled.median": [
+          -3.609135519204798,
+          0.15640376088708052
+        ],
+        "source.pooled.p95": [
+          -2.505085221328962,
+          1.4352769032215607
+        ]
+      },
+      "review_flags": [
+        {
+          "field": "baseline_control.drift.p95",
+          "reason": "absolute_order_difference_above5_percentage_points",
+          "value": 6.154787274572426
+        },
+        {
+          "field": "candidate_control.order1.p95",
+          "reason": "absolute_control_effect_above5_percent",
+          "value": 7.077229887638703
+        },
+        {
+          "field": "candidate_control.drift.p95",
+          "reason": "absolute_order_difference_above5_percentage_points",
+          "value": -8.705406796343794
+        }
+      ],
+      "precision_warnings": [
+        {
+          "bounds": [
+            -4.068151846658297,
+            5.070450900109358
+          ],
+          "field": "baseline_control.order1.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -7.851714464354631,
+            4.253091783642504
+          ],
+          "field": "baseline_control.order1.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -4.113118761293633,
+            5.230378199531727
+          ],
+          "field": "baseline_control.drift.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -6.544264265917699,
+            12.229503877075631
+          ],
+          "field": "baseline_control.drift.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -2.1419763426527516,
+            7.291555632339786
+          ],
+          "field": "candidate_control.pooled.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            0.38231091792035876,
+            10.212384077077541
+          ],
+          "field": "candidate_control.order1.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -12.700637698124496,
+            -0.4085059889025966
+          ],
+          "field": "candidate_control.drift.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        }
+      ],
+      "disposition": "NO_ADDITIONAL_ENGINEERING_BLOCKER_IDENTIFIED_IN_THIS_METRIC",
+      "assessment": "Flagged variation occurs only in identical-binary controls/order comparisons; every source order point remains below 5% and both pooled source upper bounds remain below 10%. Controls demonstrate variation within this packet but cannot prove its cause or remove source overhead. All observations are retained. No new code defect or optimization opportunity follows from this flag."
+    },
+    {
+      "suite": "integrated_dense",
+      "metric": "sql_count",
+      "source": {
+        "source.drift.median": -2.467434176854444,
+        "source.drift.p95": -2.517872188730186,
+        "source.order0.median": -3.238382595927569,
+        "source.order0.p95": -1.7231938150798154,
+        "source.order1.median": -0.7709484190731253,
+        "source.order1.p95": 0.7946783736503704,
+        "source.pooled.median": -2.195798720467268,
+        "source.pooled.p95": -0.29633485904474455
+      },
+      "source_intervals": {
+        "source.drift.median": [
+          -8.073903613659683,
+          1.1388101468127299
+        ],
+        "source.drift.p95": [
+          -46.617337921578674,
+          15.518217825121026
+        ],
+        "source.order0.median": [
+          -6.814144367414132,
+          0.08186022521241565
+        ],
+        "source.order0.p95": [
+          -15.562447928388224,
+          2.6559068882288095
+        ],
+        "source.order1.median": [
+          -3.189675468776565,
+          3.5109529428688058
+        ],
+        "source.order1.p95": [
+          -22.76340085045775,
+          41.10777248488824
+        ],
+        "source.pooled.median": [
+          -4.3480361472000295,
+          0.3646129994304026
+        ],
+        "source.pooled.p95": [
+          -9.53161983926245,
+          6.5585467308371115
+        ]
+      },
+      "review_flags": [
+        {
+          "field": "baseline_control.order0.p95",
+          "reason": "absolute_control_effect_above5_percent",
+          "value": -5.545648365828271
+        },
+        {
+          "field": "baseline_control.order1.p95",
+          "reason": "absolute_control_effect_above5_percent",
+          "value": 12.082675377521458
+        },
+        {
+          "field": "baseline_control.drift.p95",
+          "reason": "absolute_order_difference_above5_percentage_points",
+          "value": -17.62832374334973
+        },
+        {
+          "field": "candidate_control.pooled.p95",
+          "reason": "absolute_control_effect_above5_percent",
+          "value": 5.064861141721666
+        },
+        {
+          "field": "candidate_control.order1.p95",
+          "reason": "absolute_control_effect_above5_percent",
+          "value": 7.135658062031736
+        },
+        {
+          "field": "candidate_control.drift.median",
+          "reason": "absolute_order_difference_above5_percentage_points",
+          "value": -7.065468960391241
+        },
+        {
+          "field": "candidate_control.drift.p95",
+          "reason": "absolute_order_difference_above5_percentage_points",
+          "value": -8.544706181573346
+        }
+      ],
+      "precision_warnings": [
+        {
+          "bounds": [
+            -5.58750252092538,
+            11.547395588524934
+          ],
+          "field": "baseline_control.pooled.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -9.290971256374602,
+            0.7666891398706355
+          ],
+          "field": "baseline_control.order0.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -4.122519032129279,
+            28.802134230117616
+          ],
+          "field": "baseline_control.order1.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -31.180429640934094,
+            1.065834275242128
+          ],
+          "field": "baseline_control.drift.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -1.4805191418859276,
+            7.957117466781871
+          ],
+          "field": "candidate_control.pooled.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -3.540874600377608,
+            5.642921091400099
+          ],
+          "field": "candidate_control.order0.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            0.8110185567813621,
+            8.424328128771208
+          ],
+          "field": "candidate_control.order1.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -0.7660597916886447,
+            9.379480308933296
+          ],
+          "field": "candidate_control.order1.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -11.243671420288425,
+            -2.860020410085229
+          ],
+          "field": "candidate_control.drift.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -11.7997266868335,
+            3.4359487715990955
+          ],
+          "field": "candidate_control.drift.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        }
+      ],
+      "disposition": "NO_ADDITIONAL_ENGINEERING_BLOCKER_IDENTIFIED_IN_THIS_METRIC",
+      "assessment": "Flagged variation occurs only in identical-binary controls/order comparisons; every source order point remains below 5% and both pooled source upper bounds remain below 10%. Controls demonstrate variation within this packet but cannot prove its cause or remove source overhead. All observations are retained. No new code defect or optimization opportunity follows from this flag."
+    },
+    {
+      "suite": "integrated_dense",
+      "metric": "sql_ordered",
+      "source": {
+        "source.drift.median": -3.0970003825971926,
+        "source.drift.p95": -2.540788109855463,
+        "source.order0.median": -2.4393995583731343,
+        "source.order0.p95": -0.19799323308998806,
+        "source.order1.median": 0.6576008242240583,
+        "source.order1.p95": 2.342794876765475,
+        "source.pooled.median": -0.36184742653156965,
+        "source.pooled.p95": 1.2751623021291403
+      },
+      "source_intervals": {
+        "source.drift.median": [
+          -7.564177059171728,
+          1.9141423738508578
+        ],
+        "source.drift.p95": [
+          -14.273215252435921,
+          9.6124016884514
+        ],
+        "source.order0.median": [
+          -5.869149737716839,
+          2.0035619331955745
+        ],
+        "source.order0.p95": [
+          -3.456313311873871,
+          6.708357882317495
+        ],
+        "source.order1.median": [
+          -2.546421500637086,
+          3.331642969869697
+        ],
+        "source.order1.p95": [
+          -6.1512855264192705,
+          15.143443368582087
+        ],
+        "source.pooled.median": [
+          -3.122263050214491,
+          1.8178498068078142
+        ],
+        "source.pooled.p95": [
+          -2.751349577572504,
+          7.5242242731904385
+        ]
+      },
+      "review_flags": [
+        {
+          "field": "baseline_control.pooled.p95",
+          "reason": "absolute_control_effect_above5_percent",
+          "value": 6.2034466751975215
+        },
+        {
+          "field": "baseline_control.order1.p95",
+          "reason": "absolute_control_effect_above5_percent",
+          "value": 8.304297457663367
+        },
+        {
+          "field": "candidate_control.order0.p95",
+          "reason": "absolute_control_effect_above5_percent",
+          "value": -6.967248000471448
+        },
+        {
+          "field": "candidate_control.order1.p95",
+          "reason": "absolute_control_effect_above5_percent",
+          "value": 5.3151035808794544
+        },
+        {
+          "field": "candidate_control.drift.p95",
+          "reason": "absolute_order_difference_above5_percentage_points",
+          "value": -12.282351581350902
+        }
+      ],
+      "precision_warnings": [
+        {
+          "bounds": [
+            -4.320643041188987,
+            14.67557295615849
+          ],
+          "field": "baseline_control.pooled.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -4.8476846213559295,
+            11.970808795892584
+          ],
+          "field": "baseline_control.order0.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -5.677634355064843,
+            15.466465682031384
+          ],
+          "field": "baseline_control.order1.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -4.324449536178654,
+            5.76981454092892
+          ],
+          "field": "baseline_control.drift.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -16.595648021559704,
+            11.911783545763488
+          ],
+          "field": "baseline_control.drift.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -9.664986034586809,
+            6.670665592328451
+          ],
+          "field": "candidate_control.pooled.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -12.066797958239384,
+            6.546328706218896
+          ],
+          "field": "candidate_control.order0.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -10.212358068803539,
+            8.702653803671744
+          ],
+          "field": "candidate_control.order1.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -5.0720507115812445,
+            7.748666772386259
+          ],
+          "field": "candidate_control.drift.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -19.896932203879704,
+            9.499595752882549
+          ],
+          "field": "candidate_control.drift.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        }
+      ],
+      "disposition": "NO_ADDITIONAL_ENGINEERING_BLOCKER_IDENTIFIED_IN_THIS_METRIC",
+      "assessment": "Flagged variation occurs only in identical-binary controls/order comparisons; every source order point remains below 5% and both pooled source upper bounds remain below 10%. Controls demonstrate variation within this packet but cannot prove its cause or remove source overhead. All observations are retained. No new code defect or optimization opportunity follows from this flag."
+    },
+    {
+      "suite": "integrated_dense",
+      "metric": "concurrent_native_queries",
+      "source": {
+        "source.drift.median": -3.18848149334674,
+        "source.drift.p95": -2.7257019027018714,
+        "source.order0.median": -1.7751329634839275,
+        "source.order0.p95": -5.065823570347749,
+        "source.order1.median": 1.4133485298628123,
+        "source.order1.p95": -2.340121667645878,
+        "source.pooled.median": -0.02426379490612085,
+        "source.pooled.p95": -3.15952241563201
+      },
+      "source_intervals": {
+        "source.drift.median": [
+          -7.1822015931989664,
+          0.4369116487145219
+        ],
+        "source.drift.p95": [
+          -10.027906228507288,
+          3.4228457966260173
+        ],
+        "source.order0.median": [
+          -5.046660230829447,
+          0.6136907581147044
+        ],
+        "source.order0.p95": [
+          -10.23723051091292,
+          -0.2687452844085003
+        ],
+        "source.order1.median": [
+          -1.8094817049384981,
+          3.4848696579145466
+        ],
+        "source.order1.p95": [
+          -6.265438966255344,
+          2.7733142486311646
+        ],
+        "source.pooled.median": [
+          -2.6854823223980917,
+          1.6178941164111116
+        ],
+        "source.pooled.p95": [
+          -6.833323617482301,
+          -0.10641372256167125
+        ]
+      },
+      "review_flags": [
+        {
+          "field": "baseline_control.order0.p95",
+          "reason": "absolute_control_effect_above5_percent",
+          "value": -5.354391652861878
+        },
+        {
+          "field": "baseline_control.drift.p95",
+          "reason": "absolute_order_difference_above5_percentage_points",
+          "value": -7.849676711639197
+        },
+        {
+          "field": "candidate_control.drift.p95",
+          "reason": "absolute_order_difference_above5_percentage_points",
+          "value": 6.918961145879344
+        }
+      ],
+      "precision_warnings": [
+        {
+          "bounds": [
+            -7.100569789319,
+            0.9033402675928448
+          ],
+          "field": "baseline_control.pooled.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -4.343085955367609,
+            5.000359843665714
+          ],
+          "field": "baseline_control.order0.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -9.194076458138966,
+            -2.4042229110633806
+          ],
+          "field": "baseline_control.order0.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -2.1890358479543903,
+            5.019495367314364
+          ],
+          "field": "baseline_control.order1.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -3.978346381457354,
+            6.713870513790976
+          ],
+          "field": "baseline_control.order1.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -8.264473059801015,
+            4.904007632605412
+          ],
+          "field": "baseline_control.drift.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -14.553303865255963,
+            0.14856014314643673
+          ],
+          "field": "baseline_control.drift.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -1.6881246218254375,
+            6.182975407936042
+          ],
+          "field": "candidate_control.order0.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -8.498656466337795,
+            2.7955815483441393
+          ],
+          "field": "candidate_control.order1.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -2.767959824532973,
+            12.01488195148851
+          ],
+          "field": "candidate_control.drift.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        }
+      ],
+      "disposition": "NO_ADDITIONAL_ENGINEERING_BLOCKER_IDENTIFIED_IN_THIS_METRIC",
+      "assessment": "Flagged variation occurs only in identical-binary controls/order comparisons; every source order point remains below 5% and both pooled source upper bounds remain below 10%. Controls demonstrate variation within this packet but cannot prove its cause or remove source overhead. All observations are retained. No new code defect or optimization opportunity follows from this flag."
+    },
+    {
+      "suite": "integrated_dense",
+      "metric": "historical_storage_ingest",
+      "source": {
+        "source.drift.median": -1.1951633342447865,
+        "source.drift.p95": -3.876416551246964,
+        "source.order0.median": -0.42533734053920025,
+        "source.order0.p95": -0.5732233727152924,
+        "source.order1.median": 0.7698259937055862,
+        "source.order1.p95": 3.3031931785316715,
+        "source.pooled.median": 0.3205823484437209,
+        "source.pooled.p95": 0.9304417801338394
+      },
+      "source_intervals": {
+        "source.drift.median": [
+          -2.3827949716321517,
+          0.13385815720130534
+        ],
+        "source.drift.p95": [
+          -8.41131167576814,
+          -1.0083658707932819
+        ],
+        "source.order0.median": [
+          -1.094160034472813,
+          0.4639122332682044
+        ],
+        "source.order0.p95": [
+          -3.412464640547519,
+          0.0608903168349606
+        ],
+        "source.order1.median": [
+          -0.37121796555493747,
+          1.7666714665979022
+        ],
+        "source.order1.p95": [
+          0.4434605310081663,
+          7.687132593298274
+        ],
+        "source.pooled.median": [
+          -0.5090434867556892,
+          0.9678707200173609
+        ],
+        "source.pooled.p95": [
+          0.06146500402419708,
+          2.073082145014715
+        ]
+      },
+      "review_flags": [],
+      "precision_warnings": [
+        {
+          "bounds": [
+            -13.517101921419917,
+            -0.06171817438516136
+          ],
+          "field": "candidate_control.order1.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -1.0041817116953844,
+            12.94667673914084
+          ],
+          "field": "candidate_control.drift.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        }
+      ],
+      "disposition": "NO_ADDITIONAL_ENGINEERING_BLOCKER_IDENTIFIED_IN_THIS_METRIC",
+      "assessment": "No declared point-estimate review flag. Both pooled source endpoints are numerically below the limit. This is conditional evidence for the measured workload and environment, not a future-environment guarantee."
+    },
+    {
+      "suite": "integrated_sparse",
+      "metric": "live_storage_ingest",
+      "source": {
+        "source.drift.median": 1.5108438518164347,
+        "source.drift.p95": -0.5466398362784064,
+        "source.order0.median": 2.3173432517838766,
+        "source.order0.p95": 1.9189880388141622,
+        "source.order1.median": 0.8064993999674419,
+        "source.order1.p95": 2.4656278750925686,
+        "source.pooled.median": 1.2401505273985869,
+        "source.pooled.p95": 1.9033373559919964
+      },
+      "source_intervals": {
+        "source.drift.median": [
+          -0.9550372660318773,
+          4.581685636173649
+        ],
+        "source.drift.p95": [
+          -3.087963964327045,
+          2.559985140289922
+        ],
+        "source.order0.median": [
+          0.04843487810819447,
+          4.85607682554039
+        ],
+        "source.order0.p95": [
+          -0.4651256922717839,
+          3.2643232883506457
+        ],
+        "source.order1.median": [
+          -0.8612276877986935,
+          1.7113857875753036
+        ],
+        "source.order1.p95": [
+          -0.13179284440970607,
+          3.7947909024399262
+        ],
+        "source.pooled.median": [
+          0.17156054365257134,
+          2.5358017465151095
+        ],
+        "source.pooled.p95": [
+          0.4001687971036949,
+          3.072195546136025
+        ]
+      },
+      "review_flags": [],
+      "precision_warnings": [
+        {
+          "bounds": [
+            -2.154801982729704,
+            6.910620001885892
+          ],
+          "field": "baseline_control.order0.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -0.3651863671932154,
+            9.920060530633645
+          ],
+          "field": "baseline_control.drift.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -5.655274315591152,
+            1.642808338820645
+          ],
+          "field": "candidate_control.order1.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -5.073045997572867,
+            5.397457804784089
+          ],
+          "field": "candidate_control.drift.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        }
+      ],
+      "disposition": "NO_ADDITIONAL_ENGINEERING_BLOCKER_IDENTIFIED_IN_THIS_METRIC",
+      "assessment": "No declared point-estimate review flag. Both pooled source endpoints are numerically below the limit. This is conditional evidence for the measured workload and environment, not a future-environment guarantee."
+    },
+    {
+      "suite": "integrated_sparse",
+      "metric": "index_build",
+      "source": {
+        "source.drift.median": 0.6910686518325049,
+        "source.drift.p95": 1.3852282347026623,
+        "source.order0.median": 0.9219702445337541,
+        "source.order0.p95": 2.5514930906448408,
+        "source.order1.median": 0.23090159270124921,
+        "source.order1.p95": 1.1662648559421784,
+        "source.pooled.median": 0.45023545788460684,
+        "source.pooled.p95": 1.8118059215701088
+      },
+      "source_intervals": {
+        "source.drift.median": [
+          -1.246997085410495,
+          2.4132936553444617
+        ],
+        "source.drift.p95": [
+          -2.906483092204426,
+          5.596685844683558
+        ],
+        "source.order0.median": [
+          -0.500292050987361,
+          2.0116660736979597
+        ],
+        "source.order0.p95": [
+          0.052350341426921077,
+          5.22282882891012
+        ],
+        "source.order1.median": [
+          -1.1093290264437061,
+          1.5463640101884168
+        ],
+        "source.order1.p95": [
+          -2.358446833122374,
+          4.6405811951731435
+        ],
+        "source.pooled.median": [
+          -0.3649687159024695,
+          1.273588401171799
+        ],
+        "source.pooled.p95": [
+          -0.40118588684948664,
+          4.277532299834719
+        ]
+      },
+      "review_flags": [
+        {
+          "field": "baseline_control.order1.p95",
+          "reason": "absolute_control_effect_above5_percent",
+          "value": -5.384192365499119
+        }
+      ],
+      "precision_warnings": [
+        {
+          "bounds": [
+            -8.258525073810697,
+            3.3348867599553023
+          ],
+          "field": "baseline_control.pooled.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -5.023315680450324,
+            7.96862822393043
+          ],
+          "field": "baseline_control.order0.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -10.513579379232773,
+            3.996203947242827
+          ],
+          "field": "baseline_control.order1.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -6.044299482989834,
+            16.344055334095653
+          ],
+          "field": "baseline_control.drift.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -2.893290085405187,
+            5.154354030527375
+          ],
+          "field": "candidate_control.order0.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -2.2525782099131586,
+            5.370139168712862
+          ],
+          "field": "candidate_control.drift.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        }
+      ],
+      "disposition": "NO_ADDITIONAL_ENGINEERING_BLOCKER_IDENTIFIED_IN_THIS_METRIC",
+      "assessment": "Flagged variation occurs only in identical-binary controls/order comparisons; every source order point remains below 5% and both pooled source upper bounds remain below 10%. Controls demonstrate variation within this packet but cannot prove its cause or remove source overhead. All observations are retained. No new code defect or optimization opportunity follows from this flag."
+    },
+    {
+      "suite": "integrated_sparse",
+      "metric": "compaction",
+      "source": {
+        "source.drift.median": -0.08535711423915959,
+        "source.drift.p95": -1.5769480695279725,
+        "source.order0.median": 0.9641051608899831,
+        "source.order0.p95": 0.39695443600287206,
+        "source.order1.median": 1.0494622751291427,
+        "source.order1.p95": 1.9739025055308446,
+        "source.pooled.median": 1.263814654888118,
+        "source.pooled.p95": 1.6365208428145817
+      },
+      "source_intervals": {
+        "source.drift.median": [
+          -2.5386732913496246,
+          2.3098256568125697
+        ],
+        "source.drift.p95": [
+          -5.452346702025257,
+          1.4944601179756267
+        ],
+        "source.order0.median": [
+          -1.2001972028975572,
+          3.0909573168354187
+        ],
+        "source.order0.p95": [
+          -0.5261806902678856,
+          2.384929720313478
+        ],
+        "source.order1.median": [
+          -0.1412346460406444,
+          2.333497246108762
+        ],
+        "source.order1.p95": [
+          -0.16868847331902304,
+          5.953133346750139
+        ],
+        "source.pooled.median": [
+          -0.23385935852813233,
+          2.2965240473391546
+        ],
+        "source.pooled.p95": [
+          -0.0053215959158414705,
+          2.7823646358565934
+        ]
+      },
+      "review_flags": [
+        {
+          "field": "baseline_control.drift.p95",
+          "reason": "absolute_order_difference_above5_percentage_points",
+          "value": 5.5326180647343515
+        }
+      ],
+      "precision_warnings": [
+        {
+          "bounds": [
+            -8.293783470103733,
+            3.2753120656536128
+          ],
+          "field": "baseline_control.pooled.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -9.772832756361261,
+            5.534329448324105
+          ],
+          "field": "baseline_control.order0.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -6.504476783336754,
+            2.434119733954332
+          ],
+          "field": "baseline_control.order1.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -2.030433070122739,
+            5.076883198503623
+          ],
+          "field": "baseline_control.drift.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -7.855289917294339,
+            11.619689363867025
+          ],
+          "field": "baseline_control.drift.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -1.5828693381089276,
+            6.03638871256047
+          ],
+          "field": "candidate_control.drift.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        }
+      ],
+      "disposition": "NO_ADDITIONAL_ENGINEERING_BLOCKER_IDENTIFIED_IN_THIS_METRIC",
+      "assessment": "Flagged variation occurs only in identical-binary controls/order comparisons; every source order point remains below 5% and both pooled source upper bounds remain below 10%. Controls demonstrate variation within this packet but cannot prove its cause or remove source overhead. All observations are retained. No new code defect or optimization opportunity follows from this flag."
+    },
+    {
+      "suite": "integrated_sparse",
+      "metric": "reopen",
+      "source": {
+        "source.drift.median": 0.4709045947827395,
+        "source.drift.p95": 1.4545478487610897,
+        "source.order0.median": 1.2682906089352075,
+        "source.order0.p95": 1.7080081951373227,
+        "source.order1.median": 0.797386014152468,
+        "source.order1.p95": 0.25346034637623305,
+        "source.pooled.median": 1.042435379784723,
+        "source.pooled.p95": 0.47678782052802404
+      },
+      "source_intervals": {
+        "source.drift.median": [
+          -0.20525437429592674,
+          1.2562038127737596
+        ],
+        "source.drift.p95": [
+          -2.3052263755906077,
+          5.452999212654941
+        ],
+        "source.order0.median": [
+          0.7349405091784389,
+          2.0396629270830413
+        ],
+        "source.order0.p95": [
+          -0.4115825484775071,
+          3.6210580734982623
+        ],
+        "source.order1.median": [
+          0.5158436774053587,
+          1.2236739437466948
+        ],
+        "source.order1.p95": [
+          -4.0463148676918586,
+          2.7743225699400353
+        ],
+        "source.pooled.median": [
+          0.7782965807196396,
+          1.4145820793665775
+        ],
+        "source.pooled.p95": [
+          -0.8613947320887161,
+          2.3919833201689222
+        ]
+      },
+      "review_flags": [],
+      "precision_warnings": [
+        {
+          "bounds": [
+            -5.593398717502717,
+            0.11517536852168053
+          ],
+          "field": "baseline_control.pooled.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -7.263563936153461,
+            -0.5565321508715693
+          ],
+          "field": "baseline_control.order1.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -3.3750007648438607,
+            7.019668116459721
+          ],
+          "field": "baseline_control.drift.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -6.001667815054301,
+            0.0072968594720945745
+          ],
+          "field": "candidate_control.pooled.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -6.325974926513611,
+            1.1588371097968064
+          ],
+          "field": "candidate_control.order0.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -7.311874875894741,
+            0.4723306791953874
+          ],
+          "field": "candidate_control.order1.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -5.0528281823412176,
+            6.772637072301846
+          ],
+          "field": "candidate_control.drift.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        }
+      ],
+      "disposition": "NO_ADDITIONAL_ENGINEERING_BLOCKER_IDENTIFIED_IN_THIS_METRIC",
+      "assessment": "No declared point-estimate review flag. Both pooled source endpoints are numerically below the limit. This is conditional evidence for the measured workload and environment, not a future-environment guarantee."
+    },
+    {
+      "suite": "integrated_sparse",
+      "metric": "native_filter",
+      "source": {
+        "source.drift.median": 1.596261795111542,
+        "source.drift.p95": 2.3230597986828805,
+        "source.order0.median": 1.0735915063177615,
+        "source.order0.p95": 6.227654859955956,
+        "source.order1.median": -0.5226702887937806,
+        "source.order1.p95": 3.904595061273075,
+        "source.pooled.median": 0.6063896527044088,
+        "source.pooled.p95": 4.35129800584988
+      },
+      "source_intervals": {
+        "source.drift.median": [
+          -1.5938283024982236,
+          4.642663292534676
+        ],
+        "source.drift.p95": [
+          -3.221109359960339,
+          10.399299267307482
+        ],
+        "source.order0.median": [
+          -0.8983377427733696,
+          2.7268292201186872
+        ],
+        "source.order0.p95": [
+          0.881870956570685,
+          13.319067178878008
+        ],
+        "source.order1.median": [
+          -3.007130664559876,
+          2.0007400875635017
+        ],
+        "source.order1.p95": [
+          -3.0591374641003033,
+          5.978168406308848
+        ],
+        "source.pooled.median": [
+          -1.353347221995016,
+          1.7548005424804725
+        ],
+        "source.pooled.p95": [
+          0.7281975581016065,
+          6.581502290405594
+        ]
+      },
+      "review_flags": [
+        {
+          "field": "source.order0.p95",
+          "reason": "observed_source_increase_above5_percent",
+          "value": 6.227654859955956
+        },
+        {
+          "field": "baseline_control.order1.p95",
+          "reason": "absolute_control_effect_above5_percent",
+          "value": -5.385886960817842
+        },
+        {
+          "field": "candidate_control.drift.p95",
+          "reason": "absolute_order_difference_above5_percentage_points",
+          "value": 7.953218833618503
+        }
+      ],
+      "precision_warnings": [
+        {
+          "bounds": [
+            -6.499803560097717,
+            -2.554725243825884
+          ],
+          "field": "baseline_control.pooled.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -5.811728526419968,
+            3.711057623528724
+          ],
+          "field": "baseline_control.pooled.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -6.813247107240694,
+            -0.14680405966315258
+          ],
+          "field": "baseline_control.order0.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -4.959085766227722,
+            5.9347774160221745
+          ],
+          "field": "baseline_control.order0.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -6.058809533944531,
+            -2.179158501455014
+          ],
+          "field": "baseline_control.order1.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -11.947193495239416,
+            -0.4964935707800544
+          ],
+          "field": "baseline_control.order1.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -2.686592214363215,
+            14.641691134166813
+          ],
+          "field": "baseline_control.drift.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -4.49956081986127,
+            10.209257478047107
+          ],
+          "field": "candidate_control.order0.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -5.95309646339911,
+            -1.2906891003570675
+          ],
+          "field": "candidate_control.order1.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            0.2816248276387934,
+            7.202607601526934
+          ],
+          "field": "candidate_control.drift.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -0.05361423161307499,
+            15.112651898446327
+          ],
+          "field": "candidate_control.drift.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        }
+      ],
+      "disposition": "NO_ADDITIONAL_ENGINEERING_BLOCKER_IDENTIFIED_IN_THIS_METRIC",
+      "assessment": "Investigated source order0 p95 +6.23%; order1 +3.91%, pooled +4.35% with upper bound 6.58%. All rows agree with the oracle. The same bounded identity validation is used by COUNT and other candidate-row consumers. This is compatible with modest required validation cost; controls do not establish how much is causal. No repeatable above-limit effect is established."
+    },
+    {
+      "suite": "integrated_sparse",
+      "metric": "sql_count",
+      "source": {
+        "source.drift.median": 1.394320691138029,
+        "source.drift.p95": 15.869068692093492,
+        "source.order0.median": 0.5694776832229742,
+        "source.order0.p95": 13.393361864243914,
+        "source.order1.median": -0.8248430079150548,
+        "source.order1.p95": -2.4757068278495775,
+        "source.pooled.median": 0.249920143154303,
+        "source.pooled.p95": 4.059996552833134
+      },
+      "source_intervals": {
+        "source.drift.median": [
+          -2.0580212015159582,
+          4.579684447684718
+        ],
+        "source.drift.p95": [
+          -1.2386280637389335,
+          33.681799189992645
+        ],
+        "source.order0.median": [
+          -1.3272214148512873,
+          2.695769520940794
+        ],
+        "source.order0.p95": [
+          0.8117465650578248,
+          20.04533238757311
+        ],
+        "source.order1.median": [
+          -3.135921101363348,
+          2.0905501800666304
+        ],
+        "source.order1.p95": [
+          -19.85598958074426,
+          9.609719569441278
+        ],
+        "source.pooled.median": [
+          -1.2867488811201921,
+          1.9686301525694283
+        ],
+        "source.pooled.p95": [
+          -5.3752579868938,
+          12.654223137633892
+        ]
+      },
+      "review_flags": [
+        {
+          "field": "source.order0.p95",
+          "reason": "observed_source_increase_above5_percent",
+          "value": 13.393361864243914
+        },
+        {
+          "field": "source.drift.p95",
+          "reason": "absolute_order_difference_above5_percentage_points",
+          "value": 15.869068692093492
+        },
+        {
+          "field": "baseline_control.pooled.p95",
+          "reason": "absolute_control_effect_above5_percent",
+          "value": -5.240902117101709
+        },
+        {
+          "field": "baseline_control.order1.p95",
+          "reason": "absolute_control_effect_above5_percent",
+          "value": -7.692757860476207
+        },
+        {
+          "field": "baseline_control.drift.p95",
+          "reason": "absolute_order_difference_above5_percentage_points",
+          "value": 7.562147502134875
+        },
+        {
+          "field": "candidate_control.pooled.p95",
+          "reason": "absolute_control_effect_above5_percent",
+          "value": -12.036141788700094
+        },
+        {
+          "field": "candidate_control.order1.p95",
+          "reason": "absolute_control_effect_above5_percent",
+          "value": -14.261701019556739
+        },
+        {
+          "field": "candidate_control.drift.p95",
+          "reason": "absolute_order_difference_above5_percentage_points",
+          "value": 12.03477432494745
+        },
+        {
+          "field": "p95",
+          "reason": "source_order_estimates_on_opposite_sides_of10",
+          "values": [
+            13.393361864243914,
+            -2.4757068278495775
+          ]
+        }
+      ],
+      "precision_warnings": [
+        {
+          "bounds": [
+            -14.939123963195067,
+            5.45374795833895
+          ],
+          "field": "baseline_control.pooled.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -7.091532695879311,
+            11.643342574109838
+          ],
+          "field": "baseline_control.order0.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -5.791819262466358,
+            0.09951466923177055
+          ],
+          "field": "baseline_control.order1.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -18.39036203086366,
+            10.630457395589875
+          ],
+          "field": "baseline_control.order1.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -1.4345809740015314,
+            7.28226571217886
+          ],
+          "field": "baseline_control.drift.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -10.761067753931208,
+            22.984767514544767
+          ],
+          "field": "baseline_control.drift.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -19.1564607375427,
+            4.308561486209661
+          ],
+          "field": "candidate_control.pooled.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -17.679110240580453,
+            15.78841670994484
+          ],
+          "field": "candidate_control.order0.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -22.403335712641937,
+            4.308561486209661
+          ],
+          "field": "candidate_control.order1.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -2.8881955302830553,
+            5.584853073303431
+          ],
+          "field": "candidate_control.drift.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -17.07796171312013,
+            30.504146219881278
+          ],
+          "field": "candidate_control.drift.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        }
+      ],
+      "disposition": "UNRESOLVED",
+      "assessment": "Unresolved: pooled p95 upper bound crosses 10%; source-order estimates straddle 10%, while both identical-binary controls also show material order variation. No COUNT-specific source change or defect was found. Current scheduling couples control order to source order, so its observations cannot separate those factors. No causal regression or pass is established."
+    },
+    {
+      "suite": "integrated_sparse",
+      "metric": "sql_ordered",
+      "source": {
+        "source.drift.median": 1.795179166454297,
+        "source.drift.p95": -1.2908407024150303,
+        "source.order0.median": 1.7114142910624963,
+        "source.order0.p95": 1.3973430930125375,
+        "source.order1.median": -0.08376487539180077,
+        "source.order1.p95": 2.688183795427568,
+        "source.pooled.median": 0.9622058029606251,
+        "source.pooled.p95": 0.35868248773587297
+      },
+      "source_intervals": {
+        "source.drift.median": [
+          -3.402617976897049,
+          5.787794827796899
+        ],
+        "source.drift.p95": [
+          -9.385353469187152,
+          7.879414712358479
+        ],
+        "source.order0.median": [
+          -1.5043858562678203,
+          5.146357001332791
+        ],
+        "source.order0.p95": [
+          -6.753206089654473,
+          8.510838831291224
+        ],
+        "source.order1.median": [
+          -2.3157262674892043,
+          4.151157020998286
+        ],
+        "source.order1.p95": [
+          -3.034327437533968,
+          5.276348247594087
+        ],
+        "source.pooled.median": [
+          -0.9495473721114811,
+          3.3821938162555742
+        ],
+        "source.pooled.p95": [
+          -3.515050357121774,
+          8.663820243174648
+        ]
+      },
+      "review_flags": [],
+      "precision_warnings": [
+        {
+          "bounds": [
+            -10.750913687658548,
+            0.3444273025336342
+          ],
+          "field": "baseline_control.pooled.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -5.854721438712751,
+            2.6676496298528196
+          ],
+          "field": "baseline_control.order0.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -8.435624837123544,
+            3.264067836946327
+          ],
+          "field": "baseline_control.order0.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -5.210754759972391,
+            3.6583062800338517
+          ],
+          "field": "baseline_control.order1.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -14.686425818165539,
+            -0.6670786254390104
+          ],
+          "field": "baseline_control.order1.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -6.739000461213562,
+            5.340365881189646
+          ],
+          "field": "baseline_control.drift.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -6.476756416880246,
+            14.595965557310976
+          ],
+          "field": "baseline_control.drift.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -2.5006085873777617,
+            6.31547230831111
+          ],
+          "field": "candidate_control.pooled.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -4.755613858910134,
+            5.728083315860766
+          ],
+          "field": "candidate_control.order0.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -1.2659910618129766,
+            8.301300689784696
+          ],
+          "field": "candidate_control.order0.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -7.49048411843437,
+            13.851351386323497
+          ],
+          "field": "candidate_control.order1.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -2.955556404417015,
+            8.05216935189117
+          ],
+          "field": "candidate_control.drift.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -11.353952149025993,
+            10.585568769229603
+          ],
+          "field": "candidate_control.drift.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        }
+      ],
+      "disposition": "NO_ADDITIONAL_ENGINEERING_BLOCKER_IDENTIFIED_IN_THIS_METRIC",
+      "assessment": "No declared point-estimate review flag. Both pooled source endpoints are numerically below the limit. This is conditional evidence for the measured workload and environment, not a future-environment guarantee."
+    },
+    {
+      "suite": "integrated_sparse",
+      "metric": "concurrent_native_queries",
+      "source": {
+        "source.drift.median": 0.7572060766256827,
+        "source.drift.p95": -5.546382957229479,
+        "source.order0.median": 0.37882461426097525,
+        "source.order0.p95": -1.842025287802651,
+        "source.order1.median": -0.3783814623647075,
+        "source.order1.p95": 3.7043576694268276,
+        "source.pooled.median": -0.061270248089628776,
+        "source.pooled.p95": 1.1987510882011332
+      },
+      "source_intervals": {
+        "source.drift.median": [
+          -2.5797743523507055,
+          4.613808358743832
+        ],
+        "source.drift.p95": [
+          -10.495016572170368,
+          1.37458212963395
+        ],
+        "source.order0.median": [
+          -1.6501925067091139,
+          3.177536145950488
+        ],
+        "source.order0.p95": [
+          -4.997465934288991,
+          2.9048522726336623
+        ],
+        "source.order1.median": [
+          -3.11699680333295,
+          2.3469025476240413
+        ],
+        "source.order1.p95": [
+          -0.6664882456343446,
+          7.719513939298839
+        ],
+        "source.pooled.median": [
+          -1.358746991244042,
+          1.745866421154929
+        ],
+        "source.pooled.p95": [
+          -1.4471908785389176,
+          5.6060886078231675
+        ]
+      },
+      "review_flags": [
+        {
+          "field": "source.drift.p95",
+          "reason": "absolute_order_difference_above5_percentage_points",
+          "value": -5.546382957229479
+        }
+      ],
+      "precision_warnings": [
+        {
+          "bounds": [
+            -5.018910143399713,
+            2.4732999534000433
+          ],
+          "field": "baseline_control.pooled.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -6.086813344362662,
+            0.7663079023903396
+          ],
+          "field": "baseline_control.order0.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -7.2256875659755355,
+            3.5860797583820103
+          ],
+          "field": "baseline_control.order0.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -7.0140627739155414,
+            2.696901896441939
+          ],
+          "field": "baseline_control.order1.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -7.6397032154346896,
+            2.7525418909173704
+          ],
+          "field": "baseline_control.drift.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -8.254012850710202,
+            6.77012739387669
+          ],
+          "field": "baseline_control.drift.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -5.674290985037123,
+            3.3433145581823975
+          ],
+          "field": "candidate_control.order0.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -7.008560575766964,
+            3.527953978557985
+          ],
+          "field": "candidate_control.order1.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -1.9073602048920169,
+            5.498458223867253
+          ],
+          "field": "candidate_control.drift.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -6.579229652445163,
+            9.803161576504827
+          ],
+          "field": "candidate_control.drift.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        }
+      ],
+      "disposition": "NO_ADDITIONAL_ENGINEERING_BLOCKER_IDENTIFIED_IN_THIS_METRIC",
+      "assessment": "Investigated source p95 order difference -5.55 percentage points. Source-order p95 points are -1.84%/+3.70%; pooled +1.20%, upper bound 5.61%. Balanced orders and full original observations are retained. This is not an optimization gain claim and does not excuse the separate COUNT uncertainty."
+    },
+    {
+      "suite": "integrated_sparse",
+      "metric": "historical_storage_ingest",
+      "source": {
+        "source.drift.median": 0.7988088767027168,
+        "source.drift.p95": -1.5738255324879935,
+        "source.order0.median": 0.5158076867400663,
+        "source.order0.p95": -0.10281874883364406,
+        "source.order1.median": -0.28300118996265056,
+        "source.order1.p95": 1.4710067836543494,
+        "source.pooled.median": -0.09575164275783532,
+        "source.pooled.p95": 0.9110207257414071
+      },
+      "source_intervals": {
+        "source.drift.median": [
+          -0.4132368849804169,
+          1.81533521533761
+        ],
+        "source.drift.p95": [
+          -5.216460322384298,
+          1.1753282741903348
+        ],
+        "source.order0.median": [
+          -0.576105576271202,
+          1.2224915811388293
+        ],
+        "source.order0.p95": [
+          -1.8880499907822146,
+          1.6994591894687883
+        ],
+        "source.order1.median": [
+          -1.0646284078873913,
+          0.3032314533172764
+        ],
+        "source.order1.p95": [
+          -0.3423985723907341,
+          4.077693019353967
+        ],
+        "source.pooled.median": [
+          -0.6037255969437605,
+          0.5808839376410413
+        ],
+        "source.pooled.p95": [
+          -0.9289461923391862,
+          1.8488664246278264
+        ]
+      },
+      "review_flags": [],
+      "precision_warnings": [
+        {
+          "bounds": [
+            -5.023376753654951,
+            0.25705240391322715
+          ],
+          "field": "candidate_control.order1.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -2.0085079164095188,
+            7.829835343562297
+          ],
+          "field": "candidate_control.drift.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        }
+      ],
+      "disposition": "NO_ADDITIONAL_ENGINEERING_BLOCKER_IDENTIFIED_IN_THIS_METRIC",
+      "assessment": "No declared point-estimate review flag. Both pooled source endpoints are numerically below the limit. This is conditional evidence for the measured workload and environment, not a future-environment guarantee."
+    },
+    {
+      "suite": "publication",
+      "metric": "live_storage_publication",
+      "source": {
+        "source.drift.median": 0.5043870868886358,
+        "source.drift.p95": 4.2721798067860695,
+        "source.order0.median": 0.5020919622054754,
+        "source.order0.p95": 2.401789994018433,
+        "source.order1.median": -0.002295124683160399,
+        "source.order1.p95": -1.8703898127676366,
+        "source.pooled.median": 0.08308244426835643,
+        "source.pooled.p95": -0.6084809797192614
+      },
+      "source_intervals": {
+        "source.drift.median": [
+          -2.5153531790264028,
+          2.7415021459205047
+        ],
+        "source.drift.p95": [
+          -1.2900426804680398,
+          10.88178113201298
+        ],
+        "source.order0.median": [
+          -1.6513612582861992,
+          2.2966765431090996
+        ],
+        "source.order0.p95": [
+          -0.9344676030424881,
+          7.7402951570690215
+        ],
+        "source.order1.median": [
+          -1.4867555309151181,
+          2.2136111423973537
+        ],
+        "source.order1.p95": [
+          -4.408460568930595,
+          1.766879185507353
+        ],
+        "source.pooled.median": [
+          -0.9974380519575776,
+          1.5350437268874195
+        ],
+        "source.pooled.p95": [
+          -2.435800666802357,
+          2.467253260105484
+        ]
+      },
+      "review_flags": [],
+      "precision_warnings": [
+        {
+          "bounds": [
+            -6.5154063204734385,
+            4.754437472684114
+          ],
+          "field": "baseline_control.pooled.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -5.693140476244263,
+            1.6798306741174551
+          ],
+          "field": "baseline_control.order0.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -7.992638420857634,
+            5.683825456544778
+          ],
+          "field": "baseline_control.order0.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -5.283796526503181,
+            2.230749927200959
+          ],
+          "field": "baseline_control.order1.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -4.115629006903854,
+            5.077220403831362
+          ],
+          "field": "baseline_control.drift.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -8.508835471438802,
+            8.222132344217847
+          ],
+          "field": "baseline_control.drift.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -6.563244978456117,
+            0.6900551443580261
+          ],
+          "field": "candidate_control.order0.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -6.002812130024915,
+            -0.27963745048533717
+          ],
+          "field": "candidate_control.order1.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -6.916203403749244,
+            2.009609551369229
+          ],
+          "field": "candidate_control.drift.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -0.04327737852709568,
+            7.166930177688791
+          ],
+          "field": "candidate_control.drift.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        }
+      ],
+      "disposition": "NO_ADDITIONAL_ENGINEERING_BLOCKER_IDENTIFIED_IN_THIS_METRIC",
+      "assessment": "No declared point-estimate review flag. Both pooled source endpoints are numerically below the limit. This is conditional evidence for the measured workload and environment, not a future-environment guarantee."
+    },
+    {
+      "suite": "publication",
+      "metric": "historical_storage_publication",
+      "source": {
+        "source.drift.median": -0.8059167084276231,
+        "source.drift.p95": 4.73979233260422,
+        "source.order0.median": -1.0681805106424247,
+        "source.order0.p95": 4.19067708059222,
+        "source.order1.median": -0.2622638022148016,
+        "source.order1.p95": -0.5491152520120002,
+        "source.pooled.median": 0.011510858012986347,
+        "source.pooled.p95": 2.7637437133033016
+      },
+      "source_intervals": {
+        "source.drift.median": [
+          -4.743511368519904,
+          3.2755031957213077
+        ],
+        "source.drift.p95": [
+          -6.176777821538259,
+          11.768746360844695
+        ],
+        "source.order0.median": [
+          -3.858794459468473,
+          1.7128565585385447
+        ],
+        "source.order0.p95": [
+          -2.440478862221307,
+          8.373823436675076
+        ],
+        "source.order1.median": [
+          -3.371868391383903,
+          2.1175533347395525
+        ],
+        "source.order1.p95": [
+          -5.2613107301007656,
+          8.0251237620778
+        ],
+        "source.pooled.median": [
+          -2.819523627847509,
+          2.015085476587708
+        ],
+        "source.pooled.p95": [
+          -4.6587557511001965,
+          6.025937849531626
+        ]
+      },
+      "review_flags": [
+        {
+          "field": "candidate_control.pooled.p95",
+          "reason": "absolute_control_effect_above5_percent",
+          "value": -5.686975846436715
+        },
+        {
+          "field": "candidate_control.order0.p95",
+          "reason": "absolute_control_effect_above5_percent",
+          "value": -6.973754507213381
+        }
+      ],
+      "precision_warnings": [
+        {
+          "bounds": [
+            -5.221840023328339,
+            -0.265214276224468
+          ],
+          "field": "baseline_control.pooled.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -6.532285421055473,
+            5.190424971245
+          ],
+          "field": "baseline_control.pooled.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -8.46424551717445,
+            1.4622735922640961
+          ],
+          "field": "baseline_control.order0.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -16.677184823395862,
+            8.766125962144411
+          ],
+          "field": "baseline_control.order0.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -7.21585470783822,
+            -0.1790435757246578
+          ],
+          "field": "baseline_control.order1.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            1.8292864916412244,
+            5.23305560804026
+          ],
+          "field": "baseline_control.order1.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -4.708462207652642,
+            6.029655791155152
+          ],
+          "field": "baseline_control.drift.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -19.49848256555564,
+            4.893826241597886
+          ],
+          "field": "baseline_control.drift.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -10.132979243907947,
+            4.616447803539692
+          ],
+          "field": "candidate_control.pooled.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -5.296904752914378,
+            -1.1616723570559095
+          ],
+          "field": "candidate_control.order0.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -11.454232150532617,
+            -2.2731246651723658
+          ],
+          "field": "candidate_control.order0.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -7.11243643441104,
+            9.678647632268667
+          ],
+          "field": "candidate_control.order1.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -7.197632117976783,
+            0.31119551225307074
+          ],
+          "field": "candidate_control.drift.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -19.025064288665195,
+            4.013866311973857
+          ],
+          "field": "candidate_control.drift.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        }
+      ],
+      "disposition": "NO_ADDITIONAL_ENGINEERING_BLOCKER_IDENTIFIED_IN_THIS_METRIC",
+      "assessment": "Flagged variation occurs only in identical-binary controls/order comparisons; every source order point remains below 5% and both pooled source upper bounds remain below 10%. Controls demonstrate variation within this packet but cannot prove its cause or remove source overhead. All observations are retained. No new code defect or optimization opportunity follows from this flag."
+    },
+    {
+      "suite": "index_binding_paths",
+      "metric": "binding_block_hash_point",
+      "source": {
+        "source.drift.median": -0.025040344898896727,
+        "source.drift.p95": -0.15687504678958408,
+        "source.order0.median": 3.2776988490690107,
+        "source.order0.p95": 4.364926923305967,
+        "source.order1.median": 3.3027391939679074,
+        "source.order1.p95": 4.521801970095551,
+        "source.pooled.median": 3.657999753433172,
+        "source.pooled.p95": 3.438176764969314
+      },
+      "source_intervals": {
+        "source.drift.median": [
+          -4.33211022879616,
+          4.546655928211352
+        ],
+        "source.drift.p95": [
+          -4.847600772315753,
+          6.549596333469742
+        ],
+        "source.order0.median": [
+          -0.4669380065140616,
+          6.343159088537531
+        ],
+        "source.order0.p95": [
+          0.6851513398031361,
+          9.751388890545055
+        ],
+        "source.order1.median": [
+          -0.11923545454962658,
+          5.85647093497228
+        ],
+        "source.order1.p95": [
+          0.8134562936897627,
+          7.537513970606047
+        ],
+        "source.pooled.median": [
+          0.7394697837113551,
+          5.697823820526593
+        ],
+        "source.pooled.p95": [
+          1.026018751493507,
+          6.296346723754853
+        ]
+      },
+      "review_flags": [
+        {
+          "field": "baseline_control.drift.p95",
+          "reason": "absolute_order_difference_above5_percentage_points",
+          "value": 6.896476206009072
+        },
+        {
+          "field": "candidate_control.pooled.p95",
+          "reason": "absolute_control_effect_above5_percent",
+          "value": 5.80698511009714
+        },
+        {
+          "field": "candidate_control.order0.p95",
+          "reason": "absolute_control_effect_above5_percent",
+          "value": 6.231909123446733
+        },
+        {
+          "field": "candidate_control.order1.p95",
+          "reason": "absolute_control_effect_above5_percent",
+          "value": 6.6589768113919146
+        }
+      ],
+      "precision_warnings": [
+        {
+          "bounds": [
+            -7.816748594245071,
+            1.0152675252493637
+          ],
+          "field": "baseline_control.order1.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -5.727641257008487,
+            -0.46699650257302494
+          ],
+          "field": "baseline_control.order1.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -0.24815834252986946,
+            8.88824819743893
+          ],
+          "field": "baseline_control.drift.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -0.022976296206744795,
+            8.593992286943564
+          ],
+          "field": "baseline_control.drift.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            0.37684682679635095,
+            6.476214193686469
+          ],
+          "field": "candidate_control.pooled.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            2.1188700235695412,
+            10.93185680662161
+          ],
+          "field": "candidate_control.pooled.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -1.7212474408859868,
+            7.9135883553741015
+          ],
+          "field": "candidate_control.order0.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -0.4439051428400176,
+            10.14682274795966
+          ],
+          "field": "candidate_control.order0.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            0.4364895334437291,
+            7.189440972351657
+          ],
+          "field": "candidate_control.order1.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -1.130742467633905,
+            16.97151574500264
+          ],
+          "field": "candidate_control.order1.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -6.889397311002998,
+            5.52556153953192
+          ],
+          "field": "candidate_control.drift.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -11.551934853298594,
+            8.341201894462925
+          ],
+          "field": "candidate_control.drift.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        }
+      ],
+      "disposition": "NO_ADDITIONAL_ENGINEERING_BLOCKER_IDENTIFIED_IN_THIS_METRIC",
+      "assessment": "Flagged variation occurs only in identical-binary controls/order comparisons; every source order point remains below 5% and both pooled source upper bounds remain below 10%. Controls demonstrate variation within this packet but cannot prove its cause or remove source overhead. All observations are retained. No new code defect or optimization opportunity follows from this flag."
+    },
+    {
+      "suite": "index_binding_paths",
+      "metric": "binding_block_number_range",
+      "source": {
+        "source.drift.median": -0.6278046868446685,
+        "source.drift.p95": 2.8877544179225723,
+        "source.order0.median": 1.198326917246817,
+        "source.order0.p95": 2.7362962833483495,
+        "source.order1.median": 1.8261316040914854,
+        "source.order1.p95": -0.15145813457422275,
+        "source.pooled.median": 1.9535967850449198,
+        "source.pooled.p95": 0.31849100198186875
+      },
+      "source_intervals": {
+        "source.drift.median": [
+          -4.54271188862132,
+          3.599002052445488
+        ],
+        "source.drift.p95": [
+          -3.280195672188624,
+          7.175826954453591
+        ],
+        "source.order0.median": [
+          -1.747986414332403,
+          4.000671448191673
+        ],
+        "source.order0.p95": [
+          -3.049465074171065,
+          6.2750903396898705
+        ],
+        "source.order1.median": [
+          -1.55181000812602,
+          4.591545117840412
+        ],
+        "source.order1.p95": [
+          -2.467623583006162,
+          2.0103621552762796
+        ],
+        "source.pooled.median": [
+          -0.6079110915087838,
+          3.9489274142590958
+        ],
+        "source.pooled.p95": [
+          -1.9257390896292859,
+          2.790719944417863
+        ]
+      },
+      "review_flags": [
+        {
+          "field": "candidate_control.pooled.p95",
+          "reason": "absolute_control_effect_above5_percent",
+          "value": 5.008180969755838
+        },
+        {
+          "field": "candidate_control.order0.p95",
+          "reason": "absolute_control_effect_above5_percent",
+          "value": 6.555508044051406
+        }
+      ],
+      "precision_warnings": [
+        {
+          "bounds": [
+            -6.755545204649405,
+            -1.167268845459024
+          ],
+          "field": "baseline_control.pooled.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -7.62615265493054,
+            1.6805798689057294
+          ],
+          "field": "baseline_control.order0.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -7.851823726678875,
+            0.3960600265891179
+          ],
+          "field": "baseline_control.order1.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -7.9875223335328265,
+            -1.5590048014670566
+          ],
+          "field": "baseline_control.order1.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -0.6918861934215648,
+            8.083255279835754
+          ],
+          "field": "baseline_control.drift.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -3.595369819590633,
+            7.714444420756128
+          ],
+          "field": "baseline_control.drift.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            0.36971074508826973,
+            6.379838063303533
+          ],
+          "field": "candidate_control.pooled.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            1.57263106058263,
+            7.547519406044101
+          ],
+          "field": "candidate_control.pooled.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -2.142979184180105,
+            7.423597205563892
+          ],
+          "field": "candidate_control.order0.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -0.7239197857097368,
+            10.050975486459922
+          ],
+          "field": "candidate_control.order0.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            0.49355567734472583,
+            7.258981415562471
+          ],
+          "field": "candidate_control.order1.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -0.6200419925435408,
+            7.771921268034099
+          ],
+          "field": "candidate_control.order1.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -7.3272615176764315,
+            4.644465614291127
+          ],
+          "field": "candidate_control.drift.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -5.024779637204468,
+            8.957265499266033
+          ],
+          "field": "candidate_control.drift.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        }
+      ],
+      "disposition": "NO_ADDITIONAL_ENGINEERING_BLOCKER_IDENTIFIED_IN_THIS_METRIC",
+      "assessment": "Flagged variation occurs only in identical-binary controls/order comparisons; every source order point remains below 5% and both pooled source upper bounds remain below 10%. Controls demonstrate variation within this packet but cannot prove its cause or remove source overhead. All observations are retained. No new code defect or optimization opportunity follows from this flag."
+    },
+    {
+      "suite": "index_binding_paths",
+      "metric": "binding_timestamp_range",
+      "source": {
+        "source.drift.median": -0.12507379441064614,
+        "source.drift.p95": 2.52322301588106,
+        "source.order0.median": 1.7182708010855086,
+        "source.order0.p95": 4.766363965028031,
+        "source.order1.median": 1.8433445954961547,
+        "source.order1.p95": 2.243140949146971,
+        "source.pooled.median": 1.5977523473425848,
+        "source.pooled.p95": 3.069371412031452
+      },
+      "source_intervals": {
+        "source.drift.median": [
+          -4.270596892466571,
+          4.463848865615139
+        ],
+        "source.drift.p95": [
+          -1.1317998134446228,
+          6.611095960192026
+        ],
+        "source.order0.median": [
+          -1.6772519716486078,
+          4.5312716534687825
+        ],
+        "source.order0.p95": [
+          1.7133023037509298,
+          8.39005788290712
+        ],
+        "source.order1.median": [
+          -2.066346320518564,
+          4.243524135862664
+        ],
+        "source.order1.p95": [
+          -0.34536390590320654,
+          3.8822275683582763
+        ],
+        "source.pooled.median": [
+          -0.8815006538603898,
+          3.988655348192993
+        ],
+        "source.pooled.p95": [
+          1.0927326617415023,
+          5.350108215079286
+        ]
+      },
+      "review_flags": [
+        {
+          "field": "baseline_control.order1.p95",
+          "reason": "absolute_control_effect_above5_percent",
+          "value": -5.634851585622036
+        },
+        {
+          "field": "baseline_control.drift.p95",
+          "reason": "absolute_order_difference_above5_percentage_points",
+          "value": 6.562432031983467
+        },
+        {
+          "field": "candidate_control.pooled.p95",
+          "reason": "absolute_control_effect_above5_percent",
+          "value": 6.161786688049609
+        },
+        {
+          "field": "candidate_control.order0.p95",
+          "reason": "absolute_control_effect_above5_percent",
+          "value": 7.327988900275373
+        }
+      ],
+      "precision_warnings": [
+        {
+          "bounds": [
+            -5.090566887203229,
+            -1.197542239675975
+          ],
+          "field": "baseline_control.pooled.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -8.203708622464212,
+            -0.454703429101011
+          ],
+          "field": "baseline_control.order1.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -9.03636319880633,
+            -4.019808818450999
+          ],
+          "field": "baseline_control.order1.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            1.0920384208299105,
+            9.461035965758924
+          ],
+          "field": "baseline_control.drift.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            3.68222640895488,
+            10.453730688992346
+          ],
+          "field": "baseline_control.drift.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            0.42161832616871564,
+            7.017637490947282
+          ],
+          "field": "candidate_control.pooled.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            0.06274050309780232,
+            11.059814841246807
+          ],
+          "field": "candidate_control.pooled.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -2.130472311676157,
+            7.845150033184667
+          ],
+          "field": "candidate_control.order0.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -6.2772522052925055,
+            14.569067124787406
+          ],
+          "field": "candidate_control.order0.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            0.6692720292150511,
+            7.8715297687385055
+          ],
+          "field": "candidate_control.order1.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -0.050053955877982226,
+            10.335706349621754
+          ],
+          "field": "candidate_control.order1.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -7.651296193745072,
+            5.080401415324309
+          ],
+          "field": "candidate_control.drift.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -10.82336683128089,
+            12.676814502640067
+          ],
+          "field": "candidate_control.drift.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        }
+      ],
+      "disposition": "NO_ADDITIONAL_ENGINEERING_BLOCKER_IDENTIFIED_IN_THIS_METRIC",
+      "assessment": "Flagged variation occurs only in identical-binary controls/order comparisons; every source order point remains below 5% and both pooled source upper bounds remain below 10%. Controls demonstrate variation within this packet but cannot prove its cause or remove source overhead. All observations are retained. No new code defect or optimization opportunity follows from this flag."
+    },
+    {
+      "suite": "index_binding_paths",
+      "metric": "binding_erc20_topic1_present",
+      "source": {
+        "source.drift.median": 0.24152622211328634,
+        "source.drift.p95": 3.5788353974206766,
+        "source.order0.median": 2.3716072756732265,
+        "source.order0.p95": 4.549276726274631,
+        "source.order1.median": 2.13008105355994,
+        "source.order1.p95": 0.9704413288539548,
+        "source.pooled.median": 2.3558353928995412,
+        "source.pooled.p95": 1.4978725487577949
+      },
+      "source_intervals": {
+        "source.drift.median": [
+          -3.665544642374119,
+          4.232611925464247
+        ],
+        "source.drift.p95": [
+          -2.492783091228823,
+          8.480103918686588
+        ],
+        "source.order0.median": [
+          -1.006092032725392,
+          4.926088947441598
+        ],
+        "source.order0.p95": [
+          -0.09319182221060318,
+          8.930665932735593
+        ],
+        "source.order1.median": [
+          -1.000633475973156,
+          4.466320011001801
+        ],
+        "source.order1.p95": [
+          -1.4276714303490645,
+          4.886201406427482
+        ],
+        "source.pooled.median": [
+          -0.07204018223467834,
+          4.477996646767335
+        ],
+        "source.pooled.p95": [
+          -0.8870365327133034,
+          4.077509258369205
+        ]
+      },
+      "review_flags": [
+        {
+          "field": "candidate_control.pooled.p95",
+          "reason": "absolute_control_effect_above5_percent",
+          "value": 7.251274332338586
+        },
+        {
+          "field": "candidate_control.order1.p95",
+          "reason": "absolute_control_effect_above5_percent",
+          "value": 8.806361778814198
+        }
+      ],
+      "precision_warnings": [
+        {
+          "bounds": [
+            -5.102189914737765,
+            1.0701095840649266
+          ],
+          "field": "baseline_control.pooled.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -7.791588421745887,
+            -0.22144212924730677
+          ],
+          "field": "baseline_control.order1.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -8.353487625133083,
+            -1.6205883329269866
+          ],
+          "field": "baseline_control.order1.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            0.29564177092100685,
+            8.257667497312106
+          ],
+          "field": "baseline_control.drift.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -0.33683698157531694,
+            7.987187125094175
+          ],
+          "field": "baseline_control.drift.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            0.3851177384811555,
+            6.623220124766815
+          ],
+          "field": "candidate_control.pooled.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            1.4129173890081281,
+            11.085053396171407
+          ],
+          "field": "candidate_control.pooled.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -2.3244075410746357,
+            8.4192450711728
+          ],
+          "field": "candidate_control.order0.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -5.736687718061317,
+            10.549805088682419
+          ],
+          "field": "candidate_control.order0.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            0.5858727641182115,
+            7.392610716335057
+          ],
+          "field": "candidate_control.order1.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            1.95756535345748,
+            12.931557244501967
+          ],
+          "field": "candidate_control.order1.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -7.2242740517387105,
+            5.670558429770489
+          ],
+          "field": "candidate_control.drift.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -14.403747729344762,
+            4.962381655648285
+          ],
+          "field": "candidate_control.drift.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        }
+      ],
+      "disposition": "NO_ADDITIONAL_ENGINEERING_BLOCKER_IDENTIFIED_IN_THIS_METRIC",
+      "assessment": "Flagged variation occurs only in identical-binary controls/order comparisons; every source order point remains below 5% and both pooled source upper bounds remain below 10%. Controls demonstrate variation within this packet but cannot prove its cause or remove source overhead. All observations are retained. No new code defect or optimization opportunity follows from this flag."
+    },
+    {
+      "suite": "index_binding_paths",
+      "metric": "binding_erc20_topic1_absent",
+      "source": {
+        "source.drift.median": -2.1985855757501893,
+        "source.drift.p95": -0.7811781542435892,
+        "source.order0.median": 3.1999226392328994,
+        "source.order0.p95": 4.090078750611159,
+        "source.order1.median": 5.398508214983089,
+        "source.order1.p95": 4.871256904854748,
+        "source.pooled.median": 3.746329769574941,
+        "source.pooled.p95": 5.904424241141637
+      },
+      "source_intervals": {
+        "source.drift.median": [
+          -5.409231271162107,
+          3.4645903786203025
+        ],
+        "source.drift.p95": [
+          -5.711267260536368,
+          3.1518859467897453
+        ],
+        "source.order0.median": [
+          0.906733496928247,
+          6.224433941719676
+        ],
+        "source.order0.p95": [
+          0.9914300758803396,
+          7.781095875700861
+        ],
+        "source.order1.median": [
+          0.32968697704731653,
+          7.695856438748616
+        ],
+        "source.order1.p95": [
+          2.850339016601433,
+          8.384795217766005
+        ],
+        "source.pooled.median": [
+          1.241099101221077,
+          6.527413463161236
+        ],
+        "source.pooled.p95": [
+          3.1244064228266977,
+          7.942682264107748
+        ]
+      },
+      "review_flags": [
+        {
+          "field": "source.pooled.p95",
+          "reason": "observed_source_increase_above5_percent",
+          "value": 5.904424241141637
+        },
+        {
+          "field": "source.order1.median",
+          "reason": "observed_source_increase_above5_percent",
+          "value": 5.398508214983089
+        },
+        {
+          "field": "candidate_control.pooled.p95",
+          "reason": "absolute_control_effect_above5_percent",
+          "value": 6.058359060302099
+        },
+        {
+          "field": "candidate_control.order0.p95",
+          "reason": "absolute_control_effect_above5_percent",
+          "value": 6.787499342347569
+        },
+        {
+          "field": "candidate_control.order1.median",
+          "reason": "absolute_control_effect_above5_percent",
+          "value": 5.00574187177707
+        },
+        {
+          "field": "candidate_control.order1.p95",
+          "reason": "absolute_control_effect_above5_percent",
+          "value": 6.059102800116256
+        }
+      ],
+      "precision_warnings": [
+        {
+          "bounds": [
+            -7.7495509366179105,
+            1.4068383638882853
+          ],
+          "field": "baseline_control.order1.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -6.885346621661615,
+            3.2172602522408056
+          ],
+          "field": "baseline_control.order1.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -1.0173479482874725,
+            8.166391491380477
+          ],
+          "field": "baseline_control.drift.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -2.934416156474917,
+            9.472697118212015
+          ],
+          "field": "baseline_control.drift.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            0.8923503487380469,
+            6.8919014105175425
+          ],
+          "field": "candidate_control.pooled.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            2.8271547449993273,
+            8.783341504458786
+          ],
+          "field": "candidate_control.pooled.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -1.7887472692813988,
+            9.697946281807335
+          ],
+          "field": "candidate_control.order0.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            2.286856012961258,
+            9.873873487139173
+          ],
+          "field": "candidate_control.order0.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            1.8803289527379308,
+            6.750736210464248
+          ],
+          "field": "candidate_control.order1.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            0.47130449537371444,
+            14.56996031528317
+          ],
+          "field": "candidate_control.order1.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -7.1858046760496785,
+            5.080515962577059
+          ],
+          "field": "candidate_control.drift.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -8.570463648298432,
+            7.437612493502121
+          ],
+          "field": "candidate_control.drift.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        }
+      ],
+      "disposition": "NO_ADDITIONAL_ENGINEERING_BLOCKER_IDENTIFIED_IN_THIS_METRIC",
+      "assessment": "Investigated source p95 +5.90% and order1 median +5.40%. Both source-order p95 points are below 5%; pooled p95 upper bound is 7.94%. Candidate-control p95 also shifts +6.06%, but is not subtracted. Prior stage diagnostics identify small shared capture/checkpoint cost; the positional-read proposal failed its comparison and was reverted. Retain required identity validation and report its possible several-percent cost; no evidence supports another speculative optimization."
+    },
+    {
+      "suite": "engine_dense",
+      "metric": "datafusion_narrow",
+      "source": {
+        "source.drift.median": 0.9675433780273135,
+        "source.drift.p95": 4.554997429956842,
+        "source.order0.median": 1.6431941098917102,
+        "source.order0.p95": 5.332437023330883,
+        "source.order1.median": 0.6756507318643967,
+        "source.order1.p95": 0.7774395933740408,
+        "source.pooled.median": 1.234700779767528,
+        "source.pooled.p95": 3.065616184803166
+      },
+      "source_intervals": {
+        "source.drift.median": [
+          -2.1684203711136663,
+          4.346427204359693
+        ],
+        "source.drift.p95": [
+          -1.3817216082603334,
+          14.264176329655388
+        ],
+        "source.order0.median": [
+          0.12716089072282166,
+          3.61986227757487
+        ],
+        "source.order0.p95": [
+          2.4380108837725567,
+          9.865856607339673
+        ],
+        "source.order1.median": [
+          -1.86671630029015,
+          3.422849070575107
+        ],
+        "source.order1.p95": [
+          -7.899790060003886,
+          5.903025015914931
+        ],
+        "source.pooled.median": [
+          -0.46025630747453805,
+          2.987081827161675
+        ],
+        "source.pooled.p95": [
+          -1.2300574295659783,
+          6.270556425485951
+        ]
+      },
+      "review_flags": [
+        {
+          "field": "source.order0.p95",
+          "reason": "observed_source_increase_above5_percent",
+          "value": 5.332437023330883
+        }
+      ],
+      "precision_warnings": [
+        {
+          "bounds": [
+            -0.631064163667916,
+            7.122119138615202
+          ],
+          "field": "baseline_control.pooled.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -0.4986879296188351,
+            5.309339469370666
+          ],
+          "field": "baseline_control.order0.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -2.078567625568317,
+            9.188064034595644
+          ],
+          "field": "baseline_control.order0.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -1.4555427951903566,
+            6.412997822279953
+          ],
+          "field": "baseline_control.order1.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -1.182529571144919,
+            6.518975509948444
+          ],
+          "field": "baseline_control.order1.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -5.281219888505317,
+            4.481135060094332
+          ],
+          "field": "baseline_control.drift.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -5.6068071086172395,
+            8.948306247364268
+          ],
+          "field": "baseline_control.drift.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -1.5962224562856786,
+            5.994126575815173
+          ],
+          "field": "candidate_control.drift.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        }
+      ],
+      "disposition": "NO_ADDITIONAL_ENGINEERING_BLOCKER_IDENTIFIED_IN_THIS_METRIC",
+      "assessment": "Investigated source order0 p95 +5.33%; order1 +0.78%, pooled +3.07% with upper bound 6.27%. Identity capture is shared storage work; no engine implementation change or result mismatch is implicated. No above-limit source estimate is hidden by pooling."
+    },
+    {
+      "suite": "engine_dense",
+      "metric": "datafusion_wide",
+      "source": {
+        "source.drift.median": 1.0255074383139107,
+        "source.drift.p95": 5.299807341442064,
+        "source.order0.median": 1.2014707236018163,
+        "source.order0.p95": 5.0669122623177465,
+        "source.order1.median": 0.1759632852879056,
+        "source.order1.p95": -0.23289507912431784,
+        "source.pooled.median": 0.6652487688576514,
+        "source.pooled.p95": 3.20026058057421
+      },
+      "source_intervals": {
+        "source.drift.median": [
+          -1.6375402798653127,
+          3.986369942932999
+        ],
+        "source.drift.p95": [
+          -2.93783664766345,
+          11.028762090165568
+        ],
+        "source.order0.median": [
+          -0.44730547880578175,
+          3.3028013088372443
+        ],
+        "source.order0.p95": [
+          1.68781291022424,
+          6.060265964053357
+        ],
+        "source.order1.median": [
+          -1.9177068949046583,
+          2.302280188802519
+        ],
+        "source.order1.p95": [
+          -6.334051680297714,
+          6.997500518613653
+        ],
+        "source.pooled.median": [
+          -0.7415959930341498,
+          2.2559590772718074
+        ],
+        "source.pooled.p95": [
+          -1.1838411778866242,
+          6.289711555672417
+        ]
+      },
+      "review_flags": [
+        {
+          "field": "source.order0.p95",
+          "reason": "observed_source_increase_above5_percent",
+          "value": 5.0669122623177465
+        },
+        {
+          "field": "source.drift.p95",
+          "reason": "absolute_order_difference_above5_percentage_points",
+          "value": 5.299807341442064
+        },
+        {
+          "field": "baseline_control.order0.p95",
+          "reason": "absolute_control_effect_above5_percent",
+          "value": 5.607016955376087
+        }
+      ],
+      "precision_warnings": [
+        {
+          "bounds": [
+            0.5811704808182494,
+            5.645803866832466
+          ],
+          "field": "baseline_control.pooled.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            1.2772161523412429,
+            5.686558021220911
+          ],
+          "field": "baseline_control.pooled.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            0.3348924999337477,
+            7.638913590727947
+          ],
+          "field": "baseline_control.order0.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            0.8507323446891535,
+            7.042915326040866
+          ],
+          "field": "baseline_control.order0.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -1.579471947234501,
+            5.486266047967225
+          ],
+          "field": "baseline_control.order1.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -3.261830432778823,
+            7.256408266935366
+          ],
+          "field": "baseline_control.drift.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -1.4774128263837394,
+            7.789274592943296
+          ],
+          "field": "baseline_control.drift.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        }
+      ],
+      "disposition": "NO_ADDITIONAL_ENGINEERING_BLOCKER_IDENTIFIED_IN_THIS_METRIC",
+      "assessment": "Investigated source order0 p95 +5.07% and order difference +5.30 percentage points. Order1 -0.23%, pooled +3.20%, upper bound 6.29%. Baseline-control order0 p95 +5.61% is retained as evidence of variability, not a subtraction. No above-limit source estimate is hidden by pooling."
+    },
+    {
+      "suite": "engine_dense",
+      "metric": "datafusion_aggregate",
+      "source": {
+        "source.drift.median": 1.614580417630651,
+        "source.drift.p95": 4.218306520673654,
+        "source.order0.median": 2.2115244915053234,
+        "source.order0.p95": 4.709918757802645,
+        "source.order1.median": 0.5969440738746723,
+        "source.order1.p95": 0.49161223712899105,
+        "source.pooled.median": 1.405816826453199,
+        "source.pooled.p95": 1.9382680439334443
+      },
+      "source_intervals": {
+        "source.drift.median": [
+          -0.8408873802359107,
+          4.81651102144014
+        ],
+        "source.drift.p95": [
+          -3.7488393444331747,
+          8.653868484485693
+        ],
+        "source.order0.median": [
+          0.6570361997503493,
+          4.349182537704732
+        ],
+        "source.order0.p95": [
+          0.5757280348200444,
+          7.391105533868503
+        ],
+        "source.order1.median": [
+          -1.7981260480964045,
+          2.5751583978740555
+        ],
+        "source.order1.p95": [
+          -3.4612465526200675,
+          6.702967079615285
+        ],
+        "source.pooled.median": [
+          -0.07956528802581797,
+          2.920421093104486
+        ],
+        "source.pooled.p95": [
+          -0.7496492977372315,
+          6.292659303415449
+        ]
+      },
+      "review_flags": [],
+      "precision_warnings": [
+        {
+          "bounds": [
+            0.011614086231492848,
+            5.18717762762948
+          ],
+          "field": "baseline_control.pooled.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -0.8736242835541086,
+            5.745300653524632
+          ],
+          "field": "baseline_control.order0.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            0.27550024394216166,
+            5.11438841520484
+          ],
+          "field": "baseline_control.order0.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -1.0715420428421663,
+            6.584157706667559
+          ],
+          "field": "baseline_control.order1.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -5.350728061680621,
+            5.020270913629177
+          ],
+          "field": "baseline_control.drift.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -0.7755871319223839,
+            5.714958444792417
+          ],
+          "field": "candidate_control.drift.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        }
+      ],
+      "disposition": "NO_ADDITIONAL_ENGINEERING_BLOCKER_IDENTIFIED_IN_THIS_METRIC",
+      "assessment": "No declared point-estimate review flag. Both pooled source endpoints are numerically below the limit. This is conditional evidence for the measured workload and environment, not a future-environment guarantee."
+    },
+    {
+      "suite": "engine_sparse",
+      "metric": "datafusion_narrow",
+      "source": {
+        "source.drift.median": 1.3942698236636186,
+        "source.drift.p95": 0.5648469360017172,
+        "source.order0.median": 1.831212043495567,
+        "source.order0.p95": 1.1024548036684179,
+        "source.order1.median": 0.43694221983194836,
+        "source.order1.p95": 0.5376078676667007,
+        "source.pooled.median": 1.0203119531510874,
+        "source.pooled.p95": 0.879702158847806
+      },
+      "source_intervals": {
+        "source.drift.median": [
+          -0.7744056427986923,
+          3.0769785345938216
+        ],
+        "source.drift.p95": [
+          -3.415265755307606,
+          4.085367388393147
+        ],
+        "source.order0.median": [
+          -0.007394310431574347,
+          3.2973672202709636
+        ],
+        "source.order0.p95": [
+          -2.6342235904572187,
+          3.92248425265882
+        ],
+        "source.order1.median": [
+          -0.45236540188433594,
+          1.6050465634148914
+        ],
+        "source.order1.p95": [
+          -1.3646759553706644,
+          1.8542863321355352
+        ],
+        "source.pooled.median": [
+          0.11019791630608733,
+          1.9807820825345823
+        ],
+        "source.pooled.p95": [
+          -1.2857186817101574,
+          2.232395319193614
+        ]
+      },
+      "review_flags": [
+        {
+          "field": "baseline_control.order0.p95",
+          "reason": "absolute_control_effect_above5_percent",
+          "value": 5.905979386787252
+        }
+      ],
+      "precision_warnings": [
+        {
+          "bounds": [
+            0.7129889629717168,
+            7.488957103639926
+          ],
+          "field": "baseline_control.pooled.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            0.27999253393218293,
+            5.4691686636669345
+          ],
+          "field": "baseline_control.order0.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            0.2612200755279792,
+            10.482511654534843
+          ],
+          "field": "baseline_control.order0.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -2.7984079364641756,
+            5.778241944494267
+          ],
+          "field": "baseline_control.drift.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -2.1393836907582564,
+            9.678758012799072
+          ],
+          "field": "baseline_control.drift.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -5.65460509624981,
+            1.7551036733188585
+          ],
+          "field": "candidate_control.order0.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -7.808756308365727,
+            -0.014699855749233937
+          ],
+          "field": "candidate_control.drift.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -5.739702574624895,
+            1.744912076799232
+          ],
+          "field": "candidate_control.drift.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        }
+      ],
+      "disposition": "NO_ADDITIONAL_ENGINEERING_BLOCKER_IDENTIFIED_IN_THIS_METRIC",
+      "assessment": "Flagged variation occurs only in identical-binary controls/order comparisons; every source order point remains below 5% and both pooled source upper bounds remain below 10%. Controls demonstrate variation within this packet but cannot prove its cause or remove source overhead. All observations are retained. No new code defect or optimization opportunity follows from this flag."
+    },
+    {
+      "suite": "engine_sparse",
+      "metric": "datafusion_wide",
+      "source": {
+        "source.drift.median": 1.3234222635651438,
+        "source.drift.p95": -2.483056372026604,
+        "source.order0.median": 1.4354961126140209,
+        "source.order0.p95": -2.0204638775054184,
+        "source.order1.median": 0.11207384904887707,
+        "source.order1.p95": 0.46259249452118567,
+        "source.pooled.median": 0.8076606110479112,
+        "source.pooled.p95": -0.8254881046236728
+      },
+      "source_intervals": {
+        "source.drift.median": [
+          -0.7752904292581242,
+          3.1999999642576493
+        ],
+        "source.drift.p95": [
+          -6.324035729973221,
+          0.9948216392796194
+        ],
+        "source.order0.median": [
+          0.39402476226129135,
+          2.6537437343616466
+        ],
+        "source.order0.p95": [
+          -5.548068630435987,
+          1.1757288000017851
+        ],
+        "source.order1.median": [
+          -1.2378220482577418,
+          1.8582003700337246
+        ],
+        "source.order1.p95": [
+          -0.746742655136956,
+          1.7715663952208915
+        ],
+        "source.pooled.median": [
+          -0.026899542137792665,
+          1.878046720807891
+        ],
+        "source.pooled.p95": [
+          -3.160829282877209,
+          1.090812953237652
+        ]
+      },
+      "review_flags": [
+        {
+          "field": "baseline_control.order0.p95",
+          "reason": "absolute_control_effect_above5_percent",
+          "value": 6.140912399118581
+        }
+      ],
+      "precision_warnings": [
+        {
+          "bounds": [
+            0.9147800861353472,
+            7.2259400140571195
+          ],
+          "field": "baseline_control.pooled.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            0.41134389678036953,
+            8.691576501620135
+          ],
+          "field": "baseline_control.order0.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -1.919055526549962,
+            5.0172956786956995
+          ],
+          "field": "baseline_control.drift.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -2.542810833222453,
+            6.9576559191712795
+          ],
+          "field": "baseline_control.drift.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -5.694480013607484,
+            2.167043844731742
+          ],
+          "field": "candidate_control.order0.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -7.579173936035266,
+            0.7086167089845885
+          ],
+          "field": "candidate_control.drift.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        }
+      ],
+      "disposition": "NO_ADDITIONAL_ENGINEERING_BLOCKER_IDENTIFIED_IN_THIS_METRIC",
+      "assessment": "Flagged variation occurs only in identical-binary controls/order comparisons; every source order point remains below 5% and both pooled source upper bounds remain below 10%. Controls demonstrate variation within this packet but cannot prove its cause or remove source overhead. All observations are retained. No new code defect or optimization opportunity follows from this flag."
+    },
+    {
+      "suite": "engine_sparse",
+      "metric": "datafusion_aggregate",
+      "source": {
+        "source.drift.median": 1.323024577995069,
+        "source.drift.p95": -0.8316751982357928,
+        "source.order0.median": 2.0519804650715345,
+        "source.order0.p95": 0.19918857285836644,
+        "source.order1.median": 0.7289558870764656,
+        "source.order1.p95": 1.0308637710941593,
+        "source.pooled.median": 1.480661102883274,
+        "source.pooled.p95": 1.1264144066910342
+      },
+      "source_intervals": {
+        "source.drift.median": [
+          -1.09561641724365,
+          2.9974598872414937
+        ],
+        "source.drift.p95": [
+          -5.027721324559842,
+          4.292445766641406
+        ],
+        "source.order0.median": [
+          0.684350274368084,
+          3.297279849163237
+        ],
+        "source.order0.p95": [
+          -3.4080601148759326,
+          4.481932206655337
+        ],
+        "source.order1.median": [
+          -0.4022705860700748,
+          2.5978548042034033
+        ],
+        "source.order1.p95": [
+          -1.4974767900084673,
+          2.869523126336704
+        ],
+        "source.pooled.median": [
+          0.46134468977503396,
+          2.5037232719766767
+        ],
+        "source.pooled.p95": [
+          -1.3453502194905376,
+          3.195515434156926
+        ]
+      },
+      "review_flags": [
+        {
+          "field": "baseline_control.pooled.p95",
+          "reason": "absolute_control_effect_above5_percent",
+          "value": 6.35371226195951
+        },
+        {
+          "field": "baseline_control.order0.p95",
+          "reason": "absolute_control_effect_above5_percent",
+          "value": 8.118373944715508
+        },
+        {
+          "field": "baseline_control.drift.p95",
+          "reason": "absolute_order_difference_above5_percentage_points",
+          "value": 5.777141864196268
+        },
+        {
+          "field": "candidate_control.drift.median",
+          "reason": "absolute_order_difference_above5_percentage_points",
+          "value": -5.534811786553329
+        }
+      ],
+      "precision_warnings": [
+        {
+          "bounds": [
+            1.5708307660985854,
+            9.240667852549489
+          ],
+          "field": "baseline_control.pooled.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            1.3102560206085023,
+            11.282402510140788
+          ],
+          "field": "baseline_control.order0.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -1.061707540271617,
+            5.405487835433198
+          ],
+          "field": "baseline_control.order1.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -2.128920469066009,
+            5.675365410383259
+          ],
+          "field": "baseline_control.drift.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -1.2611437741302023,
+            11.041130614619531
+          ],
+          "field": "baseline_control.drift.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -6.569161114453714,
+            1.1359214006382068
+          ],
+          "field": "candidate_control.order0.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -8.941474071597867,
+            -0.44263351640552173
+          ],
+          "field": "candidate_control.drift.median",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        },
+        {
+          "bounds": [
+            -5.317122337521408,
+            0.6667044600403127
+          ],
+          "field": "candidate_control.drift.p95",
+          "reason": "control_interval_exceeds5_budget_not_automatic_gate"
+        }
+      ],
+      "disposition": "NO_ADDITIONAL_ENGINEERING_BLOCKER_IDENTIFIED_IN_THIS_METRIC",
+      "assessment": "Flagged variation occurs only in identical-binary controls/order comparisons; every source order point remains below 5% and both pooled source upper bounds remain below 10%. Controls demonstrate variation within this packet but cannot prove its cause or remove source overhead. All observations are retained. No new code defect or optimization opportunity follows from this flag."
+    }
+  ]
+}
