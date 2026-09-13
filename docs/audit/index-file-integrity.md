@@ -95,7 +95,7 @@ column against the captured row count before iteration or u32 row-ID conversion.
 A mismatch leaves the set unpublished. Bitmap preflight checks container order,
 canonical offsets, exact extents and each run container's declared cardinality
 and ordered disjoint ranges; the dependency validates array and bitmap contents.
-Only one bitmap deserialization is performed.
+Each bitmap payload is decoded once.
 
 Full B-tree decoding validates version, key width, counts/extents, strictly
 increasing keys, contiguous payload descriptors and exact bitmap/EOF consumption.
@@ -406,3 +406,49 @@ All 66 index unit tests, formatting and focused Clippy pass after draining the
 serializer buffer; parent revision, exact diff and logs are retained in
 `/private/tmp/logex-index-integrity-focused-9`. The remaining full-read regression
 requires further investigation before another acceptance comparison.
+
+
+## Dense bitmap decoding and retained evidence
+
+Implementation `02898c44` uses the pinned library's public `from_lsb0_bytes`
+constructor after complete structural preflight when every container is dense
+and non-run. Each call receives exactly 8 KiB and a checked u16 container key;
+even the highest key has an inclusive end within u32. Its returned cardinality
+must match that container's descriptor, including when inconsistent descriptors
+would preserve the overall total. Mixed and run encodings retain the ordinary
+decoder. No format change or new project `unsafe` is involved.
+
+For multiple containers, owned `MultiOps<Result<RoaringBitmap, io::Error>>::union`
+moves their payloads. The pinned implementation collects at most 50 initial
+items (10 when the upper bound exceeds 50), then appends the remaining ascending
+keys with binary searches and amortized vector growth. It avoids the quadratic
+repeated length calculation of successive owned `|=` operations. Normalization
+uses cached cardinalities for these validated dense containers. Errors propagate
+while partial results are dropped. A single container returns directly.
+
+Two independent public-API diagnostics retain 27,600 timings. The second has
+1/4/8/9/64-container configurations and compares ordinary decoding, the bounded
+eight-container prototype, and the scalable owned-union path. The scalable path
+improves their medians by about 33%/10%/20%/16%/22%, respectively. This is decoder
+cost evidence only; index and ingestion performance acceptance remains required.
+The discarded whole-file-fingerprint idea would add writer work and another
+format, so it is not implemented.
+
+All 71 index tests, formatting and focused Clippy pass. Independent generated-row
+oracles cover nonconsecutive keys, container65535, cardinality boundaries and
+1/4/8/9/49/50/51/64 containers. Finite inconsistent-count controls check both
+initial and later iterator failures; mixed and sparse controls remain covered.
+The tests were delegated as requested, reviewed and run locally, and committed
+with the implementation. No SQL code was authored during this pass.
+
+Screens17–20 are independently verified in
+[`2026-09-13-index-integrity-fingerprint-investigation.json`](baselines/2026-09-13-index-integrity-fingerprint-investigation.json)
+and its compressed raw archive (29,760 timings/160 RSS). The original human-readable
+purpose field in plans19/20 was inadvertently copied from18; source/build hashes
+were correct. Both immutable originals and an explicit description correction
+are retained. The first larger comparison and following diagnostics are in
+[`2026-09-13-index-integrity-expanded-comparison-1.json`](baselines/2026-09-13-index-integrity-expanded-comparison-1.json)
+and its raw archive (69,720 timings/120 RSS). These remain failed/investigation
+results, not acceptance. The next fixed comparison adds 9- and 32-container file
+layouts to the existing five configurations, with the same separately retained
+warm-up and measurement protocol.
