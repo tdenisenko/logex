@@ -9,9 +9,11 @@ unresolved for several query tails. The subsequent identical-binary mac-mini
 control packet is inconclusive under its predeclared precision rules. The user
 subsequently supplied a quiet test window. That separate packet is now complete:
 all correctness checks pass, but only live publication satisfies every declared
-precision/order bound. No reported CPU speed limit was below 100. Mac-mini testing
-is finished; local investigation of benchmark settling continues. Performance
-clearance, exact-head CI and merge remain pending.
+precision/order bound. No reported CPU speed limit was below 100. The local
+warmup diagnostic is also complete and does not establish a reliable measurement
+fix. A prospective direct source comparison now replaces the separate control
+admission strategy; its baseline build is running in the same isolated mac-mini
+test folder. Performance clearance, exact-head CI and merge remain pending.
 Earlier candidates and rejected experiments are retained below as audit history,
 not separate accepted implementations.
 
@@ -1005,3 +1007,52 @@ source-comparison preparations. An initially mistaken collection assertion about
 an escaped display of a newline is also retained and explicitly retracted:
 strict JSON validation of the original bytes passes; no remote artifact needed
 repair and no measurement or analysis was repeated.
+
+## Warmup diagnostic and prospective direct comparison
+
+The [local native warmup diagnostic](baselines/2026-09-14-source-identity-native-warmup-1.json)
+compares one versus 100 explicit passes in a disposable build of `c229ace0`.
+Production code, the measured loop and full row oracle are unchanged. All 24
+processes pass, retaining 12,000 measured queries, 6,060 warmups and 24 RSS records.
+An earlier attempt completed its first fixture but its macOS timing wrapper
+could not read `kern.clockrate` in the sandbox. Those 500 measured queries and
+five warmups remain separately retained. A read-only counter probe passed outside
+the sandbox before the full diagnostic ran there; no partial observation was
+used as a replacement or pooled into the completed packet.
+
+Longer warmup changes the four nonempty query cases' p95 point estimates by
+-6.10% to -9.89%; the absent-topic case changes -0.89%. This does not establish
+a reliable fix for the variation: every interval for the change in absolute
+within-process settling includes zero, and process-position intervals remain
+wide. This local ARM result also cannot identify the mechanism on the Intel
+mac-mini. The native fixture used for source acceptance retains its original
+single warmup and every measured iteration. Independent verification reparsed
+all raw samples, recomputed all 40 point estimates and 4,000 seeded index records,
+and checked every interval against the retained replicate values. It did not
+independently recompute every replicate's arithmetic.
+
+Method review identified an unnecessarily restrictive admission strategy. Failing
+to contain every identical-binary control interval within +/-5% does not establish
+that a direct source comparison cannot distinguish a 10% regression. Both earlier
+packets remain INCONCLUSIVE under their original rules. The prospective strategy
+uses a single direct baseline/candidate comparison with contemporary controls,
+without another control-only admission packet. This changes the measurement
+strategy; the source-regression limit remains 10%.
+
+The new fixed schedule retains all six original suites, 24 source pairs and 12
+control pairs for each binary per suite: 576 processes, 96,000 measured timings,
+480 warmups and 576 RSS records. A fixed seed randomizes the balanced round order
+before measurement. All 31 timing metrics retain primary median and p95
+endpoints; source upper bounds must remain below 10%, with control, order and
+chronology review addressing any unresolved confounding. Increases above 5%
+require investigation. Control percentages are never subtracted, early samples
+are never removed, and a favorable subgroup cannot replace a primary result.
+Any unresolved endpoint prevents a performance pass.
+
+Mac-mini use resumed for the separately verified baseline build after the earlier
+control window was released. New source, private dependency cache and build
+outputs stay under the existing named test root's `baseline-build-9c0a58fc`
+subdirectory. The baseline retains its own lockfile and unchanged fixtures;
+candidate build artifacts remain read-only. No direct source measurements are
+claimed by this preparation, and no live sync or external-volume access is part
+of it.
