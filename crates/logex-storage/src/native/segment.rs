@@ -1477,6 +1477,14 @@ pub(super) fn default_columns() -> Vec<ColumnDescriptor> {
     ]
 }
 
+#[cfg(test)]
+pub(crate) fn persist_initial_raw_manifest_for_test(
+    paths: &StorageCatalogPaths,
+    descriptor: &SegmentDescriptor,
+) -> std::io::Result<()> {
+    persist_segment_manifest_with_columns(paths, descriptor, default_columns())
+}
+
 fn fixed_column(name: &str, data_path: &str) -> ColumnDescriptor {
     ColumnDescriptor {
         name: name.to_owned(),

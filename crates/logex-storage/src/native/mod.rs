@@ -12,5 +12,7 @@ pub use catalog::{
 };
 pub use filter::{LogOrder, NativeLogFilter, TopicConstraint};
 #[cfg(test)]
-pub(crate) use segment::{compact_segment, persist_segment_manifest};
+pub(crate) use segment::{
+    compact_segment, persist_initial_raw_manifest_for_test, persist_segment_manifest,
+};
 pub use storage::{NativeStorage, ReadViewToken, SegmentCompactionPlan, SegmentCompactionTask};

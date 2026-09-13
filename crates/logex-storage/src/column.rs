@@ -492,6 +492,23 @@ pub(crate) fn mark_prefix_rewrite_for_test(
     )
 }
 
+#[cfg(test)]
+pub(crate) fn mark_source_updating_for_test(
+    dir: &Path,
+    identity: SourceIdentity,
+) -> io::Result<()> {
+    write_source_marker(
+        dir,
+        SourceMarker::new(identity, SOURCE_UPDATING, 0),
+        durability::Publication::Deferred,
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn remove_source_marker_for_test(dir: &Path) -> io::Result<()> {
+    fs::remove_file(dir.join(SOURCE_MARKER_FILE))
+}
+
 /// Magic bytes identifying a LogEx column file.
 const COLUMN_MAGIC: &[u8; 4] = b"LXCL";
 
@@ -812,8 +829,9 @@ impl ColumnFile {
             ));
         }
         fs::create_dir_all(dir)?;
-        // The recovery-required state must reach the directory ordering point
-        // before any column replacement rename can become observable.
+        // Readers must see the recovery-required state before column replacement.
+        // Standalone replacement orders it before changing columns; catalog-zero initialization
+        // may defer both markers because its caller publishes the complete tree.
         write_source_marker(
             dir,
             SourceMarker::new(identity, SOURCE_UPDATING, 0),
