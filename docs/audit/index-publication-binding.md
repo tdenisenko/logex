@@ -268,7 +268,7 @@ legacy migration, native append/replacement, recovery and restored datasets befo
 selecting the final mechanism. Avoid new per-batch durability barriers or source
 scans during queries. Preserve the whole-set reproducer for that milestone.
 
-## Cleanup and remaining merge gates
+## Cleanup and merge closure
 
 Caller searches and strict Clippy confirm every published primary, composite,
 range and bloom open uses the expected identity; the shared SQL precheck receives
@@ -282,6 +282,9 @@ including the added steady fixture: 1,105 workspace tests (23 ignored), 143
 release query tests (nine ignored), both release protocol-consistency tests,
 zero doc-test examples, formatting, workspace checking, strict Clippy, vendor
 verification and the release node build. Complete [final validation evidence](baselines/2026-09-13-index-binding-validation-final.json)
-includes every focused attempt and source/log hashes. Exact-head CI and merge
-remain required. The separate source-publication issue and broader audit work
-stay open.
+includes every focused attempt and source/log hashes. PR #149 merged as
+`9c0a58fc64fac3da7f5a50b3a20b7ab729f029e9` on 2026-09-13 after all six CI jobs
+passed at `ce2da301c1100a2c8dfffea3c13a69c630eaae51`, run `34742994503`,
+attempt 1. The [CI and merge record](baselines/2026-09-13-index-binding-ci-final.json)
+retains job results and verifies that the merged tree equals the tested head.
+The separate source-publication issue and broader audit work stay open.
