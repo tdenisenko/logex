@@ -2,17 +2,23 @@
 
 This batch follows merged PR #149 and is in progress. It addresses source identity
 behind derived indexes; it does not claim the rest of the offline audit is done.
-The current source checkpoint is `c229ace0`, with production behavior restored to
-`179e0ff7` and all nine local workspace/release gates passing. The latest
+The measured source checkpoint is `c229ace0`, with production behavior restored to
+`179e0ff7` and all nine local workspace/release gates passing before the new clone
+regression below. The
 [direct mac-mini comparison](#completed-direct-mac-mini-comparison) completed
 576 fixture processes and 96,000 measured timings with every correctness check
 passing. Independent arithmetic review agrees with the result: 61 of 62 primary
 endpoints are numerically below the 10% limit; sparse COUNT p95 remains uncertain.
 The full packet remains INCONCLUSIVE. Read-only query-path review found no
-COUNT-specific defect or unnecessary work. Mac-mini was released at
-2026-09-13 19:39:38 UTC, with no audit processes remaining. A separately frozen
-sparse confirmation is now in preparation on that host. Performance clearance,
-exact-head Linux/macOS CI, PR and merge remain pending.
+COUNT-specific defect or unnecessary work. The separately frozen sparse
+confirmation is now complete: all 18 primary endpoints meet its unchanged
+performance rules, with no declared stop. This clears that measured workload
+conditionally; it does not reclassify or pool the original packet. Mac-mini was
+released at 2026-09-13 21:36:37 UTC with no audit processes remaining.
+A newly reproduced divergent-copy identity failure requires a further correction.
+Its correctness/performance validation, exact-head Linux/macOS CI, PR and merge
+remain pending. The earlier namespace implementation below describes the measured
+version, not a completed solution to the new finding.
 Earlier candidates and rejected experiments are retained below as audit history,
 not separate accepted implementations.
 
@@ -25,6 +31,79 @@ rows while an independent full scan finds row 0. The complete [before-fix eviden
 retains the patch, commands, toolchain, logs and hashes, including both expected
 failures. PR #149's individual file binding remains necessary but cannot establish
 source identity when its checkpoint is copied with the files.
+
+### Divergent complete-database copies
+
+The namespace-only implementation still accepts an index set from a diverged
+complete copy. A small native regression closes and copies a generated two-row
+database, reopens both copies, and appends two different rows to each through
+ordinary writers. Each local index answers correctly before substitution. After
+copying the donor's entire index directory, the target returns no candidates
+while an independent scan finds row 2. The two copies retain the same namespace,
+row count and raw generation. These are normal writer-produced artifacts;
+the test does not manufacture identity metadata or use production data.
+
+The [before-fix evidence](baselines/2026-09-14-source-identity-clone-reproduction-1.json)
+contains the exact patch, command, failing output, source hashes and design
+reviews. The correction in progress adds a grouping-independent logical-prefix
+commitment while keeping the namespace stable. It hashes only newly appended
+rows during normal ingestion and verifies retained rows during the existing
+recovery reread. This distinguishes divergent histories and prevents recovery
+from assigning an old identity to a different prefix. Compaction and canonical
+bit changes preserve the row commitment; legacy contents without one remain
+unidentified for indexing. No additional per-batch disk flush is intended.
+The encoding and integration still require implementation validation and a new
+performance comparison; a design note is not evidence that the fix is complete.
+
+### Completed independent sparse confirmation
+
+The [complete packet](baselines/2026-09-14-source-identity-sparse-result-1.json)
+retains all 320 processes, 28,800 timings, 320 RSS records, 800 commands and
+480 host probes. Every fixture and input check passed. All 1,649 collected files
+and all 1,771 archived file records were verified byte-for-byte. The source and
+binaries are unchanged from the earlier direct comparison. The fixed fixture's
+implicit warmup behavior is unchanged; it emits no separate warmup records.
+
+The [engineering disposition](baselines/2026-09-14-source-identity-sparse-engineering-1.json)
+reviews all nine metrics under the rules committed before execution. Percentages
+below compare candidate elapsed time with baseline; upper bounds are the frozen
+nominal one-sided 99% whole-block bootstrap bounds.
+
+| Sparse workload | Median change | P95 change | P95 upper bound |
+|---|---:|---:|---:|
+| Live storage ingestion | +1.04% | +1.17% | +2.14% |
+| Index construction | +0.01% | +0.89% | +1.99% |
+| Compaction | +0.23% | +0.41% | +1.58% |
+| Reopen | +0.98% | +0.06% | +0.92% |
+| Native filter | +1.24% | +0.78% | +2.56% |
+| COUNT | -0.22% | -0.57% | +5.30% |
+| Ordered query | +0.82% | +2.64% | +8.02% |
+| Concurrent native queries | -0.25% | -1.56% | +0.90% |
+| Historical storage ingestion | +0.09% | +0.21% | +1.04% |
+
+All 18 median/P95 points and upper bounds are below 10%; no frozen stop fires.
+COUNT's source-order P95 gap is 5.33 percentage points, and one ordered-query
+order has a +5.03% P95 point. Both were investigated with the complete controls
+and temporal sensitivities. No criterion was changed or waived. Individual
+small-block tails remain variable: COUNT reached +41.06% and ordered queries
++21.16% in particular blocks. Every block remains in the analysis; the decision
+concerns the declared pooled quantiles and order/cycle checks, not a guarantee
+for every process or block.
+
+Independent verification agrees with all 216 point/interval fields, all 10,000
+draw selections and all 270 temporal vectors. It independently recomputed the
+predeclared 144 raw bootstrap vectors, not the arithmetic of every retained draw.
+CPU speed-limit observations ranged from 78 to 100, with 100 of 160 below 100;
+these observations caused no exclusion or control subtraction. The bounds remain
+conditional on the block design, with no unconditional or global sequential
+coverage claim. The original direct packet stays INCONCLUSIVE. This result
+applies to the exact tested sparse workload on the stated APFS host, and does
+not clear the subsequent correctness fix or live-sync readiness.
+
+All new remote writes stayed in
+`/private/tmp/logex-audit-source-identity-quiet-20260913.YSSYXA`, now 2,523,324 KiB.
+The final read-only check found no audit processes. The external volume and
+unrelated files were untouched; subsequent work is local.
 
 ## Implementation direction and invariants
 
@@ -649,9 +728,9 @@ Short-query medians range -0.77% to +3.47%, while p95 changes range +5.96% to
 +11.35%. Dense engine query medians range +0.74% to +1.18%, with p95 +15.83%
 to +18.29%. Sparse engine medians are within 0.12%, with p95 -4.56% to -8.68%.
 Mixed query medians are within 0.58% and their p95 increases do not exceed 2.16%.
-The larger short-query/dense-engine tails require investigation. The already-
-declared follow-up is running for every suite, using the same saved binaries;
-the initial results do not alter its scope or establish final acceptance.
+The larger short-query/dense-engine tails required investigation. The already-
+declared follow-up ran for every suite using the same saved binaries, as recorded
+below; the initial results did not alter its scope or establish final acceptance.
 
 ## Final direct performance disposition
 
@@ -1167,14 +1246,15 @@ and successful preparation checks are archived.
 This is one finite confirmation, with no interim acceptance, replacement runs,
 post-result exceptions or further unchanged confirmation if it remains uncertain.
 Mac-mini use resumed only in a new subdirectory of the existing named test root.
-Its expected duration is approximately 66 minutes plus preparation and collection;
-the host will be released after collecting the complete result.
+Its planned duration was approximately 66 minutes plus preparation and collection.
+It subsequently completed and the host was released; see the completed
+independent sparse confirmation above.
 
 The [execution preparation](baselines/2026-09-14-source-identity-sparse-preparation-1.json)
 records three successful transfer/verification steps: all 38 transferred files,
 nine Python 3.9 syntax checks and all 1,590 unchanged build/source inputs pass.
-The fixed cooldown is running at this evidence checkpoint; no benchmark has
-started. A separate independent verifier is frozen before data. It will check
-every reported effect/interval, all draw identities and temporal sensitivities,
-plus raw arithmetic at a declared fixed subset of draw indices. The full
-execution evidence will retain the cooldown's final log and outcome.
+The fixed cooldown was running at that preparation checkpoint; no benchmark had
+started. A separate independent verifier was frozen before data. The completed
+result above checks every reported effect/interval, all draw identities and
+temporal sensitivities, plus raw arithmetic at the declared fixed subset of draw
+indices. The full execution evidence retains the cooldown's final log and outcome.

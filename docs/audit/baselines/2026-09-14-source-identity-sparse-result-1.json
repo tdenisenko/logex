@@ -1,0 +1,87 @@
+{
+  "schema": 1,
+  "disposition": "COMPLETE_EVIDENCE_ENGINEERING_DISPOSITION_SEPARATE",
+  "source_performance_accepted": false,
+  "design": "2026-09-14-source-identity-sparse-confirmation-design-1.json",
+  "preparation": "2026-09-14-source-identity-sparse-preparation-1.json",
+  "builds_and_inputs": "2026-09-14-source-identity-direct-build-1.json",
+  "counts": {
+    "processes": 320,
+    "measured_timings": 28800,
+    "explicit_warmups": 0,
+    "rss_records": 320,
+    "commands": 800,
+    "host_probes": 480,
+    "collected_source_members": 1649
+  },
+  "packet_chronology": {
+    "started": "2026-09-13T20:30:06.923072+00:00",
+    "finished": "2026-09-13T21:35:50.211618+00:00"
+  },
+  "numeric_result": {
+    "status": "ANALYZED_REVIEW_PENDING",
+    "numeric_disposition": "ALL_ENDPOINTS_NUMERICALLY_BELOW_LIMIT",
+    "numeric_endpoint_counts": {
+      "NUMERICALLY_BELOW_LIMIT": 18
+    },
+    "declared_stop_count": 0
+  },
+  "independent_verification": {
+    "status": "VERIFIED_WITH_DECLARED_SAMPLING_LIMIT",
+    "metric_points_checked": 216,
+    "primary_endpoints_checked": 18,
+    "interval_pairs_checked": 216,
+    "seeded_draw_records_checked": 10000,
+    "replicate_vectors_recomputed": 144,
+    "replicate_values_recomputed": 3456,
+    "retained_draw_vectors_validated": 90000,
+    "temporal_vectors_recomputed": 270,
+    "temporal_values_recomputed": 6480,
+    "engineering_stop_flags_checked": 0
+  },
+  "release": {
+    "finished": "2026-09-13T21:36:37.791236+00:00",
+    "matching_processes": [],
+    "parent_root_kib": 2523324,
+    "remote_access_after_release": false,
+    "raw_report": "sparse-result-1/post-run-report.json"
+  },
+  "evidence_groups": [
+    "sparse-result-1",
+    "execution-preparation",
+    "frozen-design",
+    "independent-verifier-tooling",
+    "collection-tooling",
+    "engineering-review"
+  ],
+  "archive": {
+    "path": "2026-09-14-source-identity-sparse-result-1-raw.jsonl.gz",
+    "format": "gzip-compressed UTF-8 JSON Lines; first header, then exact file records. Stream line-by-line to decode.",
+    "sha256": "8d3345b44d5288b56c031b385d7c44dcb1e183fee83aa3fbc7a5c626c702f693",
+    "compressed_bytes": 24411473,
+    "uncompressed_jsonl_bytes": 155678282,
+    "payload_source_files": 1770,
+    "archive_file_records": 1771,
+    "payload_source_bytes": 143153388,
+    "decoded_bytes_including_generated_manifest": 143792173,
+    "manifest_record": "packaging/manifest.json",
+    "packaging_script_record": "packaging/package.py",
+    "roundtrip": "Every file record decoded and compared byte-for-byte to original, with length/SHA256 checks. All1649collectedmember hashes rechecked before packaging."
+  },
+  "omitted_redundant_containers": [
+    {
+      "path": "/private/tmp/logex-source-identity-sparse-confirmation-result-1/packet.tar",
+      "bytes": 39280640,
+      "sha256": "dced49338c86e85a674e26c96cec7a8d63a5da5c8bbc6a4766e3fb9d725563f4",
+      "reason": "Only redundant tar container omitted; its full verified contents, generated collection manifest, streaming/collection hashes and proof retained."
+    }
+  ],
+  "limits": [
+    "No observation, log, process, order, cycle, bootstrap draw or verifier result excluded. Earlier direct packet remains separately retained and INCONCLUSIVE; results are not pooled.",
+    "Independent verification recalculated all216points/interval pairs, all10000draw indices and all270temporal vectors; independent raw bootstrap arithmetic covered the declared144vectors/3456values, not every retained vector.",
+    "Zero explicit warmup records means the unchanged integrated fixture has no separately emitted warmup samples; its implicit behavior was not removed or changed.",
+    "Build trees and binaries are referenced through previously archived build/input evidence; not duplicated.",
+    "This package does not grant acceptance. Root engineering disposition is separate and the subsequent clone correctness finding still blocks the milestone.",
+    "Confidence bounds are the frozen conditional block-bootstrap bounds, not a simultaneous or global sequential guarantee. No new unchanged confirmation is planned."
+  ]
+}
