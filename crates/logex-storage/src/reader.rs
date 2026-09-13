@@ -392,9 +392,7 @@ impl ColumnReader {
     /// Read the canonical bitmap.
     pub fn read_canonical(dir: &Path) -> std::io::Result<NullBitmap> {
         let data = fs::read(dir.join("canonical.bitmap"))?;
-        NullBitmap::read_from(&data).ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, "corrupt canonical bitmap")
-        })
+        crate::column::read_canonical_bitmap(&data, None)
     }
 
     /// Read the row count from any column file header.

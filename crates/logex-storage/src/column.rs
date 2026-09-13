@@ -13,6 +13,12 @@ const SOURCE_MARKER_BYTES: usize = 8 + 1 + 16 + 8 + 8 + 8 + 1 + 4;
 const SOURCE_UPDATING: u8 = 1;
 const SOURCE_PREFIX_REWRITE: u8 = 2;
 const SOURCE_COMMITTED: u8 = 3;
+const CANONICAL_ENVELOPE_MAGIC: &[u8; 8] = b"LXCAN001";
+const CANONICAL_ENVELOPE_VERSION: u8 = 1;
+const CANONICAL_PENDING: u8 = 1;
+const CANONICAL_COMMITTED: u8 = 2;
+const CANONICAL_ENVELOPE_HEADER: usize = 8 + 1 + 1 + 16 + 8 + 8 + 8 + 4;
+pub(crate) const CANONICAL_PREFIX_BYTES: usize = CANONICAL_ENVELOPE_HEADER + 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SourceMarker {
@@ -47,6 +53,7 @@ impl SourceMarker {
 pub(crate) struct SourceWriteGuard {
     file: File,
     dir: std::path::PathBuf,
+    binding: Option<SourceBinding>,
 }
 
 pub(crate) struct PrefixRecoveryGuard {
@@ -128,6 +135,7 @@ impl SourceWriteGuard {
         Ok(Self {
             file,
             dir: dir.to_path_buf(),
+            binding: None,
         })
     }
 
@@ -137,26 +145,26 @@ impl SourceWriteGuard {
         generation: u64,
         segment_id: u64,
     ) -> io::Result<Self> {
-        let owner = Self::acquire(dir)?;
-        verify_owned_source(dir, namespace, generation, segment_id)?;
+        let mut owner = Self::acquire(dir)?;
+        owner.binding = Some(verify_owned_source(dir, namespace, generation, segment_id)?);
         Ok(owner)
     }
 
     pub(crate) fn acquire_legacy(dir: &Path) -> io::Result<Self> {
-        let owner = Self::acquire(dir)?;
+        let mut owner = Self::acquire(dir)?;
         // Legacy native sources remain scan-readable but cannot acquire a
         // trusted identity from their shape or an incidental standalone marker.
-        read_source_namespace(dir)?;
+        owner.binding = read_source_binding(dir)?;
         Ok(owner)
     }
 }
 
-fn verify_owned_source(
+pub(crate) fn verify_owned_source(
     dir: &Path,
     namespace: [u8; 16],
     generation: u64,
     segment_id: u64,
-) -> io::Result<()> {
+) -> io::Result<SourceBinding> {
     match read_source_marker(dir)? {
         Some(marker)
             if marker.state == SOURCE_COMMITTED
@@ -164,7 +172,11 @@ fn verify_owned_source(
                 && marker.generation == generation
                 && marker.segment_id == segment_id =>
         {
-            Ok(())
+            Ok(SourceBinding {
+                namespace,
+                generation,
+                segment_id,
+            })
         }
         Some(SourceMarker {
             state: SOURCE_COMMITTED,
@@ -281,6 +293,7 @@ fn read_source_marker(dir: &Path) -> io::Result<Option<SourceMarker>> {
     }))
 }
 
+#[cfg(test)]
 pub(crate) fn read_source_namespace(dir: &Path) -> io::Result<Option<[u8; 16]>> {
     Ok(read_source_binding(dir)?.map(|binding| binding.namespace))
 }
@@ -290,6 +303,218 @@ pub(crate) struct SourceBinding {
     pub(crate) namespace: [u8; 16],
     pub(crate) generation: u64,
     pub(crate) segment_id: u64,
+}
+
+impl From<SourceIdentity> for SourceBinding {
+    fn from(identity: SourceIdentity) -> Self {
+        Self {
+            namespace: identity.namespace,
+            generation: identity.generation,
+            segment_id: identity.segment_id,
+        }
+    }
+}
+
+/// Raw canonical metadata is separate from the generic and bundled bitmap formats.
+/// The CRC covers the version, publication state, source binding and row boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RawCanonicalMetadata {
+    binding: Option<SourceBinding>,
+    pending: bool,
+    pub(crate) rows: u64,
+    offset: usize,
+}
+
+impl RawCanonicalMetadata {
+    pub(crate) fn parse(prefix: &[u8], file_len: u64) -> io::Result<Self> {
+        let invalid = || {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid canonical source envelope or bitmap length",
+            )
+        };
+        let read_u64 = |at: usize| -> io::Result<u64> {
+            Ok(u64::from_le_bytes(
+                prefix
+                    .get(at..at + 8)
+                    .ok_or_else(invalid)?
+                    .try_into()
+                    .map_err(|_| invalid())?,
+            ))
+        };
+        if prefix.get(..8) != Some(CANONICAL_ENVELOPE_MAGIC.as_slice()) {
+            let rows = read_u64(0)?;
+            if file_len < 8 + rows.div_ceil(8) {
+                return Err(invalid());
+            }
+            return Ok(Self {
+                binding: None,
+                pending: false,
+                rows,
+                offset: 0,
+            });
+        }
+        // A reserved magic prefix is always an envelope; corruption never falls
+        // back to interpreting those bytes as a legacy row count.
+        if prefix.len() < CANONICAL_PREFIX_BYTES
+            || prefix[8] != CANONICAL_ENVELOPE_VERSION
+            || !matches!(prefix[9], CANONICAL_PENDING | CANONICAL_COMMITTED)
+            || crc32fast::hash(&prefix[..CANONICAL_ENVELOPE_HEADER - 4]).to_le_bytes()
+                != prefix[CANONICAL_ENVELOPE_HEADER - 4..CANONICAL_ENVELOPE_HEADER]
+        {
+            return Err(invalid());
+        }
+        let rows = read_u64(42)?;
+        if rows > u64::from(u32::MAX)
+            || read_u64(CANONICAL_ENVELOPE_HEADER)? != rows
+            || file_len != CANONICAL_PREFIX_BYTES as u64 + rows.div_ceil(8)
+        {
+            return Err(invalid());
+        }
+        Ok(Self {
+            binding: Some(SourceBinding {
+                namespace: prefix[10..26].try_into().map_err(|_| invalid())?,
+                generation: read_u64(26)?,
+                segment_id: read_u64(34)?,
+            }),
+            pending: prefix[9] == CANONICAL_PENDING,
+            rows,
+            offset: CANONICAL_ENVELOPE_HEADER,
+        })
+    }
+
+    pub(crate) fn validate_exact_len(self, file_len: u64) -> io::Result<Self> {
+        if file_len != self.offset as u64 + 8 + self.rows.div_ceil(8) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "canonical bitmap physical length differs from its rows",
+            ));
+        }
+        Ok(self)
+    }
+
+    pub(crate) fn validate_committed(
+        self,
+        expected: Option<SourceBinding>,
+        rows: u64,
+    ) -> io::Result<Self> {
+        if expected.is_some() && self.binding != expected {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "canonical source identity differs from manifest or is missing",
+            ));
+        }
+        if self.pending {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "canonical source replacement is incomplete",
+            ));
+        }
+        self.validate_rows(rows)?;
+        Ok(self)
+    }
+
+    pub(crate) fn validate_recovery(self, owner: &PrefixRecoveryGuard) -> io::Result<Self> {
+        verify_prefix_recovery_pending(owner.dir(), owner)?;
+        if self.binding
+            != Some(SourceBinding {
+                namespace: owner.namespace,
+                generation: owner.generation,
+                segment_id: owner.segment_id,
+            })
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "canonical identity differs from verified prefix recovery",
+            ));
+        }
+        if self.pending && self.rows != owner.prefix_rows {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "pending canonical prefix differs from recovery boundary",
+            ));
+        }
+        // Both states are valid: a crash may follow canonical-last publication
+        // while the sidecar still records the unfinished catalog transaction.
+        self.validate_rows(owner.prefix_rows)?;
+        Ok(self)
+    }
+
+    fn validate_rows(self, rows: u64) -> io::Result<()> {
+        if self.rows < rows {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "canonical bitmap does not cover captured rows",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn bitmap(self, bytes: &[u8]) -> io::Result<NullBitmap> {
+        if Self::parse(bytes, bytes.len() as u64)? != self {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "captured canonical metadata changed",
+            ));
+        }
+        NullBitmap::read_from(&bytes[self.offset..])
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "corrupt canonical bitmap"))
+    }
+}
+
+pub(crate) fn write_raw_canonical(
+    writer: &mut dyn Write,
+    bitmap: &NullBitmap,
+    binding: Option<SourceBinding>,
+) -> io::Result<()> {
+    write_raw_canonical_state(writer, bitmap, binding, CANONICAL_COMMITTED)
+}
+
+fn write_raw_canonical_state(
+    writer: &mut dyn Write,
+    bitmap: &NullBitmap,
+    binding: Option<SourceBinding>,
+    state: u8,
+) -> io::Result<()> {
+    if let Some(binding) = binding {
+        if bitmap.len() > u64::from(u32::MAX) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "canonical rows exceed segment addressing",
+            ));
+        }
+        let mut header = [0; CANONICAL_ENVELOPE_HEADER];
+        header[..8].copy_from_slice(CANONICAL_ENVELOPE_MAGIC);
+        header[8] = CANONICAL_ENVELOPE_VERSION;
+        header[9] = state;
+        header[10..26].copy_from_slice(&binding.namespace);
+        header[26..34].copy_from_slice(&binding.generation.to_le_bytes());
+        header[34..42].copy_from_slice(&binding.segment_id.to_le_bytes());
+        header[42..50].copy_from_slice(&bitmap.len().to_le_bytes());
+        let checksum = crc32fast::hash(&header[..50]);
+        header[50..54].copy_from_slice(&checksum.to_le_bytes());
+        writer.write_all(&header)?;
+    }
+    bitmap.write_to(writer)
+}
+
+fn publish_pending_canonical(
+    dir: &Path,
+    bitmap: &NullBitmap,
+    binding: SourceBinding,
+) -> io::Result<()> {
+    let mut bytes = Vec::new();
+    write_raw_canonical_state(&mut bytes, bitmap, Some(binding), CANONICAL_PENDING)?;
+    durability::write_bytes_ordered(&dir.join("canonical.bitmap"), &bytes)
+}
+
+pub(crate) fn read_canonical_bitmap(
+    bytes: &[u8],
+    expected: Option<SourceBinding>,
+) -> io::Result<NullBitmap> {
+    RawCanonicalMetadata::parse(bytes, bytes.len() as u64)?
+        .validate_committed(expected, 0)?
+        .bitmap(bytes)
 }
 
 pub(crate) fn read_source_binding(dir: &Path) -> io::Result<Option<SourceBinding>> {
@@ -390,6 +615,10 @@ pub(crate) fn begin_prefix_recovery(
                 "committed raw source namespace differs from recovery metadata",
             ))
         }
+        None if prefix_rows != 0 => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "nonempty source recovery authority is missing",
+        )),
         None
         | Some(SourceMarker {
             state: SOURCE_COMMITTED,
@@ -773,7 +1002,20 @@ impl ColumnFile {
             ),
             durability::Publication::Ordered,
         )?;
-        Self::write_batch_contents(dir, rows, Some(canonical), durability::Publication::Durable)?;
+        let binding = SourceBinding {
+            namespace,
+            generation,
+            segment_id: owner.segment_id,
+        };
+        publish_pending_canonical(dir, canonical, binding)?;
+        Self::write_batch_contents(
+            dir,
+            rows,
+            Some(canonical),
+            durability::Publication::Durable,
+            Some(binding),
+            true,
+        )?;
         owner.completed.set(true);
         Ok(())
     }
@@ -790,7 +1032,14 @@ impl ColumnFile {
             ));
         }
         let _owner = SourceWriteGuard::acquire(dir)?;
-        Self::write_batch_contents(dir, rows, Some(canonical), durability::Publication::Durable)
+        Self::write_batch_contents(
+            dir,
+            rows,
+            Some(canonical),
+            durability::Publication::Durable,
+            None,
+            false,
+        )
     }
 
     pub(crate) fn finish_verified_prefix(
@@ -835,6 +1084,12 @@ impl ColumnFile {
         marker_publication: durability::Publication,
         identity: SourceIdentity,
     ) -> io::Result<()> {
+        if rows.len() as u64 > u64::from(u32::MAX) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "replacement rows exceed segment addressing",
+            ));
+        }
         if canonical.is_some_and(|bitmap| bitmap.len() != rows.len() as u64) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -850,7 +1105,19 @@ impl ColumnFile {
             SourceMarker::new(identity, SOURCE_UPDATING, 0),
             pending_publication,
         )?;
-        Self::write_batch_contents(dir, rows, canonical, publication)?;
+        if pending_publication != durability::Publication::Deferred {
+            // The pending fence precedes every noncanonical rename. Its binding
+            // is the new incarnation, so old native manifests cannot accept it.
+            publish_pending_canonical(dir, &NullBitmap::new(), identity.into())?;
+        }
+        Self::write_batch_contents(
+            dir,
+            rows,
+            canonical,
+            publication,
+            Some(identity.into()),
+            pending_publication != durability::Publication::Deferred,
+        )?;
         write_source_marker(
             dir,
             SourceMarker::new(identity, SOURCE_COMMITTED, rows.len() as u64),
@@ -863,6 +1130,8 @@ impl ColumnFile {
         rows: &[LogRow],
         canonical: Option<&NullBitmap>,
         publication: durability::Publication,
+        binding: Option<SourceBinding>,
+        order_names: bool,
     ) -> io::Result<()> {
         fs::create_dir_all(dir)?;
         let row_count = rows.len() as u64;
@@ -975,7 +1244,7 @@ impl ColumnFile {
                     }
                 };
                 replacements.write(&dir.join("canonical.bitmap"), |writer| {
-                    bitmap.write_to(writer)
+                    write_raw_canonical(writer, bitmap, binding)
                 })?;
                 Ok(())
             });
@@ -986,7 +1255,7 @@ impl ColumnFile {
             Ok::<_, io::Error>(())
         })?;
 
-        replacements.publish()
+        replacements.publish_canonical_last(&dir.join("canonical.bitmap"), order_names)
     }
 
     /// Append rows to existing column files (for the hot partition).
@@ -1025,8 +1294,8 @@ impl ColumnFile {
                 },
             );
         }
-        read_source_namespace(dir)?;
-        Self::append_batch_owned(dir, rows, existing_rows, publication)
+        let binding = read_source_binding(dir)?;
+        Self::append_batch_owned(dir, rows, existing_rows, publication, binding)
     }
 
     fn append_batch_owned(
@@ -1034,8 +1303,30 @@ impl ColumnFile {
         rows: &[LogRow],
         existing_rows: u64,
         publication: durability::Publication,
+        binding: Option<SourceBinding>,
     ) -> io::Result<()> {
-        let new_row_count = existing_rows + rows.len() as u64;
+        // Validate the immutable canonical prefix before any in-place column
+        // append. Reuse this one read in the existing replacement worker.
+        let data = fs::read(dir.join("canonical.bitmap"))?;
+        let mut canonical = read_canonical_bitmap(&data, binding)?;
+        if canonical.len() != existing_rows {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "canonical bitmap row count differs from append prefix",
+            ));
+        }
+        let new_row_count = existing_rows
+            .checked_add(rows.len() as u64)
+            .filter(|&count| binding.is_none() || count <= u64::from(u32::MAX))
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "append rows exceed segment addressing",
+                )
+            })?;
+        for _ in rows {
+            canonical.push(true);
+        }
         let replacements = durability::ReplacementBatch::new(publication);
 
         thread::scope(|scope| {
@@ -1165,12 +1456,9 @@ impl ColumnFile {
                     rows,
                     existing_rows,
                 )?;
-                Self::append_canonical_bitmap(
-                    dir,
-                    &replacements,
-                    existing_rows,
-                    rows.len() as u64,
-                )?;
+                replacements.write(&dir.join("canonical.bitmap"), |writer| {
+                    write_raw_canonical(writer, &canonical, binding)
+                })?;
                 Ok(())
             });
             join_write_worker(block_columns)?;
@@ -1180,7 +1468,7 @@ impl ColumnFile {
             Ok::<_, io::Error>(())
         })?;
 
-        replacements.publish()
+        replacements.publish_canonical_last(&dir.join("canonical.bitmap"), false)
     }
 
     pub(crate) fn append_batch_with_source_binding(
@@ -1193,8 +1481,8 @@ impl ColumnFile {
         segment_id: u64,
     ) -> io::Result<()> {
         let _owner = SourceWriteGuard::acquire(dir)?;
-        verify_owned_source(dir, namespace, generation, segment_id)?;
-        Self::append_batch_owned(dir, rows, existing_rows, publication)
+        let binding = verify_owned_source(dir, namespace, generation, segment_id)?;
+        Self::append_batch_owned(dir, rows, existing_rows, publication, Some(binding))
     }
 
     fn write_fixed_col(
@@ -1444,15 +1732,13 @@ impl ColumnFile {
         for _ in 0..row_count {
             bitmap.push(true);
         }
-        durability::atomic_replace_ordered(&dir.join("canonical.bitmap"), |writer| {
-            bitmap.write_to(writer)
-        })
+        Self::replace_canonical_bitmap(dir, &bitmap)
     }
 
     #[cfg(test)]
     pub(crate) fn replace_canonical_bitmap(dir: &Path, bitmap: &NullBitmap) -> io::Result<()> {
-        let owner = SourceWriteGuard::acquire(dir)?;
-        read_source_namespace(dir)?;
+        let mut owner = SourceWriteGuard::acquire(dir)?;
+        owner.binding = read_source_binding(dir)?;
         Self::replace_canonical_bitmap_owned(dir, bitmap, &owner)
     }
 
@@ -1468,37 +1754,8 @@ impl ColumnFile {
             ));
         }
         durability::atomic_write(&dir.join("canonical.bitmap"), |writer| {
-            bitmap.write_to(writer)
+            write_raw_canonical(writer, bitmap, owner.binding)
         })
-    }
-
-    fn append_canonical_bitmap(
-        dir: &Path,
-        replacements: &durability::ReplacementBatch,
-        existing_rows: u64,
-        new_rows: u64,
-    ) -> io::Result<()> {
-        let path = dir.join("canonical.bitmap");
-        let data = fs::read(&path)?;
-        let mut bitmap = NullBitmap::read_from(&data).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidData, "corrupt canonical bitmap")
-        })?;
-        if bitmap.len() != existing_rows {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "canonical bitmap row count mismatch: expected {existing_rows}, got {}",
-                    bitmap.len()
-                ),
-            ));
-        }
-
-        for _ in 0..new_rows {
-            bitmap.push(true);
-        }
-
-        replacements.write(&path, |w| bitmap.write_to(w))?;
-        Ok(())
     }
 
     fn open_col_for_append(
@@ -1569,6 +1826,101 @@ mod tests {
             data_len: 0,
             source: Source::Receipt,
         }
+    }
+
+    #[test]
+    fn canonical_envelope_checks_binding_state_rows_and_exact_length() {
+        let binding = SourceBinding {
+            namespace: [7; 16],
+            generation: 3,
+            segment_id: 9,
+        };
+        let mut bitmap = NullBitmap::new();
+        bitmap.push(false);
+        bitmap.push(true);
+        let mut bytes = Vec::new();
+        write_raw_canonical(&mut bytes, &bitmap, Some(binding)).unwrap();
+        assert!(
+            !read_canonical_bitmap(&bytes, Some(binding))
+                .unwrap()
+                .is_present(0)
+        );
+        let foreign = SourceBinding {
+            generation: 4,
+            ..binding
+        };
+        assert!(read_canonical_bitmap(&bytes, Some(foreign)).is_err());
+        for offset in [8, 9, 10, 26, 34, 42, 50, 54] {
+            let mut damaged = bytes.clone();
+            damaged[offset] ^= 1;
+            assert!(
+                read_canonical_bitmap(&damaged, Some(binding)).is_err(),
+                "offset {offset}"
+            );
+        }
+        for len in [0, 8, 53, 61, bytes.len() - 1, bytes.len() + 1] {
+            let mut damaged = bytes.clone();
+            damaged.resize(len, 0);
+            assert!(
+                read_canonical_bitmap(&damaged, Some(binding)).is_err(),
+                "length {len}"
+            );
+        }
+        let mut pending = Vec::new();
+        write_raw_canonical_state(&mut pending, &bitmap, Some(binding), CANONICAL_PENDING).unwrap();
+        assert_eq!(
+            read_canonical_bitmap(&pending, Some(binding))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::WouldBlock
+        );
+        let mut legacy = Vec::new();
+        bitmap.write_to(&mut legacy).unwrap();
+        assert!(read_canonical_bitmap(&legacy, None).is_ok());
+        assert!(read_canonical_bitmap(&legacy, Some(binding)).is_err());
+        let oversized = u64::from(u32::MAX) + 1;
+        bytes[42..50].copy_from_slice(&oversized.to_le_bytes());
+        bytes[54..62].copy_from_slice(&oversized.to_le_bytes());
+        let crc = crc32fast::hash(&bytes[..50]);
+        bytes[50..54].copy_from_slice(&crc.to_le_bytes());
+        assert!(RawCanonicalMetadata::parse(&bytes, 62 + oversized.div_ceil(8)).is_err());
+    }
+
+    #[test]
+    fn replacement_fences_columns_and_publishes_canonical_last() {
+        let tmp = tempfile::tempdir().unwrap();
+        ColumnFile::write_batch(tmp.path(), &[row()]).unwrap();
+        durability::inject_failure(usize::MAX);
+        ColumnFile::write_batch(tmp.path(), &[row(), row()]).unwrap();
+        let events = durability::take_events();
+        let renames: Vec<_> = events
+            .iter()
+            .filter(|(op, _)| *op == "rename_temporary")
+            .map(|(_, path)| path.file_name().unwrap().to_str().unwrap())
+            .collect();
+        assert_eq!(&renames[..2], &[SOURCE_MARKER_FILE, "canonical.bitmap"]);
+        assert_eq!(
+            &renames[renames.len() - 2..],
+            &["canonical.bitmap", SOURCE_MARKER_FILE]
+        );
+        assert!(
+            renames[2..renames.len() - 2]
+                .iter()
+                .all(|name| *name != "canonical.bitmap")
+        );
+    }
+
+    #[test]
+    fn append_rejects_invalid_canonical_before_mutating_columns() {
+        let tmp = tempfile::tempdir().unwrap();
+        ColumnFile::write_batch(tmp.path(), &[row()]).unwrap();
+        let before = fs::read(tmp.path().join("address.col")).unwrap();
+        let path = tmp.path().join("canonical.bitmap");
+        let mut bytes = fs::read(&path).unwrap();
+        bytes[10] ^= 1;
+        fs::write(&path, bytes).unwrap();
+        assert!(ColumnFile::append_batch(tmp.path(), &[row()], 1).is_err());
+        assert_eq!(fs::read(tmp.path().join("address.col")).unwrap(), before);
     }
 
     #[test]

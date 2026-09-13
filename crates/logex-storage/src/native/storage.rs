@@ -829,15 +829,21 @@ impl NativeStorage {
                 && manifest.as_ref().is_none_or(|manifest| {
                     manifest.row_count != segment.row_count || manifest.kind != segment.kind
                 });
-            if let Some(namespace) = segment.source_namespace {
-                restore |= crate::column::prefix_rewrite_pending(
+            if let Some(namespace) = segment.source_namespace
+                && crate::column::prefix_rewrite_pending(
                     &dir,
                     namespace.0,
                     segment.row_count,
                     segment.generation,
                     segment.id,
                     segment.kind,
-                )?;
+                )?
+            {
+                // A verified transaction may expose a pending canonical fence.
+                // Only its capability reader can inspect that prefix; ordinary
+                // tail/shape inspection cannot precede this recovery.
+                self.restore_committed_prefix(segment)?;
+                continue;
             }
             if active && compacted {
                 let mut prefix = manifest.clone().ok_or_else(|| {
@@ -2232,6 +2238,11 @@ impl NativeStorage {
         label: &'static str,
     ) -> std::io::Result<bool> {
         let descriptor = self.catalog.segments[segment_index].clone();
+        if descriptor.column_bundle.is_some() {
+            // Bundled recovery uses its catalog-pinned table and has no raw
+            // publication sidecar or raw-prefix repair capability.
+            return Ok(false);
+        }
         let segment_dir = self.paths.segment_dir(descriptor.id);
         let source_owner = descriptor
             .source_namespace
@@ -2506,6 +2517,20 @@ fn verify_segment_integrity(
         ));
     }
 
+    // Startup/maintenance still require the sidecar authority even though
+    // query snapshots can trust a coherent canonical-last publication alone.
+    if descriptor.column_bundle.is_none() && descriptor.row_count != 0 {
+        if let Some(namespace) = descriptor.source_namespace {
+            crate::column::verify_owned_source(
+                &dir,
+                namespace.0,
+                descriptor.generation,
+                descriptor.id,
+            )?;
+        } else {
+            crate::column::read_source_binding(&dir)?;
+        }
+    }
     let reader = SegmentReader::open_projected(&dir, &["block_number"])?;
     if reader.source_namespace() != descriptor.source_namespace.map(|namespace| namespace.0) {
         return Err(io::Error::new(
@@ -2742,12 +2767,24 @@ fn hot_segment_physical_row_counts(
     for name in BITMAP_FILES {
         let path = segment_dir.join(name);
         let data = fs::read(&path)?;
-        let bitmap = NullBitmap::read_from(&data).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("corrupt hot segment bitmap {}", path.display()),
-            )
-        })?;
+        let bitmap = if *name == "canonical.bitmap" {
+            let binding =
+                descriptor
+                    .source_namespace
+                    .map(|namespace| crate::column::SourceBinding {
+                        namespace: namespace.0,
+                        generation: descriptor.generation,
+                        segment_id: descriptor.id,
+                    });
+            crate::column::read_canonical_bitmap(&data, binding)?
+        } else {
+            NullBitmap::read_from(&data).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("corrupt hot segment bitmap {}", path.display()),
+                )
+            })?
+        };
         counts.push((*name, bitmap.len()));
     }
 
@@ -5208,14 +5245,17 @@ mod tests {
                         .unwrap();
                 }
             }
+            let captured_canonical = SegmentReader::open_projected(&dir, &[])
+                .unwrap()
+                .read_canonical()
+                .unwrap();
+            let mut plain_canonical = Vec::new();
+            captured_canonical.write_to(&mut plain_canonical).unwrap();
             writer
                 .replace_metadata(
                     crate::column_artifact::CANONICAL_STREAM,
-                    &crate::column_artifact::encode_bitmap(
-                        &artifacts.read("canonical.bitmap").unwrap(),
-                        manifest.row_count,
-                    )
-                    .unwrap(),
+                    &crate::column_artifact::encode_bitmap(&plain_canonical, manifest.row_count)
+                        .unwrap(),
                 )
                 .unwrap();
             let reference = writer.finish(1).unwrap();
@@ -6847,6 +6887,161 @@ mod tests {
     }
 
     #[test]
+    fn canonical_fence_interrupted_prefix_rewrite_restarts_with_exact_bits() {
+        fn setup() -> (
+            TempDir,
+            NativeStorageConfig,
+            NativeStorage,
+            SegmentDescriptor,
+            Vec<LogRow>,
+            NullBitmap,
+        ) {
+            let tmp = TempDir::new().unwrap();
+            let config = NativeStorageConfig {
+                data_dir: tmp.path().to_path_buf(),
+                hot_target_rows: 32,
+                compaction_safety_margin_blocks: 2_048,
+            };
+            let mut storage = NativeStorage::open(config.clone()).unwrap();
+            let rows = make_rows(3, 100);
+            storage.write_batch(&rows).unwrap();
+            storage.mark_non_canonical(rows[0].block_hash).unwrap();
+            storage.checkpoint().unwrap();
+            let descriptor = storage
+                .segments()
+                .iter()
+                .find(|segment| segment.row_count != 0)
+                .unwrap()
+                .clone();
+            let canonical = SegmentReader::open(&storage.segment_path(descriptor.id))
+                .unwrap()
+                .read_canonical()
+                .unwrap();
+            ColumnFile::append_batch(&storage.segment_path(descriptor.id), &make_rows(2, 200), 3)
+                .unwrap();
+            (tmp, config, storage, descriptor, rows, canonical)
+        }
+        let (_tmp, _, storage, descriptor, rows, canonical) = setup();
+        let dir = storage.segment_path(descriptor.id);
+        let namespace = descriptor.source_namespace.unwrap().0;
+        let owner = crate::column::begin_prefix_recovery(
+            &dir,
+            namespace,
+            3,
+            descriptor.generation,
+            descriptor.id,
+            descriptor.kind,
+        )
+        .unwrap();
+        durability::inject_failure(usize::MAX);
+        ColumnFile::rewrite_verified_prefix(
+            &dir,
+            &rows,
+            &canonical,
+            namespace,
+            descriptor.generation,
+            &owner,
+        )
+        .unwrap();
+        let events = durability::take_events();
+        drop(owner);
+        // Fail at the first canonical fence, within noncanonical renames, just
+        // before canonical-last, and leave a completed canonical with pending
+        // sidecar. The latter requires no fabricated on-disk state.
+        let renames: Vec<_> = events
+            .iter()
+            .enumerate()
+            .filter(|(_, (op, _))| *op == "rename_temporary")
+            .map(|(index, _)| index)
+            .collect();
+        let final_order = events
+            .iter()
+            .position(|(op, _)| *op == "order_canonical_directory")
+            .unwrap();
+        let failures = [
+            Some(renames[1]),
+            Some(renames[3]),
+            Some(final_order),
+            Some(*renames.last().unwrap()),
+            None,
+        ];
+        for failure in failures {
+            let (_tmp, config, storage, descriptor, rows, canonical) = setup();
+            let dir = storage.segment_path(descriptor.id);
+            let namespace = descriptor.source_namespace.unwrap().0;
+            let owner = crate::column::begin_prefix_recovery(
+                &dir,
+                namespace,
+                3,
+                descriptor.generation,
+                descriptor.id,
+                descriptor.kind,
+            )
+            .unwrap();
+            durability::inject_failure(failure.unwrap_or(usize::MAX));
+            let result = ColumnFile::rewrite_verified_prefix(
+                &dir,
+                &rows,
+                &canonical,
+                namespace,
+                descriptor.generation,
+                &owner,
+            );
+            durability::take_events();
+            assert_eq!(result.is_err(), failure.is_some());
+            drop(owner);
+            drop(storage);
+            let reopened = NativeStorage::open(config).unwrap();
+            let reader = SegmentReader::open(&dir).unwrap();
+            assert_eq!(reader.read_log_rows(None).unwrap(), rows);
+            assert_eq!(reader.read_canonical_len().unwrap(), 3);
+            assert!(!reader.read_canonical().unwrap().is_present(0));
+            assert_eq!(
+                crate::column::read_source_namespace(&dir).unwrap(),
+                Some(namespace)
+            );
+            drop(reopened);
+        }
+    }
+
+    #[test]
+    fn startup_does_not_reconstruct_missing_sidecar_from_committed_canonical() {
+        for tail in [false, true] {
+            let tmp = TempDir::new().unwrap();
+            let config = NativeStorageConfig {
+                data_dir: tmp.path().to_path_buf(),
+                hot_target_rows: 32,
+                compaction_safety_margin_blocks: 2_048,
+            };
+            let mut storage = NativeStorage::open(config.clone()).unwrap();
+            let rows = make_rows(3, 100);
+            storage.write_batch(&rows).unwrap();
+            storage.checkpoint().unwrap();
+            let descriptor = storage
+                .segments()
+                .iter()
+                .find(|segment| segment.row_count != 0)
+                .unwrap()
+                .clone();
+            let dir = storage.segment_path(descriptor.id);
+            if tail {
+                ColumnFile::append_batch(&dir, &make_rows(1, 200), 3).unwrap();
+            }
+            crate::column::remove_source_marker_for_test(&dir).unwrap();
+            assert_eq!(
+                SegmentReader::open(&dir)
+                    .unwrap()
+                    .read_log_rows(None)
+                    .unwrap(),
+                rows
+            );
+            drop(storage);
+            assert!(NativeStorage::open(config).is_err());
+            assert!(!dir.join(".source-publication").exists());
+        }
+    }
+
+    #[test]
     fn catalog_recovery_finishes_matching_prefix_rewrite_without_wal() {
         let tmp = TempDir::new().unwrap();
         let config = NativeStorageConfig {
@@ -6883,9 +7078,13 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            SegmentReader::open(&dir).unwrap_err().kind(),
-            io::ErrorKind::WouldBlock
+            SegmentReader::open(&dir)
+                .unwrap()
+                .read_log_rows(None)
+                .unwrap(),
+            expected
         );
+        assert!(crate::column::read_source_binding(&dir).is_err());
         drop(storage);
 
         let recovered = NativeStorage::open(config).unwrap();

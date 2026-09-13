@@ -59,6 +59,7 @@ struct PageOutput<'a> {
     existing_rows: u64,
     previous: std::collections::BTreeMap<String, ExistingPages>,
     canonical: Option<NullBitmap>,
+    canonical_binding: Option<crate::column::SourceBinding>,
     replacements: Option<durability::ReplacementBatch>,
     bundle: Option<(BundleWriter, u64)>,
 }
@@ -89,6 +90,7 @@ impl<'a> PageOutput<'a> {
             existing_rows: 0,
             previous: Default::default(),
             canonical: Some(NullBitmap::new()),
+            canonical_binding: None,
             replacements: None,
             bundle: None,
         }
@@ -243,8 +245,26 @@ impl<'a> PageOutput<'a> {
                 },
             );
         }
-        let canonical =
-            parse_bitmap_prefix(&artifacts.read("canonical.bitmap")?, manifest.row_count)?;
+        let canonical_binding =
+            manifest
+                .source_namespace
+                .map(|namespace| crate::column::SourceBinding {
+                    namespace: namespace.0,
+                    generation: manifest.generation,
+                    segment_id: manifest.segment_id,
+                });
+        let canonical_bytes = artifacts.read("canonical.bitmap")?;
+        let canonical = if artifacts.bundle().is_some() {
+            parse_bitmap_prefix(&canonical_bytes, manifest.row_count)?
+        } else {
+            let metadata = crate::column::RawCanonicalMetadata::parse(
+                &canonical_bytes,
+                canonical_bytes.len() as u64,
+            )?
+            .validate_exact_len(canonical_bytes.len() as u64)?
+            .validate_committed(canonical_binding, manifest.row_count)?;
+            metadata.bitmap(&canonical_bytes)?
+        };
         tail |= canonical.len() != manifest.row_count;
         Ok((
             Self {
@@ -252,6 +272,7 @@ impl<'a> PageOutput<'a> {
                 existing_rows: manifest.row_count,
                 previous,
                 canonical: Some(canonical),
+                canonical_binding,
                 replacements: None,
                 bundle: None,
             },
@@ -307,7 +328,11 @@ impl<'a> PageOutput<'a> {
             bitmap.push(true);
         }
         self.metadata(&self.dir.join("canonical.bitmap"), |writer| {
-            bitmap.write_to(writer)
+            if self.bundle.is_some() {
+                bitmap.write_to(writer)
+            } else {
+                crate::column::write_raw_canonical(writer, &bitmap, self.canonical_binding)
+            }
         })
     }
 
@@ -317,7 +342,9 @@ impl<'a> PageOutput<'a> {
             .map(|(bundle, rows)| bundle.finish(rows))
             .transpose()?;
         self.replacements
-            .map(durability::ReplacementBatch::publish)
+            .map(|replacements| {
+                replacements.publish_canonical_last(&self.dir.join("canonical.bitmap"), false)
+            })
             .unwrap_or(Ok(()))?;
         Ok(reference)
     }
@@ -824,6 +851,27 @@ pub(crate) fn append_compacted_rows(
             "segment append manifest changed",
         ));
     }
+    let raw_owner = if manifest.column_bundle.is_none() {
+        Some(match manifest.source_namespace {
+            Some(namespace) => crate::column::SourceWriteGuard::acquire_bound(
+                segment_dir,
+                namespace.0,
+                manifest.generation,
+                manifest.segment_id,
+            )?,
+            None => crate::column::SourceWriteGuard::acquire_legacy(segment_dir)?,
+        })
+    } else {
+        None
+    };
+    if raw_owner.is_some()
+        && SegmentManifest::load(&segment_dir.join("segment.json"))?.as_ref() != Some(&manifest)
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::WouldBlock,
+            "append manifest changed before source ownership",
+        ));
+    }
     let output = PageOutput::append(segment_dir, &manifest, rows.len(), publication, inspected)?;
     output.append_canonical(rows.len())?;
     let columns = write_compacted_values(&output, rows)?;
@@ -1098,6 +1146,19 @@ fn verify_maintenance_source(
     paths: &StorageCatalogPaths,
     descriptor: &SegmentDescriptor,
 ) -> std::io::Result<()> {
+    if descriptor.column_bundle.is_none() && descriptor.row_count != 0 {
+        let dir = paths.segment_dir(descriptor.id);
+        if let Some(namespace) = descriptor.source_namespace {
+            crate::column::verify_owned_source(
+                &dir,
+                namespace.0,
+                descriptor.generation,
+                descriptor.id,
+            )?;
+        } else {
+            crate::column::read_source_binding(&dir)?;
+        }
+    }
     if descriptor.row_count != 0 || descriptor.column_bundle.is_some() {
         let reader = SegmentReader::open_projected(&paths.segment_dir(descriptor.id), &[])?;
         if reader.generation() != descriptor.generation
@@ -1983,6 +2044,30 @@ fn verify_raw_bitmap_file(
 ) -> std::io::Result<()> {
     let path = segment_dir.join(name);
     let mut file = open_raw_file(descriptor, &path, name)?;
+    if name == "canonical.bitmap" {
+        let len = file.metadata()?.len();
+        let mut prefix = [0; crate::column::CANONICAL_PREFIX_BYTES];
+        let count = len.min(prefix.len() as u64) as usize;
+        file.read_exact(&mut prefix[..count])?;
+        let binding = descriptor
+            .source_namespace
+            .map(|namespace| crate::column::SourceBinding {
+                namespace: namespace.0,
+                generation: descriptor.generation,
+                segment_id: descriptor.id,
+            });
+        let metadata = crate::column::RawCanonicalMetadata::parse(&prefix[..count], len)?
+            .validate_exact_len(len)?
+            .validate_committed(binding, descriptor.row_count)?;
+        if metadata.rows != descriptor.row_count {
+            return Err(raw_segment_error(
+                descriptor,
+                name,
+                "canonical row-count mismatch",
+            ));
+        }
+        return Ok(());
+    }
     let mut len_bytes = [0u8; 8];
     file.read_exact(&mut len_bytes).map_err(|error| {
         raw_segment_error(

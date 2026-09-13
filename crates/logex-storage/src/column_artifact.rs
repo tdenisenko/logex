@@ -73,6 +73,11 @@ pub(crate) struct ColumnArtifacts {
     pinned: Option<Arc<BTreeMap<String, Mutex<File>>>>,
 }
 
+#[cfg(test)]
+thread_local! {
+    pub(crate) static BEFORE_CANONICAL_CAPTURE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
 impl ColumnArtifacts {
     pub(crate) fn open(dir: &Path, manifest: Option<&SegmentManifest>) -> io::Result<Self> {
         // Writer-side inspection already owns the source publication lifecycle.
@@ -99,8 +104,22 @@ impl ColumnArtifacts {
         let mut artifacts = Self::open_inspected(dir, manifest, None)?;
         if artifacts.bundle.is_none() {
             if let Some(manifest) = manifest {
+                if manifest.source_namespace.is_some()
+                    && manifest.canonical_rows_path != "canonical.bitmap"
+                {
+                    return Err(invalid("invalid raw canonical artifact path"));
+                }
                 let mut names = std::collections::BTreeSet::new();
                 for column in &manifest.columns {
+                    // Include unselected descriptors: canonical must be captured
+                    // exactly once, after every selected noncanonical artifact.
+                    if std::iter::once(&column.data_path)
+                        .chain(column.page_index_path.iter())
+                        .chain(column.null_bitmap_path.iter())
+                        .any(|path| path == &manifest.canonical_rows_path)
+                    {
+                        return Err(invalid("column aliases the canonical artifact"));
+                    }
                     if (column.null_bitmap_path.is_some()
                         && !matches!(
                             column.name.as_str(),
@@ -141,6 +160,12 @@ impl ColumnArtifacts {
             };
             let mut files = BTreeMap::new();
             for path in paths {
+                #[cfg(test)]
+                if path == "canonical.bitmap"
+                    && let Some(hook) = BEFORE_CANONICAL_CAPTURE.with_borrow_mut(Option::take)
+                {
+                    hook();
+                }
                 if path.is_empty()
                     || Path::new(&path)
                         .components()
@@ -158,7 +183,9 @@ impl ColumnArtifacts {
                         Err(error)
                             if error.kind() == io::ErrorKind::NotFound
                                 && manifest.is_none_or(|m| {
-                                    m.row_count == 0 || *entry.key() == m.canonical_rows_path
+                                    m.row_count == 0
+                                        || (m.source_namespace.is_none()
+                                            && *entry.key() == m.canonical_rows_path)
                                 }) => {}
                         Err(error) => return Err(error),
                     }
@@ -231,6 +258,29 @@ impl ColumnArtifacts {
             bundle,
             pinned: None,
         })
+    }
+
+    /// Read the fixed prefix and length from the SAME pinned canonical inode.
+    /// No pathname reopen, body allocation or sidecar read is needed at capture.
+    pub(crate) fn raw_canonical_metadata(
+        &self,
+        path: &str,
+    ) -> io::Result<crate::column::RawCanonicalMetadata> {
+        let read = |file: &mut File| -> io::Result<crate::column::RawCanonicalMetadata> {
+            let len = file.metadata()?.len();
+            let mut prefix = [0; crate::column::CANONICAL_PREFIX_BYTES];
+            let count = len.min(prefix.len() as u64) as usize;
+            file.seek(SeekFrom::Start(0))?;
+            file.read_exact(&mut prefix[..count])?;
+            crate::column::RawCanonicalMetadata::parse(&prefix[..count], len)
+        };
+        match &self.pinned {
+            Some(files) => {
+                let mut file = pinned_file(files, path)?;
+                read(&mut file)
+            }
+            None => read(&mut File::open(self.dir.join(path))?),
+        }
     }
 
     pub(crate) fn bundle(&self) -> Option<&BundleReader> {
