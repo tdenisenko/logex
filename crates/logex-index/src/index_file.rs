@@ -425,7 +425,7 @@ pub(crate) fn write_index_file(
     logical_len: u64,
     write: impl FnOnce(&mut dyn Write) -> io::Result<()>,
 ) -> io::Result<()> {
-    physical_len(logical_len)?;
+    let physical_len = physical_len(logical_len)?;
     let count = usize::try_from(logical_len.div_ceil(PAGE_BYTES as u64))
         .map_err(|_| invalid("index checksum count exceeds address space"))?;
     let mut checksums = Vec::new();
@@ -436,7 +436,8 @@ pub(crate) fn write_index_file(
     getrandom::fill(&mut file_id).map_err(|error| io::Error::other(error.to_string()))?;
     // Keep the format header, table fragments and several bitmap pages in the
     // same bounded write buffer; tiny metadata writes must not split every page.
-    let mut output = BufWriter::with_capacity(WRITE_BUFFER_BYTES, File::create(path)?);
+    let capacity = physical_len.min(WRITE_BUFFER_BYTES as u64) as usize;
+    let mut output = BufWriter::with_capacity(capacity, File::create(path)?);
     let mut header = [0; HEADER_BYTES];
     header[..8].copy_from_slice(MAGIC);
     header[8..12].copy_from_slice(&VERSION.to_le_bytes());

@@ -95,7 +95,8 @@ impl BTreeIndex {
             // Roaring serializes individual integers. A concrete, bounded
             // buffer combines those writes before the checked file writer,
             // without retaining every serialized bitmap in memory.
-            let mut writer = BufWriter::with_capacity(64 * 1024, writer);
+            let capacity = logical_len.min(64 * 1024) as usize;
+            let mut writer = BufWriter::with_capacity(capacity, writer);
             writer.write_all(INDEX_MAGIC)?;
             writer.write_all(&INDEX_VERSION.to_le_bytes())?;
             writer.write_all(&key_size.to_le_bytes())?;

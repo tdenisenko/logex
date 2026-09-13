@@ -452,3 +452,28 @@ and its raw archive (69,720 timings/120 RSS). These remain failed/investigation
 results, not acceptance. The next fixed comparison adds 9- and 32-container file
 layouts to the existing five configurations, with the same separately retained
 warm-up and measurement protocol.
+
+### Expanded comparison 2 and bounded-buffer investigation
+
+Exact source `f2885fa9` completed seven layouts, including nine and 32 dense
+containers: 92,400 measured timings / 140 RSS observations and separately retained
+5,208 warm-up timings / 28 RSS observations. It is not accepted. Small writes are
++12.72% median / +18.14% p95; eight-container full reads +10.51% / +18.98%; the
+32-container point/full-read medians +12.31% / +10.65%. Typical and many-key full
+reads improve about 51%, and their write medians improve 67–71%; those gains do
+not cancel the failing cases. All raw results remain in the isolated comparison
+output and will be packaged before this milestone concludes.
+
+A finite paired small-write profile used only generated disposable files. Each
+revision ran 20,000 writes and checked the exact reopened row set. Cargo builds,
+fixture exits and sampling exits passed. Most samples were filesystem open/close
+calls; allocation was a small share, so this does not prove allocation explains
+the slowdown. Initial standalone linking failed and is retained as a diagnostic
+failure, followed by separate successful Cargo-built profiles.
+
+The next narrow candidate bounds the serializer buffer by logical file length
+and the physical buffer by checked physical length, both capped at 64 KiB. The
+checked size is capped before conversion to `usize`. Existing roundtrip,
+page-boundary and write-error checks remain unchanged; all 71 index unit tests,
+formatting and focused Clippy pass. This is a performance hypothesis until the
+fixed comparison against the preceding candidate completes.
