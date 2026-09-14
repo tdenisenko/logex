@@ -2,17 +2,52 @@
 
 This batch follows merged PR #149 and is in progress. It binds derived indexes
 and recovery to the exact logical source prefix. Current aligned-writer source
-`28ef516a` passes all nine local gates; Intel performance acceptance is pending.
-The last measured Intel source, `da36819b`, remains on **performance HOLD**:
-its preliminary diagnostic reports historical publication **+14.4447% median/
-+27.4705% p95**, with both pair medians above 10%. That result does not justify a
-full acceptance campaign or clear the new aligned candidate. The earlier full
-`84ecac65` comparison remains NOT CLEAR (+16.352% median/+14.510% p95), retained
-separately rather than pooled. Performance validation, CI, merge and the rest of
-the offline audit remain incomplete. Current formats and the design are in
+`28ef516a` passes all nine local gates. Its preliminary Intel comparison is
+complete and suitable for considering a full comparison after exact-source
+platform controls; **performance acceptance remains pending**. Earlier `da36819b`
+and `84ecac65` failures remain retained separately. CI, merge and the remaining
+offline audit are incomplete. Current formats and design are in
 [Logical-prefix commitment and compatibility](#logical-prefix-commitment-and-compatibility).
 
-## Latest fast-copy Intel diagnostic: performance HOLD
+## Aligned Intel diagnostic: full validation pending
+
+The [complete aligned diagnostic evidence](baselines/2026-09-14-source-identity-aligned-intel-diagnostic-result-1.json)
+retains all 12 processes, 800 timings, zero explicit warmups and 12 RSS records.
+Independent reconstruction verifies all observations, 240 quantiles, 120 effects
+and 36 command exits/cleanup records. All 257 collected files, 275 archived
+records and 266 byte-identical aliases verify. No sample was excluded or rerun.
+
+| Publication route | Pooled median change | Pooled p95 change | Two pair median changes |
+| --- | ---: | ---: | --- |
+| Live | -3.30% | -1.06% | -5.23%, -1.72% |
+| Historical | +4.72% | +3.32% | +4.88%, +4.80% |
+
+All 40 pooled endpoints are below 10%, but fifteen pooled-or-pair investigation
+flags remain. Historical pair 0 p95 is +10.64%; dense concurrent native query
+median is +6.82%, with both pairs above 5%; sparse reopen pair 2 p95 is +66.00%.
+The complete result includes every other flag. Two pairs per suite cannot settle
+those tails or support confidence bounds. Host CPU speed limits range from
+82% to 100%; these observations do not establish a causal explanation for an
+individual timing. This result does not clear the source or reclassify earlier
+candidate failures.
+
+Read-only follow-up found that the measured sync path performs row-length
+validation without encoding WAL payloads, so WAL encoding reuse would not remove
+existing work there. Normal query capture reads cached roots or bounded canonical
+metadata; it does not recompute whole-row commitments. Direct row-header
+reservation remains an unmeasured fallback, with no additional source change
+selected. Exact-source Intel commitment and isolated APFS/ExFAT recovery controls
+are next, followed by one frozen full comparison with the existing acceptance
+rules and all sensitivity checks.
+
+The single 600.00107659-second cooldown ended at 2026-09-14 17:07:16 UTC; the
+complete diagnostic ended at 17:09:59 UTC with zero outer/watcher exits.
+Read-only release completed at 17:11:16 UTC with SSH exit zero. Only the reporter
+and its wrapper matched, with no audit workload remaining. The Mac-mini is free;
+all test work remained in its named private temporary directory, and the
+important external volume was untouched.
+
+## Previous fast-copy Intel diagnostic: performance HOLD
 
 The [complete preliminary evidence](baselines/2026-09-14-source-identity-fastpath-intel-diagnostic-result-1.json)
 retains all 12 processes, 800 timings and 12 RSS records, plus every oracle, host
