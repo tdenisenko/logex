@@ -3,7 +3,10 @@
 This follow-up to PR #150 reviews stored lengths, decoder allocations and
 selected payload reads. Work is on `audit/storage-resource-bounds`, based on
 `8595e040`. All nine local gates pass on production source `0cf9e944`.
-Linux/macOS CI and merge follow local acceptance; the PR records their outcome. The broader storage and query
+[PR #151](https://github.com/tdenisenko/logex/pull/151) merged as `29376426`
+after all six final-head CI jobs passed on `0ac17fa7` in run `34904979423`.
+The [final CI and merge record](baselines/2026-09-15-storage-resource-bounds-ci.json)
+retains those outcomes. The broader storage and query
 resource audit remains open.
 
 ## Findings and corrections
@@ -67,7 +70,8 @@ follow-up items in the local roadmap and the batch ledger. Successful queries
 must not be silently truncated to address resource pressure. Exported legacy
 `ColumnReader::read_log_rows` and `read_row_count` have weaker validation than
 `SegmentReader`; their current repository callers are tests. Their consolidation
-remains an explicit storage follow-up, not a claimed production-path failure.
+is addressed in the subsequent [legacy-reader consolidation](legacy-column-readers.md);
+these findings are not claimed as failures in the production query path.
 
 The audit owner ended the extended benchmark campaign. No timing campaign is
 required for these necessary fixes. Further measurement is reserved for concrete

@@ -659,26 +659,7 @@ impl SegmentReader {
             let data = self
                 .artifacts
                 .read_range("address.col", 0..ColumnFileHeader::SIZE as u64)?;
-            let header = ColumnFileHeader::read_from(&data)
-                .filter(|header| {
-                    header.version == crate::column::COLUMN_VERSION
-                        && header.compression == 0
-                        && header.row_count <= u64::from(u32::MAX)
-                })
-                .ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "corrupt captured row-count header",
-                    )
-                })?;
-            let expected = (ColumnFileHeader::SIZE as u64) + header.row_count * 20;
-            if self.artifacts.len("address.col")? != expected {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "raw row count does not match its address column",
-                ));
-            }
-            Ok(header.row_count)
+            crate::reader::raw_address_row_count(&data, self.artifacts.len("address.col")?)
         }
     }
 
@@ -1571,6 +1552,11 @@ mod tests {
         });
         let reader = SegmentReader::open(&dir).unwrap();
         assert_eq!(reader.read_log_rows(None).unwrap(), rows);
+        let ids = [rows.len() as u32 - 1, 0, rows.len() as u32 - 1];
+        assert_eq!(
+            crate::ColumnReader::read_log_rows(&dir, Some(&ids)).unwrap(),
+            ids.map(|row| rows[row as usize].clone())
+        );
         assert_eq!(
             reader.source_commitment().unwrap(),
             descriptor.source_commitment.map(|root| root.0)
@@ -2604,6 +2590,12 @@ mod tests {
         std::os::unix::fs::symlink("unavailable-manifest", &manifest).unwrap();
         assert_eq!(
             SegmentReader::open(tmp.path()).unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
+        assert_eq!(
+            crate::ColumnReader::read_log_rows(tmp.path(), None)
+                .unwrap_err()
+                .kind(),
             io::ErrorKind::NotFound
         );
         assert_eq!(
