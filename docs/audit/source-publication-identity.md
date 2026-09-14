@@ -28,8 +28,12 @@ retains Rust's scoped unwinding behavior; this is no new panic-recovery promise.
 The storage all-targets check passes: 314 unit tests and one integration test,
 including five new preflight, scheduling, cleanup and serial-equivalence tests.
 Eight benchmarks/platform checks remain ignored by this ordinary suite. The
-unchanged source was independently reviewed. Complete workspace validation is
-running. The implementation has not cleared the performance limit.
+unchanged source was independently reviewed. All [nine local workspace gates](baselines/2026-09-15-source-identity-overlap-workspace-validation-1.json)
+also pass: 1,189 workspace tests (23 ignored), 149 release query tests (nine
+ignored), two release API consistency tests, vendor verification, formatting,
+check, strict Clippy, documentation tests and the release node build. Source
+bytes remained unchanged throughout. The implementation has not cleared the
+performance limit.
 
 The [fixed local comparison](baselines/2026-09-15-source-identity-overlap-local-result-1.json)
 compares provisional source `e76f4dda` with `28ef516a`, retaining 48 processes,

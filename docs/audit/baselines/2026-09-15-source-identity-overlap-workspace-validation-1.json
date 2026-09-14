@@ -1,0 +1,235 @@
+{
+  "schema": "logex-overlap-workspace-validation-v1",
+  "status": "NINE_LOCAL_GATES_PASSED_PERFORMANCE_UNRESOLVED",
+  "acceptance_granted": false,
+  "verification": {
+    "status": "EXACT_SOURCE_NINE_LOCAL_GATES_INDEPENDENTLY_VERIFIED",
+    "commit": "e76f4ddacd9a7b39c941ac24efcf0e25f8cfb306",
+    "source_files": 215,
+    "source_inventory_sha256": "4913ef8e7f0d29586e76fe59c9d89c764fc724830d7b74d0cf89e56ce1f68c7d",
+    "commands": [
+      {
+        "name": "vendor",
+        "argv": [
+          "python3",
+          "tools/verify_datafusion_vendor.py"
+        ],
+        "returncode": 0,
+        "started": "2026-09-14T20:25:16.352578+00:00",
+        "finished": "2026-09-14T20:25:16.601659+00:00",
+        "log_sha256": "d8d80949d6f3378c14456842b531f0cade514179e4c94781b95ff9abb6447675",
+        "stderr_log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "name": "fmt",
+        "argv": [
+          "cargo",
+          "fmt",
+          "--all",
+          "--",
+          "--check"
+        ],
+        "returncode": 0,
+        "started": "2026-09-14T20:25:16.611612+00:00",
+        "finished": "2026-09-14T20:25:17.689154+00:00",
+        "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stderr_log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "name": "check",
+        "argv": [
+          "cargo",
+          "check",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "returncode": 0,
+        "started": "2026-09-14T20:25:17.698847+00:00",
+        "finished": "2026-09-14T20:25:25.412834+00:00",
+        "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stderr_log_sha256": "fc1d6fbd2a1948043260d2a5bb8de7e208c9ad40416746162f516b6f3d18dd7d"
+      },
+      {
+        "name": "clippy",
+        "argv": [
+          "cargo",
+          "clippy",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "returncode": 0,
+        "started": "2026-09-14T20:25:25.425665+00:00",
+        "finished": "2026-09-14T20:25:33.137929+00:00",
+        "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stderr_log_sha256": "949c49096b2208ec18f70fa4697401563d32a7799d99c25a1749884ef631b20d"
+      },
+      {
+        "name": "test",
+        "argv": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "returncode": 0,
+        "started": "2026-09-14T20:25:33.150664+00:00",
+        "finished": "2026-09-14T20:30:23.533272+00:00",
+        "log_sha256": "d63c0a621950d492805f26f877ceda33e34049d1699a6f3644686a0659015ae3",
+        "stderr_log_sha256": "32211ce68c5d8a99fcf3660d363b610a9b2bbfade72a4cfc053fc20c265c3e16"
+      },
+      {
+        "name": "docs",
+        "argv": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--doc",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "returncode": 0,
+        "started": "2026-09-14T20:30:23.585315+00:00",
+        "finished": "2026-09-14T20:30:42.609377+00:00",
+        "log_sha256": "d7852962e3224d9e532b04708a6c7e304ce1ba4ec821a2b6175085af6a843e88",
+        "stderr_log_sha256": "8d0dec425ba55476ad2266172c4f1dabcf6405c119f1538cede2682e59dd85ff"
+      },
+      {
+        "name": "release",
+        "argv": [
+          "cargo",
+          "build",
+          "-p",
+          "logex-node",
+          "--release",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "returncode": 0,
+        "started": "2026-09-14T20:30:42.642993+00:00",
+        "finished": "2026-09-14T20:33:35.741313+00:00",
+        "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stderr_log_sha256": "652623be3e3d066bea5632757019dde2b03e111f89ac6978b3c815f1f3d31967"
+      },
+      {
+        "name": "query-release",
+        "argv": [
+          "cargo",
+          "test",
+          "-p",
+          "logex-query",
+          "--release",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "returncode": 0,
+        "started": "2026-09-14T20:33:35.794278+00:00",
+        "finished": "2026-09-14T20:44:01.778072+00:00",
+        "log_sha256": "2a3533e38f2bf65cfba52f12c778d3f1678c4bfcbe25be8495f6d6ad73afeae9",
+        "stderr_log_sha256": "8239f10374c78b21e242b855996d9cd9fbd7987976e07fda500a353eeb64e93a"
+      },
+      {
+        "name": "api-release",
+        "argv": [
+          "cargo",
+          "test",
+          "-p",
+          "logex-server",
+          "--release",
+          "--test",
+          "consistency",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "returncode": 0,
+        "started": "2026-09-14T20:44:01.836392+00:00",
+        "finished": "2026-09-14T20:46:27.209737+00:00",
+        "log_sha256": "7999cccb5554521cdae173befa9ba9908a2ba065cea6e8192b0068a354b9e289",
+        "stderr_log_sha256": "700f7ced11e8abb58c1e4526fd17535bd8dcc913efa457506442338ac7eaa074"
+      }
+    ],
+    "test_totals": {
+      "test": {
+        "passed": 1189,
+        "failed": 0,
+        "ignored": 23,
+        "measured": 0,
+        "filtered_out": 0
+      },
+      "docs": {
+        "passed": 0,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered_out": 0
+      },
+      "query-release": {
+        "passed": 149,
+        "failed": 0,
+        "ignored": 9,
+        "measured": 0,
+        "filtered_out": 0
+      },
+      "api-release": {
+        "passed": 2,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered_out": 0
+      }
+    },
+    "supervisor_sha256": "888c81ab23af9d4b1a5efb508a3e8c9075554dccb007258a423d0bb851e8d108",
+    "validator_sha256": "68117c4ca1f7e0f05fe2f3a3817727dae9d3fafd6a81e1a0dc13a6c03f3450cb",
+    "acceptance_granted": false,
+    "limitations": [
+      "Local correctness/build validation only; no performance or Intel/platform clearance.",
+      "Ignored tests remain ignored; all original logs and warnings retained.",
+      "Inventory covers all215 committed crates/vendor/Cargo/toolchain paths; vendor verification script additionally matched exact commit. No test rerun."
+    ]
+  },
+  "archive": {
+    "path": "docs/audit/baselines/2026-09-15-source-identity-overlap-workspace-validation-1-raw.jsonl.gz",
+    "sha256": "52a56d4e94857e696d58718b134542f586b7917c8cad7695cf0da82511c31375",
+    "bytes": 58101,
+    "uncompressed_jsonl_bytes": 254732,
+    "records": 23,
+    "aliases": {
+      "validation/logs/clippy.stdout.log": "validation/logs/check.stdout.log",
+      "validation/logs/fmt.stderr.log": "validation/logs/check.stdout.log",
+      "validation/logs/fmt.stdout.log": "validation/logs/check.stdout.log",
+      "validation/logs/release.stdout.log": "validation/logs/check.stdout.log",
+      "validation/logs/vendor.stderr.log": "validation/logs/check.stdout.log"
+    },
+    "files": 28,
+    "every_decoded_byte_verified": true
+  },
+  "exclusions": [],
+  "raw_references": {
+    "independent_review": "independent/review.json",
+    "packager": "packaging/package.py",
+    "manifest": "packaging/manifest.json",
+    "validation": "validation/"
+  }
+}
