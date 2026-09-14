@@ -42,7 +42,7 @@ use roaring::RoaringBitmap;
 use serde_json::{Map, Value};
 
 use logex_storage::native::{NativeLogFilter, TopicConstraint};
-use logex_storage::{PartitionManager, SegmentReader};
+use logex_storage::{MAX_PAGE_ROWS, PartitionManager, SegmentReader};
 
 use crate::json::{record_batches_to_json, unique_names};
 use crate::lexer::{Token, tokenize};
@@ -2037,10 +2037,9 @@ fn scan_native_data_sum_partition(
         let states = groups
             .entry(None)
             .or_insert_with(|| initial_native_sum_states(&scan.sum_inputs));
-        // The storage format's page-row bound is private to the storage crate.
-        // Reuse the execution batch size so a valid aggregate does not retain
-        // every decoded payload in the segment at once.
-        for row_ids in row_ids.chunks(DATAFUSION_BATCH_SIZE) {
+        // Match the storage page-row bound so dense scans decode each page once
+        // without retaining every payload in the segment at once.
+        for row_ids in row_ids.chunks(MAX_PAGE_ROWS as usize) {
             check_query_canceled(scan.cancel_check.as_ref())?;
             for value in reader.read_var_bytes("data", Some(row_ids))? {
                 let value = BigInt::from(BigUint::from_bytes_be(value.as_ref()));
@@ -5497,7 +5496,7 @@ mod tests {
             data_len: 1,
             ..make_test_rows().remove(0)
         };
-        let rows = (0..=DATAFUSION_BATCH_SIZE)
+        let rows = (0..=MAX_PAGE_ROWS as usize)
             .map(|index| LogRow {
                 block_number: index as u64,
                 log_index: index as u32,
@@ -5756,9 +5755,9 @@ mod tests {
 
         assert_eq!(
             result.rows,
-            vec![serde_json::json!({"total": (DATAFUSION_BATCH_SIZE + 1).to_string()})]
+            vec![serde_json::json!({"total": (MAX_PAGE_ROWS + 1).to_string()})]
         );
-        assert_eq!(result.total_scanned, (DATAFUSION_BATCH_SIZE + 1) as u64);
+        assert_eq!(result.total_scanned, u64::from(MAX_PAGE_ROWS + 1));
     }
 
     #[test]
@@ -5767,7 +5766,7 @@ mod tests {
         let checks = Arc::new(AtomicU64::new(0));
         let cancel_checks = Arc::clone(&checks);
         let scan = NativeDataSumPartitionScan {
-            visible_rows: (DATAFUSION_BATCH_SIZE + 1) as u64,
+            visible_rows: u64::from(MAX_PAGE_ROWS + 1),
             candidate_filters: vec![NativeLogFilter::default()],
             selection: None,
             cases: Arc::new(PreparedSqlExpressions::empty()),
