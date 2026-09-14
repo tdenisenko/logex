@@ -247,7 +247,7 @@ async fn validate_historical_blocks_parallel(
     hashes: &[B256],
     blocks: Vec<SourcedBodyReceipts>,
 ) -> Result<std::result::Result<Vec<HistoricalValidatedBlock>, Box<HistoricalValidationFailure>>> {
-    let jobs = build_historical_validation_jobs(headers, hashes, blocks);
+    let jobs = build_historical_validation_jobs(headers, hashes, blocks)?;
     let block_count = jobs.len();
     let task_count = historical_validation_task_count(block_count);
     let chunk_ranges = historical_validation_work_ranges(
@@ -299,7 +299,7 @@ async fn validate_and_extract_historical_blocks_streaming(
         Box<HistoricalValidationFailure>,
     >,
 > {
-    let jobs = build_historical_validation_jobs(headers, hashes, blocks);
+    let jobs = build_historical_validation_jobs(headers, hashes, blocks)?;
     let block_count = jobs.len();
     let task_count = historical_validation_task_count(block_count);
     let chunk_ranges = historical_validation_work_ranges(
@@ -389,24 +389,36 @@ fn build_historical_validation_jobs(
     headers: &[Header],
     hashes: &[B256],
     blocks: Vec<SourcedBodyReceipts>,
-) -> Vec<HistoricalValidationJob> {
-    blocks
+) -> Result<Vec<HistoricalValidationJob>> {
+    eyre::ensure!(
+        headers.len() == hashes.len(),
+        "historical header/hash count mismatch: headers={}, hashes={}",
+        headers.len(),
+        hashes.len()
+    );
+    // Payload requests may complete a prefix of the authenticated header window.
+    // Every supplied payload still needs its corresponding header and hash.
+    eyre::ensure!(
+        blocks.len() <= headers.len(),
+        "historical payload count exceeds header count: blocks={}, headers={}",
+        blocks.len(),
+        headers.len()
+    );
+    Ok(blocks
         .into_iter()
         .enumerate()
-        .filter_map(|(index, ((body_peer, body), (receipt_peer, receipts)))| {
-            let header = headers.get(index)?.clone();
-            let block_hash = hashes.get(index).copied().unwrap_or_default();
-            Some(HistoricalValidationJob {
+        .map(
+            |(index, ((body_peer, body), (receipt_peer, receipts)))| HistoricalValidationJob {
                 index,
-                header,
-                block_hash,
+                header: headers[index].clone(),
+                block_hash: hashes[index],
                 body_peer,
                 body,
                 receipt_peer,
                 receipts,
-            })
-        })
-        .collect()
+            },
+        )
+        .collect())
 }
 
 fn historical_validation_job_work(job: &HistoricalValidationJob) -> u64 {
@@ -6957,6 +6969,102 @@ mod tests {
             },
             finalized: false,
             parent_beacon_root: None,
+        }
+    }
+
+    fn empty_validation_fixture() -> (Header, SourcedBodyReceipts) {
+        let body = reth_ethereum_primitives::BlockBody::default();
+        let header = Header {
+            transactions_root: body.calculate_tx_root(),
+            ommers_hash: body.calculate_ommers_root(),
+            withdrawals_root: body.calculate_withdrawals_root(),
+            receipts_root: EMPTY_ROOT_HASH,
+            ..Default::default()
+        };
+        (header, ((PeerId::ZERO, body), (PeerId::ZERO, vec![])))
+    }
+
+    #[tokio::test]
+    async fn historical_validation_shape_rejects_missing_or_surplus_inputs() {
+        for (header_count, hash_count, block_count) in [
+            (1, 0, 1),
+            (1, 2, 1),
+            (0, 0, 1),
+            (1, 1, 2),
+            (1, 0, 0),
+            (2, 1, 1),
+        ] {
+            let (header, block) = empty_validation_fixture();
+            let headers = vec![header.clone(); header_count];
+            let hashes = vec![header.hash_slow(); hash_count];
+            let blocks = vec![block; block_count];
+            let result = validate_historical_blocks_parallel(&headers, &hashes, blocks).await;
+            assert!(
+                result.is_err(),
+                "shape failure must be local: headers={header_count}, hashes={hash_count}, blocks={block_count}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn historical_validation_shape_streaming_rejects_missing_or_surplus_inputs() {
+        for (header_count, hash_count, block_count) in [
+            (1, 0, 1),
+            (1, 2, 1),
+            (0, 0, 1),
+            (1, 1, 2),
+            (1, 0, 0),
+            (2, 1, 1),
+        ] {
+            let (header, block) = empty_validation_fixture();
+            let headers = vec![header.clone(); header_count];
+            let hashes = vec![header.hash_slow(); hash_count];
+            let blocks = vec![block; block_count];
+            let result =
+                validate_and_extract_historical_blocks_streaming(&headers, &hashes, blocks).await;
+            assert!(
+                result.is_err(),
+                "shape failure must be local: headers={header_count}, hashes={hash_count}, blocks={block_count}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn historical_validation_shape_preserves_empty_complete_and_prefix_work() {
+        for (header_count, block_count) in [(0, 0), (2, 0), (1, 1), (2, 1), (2, 2)] {
+            let (header, block) = empty_validation_fixture();
+            let headers = vec![header.clone(); header_count];
+            let hashes = vec![header.hash_slow(); header_count];
+            let blocks = vec![block; block_count];
+            let validated = validate_historical_blocks_parallel(&headers, &hashes, blocks.clone())
+                .await
+                .unwrap()
+                .unwrap_or_else(|failure| {
+                    panic!("unexpected validation failure: {}", failure.message)
+                });
+            assert_eq!(validated.len(), block_count);
+            for (index, block) in validated.iter().enumerate() {
+                assert_eq!(block.index, index);
+                assert_eq!(block.header, headers[index]);
+                assert_eq!(block.block_hash, hashes[index]);
+            }
+            let (extracted, _, _, _, extracted_blocks, _, _) =
+                validate_and_extract_historical_blocks_streaming(&headers, &hashes, blocks)
+                    .await
+                    .unwrap()
+                    .unwrap_or_else(|failure| {
+                        panic!("unexpected validation failure: {}", failure.message)
+                    });
+            assert_eq!(extracted_blocks, block_count);
+            assert_eq!(
+                extracted
+                    .chunks
+                    .iter()
+                    .map(|chunk| chunk.block_count)
+                    .sum::<usize>(),
+                block_count
+            );
+            assert!(extracted.chunks.iter().all(|chunk| chunk.rows.is_empty()));
         }
     }
 

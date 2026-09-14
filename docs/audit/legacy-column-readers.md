@@ -2,7 +2,8 @@
 
 This follow-up to merged PR #151 removes weaker duplicate readers on
 `audit/legacy-column-readers`, based on `29376426`. All eight local gates
-passed on source `1cbc1e90`; PR CI and merge are pending. The exported methods have only test callers in the current repository;
+passed on source `1cbc1e90`. PR #152 merged as `733a248a` after all six
+Linux/macOS CI jobs passed on final head `e0bab00d`. The exported methods have only test callers in the current repository;
 production query reads already use `SegmentReader`.
 
 ## Findings
@@ -63,4 +64,6 @@ documentation test groups (zero examples), all 56 focused release reader tests,
 and the release node build. The [gate record](baselines/2026-09-15-legacy-column-readers-gates.json)
 retains commands, toolchain, log hashes and source identity. Existing local
 HTTP checkpoint fixtures require localhost access; the suite ran with that
-permission. No benchmark ran. Final Linux/macOS CI and merge remain required.
+permission. No benchmark ran. All six Linux/macOS CI jobs passed in run
+`34907202029` on final head `e0bab00d`; the [CI/merge record](baselines/2026-09-15-legacy-column-readers-ci.json)
+records merge `733a248a` on September 14 at 23:12:49 UTC.

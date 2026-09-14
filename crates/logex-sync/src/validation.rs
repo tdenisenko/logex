@@ -869,6 +869,23 @@ mod tests {
             Ok(())
         );
 
+        let wrong_number = ExecutionAnchor {
+            block_number: anchor.block_number + 1,
+            ..anchor
+        };
+        assert!(matches!(
+            validate_header_matches_anchor(&wrong_number, &header, header.hash_slow()),
+            Err(AnchorValidationError::BlockNumberMismatch { .. })
+        ));
+        let wrong_hash = ExecutionAnchor {
+            block_hash: B256::repeat_byte(0x77),
+            ..anchor
+        };
+        assert!(matches!(
+            validate_header_matches_anchor(&wrong_hash, &header, header.hash_slow()),
+            Err(AnchorValidationError::BlockHashMismatch { .. })
+        ));
+
         let wrong_anchor = ExecutionAnchor {
             receipts_root: B256::repeat_byte(0x66),
             ..anchor
@@ -894,6 +911,85 @@ mod tests {
             validate_block_pre_execution(&header, header.hash_slow(), &body),
             Err(ConsensusError::BlobGasUsedDiff(_))
         ));
+    }
+
+    #[test]
+    fn body_commitments_bind_transaction_order_ommers_and_withdrawals() {
+        use alloy_consensus::{SignableTransaction, TxLegacy};
+        use alloy_eips::eip4895::Withdrawal;
+        use alloy_primitives::{Signature, U256};
+
+        // Small structural fixture: signatures are not submitted or executed.
+        // Consensus ancestry authenticates the header in the production caller.
+        let mut body = EthereumBlockBody::default();
+        for nonce in [1, 2] {
+            body.transactions.push(
+                TxLegacy {
+                    nonce,
+                    ..Default::default()
+                }
+                .into_signed(Signature::new(U256::from(1), U256::from(2), false))
+                .into(),
+            );
+        }
+        body.withdrawals = Some(
+            vec![Withdrawal {
+                index: 1,
+                validator_index: 2,
+                address: Address::repeat_byte(3),
+                amount: 4,
+            }]
+            .into(),
+        );
+        let header = Header {
+            transactions_root: body.calculate_tx_root(),
+            ommers_hash: body.calculate_ommers_root(),
+            withdrawals_root: body.calculate_withdrawals_root(),
+            ..Default::default()
+        };
+        assert!(validate_block_pre_execution(&header, header.hash_slow(), &body).is_ok());
+
+        let mut changed = body.clone();
+        changed.transactions.swap(0, 1);
+        assert!(matches!(
+            validate_block_pre_execution(&header, header.hash_slow(), &changed),
+            Err(ConsensusError::BodyTransactionRootDiff(_))
+        ));
+        changed.transactions.pop();
+        assert!(matches!(
+            validate_block_pre_execution(&header, header.hash_slow(), &changed),
+            Err(ConsensusError::BodyTransactionRootDiff(_))
+        ));
+
+        let mut changed = body.clone();
+        changed.ommers.push(Header::default());
+        assert!(matches!(
+            validate_block_pre_execution(&header, header.hash_slow(), &changed),
+            Err(ConsensusError::BodyOmmersHashDiff(_))
+        ));
+
+        let mut changed = body.clone();
+        changed.withdrawals.as_mut().unwrap()[0].amount += 1;
+        assert!(matches!(
+            validate_block_pre_execution(&header, header.hash_slow(), &changed),
+            Err(ConsensusError::BodyWithdrawalsRootDiff(_))
+        ));
+        changed.withdrawals = None;
+        assert!(matches!(
+            validate_block_pre_execution(&header, header.hash_slow(), &changed),
+            Err(ConsensusError::WithdrawalsRootUnexpected)
+        ));
+
+        let mut pre_withdrawals = header;
+        pre_withdrawals.withdrawals_root = None;
+        assert!(matches!(
+            validate_block_pre_execution(&pre_withdrawals, pre_withdrawals.hash_slow(), &body),
+            Err(ConsensusError::WithdrawalsRootUnexpected)
+        ));
+        assert!(
+            validate_block_pre_execution(&pre_withdrawals, pre_withdrawals.hash_slow(), &changed)
+                .is_ok()
+        );
     }
 
     /// Real Optimism mainnet block — sanity check using the same fixture as

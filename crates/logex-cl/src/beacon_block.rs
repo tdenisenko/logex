@@ -307,17 +307,6 @@ impl BeaconBlockElectraSsz {
             body_root: self.body.tree_hash_root(),
         }
     }
-
-    fn execution_anchor(&self) -> ExecutionAnchor {
-        let header = self.header();
-        ExecutionAnchor {
-            beacon_root: header.tree_hash_root(),
-            beacon_slot: self.slot,
-            block_number: self.body.execution_payload.block_number,
-            block_hash: self.body.execution_payload.block_hash,
-            receipts_root: self.body.execution_payload.receipts_root,
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Encode, Decode)]
@@ -395,7 +384,14 @@ fn decode_electra_block(
         .map_err(|error| BeaconBlockError::DecodeElectra(format!("{error:?}")))?;
     let header = block.message.header();
     let actual_root = header.tree_hash_root();
-    let execution_anchor = block.message.execution_anchor();
+    let execution = &block.message.body.execution_payload;
+    let execution_anchor = ExecutionAnchor {
+        beacon_root: actual_root,
+        beacon_slot: header.slot,
+        block_number: execution.block_number,
+        block_hash: execution.block_hash,
+        receipts_root: execution.receipts_root,
+    };
     Ok(VerifiedBeaconBlock {
         fork: ConsensusDataFork::Electra,
         beacon_root: actual_root,
