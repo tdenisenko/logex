@@ -1,0 +1,165 @@
+{
+  "commit": "1cbc1e907dff0b4d8c6e8bde11a1438570bf6290",
+  "rustc": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+  "gates": [
+    {
+      "name": "vendor",
+      "command": [
+        "python3",
+        "tools/verify_datafusion_vendor.py"
+      ],
+      "exit_code": 0,
+      "started": "2026-09-14T22:56:24.884913+00:00",
+      "finished": "2026-09-14T22:56:24.952252+00:00",
+      "sha256": "d8d80949d6f3378c14456842b531f0cade514179e4c94781b95ff9abb6447675",
+      "log": "/private/tmp/logex-legacy-column-readers.4OXYO5/gates/vendor.log"
+    },
+    {
+      "name": "format",
+      "command": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "exit_code": 0,
+      "started": "2026-09-14T22:56:24.952653+00:00",
+      "finished": "2026-09-14T22:56:25.767444+00:00",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "log": "/private/tmp/logex-legacy-column-readers.4OXYO5/gates/format.log"
+    },
+    {
+      "name": "check",
+      "command": [
+        "cargo",
+        "check",
+        "--workspace",
+        "--all-targets",
+        "--locked",
+        "--offline",
+        "-j",
+        "2"
+      ],
+      "exit_code": 0,
+      "started": "2026-09-14T22:56:25.767932+00:00",
+      "finished": "2026-09-14T22:56:33.545230+00:00",
+      "sha256": "4541abe245b1918a6af533f9604950820f613ad1e459d86e6cadb09674e73009",
+      "log": "/private/tmp/logex-legacy-column-readers.4OXYO5/gates/check.log"
+    },
+    {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--locked",
+        "--offline",
+        "-j",
+        "2",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit_code": 0,
+      "started": "2026-09-14T22:56:33.546306+00:00",
+      "finished": "2026-09-14T22:56:40.935158+00:00",
+      "sha256": "aaf7403445d6a11bb05aa1e0937a7898aa4f7e399a6be0404f319f215550870b",
+      "log": "/private/tmp/logex-legacy-column-readers.4OXYO5/gates/clippy.log"
+    },
+    {
+      "name": "test",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace",
+        "--all-targets",
+        "--locked",
+        "--offline",
+        "-j",
+        "2"
+      ],
+      "exit_code": 0,
+      "started": "2026-09-14T22:56:40.936248+00:00",
+      "finished": "2026-09-14T23:01:28.974156+00:00",
+      "sha256": "54903f7967e9812d7c5a4e4aad23cdb91512a21c15c6255e8efdd61d615ad0c8",
+      "log": "/private/tmp/logex-legacy-column-readers.4OXYO5/gates/test.log"
+    },
+    {
+      "name": "doc",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace",
+        "--doc",
+        "--locked",
+        "--offline",
+        "-j",
+        "2"
+      ],
+      "exit_code": 0,
+      "started": "2026-09-14T23:01:28.977574+00:00",
+      "finished": "2026-09-14T23:01:40.349663+00:00",
+      "sha256": "9bcc107ff2d48b964bd887d08cd1fc0c1b06d2dac57bf9ffde9d0c5908e0ea51",
+      "log": "/private/tmp/logex-legacy-column-readers.4OXYO5/gates/doc.log"
+    },
+    {
+      "name": "release-readers",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "logex-storage",
+        "--lib",
+        "reader::tests::",
+        "--release",
+        "--locked",
+        "--offline",
+        "-j",
+        "2"
+      ],
+      "exit_code": 0,
+      "started": "2026-09-14T23:01:40.350428+00:00",
+      "finished": "2026-09-14T23:02:07.465188+00:00",
+      "sha256": "157c54b764cd3b53ebd32901fc559a3b7e171d3630f4e0d9b32e217ec8375de9",
+      "log": "/private/tmp/logex-legacy-column-readers.4OXYO5/gates/release-readers.log"
+    },
+    {
+      "name": "release-build",
+      "command": [
+        "cargo",
+        "build",
+        "-p",
+        "logex-node",
+        "--release",
+        "--locked",
+        "--offline",
+        "-j",
+        "2"
+      ],
+      "exit_code": 0,
+      "started": "2026-09-14T23:02:07.465901+00:00",
+      "finished": "2026-09-14T23:03:59.864382+00:00",
+      "sha256": "2520b92cda8dff043f200315d1d25ce16534e8b4b4f7f228e32722005970d016",
+      "log": "/private/tmp/logex-legacy-column-readers.4OXYO5/gates/release-build.log"
+    }
+  ],
+  "totals": {
+    "workspace": {
+      "passed": 1201,
+      "failed": 0,
+      "ignored": 23
+    },
+    "documentation": {
+      "groups": 7,
+      "examples": 0
+    },
+    "release_readers": {
+      "passed": 56,
+      "failed": 0,
+      "ignored": 0
+    }
+  },
+  "scope": "Correctness and build checks; no timing comparison was run."
+}

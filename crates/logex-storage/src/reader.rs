@@ -1,10 +1,35 @@
 use std::fs;
-use std::io;
+use std::io::{self, Read};
 use std::path::Path;
 
 use alloy_primitives::{Address, B256, Bytes};
 
 use crate::column::{COLUMN_VERSION, ColumnFileHeader, NullBitmap};
+
+/// Validate an address header and the length of the same captured raw file.
+pub(crate) fn raw_address_row_count(header_bytes: &[u8], file_len: u64) -> io::Result<u64> {
+    let header = ColumnFileHeader::read_from(header_bytes)
+        .filter(|header| {
+            header.version == COLUMN_VERSION
+                && header.compression == 0
+                && header.row_count <= u64::from(u32::MAX)
+        })
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "corrupt captured row-count header",
+            )
+        })?;
+    // The u32 row bound above makes the address-column byte count fit in u64.
+    let expected = ColumnFileHeader::SIZE as u64 + header.row_count * 20;
+    if file_len != expected {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "raw row count does not match its address column",
+        ));
+    }
+    Ok(header.row_count)
+}
 
 /// Read a little-endian u64 from a byte slice at the given offset.
 fn read_le_u64(data: &[u8], offset: usize) -> io::Result<u64> {
@@ -404,66 +429,29 @@ impl ColumnReader {
         crate::column::read_canonical_bitmap(&data, None)
     }
 
-    /// Read the row count from any column file header.
+    /// Read a raw directory's row count from its validated address-column header.
     pub fn read_row_count(dir: &Path) -> std::io::Result<u64> {
-        // Use address.col as the reference (always present)
-        let data = fs::read(dir.join("address.col"))?;
-        let header = ColumnFileHeader::read_from(&data).ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, "corrupt header")
+        let mut file = fs::File::open(dir.join("address.col"))?;
+        let mut header = [0; ColumnFileHeader::SIZE];
+        file.read_exact(&mut header).map_err(|error| {
+            if error.kind() == io::ErrorKind::UnexpectedEof {
+                io::Error::new(io::ErrorKind::InvalidData, "truncated row-count header")
+            } else {
+                error
+            }
         })?;
-        Ok(header.row_count)
+        raw_address_row_count(&header, file.metadata()?.len())
     }
 
-    /// Reconstruct full LogRows from a partition directory.
-    /// Only loads columns needed based on the projection.
-    /// If `row_ids` is None, reads all rows.
+    /// Reconstruct full rows using the segment reader's captured publication.
+    /// If `row_ids` is `None`, reads all captured rows. A manifestless directory
+    /// must have a coherent raw layout; standalone selected-column reads can
+    /// inspect an existing prefix during an unfinished append.
     pub fn read_log_rows(
         dir: &Path,
         row_ids: Option<&[u32]>,
     ) -> std::io::Result<Vec<logex_types::LogRow>> {
-        let addresses = Self::read_address(dir, row_ids)?;
-        let block_numbers = Self::read_u64(dir, "block_number.col", row_ids)?;
-        let block_hashes = Self::read_b256(dir, "block_hash.col", row_ids)?;
-        let timestamps = Self::read_u64(dir, "timestamp.col", row_ids)?;
-        let tx_hashes = Self::read_b256(dir, "tx_hash.col", row_ids)?;
-        let tx_indices = Self::read_u32(dir, "tx_index.col", row_ids)?;
-        let log_indices = Self::read_u32(dir, "log_index.col", row_ids)?;
-        let topic0s = Self::read_nullable_b256(dir, "topic0", row_ids)?;
-        let topic1s = Self::read_nullable_b256(dir, "topic1", row_ids)?;
-        let topic2s = Self::read_nullable_b256(dir, "topic2", row_ids)?;
-        let topic3s = Self::read_nullable_b256(dir, "topic3", row_ids)?;
-        let datas = Self::read_var_bytes(dir, "data.col", row_ids)?;
-        let data_lens = Self::read_u32(dir, "data_len.col", row_ids)?;
-        let sources = Self::read_u8(dir, "source.col", row_ids)?;
-
-        let count = addresses.len();
-        let mut rows = Vec::with_capacity(count);
-
-        for i in 0..count {
-            rows.push(logex_types::LogRow {
-                block_number: block_numbers[i],
-                block_hash: block_hashes[i],
-                timestamp: timestamps[i],
-                tx_hash: tx_hashes[i],
-                tx_index: tx_indices[i],
-                log_index: log_indices[i],
-                address: addresses[i],
-                topic0: topic0s[i],
-                topic1: topic1s[i],
-                topic2: topic2s[i],
-                topic3: topic3s[i],
-                data: datas[i].clone(),
-                data_len: data_lens[i],
-                source: logex_types::Source::from_u8(sources[i]).ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("invalid source byte: {}", sources[i]),
-                    )
-                })?,
-            });
-        }
-
-        Ok(rows)
+        crate::SegmentReader::open(dir)?.read_log_rows(row_ids)
     }
 }
 
@@ -612,12 +600,80 @@ mod tests {
     fn test_read_row_count() {
         let tmp = TempDir::new().unwrap();
         let dir = tmp.path().join("partition");
-        let rows = make_test_rows(42);
+        for count in [0, 42] {
+            ColumnFile::write_batch(&dir, &make_test_rows(count)).unwrap();
+            assert_eq!(ColumnReader::read_row_count(&dir).unwrap(), count as u64);
+        }
+    }
 
-        ColumnFile::write_batch(&dir, &rows).unwrap();
+    #[test]
+    fn legacy_full_rows_reject_inconsistent_column_counts() {
+        let dir = TempDir::new().unwrap();
+        let rows = make_test_rows(2);
+        ColumnFile::write_batch(dir.path(), &rows).unwrap();
+        let path = dir.path().join("block_number.col");
+        let mut bytes = fs::read(&path).unwrap();
+        bytes[8..16].copy_from_slice(&1u64.to_le_bytes());
+        bytes.truncate(ColumnFileHeader::SIZE + 8);
+        fs::write(&path, &bytes).unwrap();
 
-        let count = ColumnReader::read_row_count(&dir).unwrap();
-        assert_eq!(count, 42);
+        assert_eq!(
+            ColumnReader::read_log_rows(dir.path(), None)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+    }
+
+    #[test]
+    fn legacy_full_rows_reject_inconsistent_payload_lengths() {
+        let dir = TempDir::new().unwrap();
+        ColumnFile::write_batch(dir.path(), &make_test_rows(2)).unwrap();
+        let path = dir.path().join("data_len.col");
+        let mut bytes = fs::read(&path).unwrap();
+        let start = ColumnFileHeader::SIZE;
+        bytes[start..start + 4].copy_from_slice(&3u32.to_le_bytes());
+        bytes[start + 4..start + 8].copy_from_slice(&5u32.to_le_bytes());
+        fs::write(&path, &bytes).unwrap();
+
+        for ids in [None, Some(&[0][..])] {
+            assert_eq!(
+                ColumnReader::read_log_rows(dir.path(), ids)
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::InvalidData
+            );
+        }
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+    }
+
+    #[test]
+    fn legacy_row_count_rejects_invalid_header_and_length() {
+        for case in 0..6 {
+            let dir = TempDir::new().unwrap();
+            ColumnFile::write_batch(dir.path(), &make_test_rows(2)).unwrap();
+            let path = dir.path().join("address.col");
+            let mut bytes = fs::read(&path).unwrap();
+            match case {
+                0 => bytes[4..8].copy_from_slice(&(COLUMN_VERSION + 1).to_le_bytes()),
+                1 => bytes[16] = 1,
+                2 => {
+                    bytes.pop();
+                }
+                3 => bytes.push(0),
+                4 => bytes[8..16].copy_from_slice(&u64::MAX.to_le_bytes()),
+                5 => bytes.truncate(ColumnFileHeader::SIZE - 1),
+                _ => unreachable!(),
+            }
+            fs::write(&path, &bytes).unwrap();
+            assert_eq!(
+                ColumnReader::read_row_count(dir.path()).unwrap_err().kind(),
+                io::ErrorKind::InvalidData,
+                "case {case}"
+            );
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+        }
     }
 
     #[test]
@@ -966,10 +1022,52 @@ mod tests {
                 fs::write(path, bytes).unwrap();
             }
             assert_eq!(
-                ColumnReader::read_log_rows(dir.path(), Some(&ids)).unwrap(),
-                expected,
+                ColumnReader::read_address(dir.path(), Some(&ids)).unwrap(),
+                expected.iter().map(|row| row.address).collect::<Vec<_>>(),
                 "{stage}"
             );
+            assert_eq!(
+                ColumnReader::read_b256(dir.path(), "block_hash.col", Some(&ids)).unwrap(),
+                expected
+                    .iter()
+                    .map(|row| row.block_hash)
+                    .collect::<Vec<_>>(),
+                "{stage}"
+            );
+            assert_eq!(
+                ColumnReader::read_u64(dir.path(), "block_number.col", Some(&ids)).unwrap(),
+                expected
+                    .iter()
+                    .map(|row| row.block_number)
+                    .collect::<Vec<_>>(),
+                "{stage}"
+            );
+            assert_eq!(
+                ColumnReader::read_u32(dir.path(), "tx_index.col", Some(&ids)).unwrap(),
+                expected.iter().map(|row| row.tx_index).collect::<Vec<_>>(),
+                "{stage}"
+            );
+            assert_eq!(
+                ColumnReader::read_u8(dir.path(), "source.col", Some(&ids)).unwrap(),
+                expected
+                    .iter()
+                    .map(|row| row.source as u8)
+                    .collect::<Vec<_>>(),
+                "{stage}"
+            );
+            assert_eq!(
+                ColumnReader::read_nullable_b256(dir.path(), "topic0", Some(&ids)).unwrap(),
+                expected.iter().map(|row| row.topic0).collect::<Vec<_>>(),
+                "{stage}"
+            );
+            // Full-row reads capture a coherent directory boundary. These
+            // manifestless partial layouts cannot establish that boundary.
+            let full = ColumnReader::read_log_rows(dir.path(), Some(&ids));
+            if stage == "bitmap-ahead" {
+                assert_eq!(full.unwrap(), expected);
+            } else {
+                assert_eq!(full.unwrap_err().kind(), io::ErrorKind::InvalidData);
+            }
             assert!(
                 ColumnReader::read_nullable_b256(dir.path(), "topic0", None).is_err(),
                 "{stage}"
