@@ -546,6 +546,43 @@ pub(crate) fn write_bundled_rows(
     segment_dir: &Path,
     rows: &[LogRow],
 ) -> std::io::Result<EncodedColumns> {
+    write_bundled_rows_with_callback(segment_dir, rows, || Ok(())).map(|(columns, ())| columns)
+}
+
+/// Only new historical bundles may overlap hashing with column encoding. Check
+/// the exact empty origin before any directory creation or replacement.
+pub(crate) fn write_new_historical_bundle(
+    segment_dir: &Path,
+    descriptor: &SegmentDescriptor,
+    rows: &[LogRow],
+    replace_existing: bool,
+) -> std::io::Result<(EncodedColumns, crate::commitment::AppendRevision)> {
+    let invalid = || {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "new historical bundle requires an identified empty prefix",
+        )
+    };
+    if descriptor.row_count != 0 {
+        return Err(invalid());
+    }
+    let namespace = descriptor.source_namespace.ok_or_else(invalid)?;
+    let root = descriptor.source_commitment.ok_or_else(invalid)?;
+    let state = descriptor.source_state.as_ref().ok_or_else(invalid)?;
+    state.validate_new_append(namespace.0, root, rows)?;
+    if replace_existing && segment_dir.exists() {
+        fs::remove_dir_all(segment_dir)?;
+    }
+    write_bundled_rows_with_callback(segment_dir, rows, || {
+        crate::commitment::AppendRevision::new(Some(state), rows)
+    })
+}
+
+fn write_bundled_rows_with_callback<T>(
+    segment_dir: &Path,
+    rows: &[LogRow],
+    callback: impl FnOnce() -> std::io::Result<T>,
+) -> std::io::Result<(EncodedColumns, T)> {
     fs::create_dir_all(segment_dir.join("columns"))?;
     let mut output = PageOutput::new(segment_dir);
     output.bundle = Some((
@@ -553,7 +590,7 @@ pub(crate) fn write_bundled_rows(
         rows.len() as u64,
     ));
     output.append_canonical(rows.len())?;
-    let columns = write_compacted_values(&output, rows)?;
+    let (columns, value) = write_compacted_values_with_callback(&output, rows, callback)?;
     let encoded = EncodedColumns {
         columns,
         bundle: output.finish()?,
@@ -570,7 +607,7 @@ pub(crate) fn write_bundled_rows(
             fs::remove_file(path)?;
         }
     }
-    Ok(encoded)
+    Ok((encoded, value))
 }
 
 /// Keep ownership until the caller durably publishes the authoritative catalog
@@ -977,6 +1014,14 @@ fn write_compacted_values(
     output: &PageOutput<'_>,
     rows: &[LogRow],
 ) -> std::io::Result<Vec<ColumnDescriptor>> {
+    write_compacted_values_with_callback(output, rows, || Ok(())).map(|(columns, ())| columns)
+}
+
+fn write_compacted_values_with_callback<T>(
+    output: &PageOutput<'_>,
+    rows: &[LogRow],
+    callback: impl FnOnce() -> std::io::Result<T>,
+) -> std::io::Result<(Vec<ColumnDescriptor>, T)> {
     thread::scope(|scope| {
         let address =
             scope.spawn(|| compact_address_values(output, rows.iter().map(|row| row.address)));
@@ -1078,31 +1123,42 @@ fn write_compacted_values(
         });
         let data = scope.spawn(|| compact_data_values(output, rows));
 
-        Ok(vec![
-            join_column_worker(address)?,
-            join_column_worker(block_number)?,
-            join_column_worker(block_hash)?,
-            join_column_worker(timestamp)?,
-            join_column_worker(tx_hash)?,
-            join_column_worker(tx_index)?,
-            join_column_worker(log_index)?,
-            join_column_worker(data_len)?,
-            join_column_worker(source)?,
-            join_column_worker(topic0)?,
-            join_column_worker(topic1)?,
-            join_column_worker(topic2)?,
-            join_column_worker(topic3)?,
-            join_column_worker(data)?,
-        ])
+        finish_column_workers(
+            [
+                address,
+                block_number,
+                block_hash,
+                timestamp,
+                tx_hash,
+                tx_index,
+                log_index,
+                data_len,
+                source,
+                topic0,
+                topic1,
+                topic2,
+                topic3,
+                data,
+            ],
+            callback,
+        )
     })
 }
 
-fn join_column_worker(
-    handle: thread::ScopedJoinHandle<'_, std::io::Result<ColumnDescriptor>>,
-) -> std::io::Result<ColumnDescriptor> {
-    handle
-        .join()
-        .map_err(|_| std::io::Error::other("compacted column worker panicked"))?
+// Evaluate the parent callback after all spawns, but join every handle before
+// propagating any Result error. Column order has precedence over callback errors.
+fn finish_column_workers<T, C, const N: usize>(
+    workers: [thread::ScopedJoinHandle<'_, std::io::Result<C>>; N],
+    callback: impl FnOnce() -> std::io::Result<T>,
+) -> std::io::Result<(Vec<C>, T)> {
+    let value = callback();
+    let joined = workers.map(|worker| {
+        worker
+            .join()
+            .map_err(|_| std::io::Error::other("compacted column worker panicked"))?
+    });
+    let columns = joined.into_iter().collect::<std::io::Result<Vec<_>>>()?;
+    Ok((columns, value?))
 }
 
 pub(crate) fn apply_rows_to_descriptor(descriptor: &mut SegmentDescriptor, rows: &[LogRow]) {
@@ -1401,22 +1457,26 @@ pub(crate) fn compact_ingest_segment(
             compact_nullable_b256_column(&output, "topic3", CompressionCodec::AdaptiveFixed)
         });
         let data = scope.spawn(|| compact_data_column(&output, CompressionCodec::AdaptiveBytes));
-        Ok::<_, std::io::Error>(vec![
-            join_column_worker(address)?,
-            join_column_worker(block_number)?,
-            join_column_worker(block_hash)?,
-            join_column_worker(timestamp)?,
-            join_column_worker(tx_hash)?,
-            join_column_worker(tx_index)?,
-            join_column_worker(log_index)?,
-            join_column_worker(data_len)?,
-            join_column_worker(source)?,
-            join_column_worker(topic0)?,
-            join_column_worker(topic1)?,
-            join_column_worker(topic2)?,
-            join_column_worker(topic3)?,
-            join_column_worker(data)?,
-        ])
+        finish_column_workers(
+            [
+                address,
+                block_number,
+                block_hash,
+                timestamp,
+                tx_hash,
+                tx_index,
+                log_index,
+                data_len,
+                source,
+                topic0,
+                topic1,
+                topic2,
+                topic3,
+                data,
+            ],
+            || Ok(()),
+        )
+        .map(|(columns, ())| columns)
     })?;
 
     output.finish()?;
@@ -3226,5 +3286,159 @@ mod tests {
                 .unwrap(),
             rows
         );
+    }
+
+    #[test]
+    fn parent_callback_overlaps_and_all_column_workers_are_joined_on_errors() {
+        use std::sync::{Barrier, atomic::AtomicUsize};
+        for case in 0..4 {
+            let gate = Barrier::new(15);
+            let finished = AtomicUsize::new(0);
+            let parent = thread::current().id();
+            let result = thread::scope(|scope| {
+                let workers = std::array::from_fn::<_, 14, _>(|index| {
+                    let gate = &gate;
+                    let finished = &finished;
+                    scope.spawn(move || {
+                        gate.wait();
+                        finished.fetch_add(1, Ordering::SeqCst);
+                        if case == 2 && index == 13 {
+                            panic!("controlled column panic");
+                        }
+                        if case >= 1 && index == 0 {
+                            return Err(std::io::Error::other("first column failed"));
+                        }
+                        Ok(index)
+                    })
+                });
+                finish_column_workers(workers, || {
+                    assert_eq!(thread::current().id(), parent);
+                    gate.wait();
+                    if case != 3 {
+                        Err(std::io::Error::other("hash callback failed"))
+                    } else {
+                        Ok(())
+                    }
+                })
+            });
+            assert_eq!(finished.load(Ordering::SeqCst), 14);
+            // Case2 also panics in the last worker: explicit joins must retain
+            // the deterministic first-column error instead of scope panicking.
+            let error = result.unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                if case == 0 {
+                    "hash callback failed"
+                } else {
+                    "first column failed"
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn failed_bundle_callback_does_not_finish_or_remove_raw_artifacts() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("unpublished");
+        fs::create_dir_all(&dir).unwrap();
+        let sentinel = dir.join("data.col");
+        fs::write(&sentinel, b"retained raw artifact").unwrap();
+        let rows = &descending_rows()[..2];
+        let result = write_bundled_rows_with_callback(&dir, rows, || {
+            Err::<(), _>(std::io::Error::other("controlled hash failure"))
+        });
+        assert!(result.is_err());
+        assert_eq!(fs::read(sentinel).unwrap(), b"retained raw artifact");
+        assert!(!dir.join("segment.json").exists());
+        let incomplete = fs::read(dir.join(BUNDLE_PATH)).unwrap();
+        assert!(!incomplete.windows(8).any(|bytes| bytes == b"LXBT0005"));
+    }
+
+    #[test]
+    fn new_historical_bundle_preflight_preserves_existing_files() {
+        let tmp = TempDir::new().unwrap();
+        let config = super::super::catalog::NativeStorageConfig {
+            data_dir: tmp.path().to_owned(),
+            ..Default::default()
+        };
+        let (mut catalog, paths) =
+            super::super::catalog::NativeStorageCatalog::open_or_create(&config).unwrap();
+        let original = catalog.allocate_segment(SegmentKind::Sealed).unwrap();
+        let dir = paths.segment_dir(original.id);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("sentinel"), b"unchanged").unwrap();
+        let rows = &descending_rows()[..2];
+        for case in 0..4 {
+            let mut descriptor = original.clone();
+            match case {
+                0 => descriptor.source_state = None,
+                1 => descriptor.source_commitment = Some(B256::ZERO),
+                2 => apply_rows_to_descriptor(&mut descriptor, rows),
+                3 => {
+                    descriptor.source_state = Some(
+                        descriptor
+                            .source_state
+                            .as_ref()
+                            .unwrap()
+                            .extend(rows)
+                            .unwrap(),
+                    );
+                    descriptor.source_commitment = descriptor
+                        .source_state
+                        .as_ref()
+                        .map(crate::PrefixState::commitment);
+                }
+                _ => unreachable!(),
+            }
+            assert!(write_new_historical_bundle(&dir, &descriptor, rows, true).is_err());
+            assert_eq!(fs::read(dir.join("sentinel")).unwrap(), b"unchanged");
+            assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
+            let absent = tmp.path().join(format!("absent-{case}"));
+            assert!(write_new_historical_bundle(&absent, &descriptor, rows, false).is_err());
+            assert!(!absent.exists());
+        }
+    }
+
+    #[test]
+    fn new_historical_bundle_matches_serial_columns_root_and_reopen() {
+        for replace_existing in [false, true] {
+            let tmp = TempDir::new().unwrap();
+            let config = super::super::catalog::NativeStorageConfig {
+                data_dir: tmp.path().to_owned(),
+                ..Default::default()
+            };
+            let (mut catalog, paths) =
+                super::super::catalog::NativeStorageCatalog::open_or_create(&config).unwrap();
+            let mut descriptor = catalog.allocate_segment(SegmentKind::Sealed).unwrap();
+            let rows = &descending_rows()[..3];
+            let expected =
+                crate::commitment::AppendRevision::new(descriptor.source_state.as_ref(), rows)
+                    .unwrap();
+            let serial = write_bundled_rows(&tmp.path().join("serial"), rows).unwrap();
+            let dir = paths.segment_dir(descriptor.id);
+            if replace_existing {
+                fs::create_dir_all(&dir).unwrap();
+                fs::write(dir.join("stale"), b"uncommitted artifact").unwrap();
+            }
+            let (columns, revision) =
+                write_new_historical_bundle(&dir, &descriptor, rows, replace_existing).unwrap();
+            assert_eq!(columns.columns, serial.columns);
+            assert_eq!(revision.previous, expected.previous);
+            assert_eq!(revision.next, expected.next);
+            assert_eq!(revision.state, expected.state);
+            super::apply_rows_to_descriptor(&mut descriptor, rows);
+            descriptor.source_commitment = revision.next;
+            descriptor.source_state = revision.state;
+            let columns = columns.apply_to(&mut descriptor);
+            persist_segment_manifest_with_columns(&paths, &descriptor, columns).unwrap();
+            assert_eq!(
+                SegmentReader::open(&dir)
+                    .unwrap()
+                    .read_log_rows(None)
+                    .unwrap(),
+                rows
+            );
+            assert!(!dir.join("stale").exists());
+        }
     }
 }

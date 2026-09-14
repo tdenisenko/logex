@@ -99,6 +99,35 @@ impl PrefixState {
         ))
     }
 
+    /// Validate every fallible encoding boundary before a new bundle mutates
+    /// files. Only the historical empty-prefix overlap path needs this pass.
+    pub(crate) fn validate_new_append(
+        &self,
+        namespace: [u8; 16],
+        root: Commitment,
+        rows: &[LogRow],
+    ) -> io::Result<()> {
+        self.validate(namespace, 0, root)?;
+        self.rows
+            .checked_add(u64::try_from(rows.len()).map_err(io::Error::other)?)
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "logical row count overflow")
+            })?;
+        let mut bytes = self.stream.byte_len();
+        for row in rows {
+            let topics = [&row.topic0, &row.topic1, &row.topic2, &row.topic3]
+                .into_iter()
+                .filter(|topic| topic.is_some())
+                .count() as u64;
+            bytes = checked_row_end(
+                bytes,
+                topics,
+                u64::try_from(row.data.len()).map_err(io::Error::other)?,
+            )?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn validate(
         &self,
         namespace: [u8; 16],
@@ -150,6 +179,20 @@ impl PrefixState {
         state.validate(state.namespace.0, state.rows, state.root)?;
         Ok(state)
     }
+}
+
+fn checked_row_end(previous: u64, topics: u64, payload: u64) -> io::Result<u64> {
+    // Private callers count the four topic slots; the fixed part cannot overflow.
+    debug_assert!(topics <= 4);
+    previous
+        .checked_add(125 + 32 * topics)
+        .and_then(|bytes| bytes.checked_add(payload))
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "logical transcript length overflow",
+            )
+        })
 }
 
 impl<'de> Deserialize<'de> for PrefixState {
@@ -381,5 +424,40 @@ mod tests {
                 "field {field}"
             );
         }
+    }
+
+    #[test]
+    fn new_bundle_preflight_checks_empty_origin_and_exact_length_without_restricting_data_len() {
+        let empty = PrefixState::empty([1; 16]);
+        let mut value = row();
+        value.data_len += 1;
+        empty
+            .validate_new_append([1; 16], empty.commitment(), &[value])
+            .unwrap();
+        let nonempty = empty.extend(&[row()]).unwrap();
+        assert!(
+            nonempty
+                .validate_new_append([1; 16], nonempty.commitment(), &[])
+                .is_err()
+        );
+        assert!(
+            empty
+                .validate_new_append([2; 16], empty.commitment(), &[])
+                .is_err()
+        );
+        assert_eq!(checked_row_end(7, 4, 3).unwrap(), 263);
+        assert_eq!(checked_row_end(0, 0, u64::MAX - 125).unwrap(), u64::MAX);
+        assert!(checked_row_end(0, 0, u64::MAX - 124).is_err());
+        assert!(checked_row_end(u64::MAX, 0, 0).is_err());
+        let mut wire = vec![1];
+        wire.extend_from_slice(&u64::MAX.to_le_bytes());
+        wire.resize(9 + 54 * 32 + 1023, 0x5a);
+        let forged =
+            PrefixState::from_parts([1; 16].into(), 0, StreamState::from_bytes(&wire).unwrap());
+        assert!(
+            forged
+                .validate_new_append([1; 16], forged.commitment(), &[row()])
+                .is_err()
+        );
     }
 }

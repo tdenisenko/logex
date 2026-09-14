@@ -1100,12 +1100,12 @@ impl NativeStorage {
                 ));
             }
             let chunk = &candidate[..take];
-            if segment_dir.exists() {
-                fs::remove_dir_all(&segment_dir)?;
-            }
-            let columns = write_bundled_rows(&segment_dir, chunk)?;
-            let revision =
-                crate::commitment::AppendRevision::new(descriptor.source_state.as_ref(), chunk)?;
+            let (columns, revision) = super::segment::write_new_historical_bundle(
+                &segment_dir,
+                &descriptor,
+                chunk,
+                true,
+            )?;
             descriptor.source_commitment = revision.next;
             descriptor.source_state = None;
             apply_ordered_rows_to_descriptor(&mut descriptor, chunk);
@@ -1183,14 +1183,19 @@ impl NativeStorage {
                 continue;
             }
 
-            let revision = crate::commitment::AppendRevision::new(
-                self.catalog.segments[segment_index].source_state.as_ref(),
-                chunk,
-            )?;
             let publication = self.segment_publication(segment_id);
-            let columns = if existing_rows == 0 {
-                write_bundled_rows(&segment_dir, chunk)?
+            let (columns, revision) = if existing_rows == 0 {
+                super::segment::write_new_historical_bundle(
+                    &segment_dir,
+                    &self.catalog.segments[segment_index],
+                    chunk,
+                    false,
+                )?
             } else {
+                let revision = crate::commitment::AppendRevision::new(
+                    self.catalog.segments[segment_index].source_state.as_ref(),
+                    chunk,
+                )?;
                 if !super::segment::segment_is_compacted(&self.paths, segment_id)? {
                     compact_ingest_segment(
                         &self.paths,
@@ -1198,14 +1203,15 @@ impl NativeStorage {
                         publication,
                     )?;
                 }
-                super::segment::append_compacted_rows_with_revision(
+                let columns = super::segment::append_compacted_rows_with_revision(
                     &segment_dir,
                     existing_rows,
                     chunk,
                     publication,
                     inspected,
                     &revision,
-                )?
+                )?;
+                (columns, revision)
             };
             {
                 let descriptor = &mut self.catalog.segments[segment_index];

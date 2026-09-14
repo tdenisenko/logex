@@ -8,6 +8,31 @@ and `84ecac65` failures remain retained separately. CI, merge and the remaining
 offline audit are incomplete. Current formats and design are in
 [Logical-prefix commitment and compatibility](#logical-prefix-commitment-and-compatibility).
 
+## Provisional historical worker overlap
+
+A provisional implementation computes a new historical segment's commitment on
+its existing parent thread after spawning the existing 14 column workers. It
+adds no threads or persistence barriers. Both staged new segments and direct
+historical segments use it; existing-prefix and live hashing remain serial.
+Before creating or replacing bundle files, it verifies the empty source origin
+and checks the complete logical transcript length without copying payloads.
+The row encoding, root and restart-state formats are unchanged.
+
+All worker handles are explicitly joined before errors propagate, including the
+raw compaction path. This prevents an early column error from leaving a later
+worker panic to escape through automatic scope cleanup. Column-order errors take
+precedence over a hashing error. Bundle completion, raw-file cleanup and source
+publication follow only after both columns and hashing succeed. A parent panic
+retains Rust's scoped unwinding behavior; this is no new panic-recovery promise.
+
+The storage all-targets check passes: 314 unit tests and one integration test,
+including five new preflight, scheduling, cleanup and serial-equivalence tests.
+Eight benchmarks/platform checks remain ignored by this ordinary suite. The
+unchanged source was independently reviewed. Complete workspace gates and
+release performance measurement remain pending. This implementation has not
+cleared the performance limit; it may contend with column workers for CPU and
+memory bandwidth. The previous full comparison remains NOT CLEAR.
+
 ## Aligned full comparison: NOT CLEAR
 
 The [complete comparison evidence](baselines/2026-09-14-source-identity-aligned-full-result-1.json)
