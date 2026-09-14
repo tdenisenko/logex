@@ -2,12 +2,41 @@
 
 This batch follows merged PR #149 and is in progress. It binds derived indexes
 and recovery to the exact logical source prefix. Current aligned-writer source
-`28ef516a` passes all nine local gates. Its preliminary Intel comparison is
-complete and suitable for considering a full comparison after exact-source
-platform controls; **performance acceptance remains pending**. Earlier `da36819b`
+`28ef516a` passes all nine local gates and all 25 focused Intel platform checks.
+Its preliminary Intel comparison and platform validation permit one frozen full
+comparison; **performance acceptance remains pending**. Earlier `da36819b`
 and `84ecac65` failures remain retained separately. CI, merge and the remaining
 offline audit are incomplete. Current formats and design are in
 [Logical-prefix commitment and compatibility](#logical-prefix-commitment-and-compatibility).
+
+## Aligned Intel platform validation
+
+The [complete platform evidence](baselines/2026-09-14-source-identity-aligned-platform-result-1.json)
+records a successful release test build, 13 commitment checks, four recovery
+checks across APFS and a disposable ExFAT image, and eight journal-origin checks.
+All 48 filesystem-phase commands exited zero, including normal image detach and
+confirmation that the image was no longer attached. Testing used only the named
+private temporary directory; the important external volume was untouched.
+
+The first build exited 101 because its isolated PATH omitted an already installed
+protocol compiler. No test executable was certified or test run by that attempt.
+The corrected environment supplied the exact installed `protoc` path, version
+and hash. It required no installation or product change. The failed proof and
+all 33 collected files remain intact alongside the successful continuation.
+
+Independent review verifies all three phase collections, the exact test names,
+command exits, compiler features and cleanup records. The successful build
+preserves 2,610 original input hashes and 35,841 dependency-source entries;
+commitment checks preserve another 913 input hashes. The mount runner checks
+source hashes and image identity during execution, but does not emit a separate
+raw source-hash map or inode tuple. Its frozen implementation and original
+outputs remain available. All 265 archived records and 259 aliases round-trip
+against their original bytes; nothing was excluded from the archive.
+
+The build completed at 2026-09-14 18:03:26 UTC and the final recovery/cleanup
+phase at 18:10:18 UTC. These are correctness results. Full performance acceptance,
+exact-head Linux/macOS CI, PR and merge remain outstanding. The Mac-mini remains
+reserved for the subsequent fixed comparison.
 
 ## Aligned Intel diagnostic: full validation pending
 
@@ -37,13 +66,13 @@ existing work there. Normal query capture reads cached roots or bounded canonica
 metadata; it does not recompute whole-row commitments. Direct row-header
 reservation remains an unmeasured fallback, with no additional source change
 selected. Exact-source Intel commitment and isolated APFS/ExFAT recovery controls
-are next, followed by one frozen full comparison with the existing acceptance
-rules and all sensitivity checks.
+have now passed, as recorded above. One frozen full comparison follows with the
+existing acceptance rules and all sensitivity checks.
 
 The single 600.00107659-second cooldown ended at 2026-09-14 17:07:16 UTC; the
 complete diagnostic ended at 17:09:59 UTC with zero outer/watcher exits.
 Read-only release completed at 17:11:16 UTC with SSH exit zero. Only the reporter
-and its wrapper matched, with no audit workload remaining. The Mac-mini is free;
+and its wrapper matched, with no audit workload remaining. The Mac-mini was released;
 all test work remained in its named private temporary directory, and the
 important external volume was untouched.
 
