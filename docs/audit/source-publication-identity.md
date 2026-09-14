@@ -4,8 +4,12 @@ This batch follows merged PR #149. It binds derived indexes and recovery to the
 exact logical source prefix. The retained implementation is `e76f4dda`: bounded
 streaming commitments with historical hashing overlapped with existing column
 workers. All nine local gates and 30 final-source Intel/APFS/ExFAT controls pass.
-All six CI jobs passed on PR #150 at `459be851`; the final documentation commit
-must also pass CI before merge. The remaining offline audit is incomplete.
+All six CI jobs passed on final head `c4ae9005` in run `34900165670`.
+[PR #150](https://github.com/tdenisenko/logex/pull/150) merged as `8595e040`
+on September 14, 2026; the [final CI and merge record](baselines/2026-09-15-source-identity-ci-final.json)
+retains the exact head and job results. The remaining offline audit is incomplete.
+The dated investigation below retains earlier provisional decisions; this final
+disposition supersedes their pending-CI, merge and benchmark holds.
 Current formats and design are in
 [Logical-prefix commitment and compatibility](#logical-prefix-commitment-and-compatibility).
 
@@ -188,8 +192,7 @@ opposite-order means -1.9664%/+0.3031% and an adverse pair of +10.5793%. Pooled
 mean savings were only 0.0271 ms per 15,360-row fixture. This small mixed component
 effect does not justify duplicated header encoding or establish useful ingestion
 margin, so the prototype is not retained in production. The worker overlap above
-was subsequently selected for retention. CI, PR and
-merge remain pending.
+was subsequently selected for retention and merged in PR #150 as recorded above.
 
 Mac-mini testing finished on September 14 at 19:14:50 UTC. Collection and the
 final read-only process review completed at 19:16:30 UTC; only the reporter and

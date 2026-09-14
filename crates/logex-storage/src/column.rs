@@ -1722,7 +1722,7 @@ impl ColumnFile {
 
         thread::scope(|scope| {
             let block_columns = scope.spawn(|| {
-                Self::append_fixed_col(
+                Self::append_fixed_col::<20>(
                     dir,
                     "address.col",
                     existing_rows,
@@ -1730,7 +1730,7 @@ impl ColumnFile {
                     rows,
                     |w, r| w.write_all(r.address.as_slice()),
                 )?;
-                Self::append_fixed_col(
+                Self::append_fixed_col::<8>(
                     dir,
                     "block_number.col",
                     existing_rows,
@@ -1738,7 +1738,7 @@ impl ColumnFile {
                     rows,
                     |w, r| w.write_all(&r.block_number.to_le_bytes()),
                 )?;
-                Self::append_fixed_col(
+                Self::append_fixed_col::<32>(
                     dir,
                     "block_hash.col",
                     existing_rows,
@@ -1746,7 +1746,7 @@ impl ColumnFile {
                     rows,
                     |w, r| w.write_all(r.block_hash.as_slice()),
                 )?;
-                Self::append_fixed_col(
+                Self::append_fixed_col::<8>(
                     dir,
                     "timestamp.col",
                     existing_rows,
@@ -1766,7 +1766,7 @@ impl ColumnFile {
                 Ok(())
             });
             let transaction_columns = scope.spawn(|| {
-                Self::append_fixed_col(
+                Self::append_fixed_col::<32>(
                     dir,
                     "tx_hash.col",
                     existing_rows,
@@ -1774,7 +1774,7 @@ impl ColumnFile {
                     rows,
                     |w, r| w.write_all(r.tx_hash.as_slice()),
                 )?;
-                Self::append_fixed_col(
+                Self::append_fixed_col::<4>(
                     dir,
                     "tx_index.col",
                     existing_rows,
@@ -1782,7 +1782,7 @@ impl ColumnFile {
                     rows,
                     |w, r| w.write_all(&r.tx_index.to_le_bytes()),
                 )?;
-                Self::append_fixed_col(
+                Self::append_fixed_col::<4>(
                     dir,
                     "log_index.col",
                     existing_rows,
@@ -1790,7 +1790,7 @@ impl ColumnFile {
                     rows,
                     |w, r| w.write_all(&r.log_index.to_le_bytes()),
                 )?;
-                Self::append_fixed_col(
+                Self::append_fixed_col::<4>(
                     dir,
                     "data_len.col",
                     existing_rows,
@@ -1798,7 +1798,7 @@ impl ColumnFile {
                     rows,
                     |w, r| w.write_all(&r.data_len.to_le_bytes()),
                 )?;
-                Self::append_fixed_col(
+                Self::append_fixed_col::<1>(
                     dir,
                     "source.col",
                     existing_rows,
@@ -1919,7 +1919,7 @@ impl ColumnFile {
         })
     }
 
-    fn append_fixed_col(
+    fn append_fixed_col<const WIDTH: u64>(
         dir: &Path,
         name: &str,
         existing_rows: u64,
@@ -1928,7 +1928,7 @@ impl ColumnFile {
         mut write_value: impl FnMut(&mut BufWriter<File>, &LogRow) -> io::Result<()>,
     ) -> io::Result<()> {
         let path = dir.join(name);
-        let file = Self::open_col_for_append(&path, existing_rows, new_row_count)?;
+        let file = Self::open_col_for_append(&path, existing_rows, new_row_count, WIDTH)?;
         let mut file = BufWriter::new(file);
         for row in rows {
             write_value(&mut file, row)?;
@@ -1999,7 +1999,7 @@ impl ColumnFile {
         let col_path = dir.join(format!("{base_name}.col"));
         let null_path = dir.join(format!("{base_name}.null"));
 
-        let col_file = Self::open_col_for_append(&col_path, existing_rows, new_row_count)?;
+        let col_file = Self::open_col_for_append(&col_path, existing_rows, new_row_count, 32)?;
         let mut col_file = BufWriter::new(col_file);
 
         // Read existing null bitmap and append
@@ -2062,79 +2062,50 @@ impl ColumnFile {
         name: &str,
         new_row_count: u64,
         rows: &[LogRow],
-        _existing_rows: u64,
+        existing_rows: u64,
     ) -> io::Result<()> {
         let path = dir.join(name);
-        let data = fs::read(&path)?;
-
-        let header = ColumnFileHeader::read_from(&data)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "corrupt data column"))?;
-        let old_count = header.row_count as usize;
-        if header.row_count != _existing_rows {
+        // The append already reads the old file. Reuse the reader's complete
+        // layout validation before constructing a replacement, and borrow its
+        // encoded offsets instead of allocating another table for every row.
+        let data = crate::reader::RawBytesColumn::open(&path)?;
+        if data.row_count() as u64 != existing_rows {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
-                    "data column row count mismatch: expected {_existing_rows}, got {}",
-                    header.row_count
+                    "data column row count mismatch: expected {existing_rows}, got {}",
+                    data.row_count()
                 ),
             ));
         }
+        let existing_data_len = data.payload().len() as u64;
+        let final_offset = rows.iter().try_fold(existing_data_len, |offset, row| {
+            offset.checked_add(row.data.len() as u64).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "data column size overflow")
+            })
+        })?;
 
-        // Read existing offsets
-        let offset_start = ColumnFileHeader::SIZE;
-        let offsets_size = (old_count + 1) * 8;
-        let data_start = offset_start + offsets_size;
-
-        let mut old_offsets = Vec::with_capacity(old_count + 1);
-        for i in 0..=old_count {
-            let pos = offset_start + i * 8;
-            let end = pos + 8;
-            let o = u64::from_le_bytes(
-                data.get(pos..end)
-                    .ok_or_else(|| {
-                        io::Error::new(io::ErrorKind::InvalidData, "truncated offset array")
-                    })?
-                    .try_into()
-                    .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid offset"))?,
-            );
-            old_offsets.push(o);
-        }
-        let existing_data = &data[data_start..];
-        let existing_data_len = old_offsets.last().copied().unwrap_or(0);
-
-        // Compute new offsets
-        let mut new_offsets = Vec::with_capacity(rows.len() + 1);
-        let mut off = existing_data_len;
-        for row in rows {
-            new_offsets.push(off);
-            off += row.data.len() as u64;
-        }
-        new_offsets.push(off);
-
-        replacements.write(&path, |w| {
-            let new_header = ColumnFileHeader {
+        replacements.write(&path, |writer| {
+            ColumnFileHeader {
                 version: COLUMN_VERSION,
                 row_count: new_row_count,
                 compression: 0,
-            };
-            new_header.write_to(w)?;
-
-            // All offsets: old (without sentinel) + new (with sentinel)
-            for o in &old_offsets[..old_count] {
-                w.write_all(&o.to_le_bytes())?;
             }
-            for o in &new_offsets {
-                w.write_all(&o.to_le_bytes())?;
-            }
-
-            // All data
-            w.write_all(existing_data)?;
+            .write_to(writer)?;
+            writer.write_all(data.encoded_row_offsets())?;
+            let mut offset = existing_data_len;
             for row in rows {
-                w.write_all(&row.data)?;
+                writer.write_all(&offset.to_le_bytes())?;
+                // The immutable input slice's complete sum was checked above.
+                offset += row.data.len() as u64;
+            }
+            writer.write_all(&final_offset.to_le_bytes())?;
+            writer.write_all(data.payload())?;
+            for row in rows {
+                writer.write_all(&row.data)?;
             }
             Ok(())
-        })?;
-        Ok(())
+        })
     }
 
     /// Write a canonical bitmap where all rows are marked canonical (all 1s).
@@ -2216,6 +2187,7 @@ impl ColumnFile {
         path: &Path,
         existing_rows: u64,
         new_row_count: u64,
+        item_size: u64,
     ) -> io::Result<File> {
         let mut file = OpenOptions::new().read(true).write(true).open(path)?;
         let mut header_buf = [0u8; ColumnFileHeader::SIZE];
@@ -2226,6 +2198,12 @@ impl ColumnFile {
                 format!("corrupt column header in {}", path.display()),
             )
         })?;
+        if header.version != COLUMN_VERSION || header.compression != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("unsupported raw column format in {}", path.display()),
+            ));
+        }
         if header.row_count != existing_rows {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -2233,6 +2211,21 @@ impl ColumnFile {
                     "column row count mismatch for {}: expected {existing_rows}, got {}",
                     path.display(),
                     header.row_count
+                ),
+            ));
+        }
+
+        let expected_len = existing_rows
+            .checked_mul(item_size)
+            .and_then(|length| length.checked_add(ColumnFileHeader::SIZE as u64))
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "column length overflow"))?;
+        let actual_len = file.metadata()?.len();
+        if actual_len != expected_len {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "column length mismatch for {}: expected {expected_len}, got {actual_len}",
+                    path.display()
                 ),
             ));
         }
@@ -2496,6 +2489,104 @@ mod tests {
         fs::write(&path, bytes).unwrap();
         assert!(ColumnFile::append_batch(tmp.path(), &[row()], 1).is_err());
         assert_eq!(fs::read(tmp.path().join("address.col")).unwrap(), before);
+    }
+
+    #[test]
+    fn repeated_append_preserves_empty_and_nonempty_payloads() {
+        let tmp = tempfile::tempdir().unwrap();
+        ColumnFile::write_batch(tmp.path(), &[]).unwrap();
+        let mut expected = Vec::new();
+        for lengths in [[0, 1, 7], [3, 0, 2], [0, 0, 5]] {
+            let rows = lengths.map(|length| {
+                let mut value = row();
+                value.data = Bytes::from(vec![length; usize::from(length)]);
+                value.data_len = u32::from(length);
+                value
+            });
+            ColumnFile::append_batch(tmp.path(), &rows, expected.len() as u64).unwrap();
+            expected.extend(rows);
+            let reader = crate::SegmentReader::open(tmp.path()).unwrap();
+            assert_eq!(reader.read_log_rows(None).unwrap(), expected);
+            assert_eq!(
+                reader.read_var_bytes("data", Some(&[2, 0, 2])).unwrap(),
+                [
+                    expected[2].data.clone(),
+                    expected[0].data.clone(),
+                    expected[2].data.clone()
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn append_rejects_invalid_variable_layout_without_publishing() {
+        for case in 0..7 {
+            let tmp = tempfile::tempdir().unwrap();
+            let mut value = row();
+            value.data = Bytes::from_static(b"ab");
+            value.data_len = 2;
+            ColumnFile::write_batch(tmp.path(), &[value.clone(), value.clone()]).unwrap();
+            let canonical = fs::read(tmp.path().join("canonical.bitmap")).unwrap();
+            let path = tmp.path().join("data.col");
+            let mut bytes = fs::read(&path).unwrap();
+            let offsets = ColumnFileHeader::SIZE;
+            match case {
+                0 => bytes[offsets..offsets + 8].copy_from_slice(&1u64.to_le_bytes()),
+                1 => bytes[offsets + 8..offsets + 16].copy_from_slice(&5u64.to_le_bytes()),
+                2 => bytes[offsets + 16..offsets + 24].copy_from_slice(&3u64.to_le_bytes()),
+                3 => {
+                    bytes.pop();
+                }
+                4 => bytes[4..8].copy_from_slice(&(COLUMN_VERSION + 1).to_le_bytes()),
+                5 => bytes[16] = 1,
+                6 => bytes.truncate(offsets + 23),
+                _ => unreachable!(),
+            }
+            fs::write(&path, &bytes).unwrap();
+            let error = ColumnFile::append_batch(tmp.path(), &[value], 2)
+                .expect_err("an invalid variable-column layout must not be published");
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData, "case {case}");
+            assert_eq!(fs::read(&path).unwrap(), bytes, "case {case}");
+            assert_eq!(
+                fs::read(tmp.path().join("canonical.bitmap")).unwrap(),
+                canonical,
+                "case {case}"
+            );
+        }
+    }
+
+    #[test]
+    fn append_rejects_invalid_fixed_layout_without_publishing() {
+        for (case, name) in [
+            (0, "address.col"),
+            (1, "block_number.col"),
+            (2, "tx_hash.col"),
+            (3, "topic2.col"),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            ColumnFile::write_batch(tmp.path(), &[row(), row()]).unwrap();
+            let canonical = fs::read(tmp.path().join("canonical.bitmap")).unwrap();
+            let path = tmp.path().join(name);
+            let mut bytes = fs::read(&path).unwrap();
+            match case {
+                0 => {
+                    bytes.pop();
+                }
+                1 => bytes.push(0),
+                2 => bytes[4..8].copy_from_slice(&(COLUMN_VERSION + 1).to_le_bytes()),
+                3 => bytes[16] = 1,
+                _ => unreachable!(),
+            }
+            fs::write(&path, &bytes).unwrap();
+            let error = ColumnFile::append_batch(tmp.path(), &[row()], 2)
+                .expect_err("an invalid fixed-column layout must not be published");
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{name}");
+            assert_eq!(fs::read(&path).unwrap(), bytes, "{name}");
+            assert_eq!(
+                fs::read(tmp.path().join("canonical.bitmap")).unwrap(),
+                canonical
+            );
+        }
     }
 
     #[test]

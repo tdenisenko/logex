@@ -166,7 +166,7 @@ pub fn decode_fixed_width_page(
 ) -> io::Result<Vec<u8>> {
     let expected = decoded_fixed_len(row_count, item_size)?;
     let raw = match codec {
-        CompressionCodec::None => encoded.to_vec(),
+        CompressionCodec::None => decode_plain_fixed_width_page(encoded, expected)?,
         CompressionCodec::Dictionary => dict_decode(encoded, row_count, item_size)?,
         CompressionCodec::Zstd => zstd_decompress_bounded(encoded, expected)?,
         CompressionCodec::Lz4 => lz4_decompress_bounded(encoded, expected)?,
@@ -246,7 +246,9 @@ fn decode_adaptive_fixed_width_page(
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "adaptive page is empty"))?;
 
     match *tag {
-        ADAPTIVE_FIXED_NONE => Ok(payload.to_vec()),
+        ADAPTIVE_FIXED_NONE => {
+            decode_plain_fixed_width_page(payload, decoded_fixed_len(row_count, item_size)?)
+        }
         ADAPTIVE_FIXED_DICTIONARY => dict_decode(payload, row_count, item_size),
         ADAPTIVE_FIXED_ZSTD => {
             zstd_decompress_bounded(payload, decoded_fixed_len(row_count, item_size)?)
@@ -527,6 +529,16 @@ fn decoded_fixed_len(rows: usize, width: usize) -> io::Result<usize> {
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "fixed page size overflow"))
 }
 
+fn decode_plain_fixed_width_page(encoded: &[u8], expected: usize) -> io::Result<Vec<u8>> {
+    if encoded.len() != expected {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "decoded fixed-width page has unexpected length",
+        ));
+    }
+    Ok(encoded.to_vec())
+}
+
 fn encode_adaptive_var_bytes_page(values: &[impl AsRef<[u8]>]) -> io::Result<Vec<u8>> {
     let total_len = values
         .iter()
@@ -770,6 +782,22 @@ mod tests {
             };
             assert!(decode_fixed_width_page(&compressed, 1, 32, codec).is_err());
             assert!(decode_fixed_width_page(&compressed, usize::MAX, 32, codec).is_err());
+        }
+        for codec in [CompressionCodec::None, CompressionCodec::AdaptiveFixed] {
+            for raw in [b"".as_slice(), &[1, 2, 3, 4]] {
+                let mut encoded = Vec::new();
+                if codec == CompressionCodec::AdaptiveFixed {
+                    encoded.push(ADAPTIVE_FIXED_NONE);
+                }
+                encoded.extend_from_slice(raw);
+                assert_eq!(
+                    decode_fixed_width_page(&encoded, raw.len() / 4, 4, codec).unwrap(),
+                    raw
+                );
+                assert!(decode_fixed_width_page(&encoded, raw.len() / 4 + 1, 4, codec).is_err());
+                encoded.push(5);
+                assert!(decode_fixed_width_page(&encoded, raw.len() / 4, 4, codec).is_err());
+            }
         }
     }
 
