@@ -467,6 +467,9 @@ pub async fn run_sync(options: RunSyncOptions) {
     );
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let mut consensus_storage_failure = consensus
+        .as_ref()
+        .map(|store| store.subscribe_storage_failure());
 
     let consensus_network_handle = consensus.as_ref().map(|consensus| {
         spawn_consensus_network(
@@ -573,6 +576,22 @@ pub async fn run_sync(options: RunSyncOptions) {
     let engine_result = {
         let mut engine_run = pin!(engine.run());
         tokio::select! {
+            biased;
+            error = wait_for_consensus_storage_failure(&mut consensus_storage_failure) => {
+                tracing::error!(%error, "consensus storage failed, stopping node gracefully");
+                mark_sync_stopped_for_consensus_storage_failure(&state.sync_status);
+                let _ = shutdown_tx.send(true);
+                match tokio::time::timeout(SYNC_ENGINE_SHUTDOWN_TIMEOUT, &mut engine_run).await {
+                    Ok(result) => result,
+                    Err(_) => {
+                        tracing::warn!(
+                            ?SYNC_ENGINE_SHUTDOWN_TIMEOUT,
+                            "sync engine did not stop within consensus storage failure shutdown timeout, closing network tasks"
+                        );
+                        Ok(())
+                    }
+                }
+            },
             res = &mut engine_run => res,
             signal = wait_for_shutdown_signal() => {
                 tracing::info!(signal, "shutdown requested, stopping node gracefully");
@@ -641,6 +660,41 @@ pub async fn run_sync(options: RunSyncOptions) {
         log_task_exit("consensus network", handle).await;
     }
     tracing::info!("shutting down");
+    // Inspect the permanent latch again: a failure may also arrive while a
+    // different shutdown branch or the shared cleanup is already running.
+    if let Some(error) = consensus_storage_failure
+        .as_ref()
+        .and_then(|receiver| receiver.borrow().clone())
+    {
+        tracing::error!(%error, "node stopped after fatal consensus storage failure");
+        std::process::exit(1);
+    }
+}
+
+async fn wait_for_consensus_storage_failure(
+    receiver: &mut Option<tokio::sync::watch::Receiver<Option<Arc<str>>>>,
+) -> Arc<str> {
+    let Some(receiver) = receiver else {
+        return std::future::pending().await;
+    };
+    loop {
+        if let Some(error) = receiver.borrow_and_update().clone() {
+            return error;
+        }
+        if receiver.changed().await.is_err() {
+            // A closed channel without a failure is not a storage failure.
+            return std::future::pending().await;
+        }
+    }
+}
+
+fn mark_sync_stopped_for_consensus_storage_failure(sync_status: &std::sync::Mutex<SyncStatus>) {
+    let mut status = sync_status.lock().expect("sync status mutex poisoned");
+    status.syncing = false;
+    status.eta_seconds = None;
+    status.historical_eta_seconds = None;
+    status.consensus_head_fresh = Some(false);
+    status.node_state = logex_types::NodeState::Disconnected;
 }
 
 async fn select_p2p_address(
@@ -1598,6 +1652,63 @@ fn free_space_bytes(_path: &Path) -> std::io::Result<u64> {
 mod tests {
     use super::*;
     use alloy_primitives::B256;
+
+    #[tokio::test]
+    async fn consensus_storage_failure_waiter_observes_existing_latch() {
+        let (sender, _) = tokio::sync::watch::channel(None);
+        let message: Arc<str> = Arc::from("consensus state write failed");
+        sender.send_replace(Some(Arc::clone(&message)));
+        let mut receiver = Some(sender.subscribe());
+        assert_eq!(
+            wait_for_consensus_storage_failure(&mut receiver).await,
+            message
+        );
+    }
+
+    #[tokio::test]
+    async fn consensus_storage_failure_waiter_observes_new_latch() {
+        let (sender, receiver) = tokio::sync::watch::channel(None);
+        let mut receiver = Some(receiver);
+        let mut waiting = pin!(wait_for_consensus_storage_failure(&mut receiver));
+        assert!(futures_util::poll!(&mut waiting).is_pending());
+        let message: Arc<str> = Arc::from("consensus state rename failed");
+        sender.send(Some(Arc::clone(&message))).unwrap();
+        assert_eq!(waiting.await, message);
+    }
+
+    #[tokio::test]
+    async fn consensus_storage_failure_waiter_without_store_remains_pending() {
+        let mut receiver = None;
+        let mut waiting = pin!(wait_for_consensus_storage_failure(&mut receiver));
+        assert!(futures_util::poll!(&mut waiting).is_pending());
+    }
+
+    #[tokio::test]
+    async fn consensus_storage_failure_waiter_closed_channel_is_not_a_failure() {
+        let (sender, receiver) = tokio::sync::watch::channel(None);
+        drop(sender);
+        let mut receiver = Some(receiver);
+        let mut waiting = pin!(wait_for_consensus_storage_failure(&mut receiver));
+        assert!(futures_util::poll!(&mut waiting).is_pending());
+    }
+
+    #[test]
+    fn consensus_storage_failure_marks_sync_unavailable() {
+        let status = std::sync::Mutex::new(SyncStatus {
+            syncing: true,
+            consensus_head_fresh: Some(true),
+            eta_seconds: Some(10.0),
+            historical_eta_seconds: Some(20.0),
+            ..Default::default()
+        });
+        mark_sync_stopped_for_consensus_storage_failure(&status);
+        let status = status.lock().unwrap();
+        assert!(!status.syncing);
+        assert_eq!(status.consensus_head_fresh, Some(false));
+        assert_eq!(status.node_state, logex_types::NodeState::Disconnected);
+        assert!(status.eta_seconds.is_none());
+        assert!(status.historical_eta_seconds.is_none());
+    }
 
     fn checkpoint_at_slot(slot: u64) -> String {
         format!("{slot}@{:#x}", B256::repeat_byte(0x42))
