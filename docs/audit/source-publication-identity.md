@@ -72,6 +72,19 @@ Preparation checks exposed two collector integration mistakes, both corrected
 before workload execution: terminal mount outcomes and nested sample result
 files now receive the appropriate handling. Earlier tool versions remain retained.
 
+The final streaming candidate `84ecac65` is now compiling in a fresh private
+Mac-mini child after its source archive and all transferred tools passed hash
+verification. The [streaming platform preparation](baselines/2026-09-14-source-identity-stream-platform-preparation-1.json)
+retains exact source packaging, tools and the unchanged twelve-process diagnostic
+schedule. Eight existing commitment oracle checks are planned on Intel, followed
+by four disposable APFS/ExFAT recovery tests and eight journal-origin cases.
+The collector now recognizes the additional correctness results and rejects
+partial output; eight local JSON checks cover that tool change. No Intel tests,
+new-candidate measurements or host-release claim is made at this checkpoint.
+The first local packaging attempt stopped on Git tar permission-mode assumptions
+before transfer; an explicit tar umask corrected packaging, with source bytes
+unchanged and the original archive/failure retained.
+
 ## Completed content diagnostic: performance HOLD
 
 The [complete diagnostic evidence](baselines/2026-09-14-source-identity-content-diagnostic-result-1.json)
