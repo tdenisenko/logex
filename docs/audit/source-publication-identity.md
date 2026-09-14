@@ -35,11 +35,16 @@ remaining uncertainty still prevent clearance. Thermal snapshots report CPU
 speed limits 78–100, which cannot assign a cause to individual samples or justify
 excluding them. Controls are never subtracted, and earlier packets are not pooled.
 
-The next bounded hypothesis is direct reservation of each row header to reduce
-repeated capacity checks while preserving the exact transcript and recovery state.
-The isolated prototype has passed source review only; it is unbuilt, untested
-and unmeasured. No further performance claim or unchanged benchmark rerun follows
-from this result. CI, PR and merge remain pending.
+A [direct-row-header reservation prototype](baselines/2026-09-15-source-identity-header-reservation-result-1.json)
+was subsequently built and tested in isolation. All 29 module tests and 448 benchmark boundary cases pass. The
+fixed local comparison retained 48 samples, 384 fixture passes and two warmups.
+Independent arithmetic verifies a paired median change of -1.4150%, with
+opposite-order means -1.9664%/+0.3031% and an adverse pair of +10.5793%. Pooled
+mean savings were only 0.0271 ms per 15,360-row fixture. This small mixed component
+effect does not justify duplicated header encoding or establish useful ingestion
+margin, so the prototype is not retained in production. The next source review
+examines overlapping commitment work with existing column workers. CI, PR and
+merge remain pending.
 
 Mac-mini testing finished on September 14 at 19:14:50 UTC. Collection and the
 final read-only process review completed at 19:16:30 UTC; only the reporter and

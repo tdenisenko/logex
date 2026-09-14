@@ -1,0 +1,113 @@
+{
+  "schema": "logex-header-reservation-result-v1",
+  "disposition": "REJECTED_UNRETAINED_COMPONENT_PROTOTYPE",
+  "acceptance_granted": false,
+  "reason": "Small mixed component effects do not establish enough ingestion margin; prototype not retained. No production integration or acceptance rerun.",
+  "baseline_commit": "28ef516acd2a16028464e4e9094dbf19590cd7d2",
+  "candidate_wrapper_sha256": "aa452260042d28f19afd25f53da5dbff32771305545f97f2e0908873b96aa88e",
+  "candidate_stream_sha256": "d8f5d61f18b0756b32da6a9ea0e146da522595f038958a6ebb2ccdc52d444ca7",
+  "measurement": {
+    "host": "local ARM64 actual module component",
+    "samples": 48,
+    "timed_fixture_passes": 384,
+    "warmups": 2,
+    "paired_median_percent": -1.4150431263550034,
+    "faster_pairs": 17,
+    "total_pairs": 24,
+    "worst_pair_percent": 10.579262139051426,
+    "all_observations_retained": true,
+    "limits": "CPU construction/finalization/drop component only. No ingestion acceptance; source28ef full comparison remains NOT_CLEAR."
+  },
+  "correctness": {
+    "exact_tests": 29,
+    "baseline_tests": 13,
+    "candidate_tests": 16,
+    "boundary_oracles": 448,
+    "same_binary_assembly_retained": true
+  },
+  "provenance": {
+    "build_proof": {
+      "source": "/private/tmp/logex-source-identity-header-reservation-component-run-1/build/build-result.json",
+      "bytes": 19221,
+      "sha256": "6c52ae415d223b2f3afbed241390163dfbb358483c80a415231dabfe6aa31e87"
+    },
+    "correctness_proof": {
+      "source": "/private/tmp/logex-source-identity-header-reservation-component-run-1/correctness/correctness-result.json",
+      "bytes": 24226,
+      "sha256": "ad04b80c080a767b0623f3c801d4071d682135dfdc2e331769b0adf4a73c020e"
+    },
+    "run_proof": {
+      "source": "/private/tmp/logex-source-identity-header-reservation-component-run-1/run/run-result.json",
+      "bytes": 17900,
+      "sha256": "b324cc6e390a843250870be6bba944533d5a005e6a38c389a0238ac75fff5b9b"
+    },
+    "independent_review": {
+      "source": "/private/tmp/logex-source-identity-header-reservation-result-review-1/review.json",
+      "bytes": 1065,
+      "sha256": "7794b00881a90f355a1f530408a97414eecd723b61472e41af28416d9cd124bc"
+    },
+    "binary_sha256": "0ca16680b1fea6e3c858d852e943949b6cced7b8b79185b84e063ff97a99f608",
+    "donor": "Earlier isolated stream-cost dependency/library scaffolding; current baseline/candidate modules are explicit frozen inputs. Donor/source inventories and fresh compiler artifact proof retained."
+  },
+  "archive": {
+    "status": "EVERY_ARCHIVED_BYTE_AND_ALIAS_VERIFIED",
+    "archive": {
+      "source": "/Users/tdenisenko/code/logex/docs/audit/baselines/2026-09-15-source-identity-header-reservation-result-1-raw.jsonl.gz",
+      "bytes": 319111,
+      "sha256": "fd9894a7ec22fd342174ffeba3363c27078c03ed1f900598a46f19241be7d48c"
+    },
+    "records": 110,
+    "aliases": 41,
+    "payload_bytes": 1784863,
+    "uncompressed_jsonl_bytes": 1870300,
+    "exclusions": [
+      {
+        "source": "/private/tmp/logex-source-identity-header-reservation-component-run-1/build/retained-binaries/row_buffer_header_cost",
+        "bytes": 3577088,
+        "sha256": "0ca16680b1fea6e3c858d852e943949b6cced7b8b79185b84e063ff97a99f608",
+        "reason": "Compiled executable omitted; original remains intact, exact build/Cargo/assembly/run proof and hash retained."
+      },
+      {
+        "source": "/private/tmp/logex-source-identity-header-reservation-component-run-1/target/release/build/logex-storage/5a8db8e435d2c04b/out/row_buffer_header_cost-5a8db8e435d2c04b",
+        "bytes": 3577088,
+        "sha256": "0ca16680b1fea6e3c858d852e943949b6cced7b8b79185b84e063ff97a99f608",
+        "reason": "Compiled executable omitted; original remains intact, exact build/Cargo/assembly/run proof and hash retained."
+      },
+      {
+        "source": "/private/tmp/logex-source-identity-header-reservation-component-run-1/source",
+        "reason": "Recreated donor source tree omitted. Actual complete source inventory equals retained build/source-before-build.json; precise baseline/candidate modules and harness snapshots are included separately.",
+        "file_count": 850,
+        "inventory": {
+          "source": "/private/tmp/logex-source-identity-header-reservation-component-run-1/build/source-before-build.json",
+          "bytes": 111505,
+          "sha256": "b809a4f193c8e11f2499ba8e031f3aa5e580e49be94804659f7d8d2f2d18d641"
+        }
+      },
+      {
+        "source": "/private/tmp/logex-source-identity-header-reservation-component-run-1/target",
+        "reason": "Recreated dependency/target cache tree omitted, not a measurement. No whole-tree byte hash claimed. Exact used executable identities above and complete actual Cargo compiler records remain included."
+      },
+      {
+        "source": "/private/tmp/logex-source-identity-header-reservation-component-run-1/correctness/tmp/xcrun_db",
+        "bytes": 1700,
+        "sha256": "8f366bb9d1b67c00b5eb2f97680136b785703bbc29356e1d94376dc940d37f79",
+        "reason": "Nonmeasurement tool scratch cache omitted; all command stdout/stderr and tool identities retained."
+      }
+    ],
+    "source_files_verified": 850,
+    "observations_omitted": 0,
+    "originals_unchanged": true
+  },
+  "raw_references": {
+    "manifest": "packaging/evidence-manifest.json",
+    "raw_observations": "logex-source-identity-header-reservation-component-run-1/run/records.json",
+    "independent_review": "logex-source-identity-header-reservation-result-review-1/review.json",
+    "package_script": "packaging/package.py"
+  },
+  "prior_evidence": "2026-09-14-source-identity-aligned-full-result-1.json",
+  "corrections_retained": [
+    "Pre-execution raw-symbol selector correction with actual llvm-objdump help.",
+    "Pre-execution HOME-preservation correction; prior reviews/scripts retained."
+  ],
+  "no_reruns_or_exclusions_of_observations": true
+}
