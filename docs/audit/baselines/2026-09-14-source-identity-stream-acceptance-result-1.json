@@ -1,0 +1,98 @@
+{
+  "schema": "logex-stream-acceptance-result-v1",
+  "disposition": "NOT_CLEAR",
+  "acceptance_granted": false,
+  "candidate_commit": "84ecac65488f858c4e9d4c4294b0b5c7f68e80b2",
+  "baseline_commit": "9c0a58fc64fac3da7f5a50b3a20b7ab729f029e9",
+  "archive": {
+    "status": "ALL_ARCHIVED_BYTES_ROUNDTRIP_VERIFIED",
+    "archive": {
+      "path": "/Users/tdenisenko/code/logex/docs/audit/baselines/2026-09-14-source-identity-stream-acceptance-result-1-raw.jsonl.gz",
+      "bytes": 8962556,
+      "sha256": "37531039418b9e474782a12f49404e3b9ecd8a5987980ff680e85c25e72f5c27"
+    },
+    "file_count": 1551,
+    "payload_bytes": 184760973,
+    "uncompressed_jsonl_bytes": 201688070,
+    "original_collection_verified_members": 1435,
+    "exclusions": [
+      {
+        "path": "/private/tmp/logex-source-identity-stream-acceptance-collected-1/evidence.tar",
+        "bytes": 80599040,
+        "sha256": "3695af8b57416c0644a65395ff52b7da781fed83e92486e3d0072c795bb88540",
+        "reason": "Nonmeasurement reproducible image/executable, or redundant verified tar container; original retained intact."
+      }
+    ]
+  },
+  "numeric_result": {
+    "acceptance_granted": false,
+    "confounding_review_required": true,
+    "controls_subtracted": false,
+    "draws": 10000,
+    "engineering_review_required": true,
+    "errors": [],
+    "explicit_warmups": 320,
+    "metrics": 25,
+    "numerical_below_limit_count": 44,
+    "numerical_eligibility_only": false,
+    "observations": 44800,
+    "observed_temporal_units": 8,
+    "primary_endpoints": 50,
+    "processes": 256,
+    "rss_records": 256,
+    "sensitivity_hold_count": 2,
+    "status": "NUMERICAL_RESULTS_PENDING_ENGINEERING_REVIEW",
+    "units_per_control_stratum": 4
+  },
+  "independent_verification": {
+    "status": "INDEPENDENT_VERIFICATION_PASSED",
+    "acceptance_granted": false,
+    "errors": [],
+    "script_sha256": "525c900763fa63b4e23c58b23c87d6fee3e15368ebe0407d404d15acbd65b227",
+    "chunk": 128,
+    "counts": {
+      "exact_checks": 25363,
+      "draw_effect_scalars": 1500000
+    },
+    "processes": 256,
+    "samples": 44800,
+    "warmups": 320,
+    "rss": 256,
+    "commands": 646
+  },
+  "historical_publication": {
+    "median_effect_percent": 16.35197,
+    "median_nominal99_lower_percent": 12.51803,
+    "median_nominal99_upper_percent": 18.83332,
+    "p95_effect_percent": 14.51021,
+    "p95_nominal99_lower_percent": 9.71631,
+    "p95_nominal99_upper_percent": 17.11132,
+    "pair_medians_above10": 15,
+    "source_pairs": 16,
+    "interpretation": "Repeatable above-limit median workload cost. P95 fails clearance/sensitivity but its lower bound does not independently establish >10% at nominal99%."
+  },
+  "engineering_disposition": "NOT CLEAR.44/50 numerical endpoints below limit and2sensitivity holds. Do not rerun unchanged candidate seeking acceptance. Investigate concrete source cost before another implementation/acceptance decision; other unresolved bounds remain independent blockers. No control subtraction, observation exclusion or pooling with earlier packets.",
+  "remaining_source_upper_bounds": [
+    "historical publication median",
+    "historical publication p95",
+    "live publication p95",
+    "dense ordered query p95",
+    "sparse COUNT p95",
+    "sparse ordered query p95"
+  ],
+  "host_context": "All130thermal snapshots retained, CPU speed limit75\u2013100. No per-process causal assignment, filtering or unthrottled claim. Contemporary controls cannot be subtracted or dismiss the stable source median cost.",
+  "release": "Mac-mini released2026-09-14 14:03:26UTC after retained idle review; later separately authorized profiling is outside this packet.",
+  "raw_references": {
+    "all_packet": "collected/unpacked/",
+    "full_analysis_and_draw_vectors": "collected/analysis-1/",
+    "independent_arithmetic": "collected/independent-verification-1/",
+    "retained_invocations": "collected/invocation-sources/retained-invocations.json",
+    "engineering": "engineering-review/review.md",
+    "every_investigation_flag": "engineering-review/all-investigation-flags.json",
+    "source_cost_review": "source-review/review.md",
+    "manifest": "packaging/manifest.json",
+    "packager": "packaging/package.py"
+  },
+  "preservation": "All1,435original collected files hash/size-verified; every1,551archive record byte-compared to original. Includes original attempts, partial metrics, complete1.5million draw scalar checks and all records. Only redundant verified original tar excluded with exact identity; original retained intact. No source/build/test/benchmark/remote changes in packaging.",
+  "limits": "Conditional bootstrap bounds and small observed temporal-unit counts do not provide unconditional error guarantees. No source correctness defect inferred solely from performance; rest of offline audit and CI/PR/merge remain incomplete."
+}

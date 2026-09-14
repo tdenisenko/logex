@@ -4,8 +4,8 @@ This batch follows merged PR #149 and is in progress. It binds derived indexes
 and recovery to the exact logical source prefix. The serial implementation is
 rejected on ingestion cost; its streaming replacement at `84ecac65` passes all
 nine local gates with the measured 64 KiB buffer choice. Its Intel commitment and
-APFS/ExFAT recovery controls pass. The fixed streaming diagnostic substantially
-reduces historical ingestion cost, but performance clearance, CI and merge remain open.
+APFS/ExFAT recovery controls pass. The full streaming comparison is **NOT CLEAR**: historical publication is
++16.352% median and +14.510% p95. Performance correction, CI and merge remain open.
 The rest of the offline audit is also incomplete. Current formats and the
 replacement design are in [Logical-prefix commitment and compatibility](#logical-prefix-commitment-and-compatibility).
 
@@ -125,15 +125,40 @@ including 92% initially and 87% finally; the cooldown did not establish an
 unthrottled host. Those observations cannot attribute a particular timing effect
 to throttling and are retained without exclusions.
 
-The engineering disposition is to prepare one separately frozen full comparison
-of the exact tested source against PR #149, with contemporary same-binary
-controls, balanced process order and all earlier observations retained separately.
-The proposed four-suite campaign covers 25 metrics and 50 median/p95 endpoints;
-the runner and independent checks must pass review before execution. Controls
-will not be subtracted from source effects, and neither favorable pooled values
-nor correctness gates override unresolved order, host or tail-latency uncertainty.
-No additional diagnostic pairs or favorable-result reruns are authorized by this
-disposition. Performance acceptance remains pending.
+The diagnostic led to one separately frozen full comparison of the exact tested
+source against PR #149, with contemporary same-binary controls. That comparison
+is complete below. The original diagnostic remains unchanged; its favorable
+pooled values did not establish acceptance.
+
+## Completed full streaming comparison: NOT CLEAR
+
+The [complete comparison evidence](baselines/2026-09-14-source-identity-stream-acceptance-result-1.json)
+retains all 256 processes, 44,800 measurements, 320 warmups and 256 RSS records.
+All 1,435 collected members verify. Independent arithmetic passes 25,363 exact
+checks and all 1.5 million retained draw-effect scalars. Of 50 primary endpoints,
+44 meet the numerical limit; two sensitivity holds remain. This is not clearance.
+
+Historical publication rises from 23.206 to 27.000 ms: **+16.352% median**, with
+nominal one-sided 99% lower/upper bounds of **12.518%/18.833%**. Fifteen of 16
+source-pair medians exceed 10%; both orders, both halves and every leave-one-block-out
+median exceed 10%. The p95 effect is **+14.510%**, with bounds **9.716%/17.111%**.
+Its point and sensitivity fail clearance, but its lower bound does not establish
+an above-10% effect at that nominal level. The median evidence supports a
+repeatable above-limit cost under this workload.
+
+Live publication p95, dense ordered-query p95, sparse COUNT p95 and sparse
+ordered-query p95 also retain unresolved upper bounds. Benefits elsewhere cannot
+offset history. Contemporary controls and all 130 thermal snapshots remain
+visible; CPU speed limits range 75–100%, which does not authorize filtering,
+control subtraction or assigning a particular process cost to throttling.
+
+Mac-mini was released at 2026-09-14 14:03:26 UTC after collection and idle review.
+Do not rerun unchanged `84ecac65` seeking a pass. The bounded next step is source-cost
+attribution of the historical path before selecting a correction. Retained source
+review finds no duplicate full-prefix hash and proposes inspecting encoding,
+subtree dispatch, bounded state work and publication costs; these are hypotheses,
+not measured explanations. Any later profile is separate from acceptance samples.
+The full offline audit, relevant validation, CI and PR/merge remain incomplete.
 
 ## Completed content diagnostic: performance HOLD
 
