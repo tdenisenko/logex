@@ -1,0 +1,77 @@
+{
+  "schema": "logex-stream-platform-preparation-v1",
+  "status": "REMOTE_PREPARATION_BUILD_ACTIVE",
+  "acceptance_granted": false,
+  "candidate_commit": "84ecac65488f858c4e9d4c4294b0b5c7f68e80b2",
+  "remote_root": "/private/tmp/logex-audit-source-identity-quiet-20260913.YSSYXA/content-diagnostic-stream-84ecac65-20260914-1",
+  "checkpoint": {
+    "reported_by_root": "All852committed source blobs verified;32original transfer files plus5Intel-control and12collector files verified remotely. Build began2026-09-14 11:49:34UTC and remains active at this preparation checkpoint.",
+    "independent_packager_scope": "Local bytes, dedup aliases and tar identity verified; no remote access by packager. Runtime results belong to a later packet.",
+    "candidate_tests_run": false,
+    "candidate_measurements_run": false,
+    "mac_mini_released": false,
+    "user_data": "Untouched; operations confined to named disposable audit root."
+  },
+  "archive": {
+    "status": "EVERY_DECODED_BYTE_AND_ALIAS_VERIFIED",
+    "archive": {
+      "source": "/Users/tdenisenko/code/logex/docs/audit/baselines/2026-09-14-source-identity-stream-platform-preparation-1-raw.jsonl.gz",
+      "bytes": 122910,
+      "sha256": "798a039f0413367625ab057bade4055f6fe67b902b9a25fde2ccade70bffeebf"
+    },
+    "files": 47,
+    "deduplicated_paths": 33,
+    "payload_bytes": 442867,
+    "uncompressed_jsonl_bytes": 482641,
+    "exclusions": [
+      {
+        "source": "/private/tmp/logex-source-identity-stream-transfer-84ecac65-2/candidate-source.tar",
+        "bytes": 202792960,
+        "sha256": "5dcaaa6c76581308af5f02821fef2f7d4bb96f3361a6fd855932fc79e2acbb32",
+        "reason": "Reproducible committed-source tar; original retained intact, source inventory/verification and prior failure retained."
+      },
+      {
+        "source": "/private/tmp/logex-source-identity-stream-transfer-84ecac65-1/candidate-source.tar",
+        "bytes": 202792960,
+        "sha256": "a738d12784dcb6fb84fdc2e1c5022a76f793a4f15aeddcbc49b68541cf9c94d8",
+        "reason": "Reproducible committed-source tar; original retained intact, source inventory/verification and prior failure retained."
+      }
+    ]
+  },
+  "completed_static_checks": {
+    "collector_json_cases": 8,
+    "meaning": "Local JSON terminal-state checks only, not Intel storage correctness tests. Completed/failed retained; running/missing-finished rejected.",
+    "other_preparation": "Original scripts, templates, syntax/config checks and provenance retained verbatim."
+  },
+  "planned_execution": {
+    "intel_storage_controls": 8,
+    "distinct_mount_and_journal_controls": 12,
+    "mount_breakdown": "Four ignored distinct-mount tests plus eight journal-origin cases, with owned disposable ExFAT image and APFS roots.",
+    "cooldown": "One fixed600seconds after compilation/correctness, no retries or host thresholds.",
+    "diagnostic": {
+      "processes": 12,
+      "timings": 800,
+      "explicit_warmups": 0,
+      "rss": 12,
+      "metrics": 20,
+      "method": "Unchanged prior fixed diagnostic; two balanced source pairs per publication/dense/sparse suite. All observations retained, no replacement runs or source acceptance."
+    }
+  },
+  "original_packaging_failure": "First source tar verifier rejected group-writable default git tar modes before transfer. Corrected packager explicitly sets tar.umask0022; all source blobs unchanged. Original failure/script/tar identity retained.",
+  "raw_references": {
+    "manifest": "packaging/manifest.json",
+    "packager": "packaging/package.py",
+    "preparation": "preparation/",
+    "resolved_transfer": "transfer2/",
+    "prior_failure": "transfer2/prior-packaging-failure.json",
+    "intel_controls": "intel-controls/",
+    "collector": "collector-v4/"
+  },
+  "deduplication": "Manifest records every duplicate original path, size, SHA and canonical archived_as target; all33 aliases verified byte-identical. Empty duplicate files may share canonical records.",
+  "scope_exclusions": [
+    "Only current fixed diagnostic preparation included. Later full-acceptance proposal is not adopted and not part of this packet.",
+    "Original current/failed source tar containers omitted with exact SHA/size/location; retained source inventory and packaging scripts reproduce committed source. No timing observations excluded.",
+    "No build completion, tests, measurements, clean-host/release or performance clearance is claimed."
+  ],
+  "prior_dispositions": "All prior diagnostic/performance HOLDs and packet dispositions remain unchanged."
+}

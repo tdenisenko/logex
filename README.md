@@ -365,9 +365,28 @@ Command samples:
 ```
 
 Normal historical sync already writes compacted sealed segments and continuously
-builds the current query index profile. `build-indexes` is mainly for older data
-directories, interrupted indexing, or changed index profiles. `compact` is
-mainly for older data directories or changed compression profiles.
+builds the current query index profile. `build-indexes` handles interrupted
+indexing and changed index profiles. `compact` handles older representations or
+changed compression profiles.
+
+This version uses catalog 13 and segment manifest 11. Start sync in a new data
+directory when upgrading from earlier native formats; they are rejected without
+migration or reset. Retain the original directory until its replacement is
+validated. The version checks also prevent earlier native readers and writers
+from silently ignoring the new source metadata.
+
+Indexes require a storage-owned namespace and a commitment to the exact logical
+row prefix. Standalone legacy raw sources remain scan-readable, but an index
+rebuild cannot establish missing identity. Explicit index builds report this
+condition; background indexing skips repeated rebuild attempts and records the
+reason at debug log level. A complete standalone raw rewrite can establish a new
+identity; there is no native in-place identity migration command.
+See the [source identity audit](docs/audit/source-publication-identity.md) for
+the format and recovery details.
+
+To roll back, use the matching older binary with a preserved pre-upgrade data
+directory or backup. Do not change version fields to bypass compatibility checks;
+no downgrade migration is provided.
 
 ## Config File
 

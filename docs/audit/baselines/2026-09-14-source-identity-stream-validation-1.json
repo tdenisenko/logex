@@ -1,0 +1,210 @@
+{
+  "status": "ALL_NINE_LOCAL_GATES_PASSED",
+  "source_manifest": "workspace-gates-2-inputs.json",
+  "source_files": 106,
+  "source_manifest_sha256": "84b86212073737d1fd75ea0b3c95c9de74cf9fce370cd473f0c776934c5a261d",
+  "results": [
+    {
+      "name": "vendor",
+      "command": [
+        "python3",
+        "tools/verify_datafusion_vendor.py"
+      ],
+      "exit_code": 0,
+      "elapsed_s": 0.08887410163879395,
+      "source_unchanged": true,
+      "log_sha256": "d8d80949d6f3378c14456842b531f0cade514179e4c94781b95ff9abb6447675"
+    },
+    {
+      "name": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "exit_code": 0,
+      "elapsed_s": 0.7524409294128418,
+      "source_unchanged": true,
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "name": "check",
+      "command": [
+        "cargo",
+        "check",
+        "--workspace",
+        "--all-targets",
+        "--locked",
+        "--offline",
+        "-j",
+        "2"
+      ],
+      "exit_code": 0,
+      "elapsed_s": 6.649481773376465,
+      "source_unchanged": true,
+      "log_sha256": "3f5a4f6bb5418e157cffad89af4cf858b56da987e33e651497ac63f27319581f"
+    },
+    {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--locked",
+        "--offline",
+        "-j",
+        "2",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit_code": 0,
+      "elapsed_s": 7.202507972717285,
+      "source_unchanged": true,
+      "log_sha256": "c2b1c3001e6a7a841907e30313cc6377dc558c369a9d055402d2cce53a9cbbf6"
+    },
+    {
+      "name": "test",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace",
+        "--all-targets",
+        "--locked",
+        "--offline",
+        "-j",
+        "2"
+      ],
+      "exit_code": 0,
+      "elapsed_s": 279.8074369430542,
+      "source_unchanged": true,
+      "log_sha256": "5dd53c28df095d786ebf441e82561ae1da2d3ffbc5d71750ecc9049a4a6f1bb2",
+      "totals": {
+        "passed": 1179,
+        "failed": 0,
+        "ignored": 23
+      }
+    },
+    {
+      "name": "docs",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace",
+        "--doc",
+        "--locked",
+        "--offline",
+        "-j",
+        "2"
+      ],
+      "exit_code": 0,
+      "elapsed_s": 18.719413995742798,
+      "source_unchanged": true,
+      "log_sha256": "0aa85a161e1c60a1e0ab6fb39b07c8af83c5ee2aaa9417faf4533109021daab3",
+      "totals": {
+        "passed": 0,
+        "failed": 0,
+        "ignored": 0
+      }
+    },
+    {
+      "name": "release",
+      "command": [
+        "cargo",
+        "build",
+        "-p",
+        "logex-node",
+        "--release",
+        "--locked",
+        "--offline",
+        "-j",
+        "2"
+      ],
+      "exit_code": 0,
+      "elapsed_s": 106.76533818244934,
+      "source_unchanged": true,
+      "log_sha256": "3cc29cb8cdf5e28756a1fbb6778d38735a614b1690653b391f9fccf5f0fc5bf3"
+    },
+    {
+      "name": "query-release",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "logex-query",
+        "--release",
+        "--locked",
+        "--offline",
+        "-j",
+        "2"
+      ],
+      "exit_code": 0,
+      "elapsed_s": 435.4779760837555,
+      "source_unchanged": true,
+      "log_sha256": "a1710f0dfc5c0f322636881d74f0651157e40bb859050a5a7efb746af5d9bfa6",
+      "totals": {
+        "passed": 149,
+        "failed": 0,
+        "ignored": 9
+      }
+    },
+    {
+      "name": "api-release",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "logex-server",
+        "--release",
+        "--test",
+        "consistency",
+        "--locked",
+        "--offline",
+        "-j",
+        "2"
+      ],
+      "exit_code": 0,
+      "elapsed_s": 84.69375801086426,
+      "source_unchanged": true,
+      "log_sha256": "afbccfdbbce1c1cd655701a54cb647004dfc0fcfc98d0474c28727f6e7fa7bdb",
+      "totals": {
+        "passed": 2,
+        "failed": 0,
+        "ignored": 0
+      }
+    }
+  ],
+  "limitations": [
+    "No ingestion performance acceptance; platform and CI still pending.",
+    "First failed iteration input manifest was overwritten by second runner; final manifest preserved separately, all test outputs retained."
+  ],
+  "archive": {
+    "file": "2026-09-14-source-identity-stream-validation-1-raw.jsonl.gz",
+    "bytes": 202126,
+    "sha256": "0bb03c16ccdbdacab7af27bc65319c1c35d88ac9a9c59e1a22b363c1570d0038",
+    "records": 56,
+    "payload_bytes": 1102109,
+    "roundtrip": "all records and decoded bytes verified"
+  },
+  "source": {
+    "parent_commit": "e9c7fb2ca4c2d5ecce886ee4d1a0a16d6f47717b",
+    "tracked_patch": "source.patch",
+    "new_component": "source/crates/logex-storage/src/commitment/stream.rs",
+    "files": {
+      "crates/logex-index/src/builder.rs": "38dff17a2cf2b756f6186f3443971e6bfaa414e26c1b5714941256b9027653a8",
+      "crates/logex-storage/src/column.rs": "70acd774dc80f9c1c43e85705f139223d77b3c6c93b5f3dfc6f358739328fb3f",
+      "crates/logex-storage/src/column_artifact.rs": "88d669b1d7067411b2bf93f117034b22f8d69af7f66b59c05e8073d8ec2318e2",
+      "crates/logex-storage/src/commitment.rs": "b5f93c2e2ac870b10912b0895a6c66d5f287f1cfbbfdb2e478a764fe7600b6ec",
+      "crates/logex-storage/src/lib.rs": "83bacb4f88b270cf773deb49b4e80a0f30c2057fec220d67efd41839a17254e5",
+      "crates/logex-storage/src/native/catalog.rs": "ffe52506e6984add993f460c739a55d6e8c9db06b7f95df20a14944fc3ce9731",
+      "crates/logex-storage/src/native/recovery.rs": "e98661d988194233ff37ecc03a30d905485cf57f8a6ae270917b2e7cafcda574",
+      "crates/logex-storage/src/native/segment.rs": "5c92113a4be31b470b6769dbfb45ab9fb27c089b91ff5f940bdaaaa0acf3cc17",
+      "crates/logex-storage/src/native/storage.rs": "d86352786375e2e9794aa80fc6120b513bc73a3442a86e52879e17de13bd211d",
+      "crates/logex-storage/src/segment_reader.rs": "5c4519df5c2717c210a525581164fcd03520971e2af275779e9c0402b5ea6b5d",
+      "crates/logex-storage/src/commitment/stream.rs": "d0f1f156e5172e6c9f8aba80f072f2764222fd39eb6d4eef4d0349c3cce76a5f"
+    }
+  }
+}

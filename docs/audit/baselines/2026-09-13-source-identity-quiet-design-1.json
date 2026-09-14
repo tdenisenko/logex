@@ -1,0 +1,250 @@
+{
+  "schema": 1,
+  "status": "prepared_before_measurements",
+  "user_environment_change": "User reports stopping most mac-mini processes and authorizes isolated testing; other files and external-volume contents remain untouched.",
+  "remote_root": "/private/tmp/logex-audit-source-identity-quiet-20260913.YSSYXA",
+  "read_only_build_root": "/private/tmp/logex-source-identity-controls-4.uHyHMD",
+  "candidate_commit": "c229ace0345dd7b6b8c07388d3c0aed8a9c6a771",
+  "design": {
+    "schema": "logex-host-control-eligibility-v1",
+    "status": "design_only_not_executed",
+    "purpose": "Finite control-only host precision check; neither acceptance nor source-causal inference.",
+    "candidate_commit": "c229ace0345dd7b6b8c07388d3c0aed8a9c6a771",
+    "host_root": "/private/tmp/logex-audit-source-identity-quiet-20260913.YSSYXA",
+    "configuration_source": {
+      "path": "/private/tmp/logex-source-identity-complete-baseline-release-plan-1.json",
+      "sha256": "5726d604802238368cc9e5b059168da7be626395d447c7a662b53c68572855bc"
+    },
+    "fixtures": [
+      {
+        "path": "crates/logex-query/tests/audit_harness.rs",
+        "package": "logex-query",
+        "target": "audit_harness",
+        "sha256": "f70018f9aa42a3de4d05e86281406d14e039214d4ad02d82a56fa7a44c21f1b4",
+        "unchanged_from_baseline": true,
+        "changed_dependency_expected": true
+      },
+      {
+        "path": "crates/logex-storage/tests/ingestion_publication.rs",
+        "package": "logex-storage",
+        "target": "ingestion_publication",
+        "sha256": "c87085b1684937ee669cad376493c9a8d7f4008b2a82cf14228c3ba93e880f50",
+        "unchanged_from_baseline": true,
+        "changed_dependency_expected": true
+      }
+    ],
+    "suites": [
+      {
+        "name": "index_binding_paths",
+        "target": "audit_harness",
+        "test": "benchmark_index_publication_binding_query_paths",
+        "environment": {
+          "LOGEX_BINDING_ROWS": "20000",
+          "LOGEX_BINDING_SEGMENT_ROWS": "8192",
+          "LOGEX_BINDING_REPEATS": "100"
+        },
+        "samples_per_process": {
+          "binding_block_hash_point": 100,
+          "binding_block_number_range": 100,
+          "binding_timestamp_range": 100,
+          "binding_erc20_topic1_present": 100,
+          "binding_erc20_topic1_absent": 100
+        }
+      },
+      {
+        "name": "publication",
+        "target": "ingestion_publication",
+        "test": "benchmark_sync_storage_publication",
+        "environment": {
+          "LOGEX_PUBLICATION_BLOCKS": "128",
+          "LOGEX_PUBLICATION_ROWS_PER_BLOCK": "128",
+          "LOGEX_PUBLICATION_WARM_HEADERS": "8192",
+          "LOGEX_PUBLICATION_HISTORY_BLOCKS": "2048",
+          "LOGEX_PUBLICATION_HISTORY_CACHED_HEAD": "1",
+          "LOGEX_PUBLICATION_SEGMENT_ROWS": "1000000",
+          "LOGEX_PUBLICATION_REPEATS": "10",
+          "LOGEX_PUBLICATION_HEADER_FIELDS": "rich",
+          "LOGEX_PUBLICATION_PAYLOAD": "mixed",
+          "LOGEX_PUBLICATION_READ_MODE": "selected",
+          "LOGEX_PUBLICATION_ROUTE": "both",
+          "LOGEX_PUBLICATION_CHECKPOINT_EACH_BLOCK": "0",
+          "LOGEX_PUBLICATION_DURABLE_CHECKPOINT": "0"
+        },
+        "samples_per_process": {
+          "live_storage_publication": 10,
+          "historical_storage_publication": 10
+        }
+      },
+      {
+        "name": "integrated_sparse",
+        "target": "audit_harness",
+        "test": "benchmark_storage_indexes_and_queries",
+        "environment": {
+          "LOGEX_BENCH_PROFILE": "sparse",
+          "LOGEX_BENCH_ROWS": "20000",
+          "LOGEX_BENCH_SEGMENT_ROWS": "8192",
+          "LOGEX_BENCH_BATCH_ROWS": "4096",
+          "LOGEX_BENCH_WORKERS": "4",
+          "LOGEX_BENCH_REPEATS": "10"
+        },
+        "samples_per_process": {
+          "live_storage_ingest": 10,
+          "index_build": 10,
+          "compaction": 10,
+          "reopen": 10,
+          "native_filter": 10,
+          "sql_count": 10,
+          "sql_ordered": 10,
+          "concurrent_native_queries": 10,
+          "historical_storage_ingest": 10
+        }
+      }
+    ],
+    "binary_rule": "One exact candidate release binary per harness for both A/B labels; same fixture configuration in independent temporary directories; record hashes before execution.",
+    "schedule": {
+      "rounds": 12,
+      "pairs_per_suite": 12,
+      "execution": "Sequential processes, each pair completed before next; no adaptive additions.",
+      "suite_order_by_round_modulo_3": [
+        [
+          "index_binding_paths",
+          "publication",
+          "integrated_sparse"
+        ],
+        [
+          "publication",
+          "integrated_sparse",
+          "index_binding_paths"
+        ],
+        [
+          "integrated_sparse",
+          "index_binding_paths",
+          "publication"
+        ]
+      ],
+      "pair_order": "AB in odd one-based rounds, BA in even rounds; six each per suite.",
+      "balance": "Each suite occupies each position four times.",
+      "processes": 72,
+      "measured_timings": {
+        "index_binding_paths": 12000,
+        "publication": 480,
+        "integrated_sparse": 2160,
+        "total": 14640
+      },
+      "explicit_short_query_warmups": 120,
+      "rss_records": 72
+    },
+    "analysis": {
+      "statistics": [
+        "median",
+        "p95"
+      ],
+      "median_definition": "Middle ordered observation, or arithmetic mean of the two middle observations for even n.",
+      "p95_definition": "Nearest rank, one-based ceil(0.95*n).",
+      "label_effect_percent": "100*(statistic(B)/statistic(A)-1), pooling observations from resampled whole processes within the relevant group.",
+      "bootstrap": {
+        "draws": 4000,
+        "seed": 2026091304,
+        "generator": "Python random.Random",
+        "procedure": "Visit suites in declared suite order. For each draw sample six AB pair indices and six BA pair indices independently with replacement, using random.randrange(6) six times per stratum. Reuse each suite draw for all its metrics/statistics. Preserve ascending round order in each original stratum and retain exact draw indices.",
+        "interval": "Two-sided percentile95 interval: sorted bootstrap values at zero-based indices99 and3899.",
+        "unit": "Whole paired processes, retaining every measured observation within each selected process.",
+        "reruns": false
+      },
+      "order_drift": {
+        "effect": "AB label-effect percent minus BA label-effect percent, computed independently within the two strata for each bootstrap draw.",
+        "units": "percentage points",
+        "eligibility": "Entire95% interval inside[-5,5] percentage points for both statistics of every required metric.",
+        "limit": "Detects within-pair order sensitivity; does not establish absence of all temporal drift."
+      },
+      "required_metrics": {
+        "index_binding_paths": [
+          "binding_block_hash_point",
+          "binding_block_number_range",
+          "binding_timestamp_range",
+          "binding_erc20_topic1_present",
+          "binding_erc20_topic1_absent"
+        ],
+        "publication": [
+          "live_storage_publication",
+          "historical_storage_publication"
+        ],
+        "integrated_sparse": [
+          "concurrent_native_queries"
+        ]
+      },
+      "reporting": "Report all5short,2publication,9integrated-sparse metrics, RSS, warmups, per-process summaries, all bootstrap draws and failures. Other metrics remain context, not undeclared gating endpoints.",
+      "exclusions": "Only declared warmups excluded from measured summaries. No trimming, dropped outliers, control subtraction or pooling with previous host/source evidence."
+    },
+    "outcomes": {
+      "ELIGIBLE": "Every required median/p95 label-effect95% interval lies wholly within[-5,5] percent, every required order-drift interval lies wholly within[-5,5] percentage points, and all expected counts, hashes and correctness oracles verify.",
+      "INCONCLUSIVE": "Any required wide/out-of-band interval, order drift, execution error, missing records, hash mismatch or oracle failure. Retain evidence and stop without replacing processes or repeating the packet.",
+      "stopping_rule": "One fixed packet only. No repeats to obtain eligibility."
+    },
+    "limits": [
+      "Hardware preflight is not proof of memory pressure or timing stability; low unused memory alone is insufficient.",
+      "Five percent is a precision budget, not permission for source regressions.",
+      "Intervals are conditional descriptive bootstrap intervals, not simultaneous guarantees.",
+      "Twelve pairs may not resolve publication tails; this produces INCONCLUSIVE.",
+      "Eligibility covers declared required metrics in this packet, not sustained host quietness.",
+      "A subsequent source comparison still requires a separate predeclared design and contemporary controls."
+    ],
+    "prepared_assets_scope": "Prepared local frozen design, control runner with separate read-only build root and output root, and byte-identical reusable analyzer. No measurements were collected during preparation; root separately orchestrates preflight, cooling, transfer and execution.",
+    "build_root": "/private/tmp/logex-source-identity-controls-4.uHyHMD",
+    "environment_experiment": {
+      "name": "newly authorized mac-mini quiet window after user stopped most workloads",
+      "prior_packet": {
+        "root": "/private/tmp/logex-source-identity-controls-4.uHyHMD/control-run",
+        "disposition": "INCONCLUSIVE",
+        "preservation": "Retain the complete previous packet separately; no pooling, replacement observations or retrospective exclusions."
+      },
+      "write_scope": "Only the clearly named new host_root. BUILD_ROOT supplies existing source, archive, build logs, inventory and saved binaries read-only; original build-result bytes and artifact paths remain unchanged.",
+      "cooling": {
+        "duration_seconds": 600,
+        "timing": "After preparation and root-orchestrated read-only source/build verification, before starting the packet.",
+        "orchestration": "Root retains timestamped probes at both endpoints and records elapsed cooling time. The runner retains its original startup and final read-only verification."
+      },
+      "admission": {
+        "both_endpoints_required": true,
+        "cpu_speed_limit_percent": 100,
+        "scheduler_limit_percent": 100,
+        "available_cpus": 6,
+        "on_failure": "Do not start the packet; retain probes and report INCONCLUSIVE. No automatic extra cooling/retry cycle.",
+        "memory": "Record memory observations; no arbitrary low-unused-memory admission rule."
+      },
+      "probes": "Retain all root-orchestrated cooling endpoint probes and existing per-pair host probes. No mid-packet environmental exclusions or replacement processes; existing precision rules determine eligibility.",
+      "stopping": "One complete fixed packet in this newly authorized environment; execution or validation failures stop as before. No adaptive repeats."
+    }
+  },
+  "file_hashes": {
+    "directory-creation.json": "b6947c981e8e1b37b04deba238457e0c879a69ab3683070d752f5f9c3e661f0c",
+    "remote-root.txt": "621f0385e1e6ec39b39d9a7f065e93a55dbf325bc927c89654a54dff4fadda83",
+    "preflight.py": "25daf133eca21b17ca1eb6095a195df13b7119fac06d92f4c1f51d19ac89442a",
+    "preflight.stdout.json": "69a2a79a1fbd0b9126801c44868a177f467a4936a82525d922a023af49b492c7",
+    "preflight.stderr.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "preflight-driver.json": "9d9ae1f14a8bb84f3184ba9767b20767d2301f8487eaf868aae35ad6bb0b53f1",
+    "preparation.json": "7074c1f18a64645379a170e9c306ab52b21519b9cc7694f8723945bff50b3160",
+    "quiet-preparation.patch": "d5e56fb6b5d6254317404e226664b4f46ec301f132d2b7f6faba67057b0dac00",
+    "scripts/control_design.json": "d7edf0b2229ca8441144d2c640fa1dc95dee616f44e7ad07355ee6d29a909cb2",
+    "scripts/control_run.py": "3c642d58fb89639e0cd6577e133a507eb2f8884feec7acd0047fbdf11f7bb19d",
+    "scripts/control_analyze.py": "08d818c411464452390a82cc4427f4b80082231d24562ba21b5da61324b57d01",
+    "scripts/draft-before-scope-correction-control_design.json": "7117e0b1e2a99229ee4870b317134ac3dde0c4710ee17789c3349c8dc07dd551",
+    "scripts/draft-before-scope-correction-control_run.py": "25b83a2304ffc48eb224b8a86bf0396e689bd2c7de1cd0af5e626d5f8bd33156",
+    "cooling.py": "9dead4e1c64657000bbc741315601ee5aef67b8192a66857c903ee519584def8",
+    "cooling-before-failure-retention.py": "87fd3578b54237e98540e161c953bbe7acaec7c0cadedc7aa36002179c2d76fd",
+    "cooling-checks.json": "f0b412cc337657a714dfc1610f5eec8c0fdbc5b53ea626858f46230d62aa92f1",
+    "transfer.json": "69b574e1d5cd816bb8b62fea916dca5d05e7283ec6de2ea685fcb3e9688490da",
+    "cooling-transfer.json": "5fc83bdb879eb2563ccbc1267432bb48c574cf4f99ce9397793ecba2969e090f",
+    "draft-before-scope-correction-preparation.json": "735ede511ff1a1e8e707090359ce30a5cc616ff2db12efc5df00de663ae53e8d",
+    "draft-before-scope-correction-quiet-preparation.patch": "9ef6fcab2360a67726e1fb87da63000933a66bad80b08aa4bbc53914531b90db"
+  },
+  "preflight": "Existing exact source inventory and both saved binaries verified read-only. Fixed cooling/admission is orchestrated separately; no benchmark result yet.",
+  "review": "Narrow output/build root split reviewed; analyzer unchanged; three local fake-probe checks verify cooling normal/timeout/spawn-error paths.",
+  "preservation": "Prior inconclusive packet remains unchanged and separately reported. No pooled evidence, replacements or changed performance limit.",
+  "raw_evidence": {
+    "path": "2026-09-13-source-identity-quiet-design-1-raw.json.gz",
+    "bytes": 24705,
+    "sha256": "b1dcc705d63693e554f22b856374e30f3e7013918437bf6065ae2a04d8ab7728",
+    "files": 20
+  }
+}

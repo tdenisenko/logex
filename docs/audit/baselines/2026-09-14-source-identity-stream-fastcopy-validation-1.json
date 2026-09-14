@@ -1,0 +1,209 @@
+{
+  "schema": "logex-stream-fastcopy-validation-v1",
+  "status": "NINE_LOCAL_GATES_PASS_PERFORMANCE_PENDING",
+  "acceptance_granted": false,
+  "verification": {
+    "status": "ALL_NINE_GATES_AND_COMMITTED_INPUTS_VERIFIED",
+    "commit": "da36819b4b9efd0cc1abdb091af29abb489f971b",
+    "source_inputs": 106,
+    "gates": {
+      "vendor": {
+        "name": "vendor",
+        "command": [
+          "python3",
+          "tools/verify_datafusion_vendor.py"
+        ],
+        "exit_code": 0,
+        "elapsed_s": 0.06366300582885742,
+        "source_unchanged": true
+      },
+      "fmt": {
+        "name": "fmt",
+        "command": [
+          "cargo",
+          "fmt",
+          "--all",
+          "--",
+          "--check"
+        ],
+        "exit_code": 0,
+        "elapsed_s": 0.8461258411407471,
+        "source_unchanged": true
+      },
+      "check": {
+        "name": "check",
+        "command": [
+          "cargo",
+          "check",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "elapsed_s": 7.889446973800659,
+        "source_unchanged": true
+      },
+      "clippy": {
+        "name": "clippy",
+        "command": [
+          "cargo",
+          "clippy",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "exit_code": 0,
+        "elapsed_s": 7.874359130859375,
+        "source_unchanged": true
+      },
+      "test": {
+        "name": "test",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "elapsed_s": 277.2055730819702,
+        "source_unchanged": true
+      },
+      "docs": {
+        "name": "docs",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--doc",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "elapsed_s": 11.084212064743042,
+        "source_unchanged": true
+      },
+      "release": {
+        "name": "release",
+        "command": [
+          "cargo",
+          "build",
+          "-p",
+          "logex-node",
+          "--release",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "elapsed_s": 118.90191197395325,
+        "source_unchanged": true
+      },
+      "query-release": {
+        "name": "query-release",
+        "command": [
+          "cargo",
+          "test",
+          "-p",
+          "logex-query",
+          "--release",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "elapsed_s": 484.99097180366516,
+        "source_unchanged": true
+      },
+      "api-release": {
+        "name": "api-release",
+        "command": [
+          "cargo",
+          "test",
+          "-p",
+          "logex-server",
+          "--release",
+          "--test",
+          "consistency",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "elapsed_s": 108.8767306804657,
+        "source_unchanged": true
+      }
+    },
+    "test_totals": {
+      "test": {
+        "passed": 1180,
+        "failed": 0,
+        "ignored": 23,
+        "measured": 0,
+        "filtered_out": 0
+      },
+      "docs": {
+        "passed": 0,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered_out": 0
+      },
+      "query-release": {
+        "passed": 149,
+        "failed": 0,
+        "ignored": 9,
+        "measured": 0,
+        "filtered_out": 0
+      },
+      "api-release": {
+        "passed": 2,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered_out": 0
+      }
+    },
+    "scope": "Read-only independent log/source checks; no tests rerun."
+  },
+  "archive": {
+    "source": "/Users/tdenisenko/code/logex/docs/audit/baselines/2026-09-14-source-identity-stream-fastcopy-validation-1-raw.jsonl.gz",
+    "bytes": 38566,
+    "sha256": "a9cc932927b5a9b45d0b869a38ecded7314b4f129db4588cd47747e268642f82"
+  },
+  "files": 23,
+  "payload_bytes": 160370,
+  "uncompressed_jsonl_bytes": 167718,
+  "every_decoded_byte_verified": true,
+  "exclusions": [],
+  "remote_checkpoint": {
+    "root": "/private/tmp/logex-audit-source-identity-quiet-20260913.YSSYXA/content-diagnostic-fastpath-da36819b-20260914-1",
+    "status": "ISOLATED_BUILD_ACTIVE",
+    "launch_utc": "2026-09-14T14:55:25UTC",
+    "pid": 70879,
+    "provenance": "Root-reported operational checkpoint; packager performs no remote access. No new-source Intel controls or measurements claimed."
+  },
+  "limits": "Local correctness/build gates only. Prior16.352%historical fullcomparison failure remains; ARM component improvement does not clear sync. No performance closure, CI/PR/merge or host-release claim.",
+  "raw_references": {
+    "gates": "gates/",
+    "verifier_and_packager": "packaging/package.py",
+    "manifest": "packaging/manifest.json"
+  }
+}

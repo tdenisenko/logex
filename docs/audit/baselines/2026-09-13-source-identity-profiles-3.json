@@ -1,0 +1,26 @@
+{
+  "schema": 1,
+  "candidate_commit": "7e411084385e80d6700978288d8e46dd89a63cb4",
+  "jobs": [
+    {
+      "attempt": 4,
+      "name": "query_paths",
+      "exit": 0,
+      "sample_exit": 0,
+      "usable_sampled_stacks": true,
+      "instrumented_record_counts": {
+        "config": 1,
+        "warmup": 5,
+        "sample": 1000
+      }
+    }
+  ],
+  "findings": [
+    "Attempt4 uses the exact schema candidate binary and unchanged bounded query fixture. Running with the required execution permission, both workload and one-second sampler complete successfully. The profile contains usable call stacks, including selected artifact opens and source-marker reads. It covers all five query paths and does not quantify removable time for any one path. All1000 instrumented timings and five warmups remain separate from acceptance comparisons. No sudo or system-wide profiling was used."
+  ],
+  "raw_evidence": {
+    "path": "2026-09-13-source-identity-profiles-3.json.gz",
+    "sha256": "dae31c9243d5a605876ab0be9c803b5e490343bcd7eca90ba1dad09f7d83c39a",
+    "files": 5
+  }
+}

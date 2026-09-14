@@ -1,0 +1,26 @@
+{
+  "schema": 1,
+  "candidate_commit": "7bfcf4595fc4bc5df63c5d010fd8640af3585186",
+  "jobs": [
+    {
+      "attempt": 3,
+      "name": "query_paths",
+      "exit": 0,
+      "sample_exit": 255,
+      "usable_sampled_stacks": false,
+      "instrumented_record_counts": {
+        "config": 1,
+        "warmup": 5,
+        "sample": 1000
+      }
+    }
+  ],
+  "findings": [
+    "Attempt3 uses the final candidate, unchanged bounded query fixture and one-second sampler without -mayDie. The workload completed with 1000 instrumented timings and five warmups; the sampler exited255 without a profile because it could not examine the process. No privilege escalation was attempted. This provides no hotspot attribution. All instrumented records remain excluded from acceptance."
+  ],
+  "raw_evidence": {
+    "path": "2026-09-13-source-identity-profiles-2.json.gz",
+    "sha256": "c90452951f26b6c9df2215ece821477c24689b450826746d20bc9123f1b04b2f",
+    "files": 4
+  }
+}

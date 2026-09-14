@@ -1,0 +1,80 @@
+{
+  "schema": "logex-stream-aligned-result-v1",
+  "disposition": "COMPONENT_IMPROVEMENT_ONLY_PERFORMANCE_HOLD",
+  "acceptance_granted": false,
+  "component_baseline": "Exact da36819b fast-copy modules, not older84ecac65",
+  "candidate_uncommitted_at_checkpoint": true,
+  "candidate_wrapper_sha256": "3592f7d59137ab10df78fc1c85e26a0c3cf5b6d649a0a9518c48c02b26891d17",
+  "candidate_stream_sha256": "275a465426a203429b3236883fedd31fd9c77e1e11c7dae3dd1bdbb893e248f1",
+  "build_proof_sha256": "a568c10fd543da632f26da15bd8b13471b79bdef955deebb120f6de6c134cfc1",
+  "binary_sha256": "f28e2d0eca31ffe362b9530c9052cd152d7cc878ac34cbe5c45ee1648f2bbdc7",
+  "archive": {
+    "status": "EVERY_DECODED_BYTE_VERIFIED",
+    "archive": {
+      "source": "/Users/tdenisenko/code/logex/docs/audit/baselines/2026-09-14-source-identity-stream-aligned-result-1-raw.jsonl.gz",
+      "bytes": 224860,
+      "sha256": "17d5e8710958255662cbc1593cfdaea607b49680e31d35ea437aeded76317c66"
+    },
+    "files": 94,
+    "payload_bytes": 969713,
+    "uncompressed_jsonl_bytes": 1035064,
+    "exclusions": [
+      {
+        "path": "/private/tmp/logex-source-identity-stream-aligned-component-run-1/target",
+        "reason": "Recreated source/dependency/target tree; exact donor inventories, source additions, inputs and command/artifact proofs retained. No observations omitted."
+      },
+      {
+        "path": "/private/tmp/logex-source-identity-stream-aligned-component-run-1/source",
+        "reason": "Recreated source/dependency/target tree; exact donor inventories, source additions, inputs and command/artifact proofs retained. No observations omitted."
+      },
+      {
+        "source": "/private/tmp/logex-source-identity-stream-aligned-component-run-1/build/retained-binaries/row_buffer_aligned_cost",
+        "bytes": 3539248,
+        "sha256": "f28e2d0eca31ffe362b9530c9052cd152d7cc878ac34cbe5c45ee1648f2bbdc7",
+        "reason": "Compiled executable omitted; exact hash/size and build/run proof retained, original intact."
+      }
+    ]
+  },
+  "measurement": {
+    "host": "local ARM64, actual production path modules",
+    "samples": 48,
+    "fixture_passes": 384,
+    "warmups": 2,
+    "paired_median_percent": -8.540412,
+    "pairs_faster": 22,
+    "pairs_total": 24,
+    "adverse_pairs_percent": [
+      23.662193,
+      3.3606
+    ],
+    "cycle_sensitivity": "All four cycle medians improve, but cycle1mean worsens; all raw values/order/cycle summaries retained.",
+    "limits": "Component construction/finalization/drop only; no storage publication. ARM~0.286ms median saving cannot quantify Intel sync gap or grant acceptance. No observations excluded or repeated."
+  },
+  "controls": "448boundary/state oracle controls and11reload splits pernamespace pass before timing. Independent raw verification checks all48samples/384passes/2warmups and222reported arithmetic scalars.",
+  "independent_review_sha256": "9b2ef19c224cff7e4f1a58023441bffcadf1d85876a02245cca9f9fed0642867",
+  "validation": {
+    "format": "rustfmt completed; its recorded stream formatting change precedes tests",
+    "focused_passed": 13,
+    "storage_passed": 309,
+    "storage_ignored": 5,
+    "strict_storage_clippy": "passed",
+    "source_after_format": "Exact final module hashes above unchanged through focused/storage/Clippy.",
+    "full_workspace_gates": "Not part of this checkpoint; next after source commit."
+  },
+  "execution": "Single10.98s release build, four build commands exit0; single3.15s run exit0. Complete original command/supervisor exits, controls, donor inventories, authorizations and scripts retained.",
+  "raw_references": {
+    "actual_modules": "component-prep/inputs/",
+    "raw_run": "component-run/run/",
+    "build_provenance": "component-run/build/",
+    "all_analysis": "component-analysis/analysis.json",
+    "independent_review": "component-review/review.json",
+    "source_tool_review": "review/",
+    "tail_design_review": "tail-review/",
+    "validation": "validation/",
+    "root_invocations": "root-scripts/",
+    "manifest": "packaging/manifest.json",
+    "packager": "packaging/package.py"
+  },
+  "exclusion_policy": "Only recreatedsource/target and compiledexecutable excluded; exactdonorinventories/sourceadditions/modulebytes/buildprooffiles retained, executablehash/size listed. All originals intact.",
+  "engineering": "Supports considering a separately frozen bounded Intel end-to-end diagnostic after correctness/provenance gates. No full campaign/PR/performance closure; prior da368 and84ecac65holds remain unchanged."
+}

@@ -1047,7 +1047,20 @@ mod tests {
         }
     }
 
+    fn copy_index_directory(source: &Path, target: &Path) {
+        fs::create_dir_all(target).unwrap();
+        for entry in fs::read_dir(source).unwrap() {
+            let entry = entry.unwrap();
+            assert!(entry.file_type().unwrap().is_file());
+            fs::copy(entry.path(), target.join(entry.file_name())).unwrap();
+        }
+    }
+
     fn setup_storage() -> (TempDir, PartitionManager) {
+        setup_storage_with_rows(&make_test_rows())
+    }
+
+    fn setup_storage_with_rows(rows: &[LogRow]) -> (TempDir, PartitionManager) {
         let tmp = TempDir::new().unwrap();
         let mut storage = PartitionManager::open(PartitionManagerConfig {
             data_dir: tmp.path().to_path_buf(),
@@ -1055,10 +1068,98 @@ mod tests {
             compaction_safety_margin_blocks: 2_048,
         })
         .unwrap();
-        storage.write_batch(&make_test_rows()).unwrap();
+        storage.write_batch(rows).unwrap();
         IndexBuilder::build_all_indexes(&storage.hot_partition().meta.path).unwrap();
         storage.checkpoint().unwrap();
         (tmp, storage)
+    }
+
+    #[test]
+    fn divergent_native_clones_do_not_share_index_publications() {
+        fn copy_fixture_tree(source: &Path, target: &Path) {
+            fs::create_dir_all(target).unwrap();
+            for entry in fs::read_dir(source).unwrap() {
+                let entry = entry.unwrap();
+                let kind = entry.file_type().unwrap();
+                let destination = target.join(entry.file_name());
+                if kind.is_dir() {
+                    copy_fixture_tree(&entry.path(), &destination);
+                } else {
+                    assert!(kind.is_file(), "fixture contains only regular files");
+                    fs::copy(entry.path(), destination).unwrap();
+                }
+            }
+        }
+
+        let (source_tmp, mut source) = setup_storage();
+        source.checkpoint_durable().unwrap();
+        drop(source);
+        let target_tmp = TempDir::new().unwrap();
+        copy_fixture_tree(source_tmp.path(), target_tmp.path());
+        let reopen = |path: &Path| {
+            PartitionManager::open(PartitionManagerConfig {
+                data_dir: path.to_path_buf(),
+                partition_target_rows: 1_000_000,
+                compaction_safety_margin_blocks: 2_048,
+            })
+            .unwrap()
+        };
+        let mut source = reopen(source_tmp.path());
+        let mut target = reopen(target_tmp.path());
+        assert_eq!(
+            SegmentReader::open(&source.hot_partition().meta.path)
+                .unwrap()
+                .source_namespace(),
+            SegmentReader::open(&target.hot_partition().meta.path)
+                .unwrap()
+                .source_namespace(),
+            "both copies must descend from the same source incarnation"
+        );
+        for (storage, mut rows) in [
+            (&mut source, make_test_rows()),
+            (&mut target, make_alternate_rows()),
+        ] {
+            for row in &mut rows {
+                row.block_number += 2;
+                row.timestamp += 24;
+            }
+            storage.write_batch(&rows).unwrap();
+            storage.checkpoint_durable().unwrap();
+            IndexBuilder::build_all_indexes(&storage.hot_partition().meta.path).unwrap();
+        }
+        let source_dir = source.hot_partition().meta.path.clone();
+        let target_dir = target.hot_partition().meta.path.clone();
+        let filter = NativeLogFilter::new().with_addresses(vec![Address::repeat_byte(0xCC)]);
+        let expected = full_scan_row_ids(&target_dir, &filter);
+        assert_eq!(expected, vec![2]);
+        assert_eq!(
+            candidate_row_ids(&target_dir, &filter, true, 4).unwrap(),
+            expected
+        );
+        drop(source);
+        drop(target);
+        copy_index_directory(&source_dir.join("indexes"), &target_dir.join("indexes"));
+        assert_indexed_result_matches_scan_or_errors(
+            &target_dir,
+            &filter,
+            "a complete index set from a divergently appended database copy",
+        );
+    }
+
+    #[test]
+    fn complete_native_checkpoint_set_copied_across_datasets_is_not_silently_trusted() {
+        let (_source_tmp, source) = setup_storage_with_rows(&make_test_rows());
+        let (_target_tmp, target) = setup_storage_with_rows(&make_alternate_rows());
+        let source_dir = &source.hot_partition().meta.path;
+        let target_dir = &target.hot_partition().meta.path;
+        copy_index_directory(&source_dir.join("indexes"), &target_dir.join("indexes"));
+        let filter = NativeLogFilter::new().with_addresses(vec![Address::repeat_byte(0xCC)]);
+
+        assert_indexed_result_matches_scan_or_errors(
+            target_dir,
+            &filter,
+            "a complete native checkpoint set from another dataset",
+        );
     }
 
     #[test]
@@ -1172,6 +1273,43 @@ mod tests {
             &target,
             &filter,
             "a complete ERC-20 bloom from another source",
+        );
+    }
+
+    #[test]
+    fn complete_checkpoint_and_indexes_copied_across_legacy_sources_are_not_silently_trusted() {
+        let tmp = TempDir::new().unwrap();
+        let source = tmp.path().join("source");
+        let target = tmp.path().join("target");
+        write_legacy_source(&source, &make_test_rows());
+        write_legacy_source(&target, &make_alternate_rows());
+        IndexBuilder::build_all_indexes(&source).unwrap();
+
+        copy_index_directory(&source.join("indexes"), &target.join("indexes"));
+        let filter = NativeLogFilter::new().with_addresses(vec![Address::repeat_byte(0xCC)]);
+
+        assert_indexed_result_matches_scan_or_errors(
+            &target,
+            &filter,
+            "a complete checkpoint and index set from an equal-row legacy source",
+        );
+    }
+
+    #[test]
+    fn equal_row_legacy_source_replacement_does_not_silently_reuse_old_indexes() {
+        let tmp = TempDir::new().unwrap();
+        write_legacy_source(tmp.path(), &make_test_rows());
+        IndexBuilder::build_all_indexes(tmp.path()).unwrap();
+
+        // Replace every source column while preserving the row boundary. The
+        // independently scanned source now differs from the published indexes.
+        write_legacy_source(tmp.path(), &make_alternate_rows());
+        let filter = NativeLogFilter::new().with_addresses(vec![Address::repeat_byte(0xCC)]);
+
+        assert_indexed_result_matches_scan_or_errors(
+            tmp.path(),
+            &filter,
+            "indexes published before an equal-row legacy source replacement",
         );
     }
 

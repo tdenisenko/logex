@@ -1,0 +1,122 @@
+{
+  "schema": 1,
+  "disposition": "VERIFIED_BUILD_AND_PREPARATION_ONLY",
+  "source_performance_accepted": false,
+  "source_comparison_executed": false,
+  "design": "2026-09-14-source-identity-direct-design-1.json",
+  "candidate_build": "2026-09-13-source-identity-remote-build-final.json",
+  "baseline": {
+    "commit": "9c0a58fc64fac3da7f5a50b3a20b7ab729f029e9",
+    "archive_sha256": "2a115d0ac9baaca613124577191f61feaab75427d5d9fa2634262dee2074b876",
+    "own_lock_sha256": "2b852b9c3f192174cc7ec6f1979a72237e4a3f0bdd561f4355fa4690b6c7fb1b",
+    "source_inventory_sha256": "e850e935b8100ea572c9fbfb15891c348293c8d231250cf4643b3b1dd448fb0b",
+    "source_files": 720,
+    "toolchain": "nightly-2026-08-24",
+    "host": {
+      "cpu_count": 6,
+      "machine": "x86_64",
+      "platform": "macOS-15.7.9-x86_64-i386-64bit",
+      "python": "3.9.6 (default, Apr 30 2025, 02:07:18) \n[Clang 17.0.0 (clang-1700.0.13.5)]",
+      "uname": [
+        "Darwin",
+        "Macmini",
+        "24.6.0",
+        "Darwin Kernel Version 24.6.0: Tue Jul 21 20:50:07 PDT 2026; root:xnu-11417.140.69.711.44~1/RELEASE_X86_64",
+        "x86_64",
+        "i386"
+      ]
+    },
+    "commands": 16,
+    "all_command_returncodes_zero": true,
+    "started": "2026-09-13T17:21:25.624714+00:00",
+    "finished": "2026-09-13T17:48:39.140619+00:00",
+    "build_result_sha256": "70f8110822b2caa8a8d0484a43142a87f935df43086b75ad2724c38d7e27ac76",
+    "build_environment": "Private cloned registry/git cache and fresh target; explicit pinned compiler/rustdoc; locked offline workspace release --no-run; CARGO_BUILD_JOBS=2.",
+    "features": "Actual compiler-artifact JSON confirms Zstd0.13.3 features arrays/default/experimental/legacy/zdict_builder and fresh:false for both harnesses."
+  },
+  "frozen_inputs": {
+    "raw_file": "direct-execution-preparation/frozen-inputs.json",
+    "sha256": "c2fbd29dba478e28d6126a2ed7ed4d37a8e5c517df36fa321fd735d812cab22e",
+    "revisions": {
+      "baseline": {
+        "archive": "/private/tmp/logex-audit-source-identity-quiet-20260913.YSSYXA/baseline-build-9c0a58fc/baseline-source.tar",
+        "binaries": {
+          "audit_harness": {
+            "path": "/private/tmp/logex-audit-source-identity-quiet-20260913.YSSYXA/baseline-build-9c0a58fc/target/retained-binaries/audit_harness",
+            "sha256": "76c307ca51522c2008c51bdcd36ac4ee6720a9f633f90ddfb338dd8a0da86170"
+          },
+          "ingestion_publication": {
+            "path": "/private/tmp/logex-audit-source-identity-quiet-20260913.YSSYXA/baseline-build-9c0a58fc/target/retained-binaries/ingestion_publication",
+            "sha256": "433b8c7309d1a7eda775615a2ad7d850b0ef4195e2c803afefe140391b2228c4"
+          }
+        },
+        "build_result": "/private/tmp/logex-audit-source-identity-quiet-20260913.YSSYXA/baseline-build-9c0a58fc/build-result.json",
+        "build_result_sha256": "70f8110822b2caa8a8d0484a43142a87f935df43086b75ad2724c38d7e27ac76",
+        "inventory": "/private/tmp/logex-audit-source-identity-quiet-20260913.YSSYXA/baseline-build-9c0a58fc/tmp/source-inventory.json",
+        "source_root": "/private/tmp/logex-audit-source-identity-quiet-20260913.YSSYXA/baseline-build-9c0a58fc/source"
+      },
+      "candidate": {
+        "archive": "/private/tmp/logex-source-identity-controls-4.uHyHMD/candidate-source.tar",
+        "binaries": {
+          "audit_harness": {
+            "path": "/private/tmp/logex-source-identity-controls-4.uHyHMD/target/retained-binaries/audit_harness",
+            "sha256": "36c6dc4eb04a86e08dc4b5dbd0be0fa4e0bf987550163f31c6eb52817d6978f7"
+          },
+          "ingestion_publication": {
+            "path": "/private/tmp/logex-source-identity-controls-4.uHyHMD/target/retained-binaries/ingestion_publication",
+            "sha256": "73e50bddd87bbd55abb14f7ca6078d631c3667292527573fe18ea0c5a0594b91"
+          }
+        },
+        "build_result": "/private/tmp/logex-source-identity-controls-4.uHyHMD/build-result.json",
+        "build_result_sha256": "ea6a18c23f3edf194ce3c387ee3aeee22b288862846a6905dee7e60c7e6ebc19",
+        "inventory": "/private/tmp/logex-source-identity-controls-4.uHyHMD/tmp/source-inventory.json",
+        "source_root": "/private/tmp/logex-source-identity-controls-4.uHyHMD/source"
+      }
+    }
+  },
+  "verification": {
+    "independent_local": {
+      "record": "baseline-build-preparation/independent-evidence-verification.json",
+      "sha256": "99481cb564cba640428b0120157689348d18866be20433ae29db9f4105bb83ce",
+      "safe_regular_members": 36,
+      "command_logs_rehashed": 32,
+      "source_files_compared_to_exact_git_archive": 720,
+      "scope": "Local verifier independently checked original archive bytes, every source inventory entry/mode, own lockfile, all successful commands/log hashes and exact fresh workspace release compiler records. Remote compiled bytes were not in evidence tar."
+    },
+    "remote": {
+      "status": "VERIFIED_INPUTS_NO_MEASUREMENTS",
+      "files_verified": 1590,
+      "frozen_inputs_sha256": "c2fbd29dba478e28d6126a2ed7ed4d37a8e5c517df36fa321fd735d812cab22e"
+    },
+    "remote_script": "direct-execution-preparation/freeze-and-verify-remote.py",
+    "remote_logs": [
+      "direct-execution-preparation/input-verification.stdout.log",
+      "direct-execution-preparation/input-verification.stderr.log"
+    ],
+    "remote_scope": "Root invoked the exact frozen runner verify_builds against both retained builds, including binary bytes and all1590 pinned inputs; no measurements."
+  },
+  "operations": {
+    "transfer_tar_sha256": "0e41a233a5e1cdd1e8d855bc0ec067cc22e8fa9d67e2800204e640470e3c2679",
+    "transfer_verifier_sha256": "288c2ec95ed71b33f812240737dea1faabf46da99477f8d54f1ea0219dc304ad",
+    "cooldown_script_sha256": "2fd4a4d3b000ddea293c06ccbc881bc5614f107a609ec44e7db0d484289cf919",
+    "cooldown_seconds": 600,
+    "cooldown_status": "Running at packaging; active driver log and final endpoint observations belong to the later execution packet.",
+    "policy": "One fixed cooldown after compilation/preparation, no automatic retry, CPU thresholds, control precision admission, exclusions or replacement observations."
+  },
+  "retention": {
+    "completed_baseline_and_operational_files": "All files under both local preparation roots retained, except the currently growing cooldown-driver.log. Includes original build script, patch, transfer/driver logs, safe evidence tar, collected copies, verifier and frozen inputs. Earlier candidate build failures remain in linked original build/preparation evidence.",
+    "no_observation_pooling": true,
+    "excluded": [
+      "Active direct-execution-preparation/cooldown-driver.log: incomplete while packaging; retain with later cooldown/execution evidence.",
+      "Full source archive/tree and compiled binaries: exact hashes/paths/inventory linked; not duplicated."
+    ]
+  },
+  "raw_packet": {
+    "path": "2026-09-14-source-identity-direct-build-1-raw.json.gz",
+    "sha256": "241ff432bc078abb2edc8f261c992dbddc64537ab3338dd5a3290da9c8f2cee8",
+    "bytes": 994645,
+    "files": 70,
+    "source_bytes": 11932372,
+    "roundtrip": "Every archived file decoded, SHA256/length checked and compared byte-for-byte to its retained original."
+  }
+}

@@ -24,6 +24,12 @@ impl IndexBuilder {
         profile: IndexBuildProfile,
     ) -> std::io::Result<bool> {
         let reader = SegmentReader::open_projected(partition_dir, &[])?;
+        if reader.source_namespace().is_none() || reader.source_commitment()?.is_none() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "source identity or prefix commitment is missing; use fresh storage or a storage-owned rewrite before indexing",
+            ));
+        }
         let Some(checkpoint) = IndexReadCheckpoint::open(partition_dir, &reader)? else {
             return Ok(true);
         };
@@ -460,6 +466,56 @@ mod tests {
                 source: Source::Receipt,
             },
         ]
+    }
+
+    #[test]
+    fn obsolete_canonical_envelopes_fail_before_index_rebuild() {
+        for (version, header_bytes) in [(1, 50), (2, 124)] {
+            let dir = TempDir::new().unwrap();
+            ColumnFile::write_batch(dir.path(), &make_test_rows()).unwrap();
+            let bitmap = SegmentReader::open(dir.path())
+                .unwrap()
+                .read_canonical()
+                .unwrap();
+            let canonical_path = dir.path().join("canonical.bitmap");
+            let current = fs::read(&canonical_path).unwrap();
+            // Reproduce the complete older envelope, including its own checksum.
+            // Unsupported formats must fail before rebuilding derived artifacts.
+            let mut obsolete = current[..header_bytes].to_vec();
+            obsolete[8] = version;
+            let checksum = crc32fast::hash(&obsolete);
+            obsolete.extend_from_slice(&checksum.to_le_bytes());
+            bitmap.write_to(&mut obsolete).unwrap();
+            fs::write(&canonical_path, &obsolete).unwrap();
+            let reader = SegmentReader::open(dir.path()).unwrap();
+            assert_eq!(
+                reader.source_commitment().unwrap_err().kind(),
+                std::io::ErrorKind::InvalidData
+            );
+            for profile in [
+                IndexBuildProfile::All,
+                IndexBuildProfile::LogQuery,
+                IndexBuildProfile::Erc20Transfer,
+            ] {
+                assert_eq!(
+                    IndexBuilder::indexes_missing(dir.path(), profile)
+                        .unwrap_err()
+                        .kind(),
+                    std::io::ErrorKind::InvalidData
+                );
+                assert_eq!(
+                    IndexBuilder::build_missing_indexes(dir.path(), profile)
+                        .unwrap_err()
+                        .kind(),
+                    std::io::ErrorKind::InvalidData
+                );
+                assert!(!dir.path().join("indexes").exists());
+                assert_eq!(fs::read(&canonical_path).unwrap(), obsolete);
+            }
+            ColumnFile::write_batch(dir.path(), &make_test_rows()).unwrap();
+            IndexBuilder::build_all_indexes(dir.path()).unwrap();
+            assert!(!IndexBuilder::indexes_missing(dir.path(), IndexBuildProfile::All).unwrap());
+        }
     }
 
     #[test]

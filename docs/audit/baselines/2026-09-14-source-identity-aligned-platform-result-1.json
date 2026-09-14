@@ -1,0 +1,107 @@
+{
+  "schema": "logex-aligned-platform-validation-v1",
+  "status": "PLATFORM_CHECKS_PASSED_FULL_PERFORMANCE_PENDING",
+  "candidate_commit": "28ef516acd2a16028464e4e9094dbf19590cd7d2",
+  "source_changed": false,
+  "compatibility_or_migration_required": false,
+  "build": {
+    "finished": "2026-09-14T18:03:26.394453+00:00",
+    "actual_command_exits": [
+      0,
+      0
+    ],
+    "source_files": 870,
+    "unchanged_input_pins": 2610,
+    "unchanged_dependency_source_entries": 35841,
+    "storage_test_binary_sha256": "7a2bc57da6097662ce5dcd6a55ddeb2c36442ef499447a07afebd1f9ad3cf316"
+  },
+  "correctness": {
+    "commitment_tests": 13,
+    "cross_mount_tests": 4,
+    "journal_origin_tests": 8,
+    "mount_commands": 48,
+    "all_test_and_command_exits_zero": true,
+    "disposable_image_detached": true,
+    "finished": "2026-09-14T18:10:18.113444+00:00"
+  },
+  "preserved_failure": {
+    "cargo_exit": 101,
+    "cause": "The isolated PATH omitted the existing protocol compiler. The explicit pinned PROTOC environment correction used the installed binary without installation or source changes.",
+    "tests_executed": false,
+    "failed_proof_sha256": "34d1f7664adaddc4ebf306642e29853e9b2fdc039ce79f0a6344adf34d6c6760",
+    "evidence_files_preserved_unchanged": 33
+  },
+  "protoc": {
+    "version": "libprotoc 35.1",
+    "sha256": "774abef6b7840730dee9a1366233e7e3bda87962619b115c9b5d34d831dfe0ad"
+  },
+  "independent_reviews": {
+    "build": "847203cfb2171d7ab4256b83c488e4a898d575a62085d866699ff7ba0cfc6ce0",
+    "controls": "623f1a0fee0324307eab9c0d933ced8210e902ed1911f9cd69658aa21aaab45f",
+    "mount": "2095a3f2aa2627d7c120a1ed70338970538865c7290b15ca4fe56b4e4fb8c519"
+  },
+  "archive": {
+    "status": "EVERY_ARCHIVED_BYTE_AND_ALIAS_VERIFIED",
+    "started": "2026-09-14T18:14:34.654573+00:00",
+    "acceptance_granted": false,
+    "actual_statuses": {
+      "build": {
+        "path": "/private/tmp/logex-source-identity-aligned-platform2-build-success-collected-1/files/aligned-platform-build-2/build-result.json",
+        "sha256": "d5847a86c55c81b2f9443da47bb91fb30b4d257f630b7c83487f45e6a5307699",
+        "status": "built_not_executed",
+        "finished": "2026-09-14T18:03:26.394453+00:00",
+        "errors": [],
+        "cleanup_errors": []
+      },
+      "controls": {
+        "path": "/private/tmp/logex-source-identity-aligned-platform2-controls-success-collected-1/files/aligned-intel-controls-1/controls-result.json",
+        "sha256": "c6b7bc9eaf834148136d8483b404f1263cbbafe8211f2825d9ac9cbc789ba8ab",
+        "status": "passed",
+        "finished": "2026-09-14T18:07:41.400757+00:00",
+        "errors": [],
+        "cleanup_errors": []
+      },
+      "mount": {
+        "path": "/private/tmp/logex-source-identity-aligned-platform2-mount-success-collected-1/files/aligned-mount-tests-1/mount-result.json",
+        "sha256": "7048548b5631ae3fe4bf859f2731ad289cf29f5936704099b102e29ec9a50d51",
+        "status": "COMPLETE_TESTS_AND_DETACH",
+        "finished": "2026-09-14T18:10:18.113444+00:00",
+        "errors": [],
+        "cleanup_errors": []
+      }
+    },
+    "archive": {
+      "source": "/private/tmp/logex-source-identity-aligned-platform-archive-result-1/raw.jsonl.gz",
+      "bytes": 13993439,
+      "sha256": "0bc770f0b70147fe7d8f7012246eaeca2e685ab5e734c83553de35a44c1bbe24"
+    },
+    "files": 265,
+    "aliases": 259,
+    "uncompressed_jsonl_bytes": 63343576,
+    "originals_unchanged": true,
+    "exclusions": [],
+    "finished": "2026-09-14T18:14:36.421329+00:00"
+  },
+  "root_byte_review": {
+    "status": "VERIFIED_ALL_ARCHIVED_BYTES",
+    "records": 265,
+    "aliases": 259,
+    "raw_sha256": "0bc770f0b70147fe7d8f7012246eaeca2e685ab5e734c83553de35a44c1bbe24",
+    "archive_bytes": 13993439,
+    "excluded_containers": 0,
+    "acceptance_granted": false
+  },
+  "raw_evidence_file": "2026-09-14-source-identity-aligned-platform-result-1.raw.jsonl.gz",
+  "limitations": [
+    "Performance acceptance, exact-head CI, PR and merge remain pending.",
+    "Mount runner verifies source hashes and image inode during execution; it does not emit a separate raw source-hash map or inode tuple.",
+    "Original local verifier mistakes are retained separately from actual build and test results."
+  ],
+  "dependency_notices": [
+    "discv5 0.10.4",
+    "proc-macro-error2 2.0.1",
+    "quinn 0.11.9",
+    "quinn-udp 0.5.14"
+  ],
+  "performance_acceptance": false
+}

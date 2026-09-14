@@ -1,0 +1,1950 @@
+{
+  "schema": 1,
+  "environment": {
+    "base_commit": "66d511ceac9bb086f6391acc67c7d21cfdb2709e",
+    "candidate_commit": "179e0ff7c7b2816c96d1a62195fa75b2cf8d3b09",
+    "recorded_at_utc": "2026-09-13T11:50:10.493827+00:00",
+    "runner_path": "/private/tmp/logex-storage-decode-tail-checks.py",
+    "runner_sha256": "eaaa5964095c2cddfd087da0692af1536d50190738b50f6402cc0cd053200ba1",
+    "runner_source": "\"\"\"Retain fixed dense storage confirmation and identical-executable controls.\"\"\"\nfrom pathlib import Path\nfrom collections import Counter\nfrom datetime import datetime, timezone\nimport hashlib\nimport json\nimport math\nimport os\nimport re\nimport statistics\nimport subprocess\nimport sys\n\nREPO = Path('/Users/tdenisenko/code/logex')\nMANIFEST = Path(sys.argv[1])\nROOT = Path(sys.argv[2])\nPLAN = json.loads(MANIFEST.read_text())\nROOT.mkdir(exist_ok=False)\n\n\ndef sha(path):\n    return hashlib.sha256(path.read_bytes()).hexdigest()\n\n\ndef output(command, cwd=REPO):\n    return subprocess.check_output(command, cwd=cwd, text=True).strip()\n\n\ndef append(path, record):\n    with path.open('a') as stream:\n        stream.write(json.dumps(record) + '\\n')\n\n\ndef stats(values):\n    assert values and all(math.isfinite(v) and v >= 0 for v in values)\n    return {'samples': len(values), 'median': statistics.median(values),\n            'p95': sorted(values)[math.ceil(len(values) * .95) - 1]}\n\n\ndef counters(log):\n    lines = log.read_text().splitlines()\n    timing = None\n    values = {}\n    for index, line in enumerate(lines):\n        match = re.match(r'^\\s*([0-9.]+) real\\s+([0-9.]+) user\\s+([0-9.]+) sys\\s*$', line)\n        if match:\n            assert timing is None, log\n            timing = index\n            values.update(zip(['real_seconds', 'user_seconds', 'sys_seconds'],\n                              map(float, match.groups())))\n        elif timing is not None:\n            match = re.match(r'^\\s*(\\d+)\\s{2,}(.+?)\\s*$', line)\n            assert match is not None, (log, line)\n            values[match.group(2).replace(' ', '_')] = int(match.group(1))\n    assert timing is not None and 'maximum_resident_set_size' in values, log\n    return {'counters': values, 'raw_time_output': '\\n'.join(lines[timing:])}\n\n\ndef timed(command, log, additions):\n    started_at = datetime.now(timezone.utc).isoformat()\n    command = ['/usr/bin/time', '-l', *command]\n    # Explicit benchmark parameters below must not inherit another experiment's settings.\n    env = {key: value for key, value in os.environ.items()\n           if not key.startswith(('LOGEX_BENCH_', 'LOGEX_PUBLICATION_', 'LOGEX_INLIST_'))}\n    env.update({'TMPDIR': '/private/tmp', **additions})\n    with log.open('w') as stream:\n        result = subprocess.run(command, stdout=stream, stderr=subprocess.STDOUT, env=env)\n    return {'command': command, 'started_at_utc': started_at,\n            'finished_at_utc': datetime.now(timezone.utc).isoformat(),\n            'environment_overrides': additions, 'exit': result.returncode,\n            'log': str(log), 'log_sha256': sha(log), **counters(log)}\n\n\ninitial = Path(PLAN['confirmation']['initial_directory'])\noriginal = json.loads((initial / 'environment.json').read_text())\nassert sha(initial / 'results.jsonl') == PLAN['confirmation']['initial_results_sha256']\nassert output(['git', 'rev-parse', 'HEAD']) == PLAN['candidate_commit'] == original['candidate_commit']\nfor entry in PLAN['fixtures']:\n    assert sha(REPO / entry['path']) == entry['sha256']\nfor suite in PLAN['benchmarks']:\n    assert len(suite['process_order']) == suite['pairs']\n    assert Counter(order[0] for order in suite['process_order']) == {'base': suite['pairs'] // 2, 'candidate': suite['pairs'] // 2}\n    assert all(sorted(order) == ['base', 'candidate'] for order in suite['process_order'])\n    for label in ('base', 'candidate'):\n        binary = initial / f\"{label}-{suite['target']}\"\n        assert sha(binary) == original['builds'][label]['artifacts'][suite['target']]['binary_sha256']\nmetadata = {\n    'base_commit': original['base_commit'], 'candidate_commit': original['candidate_commit'],\n    'recorded_at_utc': datetime.now(timezone.utc).isoformat(),\n    'runner_path': str(Path(__file__)), 'runner_sha256': sha(Path(__file__)),\n    'runner_source': Path(__file__).read_text(), 'plan': PLAN, 'plan_sha256': sha(MANIFEST),\n    'hardware': output(['sysctl', '-n', 'hw.model', 'hw.memsize', 'hw.ncpu']),\n    'os': output(['sw_vers']), 'rustc': output(['rustc', '-Vv']), 'cargo': output(['cargo', '-V']),\n    'filesystem': output(['df', '-h', '/private/tmp']),\n    'memory_before': output(['vm_stat']),\n    'original_environment_sha256': sha(initial / 'environment.json'),\n    'binaries': {suite['target']: original['binary_comparisons'][suite['target']] for suite in PLAN['benchmarks']},\n}\n(ROOT / 'environment.json').write_text(json.dumps(metadata))\nall_records = []\nfor suite in PLAN['benchmarks']:\n    name = suite['name']\n    suite_records = []\n    for pair, order in enumerate(suite['process_order']):\n        for label in order:\n            target = suite['target']\n            log = ROOT / f'{name}-{pair}-{label}.log'\n            binary_revision = suite['binary_revisions'][label]\n            command = [str(initial / f'{binary_revision}-{target}'), suite['test'], '--exact',\n                       '--ignored', '--nocapture', '--test-threads=1']\n            memory_before = output(['vm_stat'])\n            load_before = output(['sysctl', '-n', 'vm.loadavg'])\n            run = {'kind': 'run', 'suite': name, 'pair': pair, 'revision': label,\n                   'binary_revision': binary_revision, 'memory_before': memory_before, 'load_before': load_before,\n                   **timed(command, log, suite['environment'])}\n            run['memory_after'] = output(['vm_stat'])\n            run['load_after'] = output(['sysctl', '-n', 'vm.loadavg'])\n            append(ROOT / 'results.jsonl', run)\n            assert run['exit'] == 0, log\n            parsed = []\n            for line in log.read_text().splitlines():\n                if '{' not in line:\n                    continue\n                try:\n                    record = json.loads(line[line.index('{'):])\n                except json.JSONDecodeError:\n                    continue\n                record = {'raw_record': record, 'suite': name, 'pair': pair, 'revision': label}\n                parsed.append(record)\n                append(ROOT / 'results.jsonl', {'kind': 'fixture_record', **record})\n            configs = [r['raw_record'] for r in parsed if r['raw_record'].get('kind') == 'config']\n            samples = [r['raw_record'] for r in parsed if r['raw_record'].get('kind') == 'sample']\n            assert len(configs) == 1, log\n            assert Counter(r['metric'] for r in samples) == Counter(suite['samples_per_process']), log\n            for metric, expected in suite['samples_per_process'].items():\n                iterations = [r['iteration'] for r in samples if r['metric'] == metric]\n                assert len(iterations) == expected and len(set(iterations)) == expected, log\n            rss = {'raw_record': {'kind': 'rss', 'bytes': run['counters']['maximum_resident_set_size']},\n                   'suite': name, 'pair': pair, 'revision': label}\n            parsed.append(rss)\n            append(ROOT / 'results.jsonl', {'kind': 'fixture_record', **rss})\n            suite_records.extend(parsed)\n            for metric in [*suite['samples_per_process'], 'peak_rss']:\n                values = ([rss['raw_record']['bytes']] if metric == 'peak_rss' else\n                          [r['elapsed_ms'] for r in samples if r['metric'] == metric])\n                append(ROOT / 'results.jsonl', {'kind': 'process_summary', 'suite': name,\n                       'pair': pair, 'revision': label, 'metric': metric, **stats(values)})\n            print(name, pair, label, len(samples), 'samples retained', flush=True)\n    configs = [r['raw_record'] for r in suite_records if r['raw_record'].get('kind') == 'config']\n    assert len(configs) == suite['pairs'] * 2 and len({json.dumps(c, sort_keys=True) for c in configs}) == 1, name\n    for metric in [*suite['samples_per_process'], 'peak_rss']:\n        values = {}\n        for label in ('base', 'candidate'):\n            records = [r['raw_record'] for r in suite_records if r['revision'] == label]\n            values[label] = ([r['bytes'] for r in records if r.get('kind') == 'rss']\n                             if metric == 'peak_rss' else\n                             [r['elapsed_ms'] for r in records if r.get('kind') == 'sample'\n                              and r['metric'] == metric])\n            expected = suite['pairs'] if metric == 'peak_rss' else suite['pairs'] * suite['samples_per_process'][metric]\n            assert len(values[label]) == expected, (name, metric, label)\n        summarized = {label: stats(v) for label, v in values.items()}\n        record = {'kind': 'comparison', 'suite': name, 'metric': metric, 'values': summarized}\n        for measure in ('median', 'p95'):\n            before, after = (summarized[label][measure] for label in ('base', 'candidate'))\n            record[f'{measure}_change_percent'] = 100 * (after / before - 1)\n        append(ROOT / 'results.jsonl', record)\n        print(record, flush=True)\n    all_records.extend(suite_records)\n\nmetadata['retained_counts'] = dict(Counter(r['raw_record']['kind'] for r in all_records))\nassert metadata['retained_counts']['sample'] == PLAN['confirmation']['expected_samples']\nassert metadata['retained_counts']['rss'] == PLAN['confirmation']['expected_rss']\nmetadata['memory_after'] = output(['vm_stat'])\nfor name in ('results.jsonl',):\n    metadata[name] = {'path': str(ROOT / name), 'sha256': sha(ROOT / name)}\n(ROOT / 'environment.json').write_text(json.dumps(metadata))\nprint('Complete:', metadata['retained_counts'], flush=True)\n",
+    "plan": {
+      "base_commit": "66d511ceac9bb086f6391acc67c7d21cfdb2709e",
+      "candidate_commit": "179e0ff7c7b2816c96d1a62195fa75b2cf8d3b09",
+      "fixtures": [
+        {
+          "path": "crates/logex-query/tests/audit_harness.rs",
+          "package": "logex-query",
+          "target": "audit_harness",
+          "sha256": "f70018f9aa42a3de4d05e86281406d14e039214d4ad02d82a56fa7a44c21f1b4",
+          "unchanged_from_baseline": true,
+          "changed_dependency_expected": true
+        },
+        {
+          "path": "crates/logex-storage/tests/ingestion_publication.rs",
+          "package": "logex-storage",
+          "target": "ingestion_publication",
+          "sha256": "c87085b1684937ee669cad376493c9a8d7f4008b2a82cf14228c3ba93e880f50",
+          "unchanged_from_baseline": true,
+          "changed_dependency_expected": true
+        }
+      ],
+      "benchmarks": [
+        {
+          "name": "integrated_dense_confirmation",
+          "target": "audit_harness",
+          "test": "benchmark_storage_indexes_and_queries",
+          "environment": {
+            "LOGEX_BENCH_PROFILE": "dense",
+            "LOGEX_BENCH_ROWS": "20000",
+            "LOGEX_BENCH_SEGMENT_ROWS": "8192",
+            "LOGEX_BENCH_BATCH_ROWS": "4096",
+            "LOGEX_BENCH_WORKERS": "4",
+            "LOGEX_BENCH_REPEATS": "10"
+          },
+          "samples_per_process": {
+            "live_storage_ingest": 10,
+            "index_build": 10,
+            "compaction": 10,
+            "reopen": 10,
+            "native_filter": 10,
+            "sql_count": 10,
+            "sql_ordered": 10,
+            "concurrent_native_queries": 10,
+            "historical_storage_ingest": 10
+          },
+          "pairs": 20,
+          "process_order": [
+            [
+              "candidate",
+              "base"
+            ],
+            [
+              "base",
+              "candidate"
+            ],
+            [
+              "candidate",
+              "base"
+            ],
+            [
+              "base",
+              "candidate"
+            ],
+            [
+              "candidate",
+              "base"
+            ],
+            [
+              "base",
+              "candidate"
+            ],
+            [
+              "candidate",
+              "base"
+            ],
+            [
+              "base",
+              "candidate"
+            ],
+            [
+              "candidate",
+              "base"
+            ],
+            [
+              "base",
+              "candidate"
+            ],
+            [
+              "candidate",
+              "base"
+            ],
+            [
+              "base",
+              "candidate"
+            ],
+            [
+              "candidate",
+              "base"
+            ],
+            [
+              "base",
+              "candidate"
+            ],
+            [
+              "candidate",
+              "base"
+            ],
+            [
+              "base",
+              "candidate"
+            ],
+            [
+              "candidate",
+              "base"
+            ],
+            [
+              "base",
+              "candidate"
+            ],
+            [
+              "candidate",
+              "base"
+            ],
+            [
+              "base",
+              "candidate"
+            ]
+          ],
+          "binary_revisions": {
+            "base": "base",
+            "candidate": "candidate"
+          }
+        },
+        {
+          "name": "integrated_dense_same_candidate",
+          "target": "audit_harness",
+          "test": "benchmark_storage_indexes_and_queries",
+          "environment": {
+            "LOGEX_BENCH_PROFILE": "dense",
+            "LOGEX_BENCH_ROWS": "20000",
+            "LOGEX_BENCH_SEGMENT_ROWS": "8192",
+            "LOGEX_BENCH_BATCH_ROWS": "4096",
+            "LOGEX_BENCH_WORKERS": "4",
+            "LOGEX_BENCH_REPEATS": "10"
+          },
+          "samples_per_process": {
+            "live_storage_ingest": 10,
+            "index_build": 10,
+            "compaction": 10,
+            "reopen": 10,
+            "native_filter": 10,
+            "sql_count": 10,
+            "sql_ordered": 10,
+            "concurrent_native_queries": 10,
+            "historical_storage_ingest": 10
+          },
+          "pairs": 10,
+          "process_order": [
+            [
+              "candidate",
+              "base"
+            ],
+            [
+              "base",
+              "candidate"
+            ],
+            [
+              "candidate",
+              "base"
+            ],
+            [
+              "base",
+              "candidate"
+            ],
+            [
+              "candidate",
+              "base"
+            ],
+            [
+              "base",
+              "candidate"
+            ],
+            [
+              "candidate",
+              "base"
+            ],
+            [
+              "base",
+              "candidate"
+            ],
+            [
+              "candidate",
+              "base"
+            ],
+            [
+              "base",
+              "candidate"
+            ]
+          ],
+          "binary_revisions": {
+            "base": "candidate",
+            "candidate": "candidate"
+          }
+        },
+        {
+          "name": "integrated_sparse_confirmation",
+          "target": "audit_harness",
+          "test": "benchmark_storage_indexes_and_queries",
+          "environment": {
+            "LOGEX_BENCH_PROFILE": "sparse",
+            "LOGEX_BENCH_ROWS": "20000",
+            "LOGEX_BENCH_SEGMENT_ROWS": "8192",
+            "LOGEX_BENCH_BATCH_ROWS": "4096",
+            "LOGEX_BENCH_WORKERS": "4",
+            "LOGEX_BENCH_REPEATS": "10"
+          },
+          "samples_per_process": {
+            "live_storage_ingest": 10,
+            "index_build": 10,
+            "compaction": 10,
+            "reopen": 10,
+            "native_filter": 10,
+            "sql_count": 10,
+            "sql_ordered": 10,
+            "concurrent_native_queries": 10,
+            "historical_storage_ingest": 10
+          },
+          "pairs": 20,
+          "process_order": [
+            [
+              "candidate",
+              "base"
+            ],
+            [
+              "base",
+              "candidate"
+            ],
+            [
+              "candidate",
+              "base"
+            ],
+            [
+              "base",
+              "candidate"
+            ],
+            [
+              "candidate",
+              "base"
+            ],
+            [
+              "base",
+              "candidate"
+            ],
+            [
+              "candidate",
+              "base"
+            ],
+            [
+              "base",
+              "candidate"
+            ],
+            [
+              "candidate",
+              "base"
+            ],
+            [
+              "base",
+              "candidate"
+            ],
+            [
+              "candidate",
+              "base"
+            ],
+            [
+              "base",
+              "candidate"
+            ],
+            [
+              "candidate",
+              "base"
+            ],
+            [
+              "base",
+              "candidate"
+            ],
+            [
+              "candidate",
+              "base"
+            ],
+            [
+              "base",
+              "candidate"
+            ],
+            [
+              "candidate",
+              "base"
+            ],
+            [
+              "base",
+              "candidate"
+            ],
+            [
+              "candidate",
+              "base"
+            ],
+            [
+              "base",
+              "candidate"
+            ]
+          ],
+          "binary_revisions": {
+            "base": "base",
+            "candidate": "candidate"
+          }
+        },
+        {
+          "name": "integrated_sparse_same_candidate",
+          "target": "audit_harness",
+          "test": "benchmark_storage_indexes_and_queries",
+          "environment": {
+            "LOGEX_BENCH_PROFILE": "sparse",
+            "LOGEX_BENCH_ROWS": "20000",
+            "LOGEX_BENCH_SEGMENT_ROWS": "8192",
+            "LOGEX_BENCH_BATCH_ROWS": "4096",
+            "LOGEX_BENCH_WORKERS": "4",
+            "LOGEX_BENCH_REPEATS": "10"
+          },
+          "samples_per_process": {
+            "live_storage_ingest": 10,
+            "index_build": 10,
+            "compaction": 10,
+            "reopen": 10,
+            "native_filter": 10,
+            "sql_count": 10,
+            "sql_ordered": 10,
+            "concurrent_native_queries": 10,
+            "historical_storage_ingest": 10
+          },
+          "pairs": 10,
+          "process_order": [
+            [
+              "candidate",
+              "base"
+            ],
+            [
+              "base",
+              "candidate"
+            ],
+            [
+              "candidate",
+              "base"
+            ],
+            [
+              "base",
+              "candidate"
+            ],
+            [
+              "candidate",
+              "base"
+            ],
+            [
+              "base",
+              "candidate"
+            ],
+            [
+              "candidate",
+              "base"
+            ],
+            [
+              "base",
+              "candidate"
+            ],
+            [
+              "candidate",
+              "base"
+            ],
+            [
+              "base",
+              "candidate"
+            ]
+          ],
+          "binary_revisions": {
+            "base": "candidate",
+            "candidate": "candidate"
+          }
+        },
+        {
+          "name": "publication_confirmation",
+          "target": "ingestion_publication",
+          "test": "benchmark_sync_storage_publication",
+          "environment": {
+            "LOGEX_PUBLICATION_BLOCKS": "128",
+            "LOGEX_PUBLICATION_ROWS_PER_BLOCK": "128",
+            "LOGEX_PUBLICATION_WARM_HEADERS": "8192",
+            "LOGEX_PUBLICATION_HISTORY_BLOCKS": "2048",
+            "LOGEX_PUBLICATION_HISTORY_CACHED_HEAD": "1",
+            "LOGEX_PUBLICATION_SEGMENT_ROWS": "1000000",
+            "LOGEX_PUBLICATION_REPEATS": "10",
+            "LOGEX_PUBLICATION_HEADER_FIELDS": "rich",
+            "LOGEX_PUBLICATION_PAYLOAD": "mixed",
+            "LOGEX_PUBLICATION_READ_MODE": "selected",
+            "LOGEX_PUBLICATION_ROUTE": "both",
+            "LOGEX_PUBLICATION_CHECKPOINT_EACH_BLOCK": "0",
+            "LOGEX_PUBLICATION_DURABLE_CHECKPOINT": "0"
+          },
+          "samples_per_process": {
+            "live_storage_publication": 10,
+            "historical_storage_publication": 10
+          },
+          "pairs": 20,
+          "process_order": [
+            [
+              "candidate",
+              "base"
+            ],
+            [
+              "base",
+              "candidate"
+            ],
+            [
+              "candidate",
+              "base"
+            ],
+            [
+              "base",
+              "candidate"
+            ],
+            [
+              "candidate",
+              "base"
+            ],
+            [
+              "base",
+              "candidate"
+            ],
+            [
+              "candidate",
+              "base"
+            ],
+            [
+              "base",
+              "candidate"
+            ],
+            [
+              "candidate",
+              "base"
+            ],
+            [
+              "base",
+              "candidate"
+            ],
+            [
+              "candidate",
+              "base"
+            ],
+            [
+              "base",
+              "candidate"
+            ],
+            [
+              "candidate",
+              "base"
+            ],
+            [
+              "base",
+              "candidate"
+            ],
+            [
+              "candidate",
+              "base"
+            ],
+            [
+              "base",
+              "candidate"
+            ],
+            [
+              "candidate",
+              "base"
+            ],
+            [
+              "base",
+              "candidate"
+            ],
+            [
+              "candidate",
+              "base"
+            ],
+            [
+              "base",
+              "candidate"
+            ]
+          ],
+          "binary_revisions": {
+            "base": "base",
+            "candidate": "candidate"
+          }
+        },
+        {
+          "name": "publication_same_candidate",
+          "target": "ingestion_publication",
+          "test": "benchmark_sync_storage_publication",
+          "environment": {
+            "LOGEX_PUBLICATION_BLOCKS": "128",
+            "LOGEX_PUBLICATION_ROWS_PER_BLOCK": "128",
+            "LOGEX_PUBLICATION_WARM_HEADERS": "8192",
+            "LOGEX_PUBLICATION_HISTORY_BLOCKS": "2048",
+            "LOGEX_PUBLICATION_HISTORY_CACHED_HEAD": "1",
+            "LOGEX_PUBLICATION_SEGMENT_ROWS": "1000000",
+            "LOGEX_PUBLICATION_REPEATS": "10",
+            "LOGEX_PUBLICATION_HEADER_FIELDS": "rich",
+            "LOGEX_PUBLICATION_PAYLOAD": "mixed",
+            "LOGEX_PUBLICATION_READ_MODE": "selected",
+            "LOGEX_PUBLICATION_ROUTE": "both",
+            "LOGEX_PUBLICATION_CHECKPOINT_EACH_BLOCK": "0",
+            "LOGEX_PUBLICATION_DURABLE_CHECKPOINT": "0"
+          },
+          "samples_per_process": {
+            "live_storage_publication": 10,
+            "historical_storage_publication": 10
+          },
+          "pairs": 10,
+          "process_order": [
+            [
+              "candidate",
+              "base"
+            ],
+            [
+              "base",
+              "candidate"
+            ],
+            [
+              "candidate",
+              "base"
+            ],
+            [
+              "base",
+              "candidate"
+            ],
+            [
+              "candidate",
+              "base"
+            ],
+            [
+              "base",
+              "candidate"
+            ],
+            [
+              "candidate",
+              "base"
+            ],
+            [
+              "base",
+              "candidate"
+            ],
+            [
+              "candidate",
+              "base"
+            ],
+            [
+              "base",
+              "candidate"
+            ]
+          ],
+          "binary_revisions": {
+            "base": "candidate",
+            "candidate": "candidate"
+          }
+        }
+      ],
+      "confirmation": {
+        "initial_directory": "/private/tmp/logex-source-identity-directory-release-1",
+        "initial_results_sha256": "31a71147152d628f496ea3653b788135ecb8a1b4d9fb9b376c9763de48f854b3",
+        "expected_samples": 12000,
+        "expected_rss": 180,
+        "expected_warmups": 0,
+        "reason": "Initial preparation comparison has sub-1% mixed ingestion/reopen median improvements, 2.24% actual live publication improvement, and positive dense/sparse query tails above5% including sparse concurrent p95+20.98%. Predefine twenty balanced source pairs plus ten identical-candidate pairs for all three complete affected suites using saved exact binaries. Complete this fixed schedule and retain every observation; do not alter source or schedule based on intermediate results.",
+        "interpretation": "Compare source and same-candidate controls separately. Pool all initial and confirmation source observations without controls. Do not claim performance benefit within observed variability. Required absent-append and missing-source correctness fixes remain independent of preparation benefit."
+      }
+    },
+    "plan_sha256": "0d4022cc020380c1eb1afbcaf340f8c01b3cf74f85970273bb97a6aa218660d4",
+    "hardware": "Mac14,15\n17179869184\n8",
+    "os": "ProductName:\t\tmacOS\nProductVersion:\t\t26.6.2\nBuildVersion:\t\t25G83",
+    "rustc": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+    "cargo": "cargo 1.100.0-nightly (e8cb624d5 2026-08-22)",
+    "filesystem": "Filesystem      Size    Used   Avail Capacity iused ifree %iused  Mounted on\n/dev/disk3s5   926Gi   861Gi    32Gi    97%    6.1M  340M    2%   /System/Volumes/Data",
+    "memory_before": "Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages free:                                     4379.\nPages active:                                 236222.\nPages inactive:                               234998.\nPages speculative:                               548.\nPages throttled:                                   0.\nPages wired down:                             172760.\nPages purgeable:                                   3.\n\"Translation faults\":                    10745184555.\nPages copy-on-write:                       419858819.\nPages zero filled:                        3782061215.\nPages reactivated:                        2596042562.\nPages purged:                              146243076.\nFile-backed pages:                            145680.\nAnonymous pages:                              326088.\nPages stored in compressor:                  2139982.\nPages occupied by compressor:                 349161.\nDecompressions:                           2191638907.\nCompressions:                             2433692934.\nPageins:                                   211000887.\nPageouts:                                    5011093.\nSwapins:                                     6210618.\nSwapouts:                                    8336258.",
+    "original_environment_sha256": "5383ccf4addb0bc6f50196c5d4670fb6610447aaa9f8b364006b7b5c59f67d98",
+    "binaries": {
+      "audit_harness": {
+        "sha256": {
+          "base": "c48d225c8a1c2d5e6756e1146f2ba321b2c93dc1b894e82117948731e0aaf311",
+          "candidate": "a722e1aaf3aeb5edd857140e270d8a65f095f9e95be2a57b2aa5f36363cea78f"
+        },
+        "distinct": true,
+        "changed_dependency_expected": true
+      },
+      "ingestion_publication": {
+        "sha256": {
+          "base": "3f65f9b37a8e3fa69b1d871cba962f59bf3026f52ad048177343d3a80c027f77",
+          "candidate": "a5b99871684f2ceb96fd182e3a6c7e8915984eff3a39735f66e81276dc413ad2"
+        },
+        "distinct": true,
+        "changed_dependency_expected": true
+      }
+    },
+    "retained_counts": {
+      "config": 180,
+      "sample": 12000,
+      "storage": 1200,
+      "summary": 1080,
+      "rss": 180,
+      "lifecycle": 1200
+    },
+    "memory_after": "Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages free:                                    13518.\nPages active:                                 230126.\nPages inactive:                               229048.\nPages speculative:                               639.\nPages throttled:                                   0.\nPages wired down:                             162126.\nPages purgeable:                                 159.\n\"Translation faults\":                    10761098034.\nPages copy-on-write:                       422328848.\nPages zero filled:                        3787680867.\nPages reactivated:                        2598911367.\nPages purged:                              146446062.\nFile-backed pages:                            149667.\nAnonymous pages:                              310146.\nPages stored in compressor:                  2131815.\nPages occupied by compressor:                 362592.\nDecompressions:                           2193864396.\nCompressions:                             2436054304.\nPageins:                                   211063068.\nPageouts:                                    5014019.\nSwapins:                                     6214801.\nSwapouts:                                    8336258.",
+    "results.jsonl": {
+      "path": "/private/tmp/logex-source-identity-directory-tail-1/results.jsonl",
+      "sha256": "11225ac957c065c2dc80ee2fa1d96301e125e682b9b39da19105d9364a91fa41"
+    }
+  },
+  "comparisons": [
+    {
+      "kind": "comparison",
+      "suite": "integrated_dense_confirmation",
+      "metric": "live_storage_ingest",
+      "values": {
+        "base": {
+          "samples": 200,
+          "median": 89.96506249999999,
+          "p95": 96.13445800000001
+        },
+        "candidate": {
+          "samples": 200,
+          "median": 89.81308349999999,
+          "p95": 96.965958
+        }
+      },
+      "median_change_percent": -0.16893113368313672,
+      "p95_change_percent": 0.8649344026051331
+    },
+    {
+      "kind": "comparison",
+      "suite": "integrated_dense_confirmation",
+      "metric": "index_build",
+      "values": {
+        "base": {
+          "samples": 200,
+          "median": 57.138645999999994,
+          "p95": 60.466458
+        },
+        "candidate": {
+          "samples": 200,
+          "median": 57.25247950000001,
+          "p95": 60.510583
+        }
+      },
+      "median_change_percent": 0.19922330676160893,
+      "p95_change_percent": 0.07297434223780819
+    },
+    {
+      "kind": "comparison",
+      "suite": "integrated_dense_confirmation",
+      "metric": "compaction",
+      "values": {
+        "base": {
+          "samples": 200,
+          "median": 25.706354,
+          "p95": 27.735458
+        },
+        "candidate": {
+          "samples": 200,
+          "median": 25.797333499999997,
+          "p95": 27.894540999999997
+        }
+      },
+      "median_change_percent": 0.35391833474320844,
+      "p95_change_percent": 0.5735726448072187
+    },
+    {
+      "kind": "comparison",
+      "suite": "integrated_dense_confirmation",
+      "metric": "reopen",
+      "values": {
+        "base": {
+          "samples": 200,
+          "median": 6.815625000000001,
+          "p95": 7.509542
+        },
+        "candidate": {
+          "samples": 200,
+          "median": 6.787167,
+          "p95": 7.647417
+        }
+      },
+      "median_change_percent": -0.4175405777166463,
+      "p95_change_percent": 1.8359974549712943
+    },
+    {
+      "kind": "comparison",
+      "suite": "integrated_dense_confirmation",
+      "metric": "native_filter",
+      "values": {
+        "base": {
+          "samples": 200,
+          "median": 9.3671665,
+          "p95": 9.725458
+        },
+        "candidate": {
+          "samples": 200,
+          "median": 9.3840835,
+          "p95": 9.988333
+        }
+      },
+      "median_change_percent": 0.18059890362789321,
+      "p95_change_percent": 2.702957536807027
+    },
+    {
+      "kind": "comparison",
+      "suite": "integrated_dense_confirmation",
+      "metric": "sql_count",
+      "values": {
+        "base": {
+          "samples": 200,
+          "median": 1.0323544999999998,
+          "p95": 1.080583
+        },
+        "candidate": {
+          "samples": 200,
+          "median": 1.030042,
+          "p95": 1.0916249999999998
+        }
+      },
+      "median_change_percent": -0.22400251076543087,
+      "p95_change_percent": 1.0218557945109064
+    },
+    {
+      "kind": "comparison",
+      "suite": "integrated_dense_confirmation",
+      "metric": "sql_ordered",
+      "values": {
+        "base": {
+          "samples": 200,
+          "median": 3.370604,
+          "p95": 3.4776249999999997
+        },
+        "candidate": {
+          "samples": 200,
+          "median": 3.356854,
+          "p95": 3.49825
+        }
+      },
+      "median_change_percent": -0.4079387551904734,
+      "p95_change_percent": 0.5930771719204975
+    },
+    {
+      "kind": "comparison",
+      "suite": "integrated_dense_confirmation",
+      "metric": "concurrent_native_queries",
+      "values": {
+        "base": {
+          "samples": 200,
+          "median": 12.1025,
+          "p95": 14.109417
+        },
+        "candidate": {
+          "samples": 200,
+          "median": 12.1417915,
+          "p95": 16.094333
+        }
+      },
+      "median_change_percent": 0.32465606279694637,
+      "p95_change_percent": 14.06802279640611
+    },
+    {
+      "kind": "comparison",
+      "suite": "integrated_dense_confirmation",
+      "metric": "historical_storage_ingest",
+      "values": {
+        "base": {
+          "samples": 200,
+          "median": 54.121354,
+          "p95": 57.910125
+        },
+        "candidate": {
+          "samples": 200,
+          "median": 54.174208,
+          "p95": 58.975167
+        }
+      },
+      "median_change_percent": 0.09765831061803176,
+      "p95_change_percent": 1.8391291678268695
+    },
+    {
+      "kind": "comparison",
+      "suite": "integrated_dense_confirmation",
+      "metric": "peak_rss",
+      "values": {
+        "base": {
+          "samples": 20,
+          "median": 121823232.0,
+          "p95": 124764160
+        },
+        "candidate": {
+          "samples": 20,
+          "median": 122298368.0,
+          "p95": 124059648
+        }
+      },
+      "median_change_percent": 0.3900208459417742,
+      "p95_change_percent": -0.564674983585034
+    },
+    {
+      "kind": "comparison",
+      "suite": "integrated_dense_same_candidate",
+      "metric": "live_storage_ingest",
+      "values": {
+        "base": {
+          "samples": 100,
+          "median": 88.78943749999999,
+          "p95": 95.065792
+        },
+        "candidate": {
+          "samples": 100,
+          "median": 89.04668749999999,
+          "p95": 94.88945799999999
+        }
+      },
+      "median_change_percent": 0.2897304085297314,
+      "p95_change_percent": -0.18548627880785595
+    },
+    {
+      "kind": "comparison",
+      "suite": "integrated_dense_same_candidate",
+      "metric": "index_build",
+      "values": {
+        "base": {
+          "samples": 100,
+          "median": 56.681957999999995,
+          "p95": 59.021833
+        },
+        "candidate": {
+          "samples": 100,
+          "median": 56.7670205,
+          "p95": 60.699792
+        }
+      },
+      "median_change_percent": 0.15006979822398403,
+      "p95_change_percent": 2.8429462704081088
+    },
+    {
+      "kind": "comparison",
+      "suite": "integrated_dense_same_candidate",
+      "metric": "compaction",
+      "values": {
+        "base": {
+          "samples": 100,
+          "median": 25.6600835,
+          "p95": 27.69725
+        },
+        "candidate": {
+          "samples": 100,
+          "median": 25.7517085,
+          "p95": 27.647250000000003
+        }
+      },
+      "median_change_percent": 0.35707210383786325,
+      "p95_change_percent": -0.1805233371544035
+    },
+    {
+      "kind": "comparison",
+      "suite": "integrated_dense_same_candidate",
+      "metric": "reopen",
+      "values": {
+        "base": {
+          "samples": 100,
+          "median": 6.725603999999999,
+          "p95": 7.527500000000001
+        },
+        "candidate": {
+          "samples": 100,
+          "median": 6.780416499999999,
+          "p95": 7.525333000000001
+        }
+      },
+      "median_change_percent": 0.8149825651346809,
+      "p95_change_percent": -0.028787778146799337
+    },
+    {
+      "kind": "comparison",
+      "suite": "integrated_dense_same_candidate",
+      "metric": "native_filter",
+      "values": {
+        "base": {
+          "samples": 100,
+          "median": 9.3426455,
+          "p95": 9.808124999999999
+        },
+        "candidate": {
+          "samples": 100,
+          "median": 9.3641665,
+          "p95": 9.953083999999999
+        }
+      },
+      "median_change_percent": 0.23035231295032155,
+      "p95_change_percent": 1.4779481297393815
+    },
+    {
+      "kind": "comparison",
+      "suite": "integrated_dense_same_candidate",
+      "metric": "sql_count",
+      "values": {
+        "base": {
+          "samples": 100,
+          "median": 1.031708,
+          "p95": 1.12225
+        },
+        "candidate": {
+          "samples": 100,
+          "median": 1.0301874999999998,
+          "p95": 1.1905839999999999
+        }
+      },
+      "median_change_percent": -0.14737697100344338,
+      "p95_change_percent": 6.089017598574276
+    },
+    {
+      "kind": "comparison",
+      "suite": "integrated_dense_same_candidate",
+      "metric": "sql_ordered",
+      "values": {
+        "base": {
+          "samples": 100,
+          "median": 3.355021,
+          "p95": 3.486459
+        },
+        "candidate": {
+          "samples": 100,
+          "median": 3.355125,
+          "p95": 3.5800419999999997
+        }
+      },
+      "median_change_percent": 0.003099831565900324,
+      "p95_change_percent": 2.684184727254779
+    },
+    {
+      "kind": "comparison",
+      "suite": "integrated_dense_same_candidate",
+      "metric": "concurrent_native_queries",
+      "values": {
+        "base": {
+          "samples": 100,
+          "median": 12.194062500000001,
+          "p95": 14.553416
+        },
+        "candidate": {
+          "samples": 100,
+          "median": 12.141208500000001,
+          "p95": 15.096667
+        }
+      },
+      "median_change_percent": -0.4334404551395443,
+      "p95_change_percent": 3.7328074728297356
+    },
+    {
+      "kind": "comparison",
+      "suite": "integrated_dense_same_candidate",
+      "metric": "historical_storage_ingest",
+      "values": {
+        "base": {
+          "samples": 100,
+          "median": 54.1604375,
+          "p95": 58.031875
+        },
+        "candidate": {
+          "samples": 100,
+          "median": 54.714458,
+          "p95": 58.22675
+        }
+      },
+      "median_change_percent": 1.0229247132651054,
+      "p95_change_percent": 0.3358068302980133
+    },
+    {
+      "kind": "comparison",
+      "suite": "integrated_dense_same_candidate",
+      "metric": "peak_rss",
+      "values": {
+        "base": {
+          "samples": 10,
+          "median": 120504320.0,
+          "p95": 123617280
+        },
+        "candidate": {
+          "samples": 10,
+          "median": 121233408.0,
+          "p95": 125698048
+        }
+      },
+      "median_change_percent": 0.6050305914343967,
+      "p95_change_percent": 1.6832339297548016
+    },
+    {
+      "kind": "comparison",
+      "suite": "integrated_sparse_confirmation",
+      "metric": "live_storage_ingest",
+      "values": {
+        "base": {
+          "samples": 200,
+          "median": 89.946125,
+          "p95": 96.44270900000001
+        },
+        "candidate": {
+          "samples": 200,
+          "median": 89.99216650000001,
+          "p95": 96.174125
+        }
+      },
+      "median_change_percent": 0.051187863846302584,
+      "p95_change_percent": -0.27849072551456855
+    },
+    {
+      "kind": "comparison",
+      "suite": "integrated_sparse_confirmation",
+      "metric": "index_build",
+      "values": {
+        "base": {
+          "samples": 200,
+          "median": 69.98150000000001,
+          "p95": 73.178791
+        },
+        "candidate": {
+          "samples": 200,
+          "median": 70.2971665,
+          "p95": 74.92929199999999
+        }
+      },
+      "median_change_percent": 0.45107135457227443,
+      "p95_change_percent": 2.392087893335093
+    },
+    {
+      "kind": "comparison",
+      "suite": "integrated_sparse_confirmation",
+      "metric": "compaction",
+      "values": {
+        "base": {
+          "samples": 200,
+          "median": 24.76225,
+          "p95": 27.7945
+        },
+        "candidate": {
+          "samples": 200,
+          "median": 24.769292,
+          "p95": 26.64175
+        }
+      },
+      "median_change_percent": 0.028438449656231768,
+      "p95_change_percent": -4.147403263235539
+    },
+    {
+      "kind": "comparison",
+      "suite": "integrated_sparse_confirmation",
+      "metric": "reopen",
+      "values": {
+        "base": {
+          "samples": 200,
+          "median": 6.708729,
+          "p95": 7.6722090000000005
+        },
+        "candidate": {
+          "samples": 200,
+          "median": 6.7180625,
+          "p95": 7.519292
+        }
+      },
+      "median_change_percent": 0.13912471348895838,
+      "p95_change_percent": -1.9931287064781533
+    },
+    {
+      "kind": "comparison",
+      "suite": "integrated_sparse_confirmation",
+      "metric": "native_filter",
+      "values": {
+        "base": {
+          "samples": 200,
+          "median": 9.053708,
+          "p95": 9.404833
+        },
+        "candidate": {
+          "samples": 200,
+          "median": 9.0484375,
+          "p95": 9.751
+        }
+      },
+      "median_change_percent": -0.05821371751772997,
+      "p95_change_percent": 3.680735213480135
+    },
+    {
+      "kind": "comparison",
+      "suite": "integrated_sparse_confirmation",
+      "metric": "sql_count",
+      "values": {
+        "base": {
+          "samples": 200,
+          "median": 1.034042,
+          "p95": 1.088875
+        },
+        "candidate": {
+          "samples": 200,
+          "median": 1.0341045000000002,
+          "p95": 1.125
+        }
+      },
+      "median_change_percent": 0.0060442419167028305,
+      "p95_change_percent": 3.317644357708649
+    },
+    {
+      "kind": "comparison",
+      "suite": "integrated_sparse_confirmation",
+      "metric": "sql_ordered",
+      "values": {
+        "base": {
+          "samples": 200,
+          "median": 3.3318125,
+          "p95": 3.49175
+        },
+        "candidate": {
+          "samples": 200,
+          "median": 3.318688,
+          "p95": 3.501792
+        }
+      },
+      "median_change_percent": -0.3939147235926366,
+      "p95_change_percent": 0.2875921815708393
+    },
+    {
+      "kind": "comparison",
+      "suite": "integrated_sparse_confirmation",
+      "metric": "concurrent_native_queries",
+      "values": {
+        "base": {
+          "samples": 200,
+          "median": 12.076104,
+          "p95": 15.985458000000001
+        },
+        "candidate": {
+          "samples": 200,
+          "median": 12.0715205,
+          "p95": 14.801708999999999
+        }
+      },
+      "median_change_percent": -0.03795512194992856,
+      "p95_change_percent": -7.4051616162639995
+    },
+    {
+      "kind": "comparison",
+      "suite": "integrated_sparse_confirmation",
+      "metric": "historical_storage_ingest",
+      "values": {
+        "base": {
+          "samples": 200,
+          "median": 54.003979,
+          "p95": 57.92925
+        },
+        "candidate": {
+          "samples": 200,
+          "median": 54.096083,
+          "p95": 58.154958
+        }
+      },
+      "median_change_percent": 0.17055039592546173,
+      "p95_change_percent": 0.38962700190317
+    },
+    {
+      "kind": "comparison",
+      "suite": "integrated_sparse_confirmation",
+      "metric": "peak_rss",
+      "values": {
+        "base": {
+          "samples": 20,
+          "median": 122249216.0,
+          "p95": 126009344
+        },
+        "candidate": {
+          "samples": 20,
+          "median": 122568704.0,
+          "p95": 127352832
+        }
+      },
+      "median_change_percent": 0.26134155330697073,
+      "p95_change_percent": 1.0661812508126367
+    },
+    {
+      "kind": "comparison",
+      "suite": "integrated_sparse_same_candidate",
+      "metric": "live_storage_ingest",
+      "values": {
+        "base": {
+          "samples": 100,
+          "median": 90.15672950000001,
+          "p95": 103.132584
+        },
+        "candidate": {
+          "samples": 100,
+          "median": 90.428979,
+          "p95": 99.75487500000001
+        }
+      },
+      "median_change_percent": 0.3019735759159037,
+      "p95_change_percent": -3.275113324029566
+    },
+    {
+      "kind": "comparison",
+      "suite": "integrated_sparse_same_candidate",
+      "metric": "index_build",
+      "values": {
+        "base": {
+          "samples": 100,
+          "median": 69.9396255,
+          "p95": 80.775292
+        },
+        "candidate": {
+          "samples": 100,
+          "median": 70.39156249999999,
+          "p95": 74.207583
+        }
+      },
+      "median_change_percent": 0.6461816127396824,
+      "p95_change_percent": -8.130839068956874
+    },
+    {
+      "kind": "comparison",
+      "suite": "integrated_sparse_same_candidate",
+      "metric": "compaction",
+      "values": {
+        "base": {
+          "samples": 100,
+          "median": 24.511042000000003,
+          "p95": 27.727625
+        },
+        "candidate": {
+          "samples": 100,
+          "median": 24.833646,
+          "p95": 28.195125
+        }
+      },
+      "median_change_percent": 1.3161578361295279,
+      "p95_change_percent": 1.686044152717736
+    },
+    {
+      "kind": "comparison",
+      "suite": "integrated_sparse_same_candidate",
+      "metric": "reopen",
+      "values": {
+        "base": {
+          "samples": 100,
+          "median": 6.686771,
+          "p95": 7.808917
+        },
+        "candidate": {
+          "samples": 100,
+          "median": 6.777854,
+          "p95": 7.802084
+        }
+      },
+      "median_change_percent": 1.362137270739483,
+      "p95_change_percent": -0.08750253076067471
+    },
+    {
+      "kind": "comparison",
+      "suite": "integrated_sparse_same_candidate",
+      "metric": "native_filter",
+      "values": {
+        "base": {
+          "samples": 100,
+          "median": 9.0563335,
+          "p95": 10.127416
+        },
+        "candidate": {
+          "samples": 100,
+          "median": 9.124958500000002,
+          "p95": 10.623667
+        }
+      },
+      "median_change_percent": 0.7577569885208302,
+      "p95_change_percent": 4.900075201808618
+    },
+    {
+      "kind": "comparison",
+      "suite": "integrated_sparse_same_candidate",
+      "metric": "sql_count",
+      "values": {
+        "base": {
+          "samples": 100,
+          "median": 1.038125,
+          "p95": 1.29125
+        },
+        "candidate": {
+          "samples": 100,
+          "median": 1.036521,
+          "p95": 1.1591660000000001
+        }
+      },
+      "median_change_percent": -0.15450933172787007,
+      "p95_change_percent": -10.229157792836386
+    },
+    {
+      "kind": "comparison",
+      "suite": "integrated_sparse_same_candidate",
+      "metric": "sql_ordered",
+      "values": {
+        "base": {
+          "samples": 100,
+          "median": 3.3305000000000002,
+          "p95": 4.094375
+        },
+        "candidate": {
+          "samples": 100,
+          "median": 3.3186039999999997,
+          "p95": 3.87725
+        }
+      },
+      "median_change_percent": -0.3571836060651701,
+      "p95_change_percent": -5.303007174477181
+    },
+    {
+      "kind": "comparison",
+      "suite": "integrated_sparse_same_candidate",
+      "metric": "concurrent_native_queries",
+      "values": {
+        "base": {
+          "samples": 100,
+          "median": 12.033438,
+          "p95": 17.365624999999998
+        },
+        "candidate": {
+          "samples": 100,
+          "median": 12.336395500000002,
+          "p95": 19.952375
+        }
+      },
+      "median_change_percent": 2.517630456067521,
+      "p95_change_percent": 14.895807090156566
+    },
+    {
+      "kind": "comparison",
+      "suite": "integrated_sparse_same_candidate",
+      "metric": "historical_storage_ingest",
+      "values": {
+        "base": {
+          "samples": 100,
+          "median": 54.4368125,
+          "p95": 60.194708
+        },
+        "candidate": {
+          "samples": 100,
+          "median": 54.5041665,
+          "p95": 60.046958999999994
+        }
+      },
+      "median_change_percent": 0.1237287726940206,
+      "p95_change_percent": -0.24545180948465362
+    },
+    {
+      "kind": "comparison",
+      "suite": "integrated_sparse_same_candidate",
+      "metric": "peak_rss",
+      "values": {
+        "base": {
+          "samples": 10,
+          "median": 124665856.0,
+          "p95": 126877696
+        },
+        "candidate": {
+          "samples": 10,
+          "median": 121495552.0,
+          "p95": 126058496
+        }
+      },
+      "median_change_percent": -2.543041135497437,
+      "p95_change_percent": -0.6456611570247905
+    },
+    {
+      "kind": "comparison",
+      "suite": "publication_confirmation",
+      "metric": "live_storage_publication",
+      "values": {
+        "base": {
+          "samples": 200,
+          "median": 135.725479,
+          "p95": 144.970791
+        },
+        "candidate": {
+          "samples": 200,
+          "median": 134.9469795,
+          "p95": 147.976417
+        }
+      },
+      "median_change_percent": -0.5735839031373091,
+      "p95_change_percent": 2.073263158231642
+    },
+    {
+      "kind": "comparison",
+      "suite": "publication_confirmation",
+      "metric": "historical_storage_publication",
+      "values": {
+        "base": {
+          "samples": 200,
+          "median": 10.6061045,
+          "p95": 11.933792
+        },
+        "candidate": {
+          "samples": 200,
+          "median": 10.675041499999999,
+          "p95": 13.055208
+        }
+      },
+      "median_change_percent": 0.6499747386045307,
+      "p95_change_percent": 9.3969796021248
+    },
+    {
+      "kind": "comparison",
+      "suite": "publication_confirmation",
+      "metric": "peak_rss",
+      "values": {
+        "base": {
+          "samples": 20,
+          "median": 168632320.0,
+          "p95": 191217664
+        },
+        "candidate": {
+          "samples": 20,
+          "median": 163299328.0,
+          "p95": 184827904
+        }
+      },
+      "median_change_percent": -3.162496963808603,
+      "p95_change_percent": -3.3416159712106985
+    },
+    {
+      "kind": "comparison",
+      "suite": "publication_same_candidate",
+      "metric": "live_storage_publication",
+      "values": {
+        "base": {
+          "samples": 100,
+          "median": 135.0771455,
+          "p95": 138.195875
+        },
+        "candidate": {
+          "samples": 100,
+          "median": 135.011709,
+          "p95": 143.99275
+        }
+      },
+      "median_change_percent": -0.04844379836261847,
+      "p95_change_percent": 4.194680195772849
+    },
+    {
+      "kind": "comparison",
+      "suite": "publication_same_candidate",
+      "metric": "historical_storage_publication",
+      "values": {
+        "base": {
+          "samples": 100,
+          "median": 10.507938,
+          "p95": 11.328458
+        },
+        "candidate": {
+          "samples": 100,
+          "median": 10.6428955,
+          "p95": 11.2845
+        }
+      },
+      "median_change_percent": 1.2843385638552585,
+      "p95_change_percent": -0.3880316279585405
+    },
+    {
+      "kind": "comparison",
+      "suite": "publication_same_candidate",
+      "metric": "peak_rss",
+      "values": {
+        "base": {
+          "samples": 10,
+          "median": 154746880.0,
+          "p95": 182960128
+        },
+        "candidate": {
+          "samples": 10,
+          "median": 168828928.0,
+          "p95": 181698560
+        }
+      },
+      "median_change_percent": 9.100052938062465,
+      "p95_change_percent": -0.6895316557714692
+    }
+  ],
+  "combined_source_comparisons": [
+    {
+      "kind": "comparison",
+      "suite": "integrated_dense",
+      "metric": "live_storage_ingest",
+      "values": {
+        "base": {
+          "samples": 300,
+          "median": 89.854021,
+          "p95": 97.030458
+        },
+        "candidate": {
+          "samples": 300,
+          "median": 89.36891700000001,
+          "p95": 96.965958
+        }
+      },
+      "median_change_percent": -0.5398801240069084,
+      "p95_change_percent": -0.0664739725334429
+    },
+    {
+      "kind": "comparison",
+      "suite": "integrated_dense",
+      "metric": "index_build",
+      "values": {
+        "base": {
+          "samples": 300,
+          "median": 56.977770500000005,
+          "p95": 60.98375
+        },
+        "candidate": {
+          "samples": 300,
+          "median": 56.9853755,
+          "p95": 60.852000000000004
+        }
+      },
+      "median_change_percent": 0.013347310597211504,
+      "p95_change_percent": -0.21604115850533123
+    },
+    {
+      "kind": "comparison",
+      "suite": "integrated_dense",
+      "metric": "compaction",
+      "values": {
+        "base": {
+          "samples": 300,
+          "median": 25.695417,
+          "p95": 27.818125
+        },
+        "candidate": {
+          "samples": 300,
+          "median": 25.708812,
+          "p95": 27.894540999999997
+        }
+      },
+      "median_change_percent": 0.052129918732202185,
+      "p95_change_percent": 0.27469860028308535
+    },
+    {
+      "kind": "comparison",
+      "suite": "integrated_dense",
+      "metric": "reopen",
+      "values": {
+        "base": {
+          "samples": 300,
+          "median": 6.7865835,
+          "p95": 7.509542
+        },
+        "candidate": {
+          "samples": 300,
+          "median": 6.7727505,
+          "p95": 7.647417
+        }
+      },
+      "median_change_percent": -0.20382862746770591,
+      "p95_change_percent": 1.8359974549712943
+    },
+    {
+      "kind": "comparison",
+      "suite": "integrated_dense",
+      "metric": "native_filter",
+      "values": {
+        "base": {
+          "samples": 300,
+          "median": 9.382521,
+          "p95": 9.826125
+        },
+        "candidate": {
+          "samples": 300,
+          "median": 9.385354,
+          "p95": 9.999625
+        }
+      },
+      "median_change_percent": 0.030194443476316835,
+      "p95_change_percent": 1.7657011283695345
+    },
+    {
+      "kind": "comparison",
+      "suite": "integrated_dense",
+      "metric": "sql_count",
+      "values": {
+        "base": {
+          "samples": 300,
+          "median": 1.031958,
+          "p95": 1.0937919999999999
+        },
+        "candidate": {
+          "samples": 300,
+          "median": 1.0315210000000001,
+          "p95": 1.126292
+        }
+      },
+      "median_change_percent": -0.042346684651872746,
+      "p95_change_percent": 2.971314472952824
+    },
+    {
+      "kind": "comparison",
+      "suite": "integrated_dense",
+      "metric": "sql_ordered",
+      "values": {
+        "base": {
+          "samples": 300,
+          "median": 3.3723539999999996,
+          "p95": 3.555333
+        },
+        "candidate": {
+          "samples": 300,
+          "median": 3.361125,
+          "p95": 3.621083
+        }
+      },
+      "median_change_percent": -0.33297216128554963,
+      "p95_change_percent": 1.8493345067817746
+    },
+    {
+      "kind": "comparison",
+      "suite": "integrated_dense",
+      "metric": "concurrent_native_queries",
+      "values": {
+        "base": {
+          "samples": 300,
+          "median": 12.128562500000001,
+          "p95": 14.525
+        },
+        "candidate": {
+          "samples": 300,
+          "median": 12.1699375,
+          "p95": 16.508208
+        }
+      },
+      "median_change_percent": 0.3411368824623562,
+      "p95_change_percent": 13.653755593803773
+    },
+    {
+      "kind": "comparison",
+      "suite": "integrated_dense",
+      "metric": "historical_storage_ingest",
+      "values": {
+        "base": {
+          "samples": 300,
+          "median": 54.1141875,
+          "p95": 59.979709
+        },
+        "candidate": {
+          "samples": 300,
+          "median": 54.057896,
+          "p95": 60.663667
+        }
+      },
+      "median_change_percent": -0.10402355204908176,
+      "p95_change_percent": 1.1403156357427502
+    },
+    {
+      "kind": "comparison",
+      "suite": "integrated_dense",
+      "metric": "peak_rss",
+      "values": {
+        "base": {
+          "samples": 30,
+          "median": 121282560.0,
+          "p95": 124764160
+        },
+        "candidate": {
+          "samples": 30,
+          "median": 122470400.0,
+          "p95": 126386176
+        }
+      },
+      "median_change_percent": 0.9793988517392771,
+      "p95_change_percent": 1.3000656598818106
+    },
+    {
+      "kind": "comparison",
+      "suite": "integrated_sparse",
+      "metric": "live_storage_ingest",
+      "values": {
+        "base": {
+          "samples": 300,
+          "median": 89.8331045,
+          "p95": 96.44270900000001
+        },
+        "candidate": {
+          "samples": 300,
+          "median": 89.747063,
+          "p95": 96.569125
+        }
+      },
+      "median_change_percent": -0.09577927922996832,
+      "p95_change_percent": 0.13107885636018946
+    },
+    {
+      "kind": "comparison",
+      "suite": "integrated_sparse",
+      "metric": "index_build",
+      "values": {
+        "base": {
+          "samples": 300,
+          "median": 69.874459,
+          "p95": 73.178791
+        },
+        "candidate": {
+          "samples": 300,
+          "median": 70.22274949999999,
+          "p95": 74.722917
+        }
+      },
+      "median_change_percent": 0.4984518019667039,
+      "p95_change_percent": 2.1100731221427083
+    },
+    {
+      "kind": "comparison",
+      "suite": "integrated_sparse",
+      "metric": "compaction",
+      "values": {
+        "base": {
+          "samples": 300,
+          "median": 24.7484585,
+          "p95": 27.242292000000003
+        },
+        "candidate": {
+          "samples": 300,
+          "median": 24.840813,
+          "p95": 26.941791
+        }
+      },
+      "median_change_percent": 0.37317273720300914,
+      "p95_change_percent": -1.103067979742689
+    },
+    {
+      "kind": "comparison",
+      "suite": "integrated_sparse",
+      "metric": "reopen",
+      "values": {
+        "base": {
+          "samples": 300,
+          "median": 6.6870835,
+          "p95": 7.66775
+        },
+        "candidate": {
+          "samples": 300,
+          "median": 6.670688,
+          "p95": 7.518708
+        }
+      },
+      "median_change_percent": -0.24518162514345354,
+      "p95_change_percent": -1.9437514264288747
+    },
+    {
+      "kind": "comparison",
+      "suite": "integrated_sparse",
+      "metric": "native_filter",
+      "values": {
+        "base": {
+          "samples": 300,
+          "median": 9.047874499999999,
+          "p95": 9.431125
+        },
+        "candidate": {
+          "samples": 300,
+          "median": 9.0584165,
+          "p95": 9.872292
+        }
+      },
+      "median_change_percent": 0.11651355243711414,
+      "p95_change_percent": 4.677777041445208
+    },
+    {
+      "kind": "comparison",
+      "suite": "integrated_sparse",
+      "metric": "sql_count",
+      "values": {
+        "base": {
+          "samples": 300,
+          "median": 1.0329165,
+          "p95": 1.087291
+        },
+        "candidate": {
+          "samples": 300,
+          "median": 1.0354999999999999,
+          "p95": 1.149791
+        }
+      },
+      "median_change_percent": 0.25011702301200867,
+      "p95_change_percent": 5.748231154309202
+    },
+    {
+      "kind": "comparison",
+      "suite": "integrated_sparse",
+      "metric": "sql_ordered",
+      "values": {
+        "base": {
+          "samples": 300,
+          "median": 3.3334995000000003,
+          "p95": 3.4884999999999997
+        },
+        "candidate": {
+          "samples": 300,
+          "median": 3.320167,
+          "p95": 3.5267079999999997
+        }
+      },
+      "median_change_percent": -0.39995506224015376,
+      "p95_change_percent": 1.0952558406191804
+    },
+    {
+      "kind": "comparison",
+      "suite": "integrated_sparse",
+      "metric": "concurrent_native_queries",
+      "values": {
+        "base": {
+          "samples": 300,
+          "median": 12.073167000000002,
+          "p95": 15.643583
+        },
+        "candidate": {
+          "samples": 300,
+          "median": 12.071937,
+          "p95": 15.996916
+        }
+      },
+      "median_change_percent": -0.010187881936873922,
+      "p95_change_percent": 2.258644966437684
+    },
+    {
+      "kind": "comparison",
+      "suite": "integrated_sparse",
+      "metric": "historical_storage_ingest",
+      "values": {
+        "base": {
+          "samples": 300,
+          "median": 54.0919995,
+          "p95": 58.771042
+        },
+        "candidate": {
+          "samples": 300,
+          "median": 54.1014165,
+          "p95": 58.777583
+        }
+      },
+      "median_change_percent": 0.017409228882359074,
+      "p95_change_percent": 0.011129630813755398
+    },
+    {
+      "kind": "comparison",
+      "suite": "integrated_sparse",
+      "metric": "peak_rss",
+      "values": {
+        "base": {
+          "samples": 30,
+          "median": 122585088.0,
+          "p95": 127877120
+        },
+        "candidate": {
+          "samples": 30,
+          "median": 122806272.0,
+          "p95": 127401984
+        }
+      },
+      "median_change_percent": 0.1804330392943143,
+      "p95_change_percent": -0.37155669442664463
+    },
+    {
+      "kind": "comparison",
+      "suite": "publication",
+      "metric": "live_storage_publication",
+      "values": {
+        "base": {
+          "samples": 300,
+          "median": 136.120563,
+          "p95": 148.040208
+        },
+        "candidate": {
+          "samples": 300,
+          "median": 134.979479,
+          "p95": 146.886458
+        }
+      },
+      "median_change_percent": -0.8382892157153377,
+      "p95_change_percent": -0.7793490806227488
+    },
+    {
+      "kind": "comparison",
+      "suite": "publication",
+      "metric": "historical_storage_publication",
+      "values": {
+        "base": {
+          "samples": 300,
+          "median": 10.6372705,
+          "p95": 12.489500000000001
+        },
+        "candidate": {
+          "samples": 300,
+          "median": 10.6626665,
+          "p95": 12.257041
+        }
+      },
+      "median_change_percent": 0.2387454563649527,
+      "p95_change_percent": -1.8612354377677387
+    },
+    {
+      "kind": "comparison",
+      "suite": "publication",
+      "metric": "peak_rss",
+      "values": {
+        "base": {
+          "samples": 30,
+          "median": 164274176.0,
+          "p95": 191217664
+        },
+        "candidate": {
+          "samples": 30,
+          "median": 159236096.0,
+          "p95": 184827904
+        }
+      },
+      "median_change_percent": -3.06687278711415,
+      "p95_change_percent": -3.3416159712106985
+    }
+  ],
+  "interpretation": "Control labels base/candidate execute the same selected binary as recorded in each suite; they are never pooled with source comparisons. Combined source statistics include all original and confirmation samples. No observations are removed.",
+  "raw_evidence": {
+    "path": "2026-09-13-source-identity-directory-tail-1-raw.json.gz",
+    "sha256": "848443bce4a2a4adaad911e8a76bf78bfde7db2efd60e1fd8dd983af30f158bb",
+    "files": 185
+  }
+}

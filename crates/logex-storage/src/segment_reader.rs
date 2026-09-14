@@ -11,13 +11,24 @@ use crate::page::{
     decode_var_bytes_page_bounded, read_page_index,
 };
 use crate::reader::{RawBytesColumn, RawFixedColumn};
-use crate::{ColumnFileHeader, NullBitmap};
+use crate::{
+    ColumnFileHeader, NullBitmap,
+    column::{PrefixRecoveryGuard, read_source_binding, verify_prefix_recovery_pending},
+};
+
+#[cfg(test)]
+thread_local! {
+    static AFTER_ARTIFACT_CAPTURE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
 
 #[derive(Debug, Clone)]
 pub struct SegmentReader {
     dir: PathBuf,
     manifest: Option<SegmentManifest>,
     artifacts: ColumnArtifacts,
+    source_namespace: Option<[u8; 16]>,
+    captured_rows: Option<u64>,
+    canonical_metadata: Option<crate::column::RawCanonicalMetadata>,
 }
 
 #[derive(Debug, Clone)]
@@ -36,6 +47,29 @@ impl SegmentReader {
     pub(crate) fn bundle_reference(&self) -> Option<&crate::bundle::BundleReference> {
         self.artifacts.bundle().map(|bundle| bundle.reference())
     }
+    /// Captured publication's logical-prefix commitment, checked against its
+    /// canonical envelope for identified raw storage. Query capture validates
+    /// metadata, not every row's content; recovery recomputes the saved prefix.
+    /// Legacy data without a commitment remains readable but index-ineligible.
+    pub fn source_commitment(&self) -> io::Result<Option<[u8; 32]>> {
+        let commitment = match self.manifest.as_ref() {
+            Some(manifest) => manifest.source_commitment,
+            None if self.source_namespace.is_some() => {
+                self.artifacts
+                    .raw_canonical_metadata("canonical.bitmap")?
+                    .validate_committed(None, self.captured_rows.unwrap_or(0))?
+                    .commitment
+            }
+            None => None,
+        };
+        Ok(commitment.map(|root| root.0))
+    }
+
+    /// Stable storage-owned namespace retained across append and reopen.
+    /// Full replacement rotates it; legacy sources can have no namespace.
+    pub fn source_namespace(&self) -> Option<[u8; 16]> {
+        self.source_namespace
+    }
 
     pub fn open(dir: &Path) -> io::Result<Self> {
         Self::open_inner(dir, None)
@@ -46,6 +80,44 @@ impl SegmentReader {
     /// needed if an index is unavailable. Other columns may not be readable.
     pub fn open_projected(dir: &Path, columns: &[&str]) -> io::Result<Self> {
         Self::open_inner(dir, Some(columns))
+    }
+
+    pub(crate) fn open_recovering_prefix(owner: &PrefixRecoveryGuard) -> io::Result<Self> {
+        let dir = owner.dir();
+        verify_prefix_recovery_pending(dir, owner)?;
+        let mut manifest = load_manifest(dir)?.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "verified prefix recovery requires its catalog-selected manifest",
+            )
+        })?;
+        if manifest.source_namespace.map(|namespace| namespace.0) != Some(owner.namespace())
+            || manifest.generation != owner.generation()
+            || manifest.segment_id != owner.segment_id()
+            || manifest.column_bundle.is_some()
+            || manifest.row_count < owner.prefix_rows()
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "prefix recovery manifest differs from authoritative source metadata",
+            ));
+        }
+        manifest.validate_read_bounds()?;
+        manifest.row_count = owner.prefix_rows();
+        manifest.source_commitment = owner.commitment();
+        let artifacts = ColumnArtifacts::open_projected(dir, Some(&manifest), None)?;
+        let canonical_metadata = artifacts
+            .raw_canonical_metadata("canonical.bitmap")?
+            .validate_recovery(owner)?;
+        verify_prefix_recovery_pending(dir, owner)?;
+        Ok(Self {
+            dir: dir.to_path_buf(),
+            manifest: Some(manifest),
+            artifacts,
+            source_namespace: Some(owner.namespace()),
+            captured_rows: Some(owner.prefix_rows()),
+            canonical_metadata: Some(canonical_metadata),
+        })
     }
 
     fn open_inner(dir: &Path, projection: Option<&[&str]>) -> io::Result<Self> {
@@ -61,13 +133,100 @@ impl SegmentReader {
             if let Some(manifest) = &manifest {
                 manifest.validate_read_bounds()?;
             }
+            let bundled = manifest
+                .as_ref()
+                .is_some_and(|manifest| manifest.column_bundle.is_some());
+            let expected_post = manifest.as_ref().and_then(|manifest| {
+                let namespace = manifest.source_namespace?;
+                (manifest.column_bundle.is_none() && manifest.row_count != 0).then_some(
+                    crate::column::SourceBinding {
+                        namespace: namespace.0,
+                        generation: manifest.generation,
+                        segment_id: manifest.segment_id,
+                    },
+                )
+            });
+            let marker_before = if bundled || expected_post.is_some() {
+                None
+            } else {
+                read_source_binding(dir)?
+            };
+            let source_namespace = match manifest.as_ref() {
+                Some(manifest) => manifest.source_namespace.map(|namespace| namespace.0),
+                None => marker_before.map(|binding| binding.namespace),
+            };
+            if !bundled
+                && expected_post.is_none()
+                && let (Some(manifest), Some(actual)) = (manifest.as_ref(), marker_before)
+                && manifest.source_namespace.is_some()
+                && (manifest.source_namespace.map(|namespace| namespace.0)
+                    != Some(actual.namespace)
+                    || manifest.generation != actual.generation
+                    || manifest.segment_id != actual.segment_id)
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "raw source namespace differs from the manifest",
+                ));
+            }
             match ColumnArtifacts::open_projected(dir, manifest.as_ref(), projection) {
                 Ok(artifacts) => {
-                    return Ok(Self {
+                    #[cfg(test)]
+                    if let Some(hook) = AFTER_ARTIFACT_CAPTURE.with_borrow_mut(Option::take) {
+                        hook();
+                    }
+                    let canonical_metadata = expected_post
+                        .map(|expected| {
+                            artifacts
+                                .raw_canonical_metadata("canonical.bitmap")?
+                                .validate_committed(
+                                    Some(expected),
+                                    manifest.as_ref().map_or(0, |manifest| manifest.row_count),
+                                )?
+                                .validate_capture_commitment(
+                                    manifest
+                                        .as_ref()
+                                        .and_then(|manifest| manifest.source_commitment),
+                                    manifest.as_ref().map_or(0, |manifest| manifest.row_count),
+                                )
+                        })
+                        .transpose();
+                    let canonical_metadata = match canonical_metadata {
+                        Ok(metadata) => metadata,
+                        Err(error) => {
+                            let current = load_manifest(dir)?;
+                            if current == manifest {
+                                return Err(error);
+                            }
+                            manifest = current;
+                            continue;
+                        }
+                    };
+                    let after = if expected_post.is_some() {
+                        None
+                    } else if !bundled {
+                        read_source_binding(dir)?
+                    } else {
+                        marker_before
+                    };
+                    if !bundled && after != marker_before {
+                        return Err(io::Error::new(
+                            io::ErrorKind::WouldBlock,
+                            "raw source changed during capture; retry the read",
+                        ));
+                    }
+                    let mut reader = Self {
                         dir: dir.to_path_buf(),
                         manifest,
                         artifacts,
-                    });
+                        source_namespace,
+                        captured_rows: None,
+                        canonical_metadata,
+                    };
+                    if reader.manifest.is_none() {
+                        reader.captured_rows = Some(reader.read_row_count()?);
+                    }
+                    return Ok(reader);
                 }
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {
                     // Publication can retire old names during capture. Retry only
@@ -93,7 +252,11 @@ impl SegmentReader {
         path: &str,
         row_ids: Option<&[u32]>,
     ) -> io::Result<RawFixedColumn<WIDTH>> {
-        let visible = self.manifest.as_ref().map(|m| m.row_count);
+        let visible = self
+            .manifest
+            .as_ref()
+            .map(|m| m.row_count)
+            .or(self.captured_rows);
         let requested = row_ids
             .and_then(|ids| ids.iter().max())
             .map(|&id| u64::from(id) + 1);
@@ -232,7 +395,13 @@ impl SegmentReader {
             let path = raw_column_path(column);
             let values =
                 RawBytesColumn::from_bytes(&self.dir.join(path), self.artifacts.read(path)?)?
-                    .materialize(row_ids, self.manifest.as_ref().map(|m| m.row_count))?;
+                    .materialize(
+                        row_ids,
+                        self.manifest
+                            .as_ref()
+                            .map(|m| m.row_count)
+                            .or(self.captured_rows),
+                    )?;
             let lengths = self.read_u32("data_len", row_ids)?;
             validate_data_lengths(&values, &lengths)?;
             return Ok((values, lengths));
@@ -242,9 +411,15 @@ impl SegmentReader {
 
     pub fn read_canonical(&self) -> io::Result<NullBitmap> {
         let data = self.artifacts.read(self.canonical_relative_path())?;
-        let bitmap = NullBitmap::read_from(&data).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidData, "corrupt canonical bitmap")
-        })?;
+        let bitmap = if self.artifacts.bundle().is_some() {
+            NullBitmap::read_from(&data).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "corrupt canonical bitmap")
+            })?
+        } else if let Some(metadata) = self.canonical_metadata {
+            metadata.bitmap(&data)?
+        } else {
+            crate::column::read_canonical_bitmap(&data, None)?
+        };
         self.validate_bitmap_rows(bitmap.len())?;
         Ok(bitmap)
     }
@@ -253,22 +428,15 @@ impl SegmentReader {
         if self.artifacts.bundle().is_some() {
             return self.read_canonical().map(|bitmap| bitmap.len());
         }
-        let bytes = self
-            .artifacts
-            .read_range(self.canonical_relative_path(), 0..8)?;
-        let len = u64::from_le_bytes(bytes.try_into().map_err(|_| {
-            io::Error::new(io::ErrorKind::InvalidData, "invalid captured bitmap header")
-        })?);
-        let expected_len = 8 + len.div_ceil(8);
-        let actual_len = self.artifacts.len(self.canonical_relative_path())?;
-        if actual_len < expected_len {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "canonical bitmap is truncated",
-            ));
-        }
-        self.validate_bitmap_rows(len)?;
-        Ok(len)
+        let metadata = match self.canonical_metadata {
+            Some(metadata) => metadata,
+            None => self
+                .artifacts
+                .raw_canonical_metadata(self.canonical_relative_path())?
+                .validate_committed(None, self.read_row_count()?)?,
+        };
+        self.validate_bitmap_rows(metadata.rows)?;
+        Ok(metadata.rows)
     }
 
     fn validate_bitmap_rows(&self, rows: u64) -> io::Result<()> {
@@ -287,6 +455,8 @@ impl SegmentReader {
     pub fn read_row_count(&self) -> io::Result<u64> {
         if let Some(manifest) = &self.manifest {
             Ok(manifest.row_count)
+        } else if let Some(captured_rows) = self.captured_rows {
+            Ok(captured_rows)
         } else {
             let data = self
                 .artifacts
@@ -993,7 +1163,7 @@ mod tests {
     use crate::ColumnFile;
     use crate::native::{
         SegmentDescriptor, SegmentKind, StorageCatalogPaths, compact_segment,
-        persist_segment_manifest,
+        persist_initial_raw_manifest_for_test, persist_segment_manifest,
     };
 
     fn make_rows() -> Vec<LogRow> {
@@ -1019,6 +1189,61 @@ mod tests {
                 source: Source::Receipt,
             })
             .collect()
+    }
+
+    fn write_native_raw(dir: &Path, rows: &[LogRow], descriptor: &mut SegmentDescriptor) {
+        let namespace = [descriptor.id as u8; 16];
+        descriptor.source_namespace = Some(namespace.into());
+        descriptor.source_state = Some(crate::PrefixState::from_rows(namespace, rows).unwrap());
+        descriptor.source_commitment = descriptor
+            .source_state
+            .as_ref()
+            .map(crate::PrefixState::commitment);
+        ColumnFile::write_initial_batch_with_source_identity(
+            dir,
+            rows,
+            None,
+            crate::durability::Publication::Ordered,
+            crate::column::SourceIdentity {
+                namespace,
+                generation: descriptor.generation,
+                segment_id: descriptor.id,
+                kind: descriptor.kind,
+            },
+            descriptor.source_state.as_ref(),
+        )
+        .unwrap();
+    }
+
+    fn identified_raw_fixture() -> (TempDir, PathBuf, SegmentDescriptor, Vec<LogRow>) {
+        let tmp = TempDir::new().unwrap();
+        let paths = StorageCatalogPaths::new(tmp.path().to_path_buf());
+        paths.ensure_base_dirs().unwrap();
+        let mut descriptor = SegmentDescriptor {
+            column_bundle: None,
+            source_namespace: None,
+            source_commitment: None,
+            source_state: None,
+            id: 11,
+            generation: 3,
+            kind: SegmentKind::Hot,
+            relative_path: PathBuf::from("segments/s_0000000000000011"),
+            manifest_relative_path: PathBuf::from("segments/s_0000000000000011/segment.json"),
+            min_block: Some(10),
+            max_block: Some(29),
+            min_timestamp: Some(1_700_000_000),
+            max_timestamp: Some(1_700_000_228),
+            row_count: 20,
+        };
+        let dir = paths.segment_dir(descriptor.id);
+        let rows = make_rows();
+        write_native_raw(&dir, &rows, &mut descriptor);
+        persist_initial_raw_manifest_for_test(&paths, &descriptor).unwrap();
+        (tmp, dir, descriptor, rows)
+    }
+
+    fn after_artifact_capture(action: impl FnOnce() + 'static) {
+        AFTER_ARTIFACT_CAPTURE.with_borrow_mut(|hook| *hook = Some(Box::new(action)));
     }
 
     #[test]
@@ -1083,12 +1308,408 @@ mod tests {
     }
 
     #[test]
+    fn captured_raw_reader_keeps_replaced_source_snapshot() {
+        let tmp = TempDir::new().unwrap();
+        let original = make_rows();
+        ColumnFile::write_batch(tmp.path(), &original).unwrap();
+        let captured = SegmentReader::open(tmp.path()).unwrap();
+        let captured_namespace = captured.source_namespace().unwrap();
+
+        let mut replacement = original.clone();
+        replacement[0].block_number += 1_000;
+        ColumnFile::write_batch(tmp.path(), &replacement).unwrap();
+
+        assert_eq!(captured.read_log_rows(None).unwrap(), original);
+        let current = SegmentReader::open(tmp.path()).unwrap();
+        assert_eq!(current.read_log_rows(None).unwrap(), replacement);
+        assert_ne!(current.source_namespace().unwrap(), captured_namespace);
+    }
+
+    #[test]
+    fn identified_capture_accepts_exact_previous_append_prefix() {
+        let (_tmp, dir, descriptor, rows) = identified_raw_fixture();
+        let append_dir = dir.clone();
+        let suffix = rows[..1].to_vec();
+        crate::column_artifact::BEFORE_CANONICAL_CAPTURE.with_borrow_mut(|hook| {
+            *hook = Some(Box::new(move || {
+                ColumnFile::append_batch(&append_dir, &suffix, descriptor.row_count).unwrap();
+            }));
+        });
+        let reader = SegmentReader::open(&dir).unwrap();
+        assert_eq!(reader.read_log_rows(None).unwrap(), rows);
+        assert_eq!(
+            reader.source_commitment().unwrap(),
+            descriptor.source_commitment.map(|root| root.0)
+        );
+    }
+
+    #[test]
+    fn identified_raw_capture_rejects_replacement_before_canonical_capture() {
+        let (_tmp, dir, _descriptor, rows) = identified_raw_fixture();
+        let replace_dir = dir.clone();
+        crate::column_artifact::BEFORE_CANONICAL_CAPTURE.with_borrow_mut(|hook| {
+            *hook = Some(Box::new(move || {
+                ColumnFile::write_batch(&replace_dir, &rows).unwrap()
+            }));
+        });
+        assert_eq!(
+            SegmentReader::open(&dir).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+    }
+
+    #[test]
+    fn identified_raw_capture_keeps_coherent_snapshot_after_canonical_capture() {
+        for action in 0..3 {
+            let (_tmp, dir, descriptor, rows) = identified_raw_fixture();
+            let change_dir = dir.clone();
+            let replacement = rows.clone();
+            after_artifact_capture(move || match action {
+                0 => ColumnFile::write_batch(&change_dir, &replacement).unwrap(),
+                1 => crate::column::mark_source_updating_for_test(
+                    &change_dir,
+                    crate::column::SourceIdentity {
+                        namespace: descriptor.source_namespace.unwrap().0,
+                        generation: descriptor.generation,
+                        segment_id: descriptor.id,
+                        kind: descriptor.kind,
+                    },
+                )
+                .unwrap(),
+                _ => crate::column::remove_source_marker_for_test(&change_dir).unwrap(),
+            });
+            let captured = SegmentReader::open(&dir).unwrap();
+            assert_eq!(captured.read_log_rows(None).unwrap(), rows);
+            assert_eq!(captured.read_canonical_len().unwrap(), rows.len() as u64);
+        }
+    }
+
+    #[test]
+    fn native_manifest_before_commitment_format_is_rejected_without_writes() {
+        let (_tmp, dir, _, _) = identified_raw_fixture();
+        let path = dir.join("segment.json");
+        let mut manifest = SegmentManifest::load(&path).unwrap().unwrap();
+        manifest.format_version = 9;
+        manifest.source_commitment = None;
+        let old = serde_json::to_vec(&manifest).unwrap();
+        fs::write(&path, &old).unwrap();
+        assert_eq!(
+            SegmentReader::open(&dir).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(fs::read(path).unwrap(), old);
+    }
+
+    #[test]
+    fn commitment_without_namespace_is_not_a_valid_manifest() {
+        let (_tmp, dir, _, _) = identified_raw_fixture();
+        let path = dir.join("segment.json");
+        let mut manifest = SegmentManifest::load(&path).unwrap().unwrap();
+        assert!(manifest.source_commitment.is_some());
+        manifest.source_namespace = None;
+        fs::write(path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        assert_eq!(
+            SegmentReader::open(&dir).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+    }
+
+    #[test]
+    fn legacy_manifest_retains_relative_canonical_path_support() {
+        let (_tmp, dir, _, rows) = identified_raw_fixture();
+        let path = dir.join("segment.json");
+        let mut manifest = SegmentManifest::load(&path).unwrap().unwrap();
+        manifest.source_namespace = None;
+        manifest.source_commitment = None;
+        manifest.canonical_rows_path = "legacy/canonical.bits".into();
+        fs::create_dir(dir.join("legacy")).unwrap();
+        let mut bitmap = NullBitmap::new();
+        for row in 0..rows.len() {
+            bitmap.push(row != 0);
+        }
+        let mut bytes = Vec::new();
+        bitmap.write_to(&mut bytes).unwrap();
+        fs::write(dir.join(&manifest.canonical_rows_path), bytes).unwrap();
+        fs::remove_file(dir.join("canonical.bitmap")).unwrap();
+        crate::column::remove_source_marker_for_test(&dir).unwrap();
+        fs::write(path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        let reader = SegmentReader::open(&dir).unwrap();
+        assert_eq!(reader.source_namespace(), None);
+        assert_eq!(reader.read_log_rows(None).unwrap(), rows);
+        assert_eq!(reader.read_canonical_len().unwrap(), rows.len() as u64);
+        assert!(!reader.read_canonical().unwrap().is_present(0));
+    }
+
+    #[test]
+    fn identified_raw_capture_rejects_invalid_canonical_and_all_descriptor_aliases() {
+        for damage in 0..7 {
+            let (_tmp, dir, _, _) = identified_raw_fixture();
+            let path = dir.join("canonical.bitmap");
+            let mut bytes = fs::read(&path).unwrap();
+            match damage {
+                0 => {
+                    fs::remove_file(&path).unwrap();
+                }
+                1 => {
+                    fs::write(&path, 20u64.to_le_bytes()).unwrap();
+                }
+                2 => {
+                    bytes[9] = 1;
+                    let crc = crc32fast::hash(&bytes[..50]);
+                    bytes[50..54].copy_from_slice(&crc.to_le_bytes());
+                    fs::write(&path, bytes).unwrap();
+                }
+                3 => {
+                    bytes[10] ^= 1;
+                    fs::write(&path, bytes).unwrap();
+                }
+                4 => {
+                    bytes.push(0);
+                    fs::write(&path, bytes).unwrap();
+                }
+                5 => {
+                    bytes.pop();
+                    fs::write(&path, bytes).unwrap();
+                }
+                _ => {
+                    bytes[54] ^= 1;
+                    fs::write(&path, bytes).unwrap();
+                }
+            }
+            assert!(
+                SegmentReader::open_projected(&dir, &[]).is_err(),
+                "damage {damage}"
+            );
+        }
+        for alias in 0..4 {
+            let (_tmp, dir, _, _) = identified_raw_fixture();
+            let path = dir.join("segment.json");
+            let mut manifest = SegmentManifest::load(&path).unwrap().unwrap();
+            let column = manifest
+                .columns
+                .iter_mut()
+                .find(|column| column.name == "topic0")
+                .unwrap();
+            match alias {
+                0 => column.data_path = "canonical.bitmap".into(),
+                1 => column.page_index_path = Some("canonical.bitmap".into()),
+                2 => column.null_bitmap_path = Some("canonical.bitmap".into()),
+                _ => manifest.canonical_rows_path = "other.bitmap".into(),
+            }
+            fs::write(path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+            assert!(
+                SegmentReader::open_projected(&dir, &[]).is_err(),
+                "alias {alias}"
+            );
+        }
+    }
+
+    #[test]
+    fn verified_prefix_capture_accepts_both_canonical_states_and_preserves_bits() {
+        for pending_canonical in [false, true] {
+            let (_tmp, dir, descriptor, rows) = identified_raw_fixture();
+            let mut canonical = NullBitmap::new();
+            for index in 0..rows.len() {
+                canonical.push(index != 0);
+            }
+            ColumnFile::replace_canonical_bitmap(&dir, &canonical).unwrap();
+            let namespace = descriptor.source_namespace.unwrap().0;
+            crate::column::mark_prefix_rewrite_for_test(
+                &dir,
+                namespace,
+                descriptor.row_count,
+                descriptor.generation,
+                descriptor.id,
+                descriptor.kind,
+            )
+            .unwrap();
+            if pending_canonical {
+                let path = dir.join("canonical.bitmap");
+                let mut bytes = fs::read(&path).unwrap();
+                bytes[9] = 1;
+                let crc = crc32fast::hash(&bytes[..128]);
+                bytes[128..132].copy_from_slice(&crc.to_le_bytes());
+                fs::write(path, bytes).unwrap();
+                assert_eq!(
+                    SegmentReader::open(&dir).unwrap_err().kind(),
+                    io::ErrorKind::WouldBlock
+                );
+            } else {
+                // Complete canonical-last publication is query coherent even
+                // while catalog finalization remains blocked by the sidecar.
+                assert_eq!(
+                    SegmentReader::open(&dir)
+                        .unwrap()
+                        .read_log_rows(None)
+                        .unwrap(),
+                    rows
+                );
+            }
+            let owner = crate::column::begin_prefix_recovery(
+                &dir,
+                namespace,
+                descriptor.row_count,
+                descriptor.generation,
+                descriptor.id,
+                descriptor.kind,
+                descriptor.source_commitment,
+            )
+            .unwrap();
+            let recovering = SegmentReader::open_recovering_prefix(&owner).unwrap();
+            assert_eq!(recovering.read_log_rows(None).unwrap(), rows);
+            assert!(!recovering.read_canonical().unwrap().is_present(0));
+            ColumnFile::rewrite_verified_prefix(
+                &dir,
+                &rows,
+                &canonical,
+                namespace,
+                descriptor.generation,
+                &owner,
+            )
+            .unwrap();
+            assert!(crate::column::read_source_binding(&dir).is_err());
+            assert!(
+                !SegmentReader::open_recovering_prefix(&owner)
+                    .unwrap()
+                    .read_canonical()
+                    .unwrap()
+                    .is_present(0)
+            );
+            ColumnFile::finish_verified_prefix(&dir, &owner).unwrap();
+            assert!(
+                !SegmentReader::open(&dir)
+                    .unwrap()
+                    .read_canonical()
+                    .unwrap()
+                    .is_present(0)
+            );
+        }
+    }
+
+    #[test]
+    fn identified_raw_capture_keeps_its_bound_prefix_across_append() {
+        let (_tmp, dir, _, rows) = identified_raw_fixture();
+        let append_dir = dir.clone();
+        let mut appended = rows[0].clone();
+        appended.block_number += 1_000;
+        let existing_rows = rows.len() as u64;
+        after_artifact_capture(move || {
+            ColumnFile::append_batch(&append_dir, &[appended], existing_rows).unwrap();
+        });
+
+        let captured = SegmentReader::open(&dir).unwrap();
+        assert_eq!(captured.read_row_count().unwrap(), rows.len() as u64);
+        assert_eq!(captured.read_log_rows(None).unwrap(), rows);
+        let canonical = captured.read_canonical().unwrap();
+        assert!((0..rows.len() as u64).all(|row| canonical.is_present(row)));
+    }
+
+    #[test]
+    fn identified_raw_capture_keeps_its_bound_prefix_across_exact_rewrite() {
+        let (_tmp, dir, descriptor, rows) = identified_raw_fixture();
+        let rewrite_dir = dir.clone();
+        let rewrite_rows = rows.clone();
+        after_artifact_capture(move || {
+            let namespace = descriptor.source_namespace.unwrap().0;
+            crate::column::mark_prefix_rewrite_for_test(
+                &rewrite_dir,
+                namespace,
+                descriptor.row_count,
+                descriptor.generation,
+                descriptor.id,
+                descriptor.kind,
+            )
+            .unwrap();
+            let owner = crate::column::begin_prefix_recovery(
+                &rewrite_dir,
+                namespace,
+                descriptor.row_count,
+                descriptor.generation,
+                descriptor.id,
+                descriptor.kind,
+                descriptor.source_commitment,
+            )
+            .unwrap();
+            let mut canonical = NullBitmap::new();
+            for _ in &rewrite_rows {
+                canonical.push(true);
+            }
+            ColumnFile::rewrite_verified_prefix(
+                &rewrite_dir,
+                &rewrite_rows,
+                &canonical,
+                namespace,
+                descriptor.generation,
+                &owner,
+            )
+            .unwrap();
+            ColumnFile::finish_verified_prefix(&rewrite_dir, &owner).unwrap();
+        });
+
+        let captured = SegmentReader::open(&dir).unwrap();
+        assert_eq!(captured.read_row_count().unwrap(), rows.len() as u64);
+        assert_eq!(captured.read_log_rows(None).unwrap(), rows);
+        let canonical = captured.read_canonical().unwrap();
+        assert!((0..rows.len() as u64).all(|row| canonical.is_present(row)));
+    }
+
+    #[test]
+    fn identified_zero_row_capture_still_rejects_marker_replacement() {
+        let tmp = TempDir::new().unwrap();
+        let paths = StorageCatalogPaths::new(tmp.path().to_path_buf());
+        paths.ensure_base_dirs().unwrap();
+        let mut descriptor = SegmentDescriptor {
+            column_bundle: None,
+            source_namespace: None,
+            source_commitment: None,
+            source_state: None,
+            id: 12,
+            generation: 0,
+            kind: SegmentKind::Hot,
+            relative_path: PathBuf::from("segments/s_0000000000000012"),
+            manifest_relative_path: PathBuf::from("segments/s_0000000000000012/segment.json"),
+            min_block: None,
+            max_block: None,
+            min_timestamp: None,
+            max_timestamp: None,
+            row_count: 0,
+        };
+        let dir = paths.segment_dir(descriptor.id);
+        write_native_raw(&dir, &[], &mut descriptor);
+        persist_segment_manifest(&paths, &descriptor).unwrap();
+        let replacement_dir = dir.clone();
+        after_artifact_capture(move || {
+            ColumnFile::write_batch(&replacement_dir, &[make_rows()[0].clone()]).unwrap();
+        });
+        assert_eq!(
+            SegmentReader::open(&dir).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+    }
+
+    #[test]
+    fn legacy_capture_still_rejects_a_replacement_between_marker_reads() {
+        let tmp = TempDir::new().unwrap();
+        let rows = make_rows();
+        ColumnFile::write_batch(tmp.path(), &rows).unwrap();
+        let dir = tmp.path().to_path_buf();
+        after_artifact_capture(move || ColumnFile::write_batch(&dir, &rows).unwrap());
+        assert_eq!(
+            SegmentReader::open(tmp.path()).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+    }
+
+    #[test]
     fn reads_compacted_segment_rows() {
         let tmp = TempDir::new().unwrap();
         let paths = StorageCatalogPaths::new(tmp.path().to_path_buf());
         paths.ensure_base_dirs().unwrap();
-        let descriptor = SegmentDescriptor {
+        let mut descriptor = SegmentDescriptor {
             column_bundle: None,
+            source_namespace: None,
+            source_commitment: None,
+            source_state: None,
             id: 1,
             generation: 0,
             kind: SegmentKind::Sealed,
@@ -1106,8 +1727,12 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
 
         let rows = make_rows();
-        ColumnFile::write_batch(&dir, &rows).unwrap();
+        write_native_raw(&dir, &rows, &mut descriptor);
         persist_segment_manifest(&paths, &descriptor).unwrap();
+        assert_eq!(
+            SegmentReader::open(&dir).unwrap().source_namespace(),
+            descriptor.source_namespace.map(|namespace| namespace.0)
+        );
         let before = load_manifest(&dir).unwrap();
         compact_segment(&paths, &descriptor).unwrap();
 
@@ -1202,8 +1827,11 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let paths = StorageCatalogPaths::new(tmp.path().to_path_buf());
         paths.ensure_base_dirs().unwrap();
-        let descriptor = SegmentDescriptor {
+        let mut descriptor = SegmentDescriptor {
             column_bundle: None,
+            source_namespace: None,
+            source_commitment: None,
+            source_state: None,
             id: 2,
             generation: 0,
             kind: SegmentKind::Sealed,
@@ -1220,7 +1848,7 @@ mod tests {
         let dir = paths.segment_dir(descriptor.id);
         fs::create_dir_all(&dir).unwrap();
 
-        ColumnFile::write_batch(&dir, &make_rows()).unwrap();
+        write_native_raw(&dir, &make_rows(), &mut descriptor);
         persist_segment_manifest(&paths, &descriptor).unwrap();
         compact_segment(&paths, &descriptor).unwrap();
 
@@ -1252,8 +1880,11 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let paths = StorageCatalogPaths::new(tmp.path().to_path_buf());
         paths.ensure_base_dirs().unwrap();
-        let descriptor = SegmentDescriptor {
+        let mut descriptor = SegmentDescriptor {
             column_bundle: None,
+            source_namespace: None,
+            source_commitment: None,
+            source_state: None,
             id: 1,
             generation: 0,
             kind: SegmentKind::Sealed,
@@ -1267,10 +1898,27 @@ mod tests {
         };
         let dir = paths.segment_dir(descriptor.id);
         fs::create_dir_all(&dir).unwrap();
-        ColumnFile::write_batch(&dir, &make_rows()).unwrap();
+        write_native_raw(&dir, &make_rows(), &mut descriptor);
         persist_segment_manifest(&paths, &descriptor).unwrap();
         compact_segment(&paths, &descriptor).unwrap();
         (tmp, dir)
+    }
+
+    #[test]
+    fn unbundled_manifest_rejects_unknown_column_name() {
+        let (_tmp, dir) = compacted_fixture();
+        let mut manifest = load_manifest(&dir).unwrap().unwrap();
+        manifest.columns[0].name = "unknown_column".to_owned();
+        fs::write(
+            dir.join("segment.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            SegmentReader::open(&dir).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
     }
 
     fn assert_variable_page_row_count_is_checked(row_ids: Option<&[u32]>) {
@@ -1515,19 +2163,36 @@ mod tests {
                 bitmap.push(row % 2 == 1);
             }
             let mut bytes = Vec::new();
-            bitmap.write_to(&mut bytes).unwrap();
+            let manifest = load_manifest(&dir).unwrap().unwrap();
+            let prefix_rows = make_rows()
+                .into_iter()
+                .cycle()
+                .take(len as usize)
+                .collect::<Vec<_>>();
+            let prefix =
+                crate::PrefixState::from_rows(manifest.source_namespace.unwrap().0, &prefix_rows)
+                    .unwrap();
+            crate::column::write_raw_canonical_with_previous(
+                &mut bytes,
+                &bitmap,
+                manifest
+                    .source_namespace
+                    .map(|namespace| crate::column::SourceBinding {
+                        namespace: namespace.0,
+                        generation: manifest.generation,
+                        segment_id: manifest.segment_id,
+                    }),
+                Some(prefix.commitment()),
+                Some(&prefix),
+                (len > 20).then(|| (20, manifest.source_commitment.unwrap())),
+            )
+            .unwrap();
             fs::write(dir.join("canonical.bitmap"), &bytes).unwrap();
-            let reader = SegmentReader::open_projected(&dir, &[]).unwrap();
+            let captured = SegmentReader::open_projected(&dir, &[]);
             if len < 20 {
-                assert_eq!(
-                    reader.read_canonical().unwrap_err().kind(),
-                    io::ErrorKind::InvalidData
-                );
-                assert_eq!(
-                    reader.read_canonical_len().unwrap_err().kind(),
-                    io::ErrorKind::InvalidData
-                );
+                assert_eq!(captured.unwrap_err().kind(), io::ErrorKind::InvalidData);
             } else {
+                let reader = captured.unwrap();
                 let bitmap = reader.read_canonical().unwrap();
                 assert!(bitmap.is_present(19));
                 assert!(!bitmap.is_present(0));
@@ -1629,8 +2294,7 @@ mod tests {
             .write_to(&mut bytes)
             .unwrap();
             fs::write(tmp.path().join("address.col"), bytes).unwrap();
-            let reader = SegmentReader::open(tmp.path()).unwrap();
-            let result = reader.read_row_count();
+            let result = SegmentReader::open(tmp.path()).and_then(|reader| reader.read_row_count());
             if (version, compression, row_count) == (1, 0, 0) {
                 assert_eq!(result.unwrap(), 0);
             } else {

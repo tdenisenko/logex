@@ -1,0 +1,23 @@
+{
+  "baseline": "9c0a58fc64fac3da7f5a50b3a20b7ab729f029e9",
+  "candidate": "Final committed source and build proof resolved separately before execution.",
+  "disposition": "Diagnostic only: both pair and pooled median/p95, all observations retained, >5% investigated, repeated or pooled >10% holds further acceptance. No confidence interval or performance clearance.",
+  "execution": "One fresh build in a named private child on mac-mini, then one fixed 600-second cooldown and the immutable schedule; no extra pairs.",
+  "explicit_warmups": 0,
+  "metric_families": 20,
+  "observations": 800,
+  "processes": 12,
+  "raw_evidence": {
+    "bytes": 51896,
+    "decoded_bytes": 163272,
+    "files": 14,
+    "path": "2026-09-14-source-identity-content-diagnostic-design-1-raw.json.gz",
+    "roundtrip_verified": true,
+    "sha256": "012066f92634df82853759812c7c37a5045296e4d4d6de75c4b5ab37efe1ac8a"
+  },
+  "rss_records": 12,
+  "schedule_sha256": "c558d4f5f0cd5b1eb4c7ab11a5c245f43768a52b1c575695c5627bdc763eaf6e",
+  "schema": 1,
+  "source_pairs_per_suite": 2,
+  "status": "FIXED_DIAGNOSTIC_NOT_EXECUTED"
+}

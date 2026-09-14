@@ -1,0 +1,216 @@
+{
+  "schema": "logex-overlap-phase-result-v1",
+  "disposition": "DIAGNOSTIC_ATTRIBUTION_ONLY_PRIOR_PERFORMANCE_HOLDS_RETAINED",
+  "acceptance_granted": false,
+  "baseline_commit": "28ef516acd2a16028464e4e9094dbf19590cd7d2",
+  "candidate_commit": "e76f4ddacd9a7b39c941ac24efcf0e25f8cfb306",
+  "scope": "Local instrumented ARM64 parent-wall phase diagnostic, not performance acceptance.",
+  "packet": {
+    "processes": 24,
+    "measured": 192,
+    "warmups": 24,
+    "traces": 216,
+    "rss": 24,
+    "actual_exits": 0,
+    "all_observations_retained": true
+  },
+  "pooled_effects_percent": {
+    "direct_historical": {
+      "median": -16.370296287557995,
+      "p95": 9.066491917868058
+    },
+    "staged_historical": {
+      "median": -12.436688063282087,
+      "p95": -11.131303658761759
+    }
+  },
+  "correctness": {
+    "fresh_builds": 2,
+    "actual_zero_build_and_check_commands": 10,
+    "ordinary_fixture_passes": 2,
+    "single_iteration_schema_smokes": 4,
+    "staged_trace_events": 18,
+    "direct_trace_events": 17,
+    "smoke_and_ordinary_times_are_not_attribution": true
+  },
+  "launch_history": {
+    "sole_actual_build_launch": 1,
+    "actual_build_launch_exit": 0,
+    "attempted_stops": "All exact-state/command guard rejected; no process signalled.",
+    "launch2": "Never created; attempted nonexistent launcher exit2 preserved.",
+    "reviewer_corrections": "Original counter-count and leading-whitespace verification failures preserved; no workload or original analysis rerun."
+  },
+  "decision": "No further production optimization selected from these phase observations; overlap remains provisional.",
+  "prior_hold": "Prior mixed-workload staged p95+29.525% remains unexplained and retained. Current direct p95+9.066% and source-order/cycle tails above10% do not grant clearance.",
+  "interpretation_limits": [
+    "Nested parent wall spans overlap; do not sum as CPU cost or worker duration.",
+    "No demonstrated CPU/I/O/paging cause assigned to pauses.",
+    "Pre/post host observations cannot establish per-sample causality; user applications unchanged.",
+    "No pooling with prior packets, observation removal, rerun, PR149 compound claim or performance acceptance."
+  ],
+  "archive": {
+    "status": "EVERY_ARCHIVED_BYTE_AND_ALIAS_VERIFIED",
+    "archive": {
+      "source": "/Users/tdenisenko/code/logex/docs/audit/baselines/2026-09-15-source-identity-overlap-phase-result-1-raw.jsonl.gz",
+      "bytes": 2631058,
+      "sha256": "b39840da1bf1780f5266a9e3ca993737600702b554fd0799a69fca72e259a576"
+    },
+    "records": 212,
+    "aliases": 43,
+    "original_evidence_files": 254,
+    "payload_bytes": 15874400,
+    "uncompressed_jsonl_bytes": 17096909,
+    "source_archives_verified": [
+      {
+        "label": "baseline",
+        "commit": "28ef516acd2a16028464e4e9094dbf19590cd7d2",
+        "files": 216,
+        "original_git_files": 215,
+        "changed_overlay_files": 7,
+        "source_inventory": {
+          "source": "/private/tmp/logex-source-identity-overlap-phase-build-1/baseline/source-before-build.json",
+          "bytes": 36953,
+          "sha256": "3ca57843fdf3803ab5f0a244abd25a3d870528770bd0232e3c124c987df87717"
+        },
+        "prior_git_archive": {
+          "prior_summary": {
+            "source": "/Users/tdenisenko/code/logex/docs/audit/baselines/2026-09-15-source-identity-overlap-local-result-1.json",
+            "bytes": 7920,
+            "sha256": "c75e91dba5b4f4e6f4f999f20196cd0cd230b55448ef3310bb22f49ca817843d"
+          },
+          "prior_raw_sha256": "be786d4840b56a6689984f59be7159209eb7abdb3501fb2b9b642f465feecaf8",
+          "raw_record": "logex-source-identity-overlap-baseline-build-1/source.tar",
+          "bytes": 7352320,
+          "sha256": "9586a48482b7ab45dcf06214e4a6097d24fd4f4995e48a6667e896fe794ee14d"
+        },
+        "full_original_plus_overlay_verified": true
+      },
+      {
+        "label": "candidate",
+        "commit": "e76f4ddacd9a7b39c941ac24efcf0e25f8cfb306",
+        "files": 216,
+        "original_git_files": 215,
+        "changed_overlay_files": 7,
+        "source_inventory": {
+          "source": "/private/tmp/logex-source-identity-overlap-phase-build-1/candidate/source-before-build.json",
+          "bytes": 36953,
+          "sha256": "4dbbde4dee3cdc7c87c11fc916fd4928e6c887552b208f82cc244c1255145055"
+        },
+        "prior_git_archive": {
+          "prior_summary": {
+            "source": "/Users/tdenisenko/code/logex/docs/audit/baselines/2026-09-15-source-identity-overlap-local-result-1.json",
+            "bytes": 7920,
+            "sha256": "c75e91dba5b4f4e6f4f999f20196cd0cd230b55448ef3310bb22f49ca817843d"
+          },
+          "prior_raw_sha256": "be786d4840b56a6689984f59be7159209eb7abdb3501fb2b9b642f465feecaf8",
+          "raw_record": "logex-source-identity-overlap-candidate-build-1/source.tar",
+          "bytes": 7362560,
+          "sha256": "0c40b07932fc2865dd012da379b72e7ae55c8d41bbcbf35ea667f8357028b348"
+        },
+        "full_original_plus_overlay_verified": true
+      }
+    ],
+    "exclusions": [
+      {
+        "source": "/private/tmp/logex-source-identity-overlap-phase-build-1/baseline/source",
+        "reason": "Recreated216-file source excluded after full original215 Git input reconstruction from prior archived source.tar plus exactly seven retained instrumentation overlays; every resulting source byte verified.",
+        "proof": {
+          "label": "baseline",
+          "commit": "28ef516acd2a16028464e4e9094dbf19590cd7d2",
+          "files": 216,
+          "original_git_files": 215,
+          "changed_overlay_files": 7,
+          "source_inventory": {
+            "source": "/private/tmp/logex-source-identity-overlap-phase-build-1/baseline/source-before-build.json",
+            "bytes": 36953,
+            "sha256": "3ca57843fdf3803ab5f0a244abd25a3d870528770bd0232e3c124c987df87717"
+          },
+          "prior_git_archive": {
+            "prior_summary": {
+              "source": "/Users/tdenisenko/code/logex/docs/audit/baselines/2026-09-15-source-identity-overlap-local-result-1.json",
+              "bytes": 7920,
+              "sha256": "c75e91dba5b4f4e6f4f999f20196cd0cd230b55448ef3310bb22f49ca817843d"
+            },
+            "prior_raw_sha256": "be786d4840b56a6689984f59be7159209eb7abdb3501fb2b9b642f465feecaf8",
+            "raw_record": "logex-source-identity-overlap-baseline-build-1/source.tar",
+            "bytes": 7352320,
+            "sha256": "9586a48482b7ab45dcf06214e4a6097d24fd4f4995e48a6667e896fe794ee14d"
+          },
+          "full_original_plus_overlay_verified": true
+        }
+      },
+      {
+        "source": "/private/tmp/logex-source-identity-overlap-phase-build-1/baseline/target",
+        "reason": "Recreated dependency/target cache omitted; exact donor inventory/compiler artifacts and executable hashes retained. No whole-target byte hash claimed."
+      },
+      {
+        "source": "/private/tmp/logex-source-identity-overlap-phase-build-1/baseline/retained-binaries/ingestion_publication",
+        "bytes": 3381296,
+        "sha256": "cc4d338cd8ce68cf16f309b7e53f4144eac5be64a633b803ffedbc73925ec9ba",
+        "reason": "Compiled executable omitted; exact fresh compiler artifact, dependency profiles, ordinary/smoke checks and executed artifact identity retained."
+      },
+      {
+        "source": "/private/tmp/logex-source-identity-overlap-phase-build-1/baseline/target/release/build/logex-storage/067ee7a89b6721b9/out/ingestion_publication-067ee7a89b6721b9",
+        "bytes": 3381296,
+        "sha256": "cc4d338cd8ce68cf16f309b7e53f4144eac5be64a633b803ffedbc73925ec9ba",
+        "reason": "Compiled executable omitted; exact fresh compiler artifact, dependency profiles, ordinary/smoke checks and executed artifact identity retained."
+      },
+      {
+        "source": "/private/tmp/logex-source-identity-overlap-phase-build-1/candidate/source",
+        "reason": "Recreated216-file source excluded after full original215 Git input reconstruction from prior archived source.tar plus exactly seven retained instrumentation overlays; every resulting source byte verified.",
+        "proof": {
+          "label": "candidate",
+          "commit": "e76f4ddacd9a7b39c941ac24efcf0e25f8cfb306",
+          "files": 216,
+          "original_git_files": 215,
+          "changed_overlay_files": 7,
+          "source_inventory": {
+            "source": "/private/tmp/logex-source-identity-overlap-phase-build-1/candidate/source-before-build.json",
+            "bytes": 36953,
+            "sha256": "4dbbde4dee3cdc7c87c11fc916fd4928e6c887552b208f82cc244c1255145055"
+          },
+          "prior_git_archive": {
+            "prior_summary": {
+              "source": "/Users/tdenisenko/code/logex/docs/audit/baselines/2026-09-15-source-identity-overlap-local-result-1.json",
+              "bytes": 7920,
+              "sha256": "c75e91dba5b4f4e6f4f999f20196cd0cd230b55448ef3310bb22f49ca817843d"
+            },
+            "prior_raw_sha256": "be786d4840b56a6689984f59be7159209eb7abdb3501fb2b9b642f465feecaf8",
+            "raw_record": "logex-source-identity-overlap-candidate-build-1/source.tar",
+            "bytes": 7362560,
+            "sha256": "0c40b07932fc2865dd012da379b72e7ae55c8d41bbcbf35ea667f8357028b348"
+          },
+          "full_original_plus_overlay_verified": true
+        }
+      },
+      {
+        "source": "/private/tmp/logex-source-identity-overlap-phase-build-1/candidate/target",
+        "reason": "Recreated dependency/target cache omitted; exact donor inventory/compiler artifacts and executable hashes retained. No whole-target byte hash claimed."
+      },
+      {
+        "source": "/private/tmp/logex-source-identity-overlap-phase-build-1/candidate/retained-binaries/ingestion_publication",
+        "bytes": 3633152,
+        "sha256": "6321c06e4c39ffe9b80100b246414910e89ea0fa7a24fcd6f8f7923120d9ad86",
+        "reason": "Compiled executable omitted; exact fresh compiler artifact, dependency profiles, ordinary/smoke checks and executed artifact identity retained."
+      },
+      {
+        "source": "/private/tmp/logex-source-identity-overlap-phase-build-1/candidate/target/release/build/logex-storage/067ee7a89b6721b9/out/ingestion_publication-067ee7a89b6721b9",
+        "bytes": 3633152,
+        "sha256": "6321c06e4c39ffe9b80100b246414910e89ea0fa7a24fcd6f8f7923120d9ad86",
+        "reason": "Compiled executable omitted; exact fresh compiler artifact, dependency profiles, ordinary/smoke checks and executed artifact identity retained."
+      }
+    ],
+    "observations_omitted": 0,
+    "originals_unchanged": true
+  },
+  "raw_references": {
+    "manifest": "packaging/evidence-manifest.json",
+    "package_script": "packaging/package.py",
+    "source_proof": "packaging/source-proof.json",
+    "packet": "logex-source-identity-overlap-phase-packet-1/",
+    "independent_review": "logex-source-identity-overlap-phase-result-review-1/review.json",
+    "engineering_review": "logex-source-identity-overlap-phase-engineering-review-1/review.json"
+  },
+  "prior_source_archive_packet": "2026-09-15-source-identity-overlap-local-result-1.json",
+  "prior_source_packet_commit": "5037bd11"
+}

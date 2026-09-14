@@ -1,0 +1,86 @@
+{
+  "schema": "logex-source-identity-stream-design-v1",
+  "disposition": "COMPONENT_AND_DESIGN_ONLY_PERFORMANCE_HOLD",
+  "acceptance_granted": false,
+  "base_source": "b6c4741cc77e5fa476f1c11cbbab8386b27b040e",
+  "archive": {
+    "status": "EVERY_DECODED_BYTE_VERIFIED",
+    "archive": {
+      "source": "/Users/tdenisenko/code/logex/docs/audit/baselines/2026-09-14-source-identity-stream-design-1-raw.jsonl.gz",
+      "bytes": 239422,
+      "sha256": "15317f3c7a15850104de855c6af00c5088c3dafe789babf0e67cd77d5427c5cc"
+    },
+    "files": 69,
+    "payload_bytes": 1102702,
+    "uncompressed_jsonl_bytes": 1209571,
+    "exclusions": [
+      {
+        "path": "/private/tmp/logex-source-identity-content-hash-prototype-1/target",
+        "reason": "Reproducible source/dependency/build tree, not timing observations. Exact added test/component source, commands, source inventories and build proofs retained; base b6c4741cc77e5fa476f1c11cbbab8386b27b040e. Component cache copied from separately archived history profile."
+      },
+      {
+        "path": "/private/tmp/logex-source-identity-content-hash-prototype-1/source",
+        "reason": "Reproducible source/dependency/build tree, not timing observations. Exact added test/component source, commands, source inventories and build proofs retained; base b6c4741cc77e5fa476f1c11cbbab8386b27b040e. Component cache copied from separately archived history profile."
+      },
+      {
+        "path": "/private/tmp/logex-source-identity-stream-component-1/target",
+        "reason": "Reproducible source/dependency/build tree, not timing observations. Exact added test/component source, commands, source inventories and build proofs retained; base b6c4741cc77e5fa476f1c11cbbab8386b27b040e. Component cache copied from separately archived history profile."
+      },
+      {
+        "path": "/private/tmp/logex-source-identity-stream-component-1/source",
+        "reason": "Reproducible source/dependency/build tree, not timing observations. Exact added test/component source, commands, source inventories and build proofs retained; base b6c4741cc77e5fa476f1c11cbbab8386b27b040e. Component cache copied from separately archived history profile."
+      }
+    ],
+    "tested_component_sha256": "d0f1f156e5172e6c9f8aba80f072f2764222fd39eb6d4eef4d0349c3cce76a5f",
+    "repository_component_sha256": "d0f1f156e5172e6c9f8aba80f072f2764222fd39eb6d4eef4d0349c3cce76a5f",
+    "same_component": true
+  },
+  "prototype": {
+    "host": "local ARM64",
+    "samples": 72,
+    "explicit_warmups": 3,
+    "balanced_rounds": 24,
+    "rows_per_fixture": 15360,
+    "fixture_passes_per_sample": 8,
+    "median_component_reduction_percent": {
+      "buffered_same_chain": 17.8,
+      "buffered_logical_stream": 65.8
+    },
+    "limits": "One process, warm in-memory rows, no storage writes/checkpoints. Prospective stream root differs from selected persisted wrapper. Neither result measures ingestion, Intel speedup or acceptance. All original observations retained; no exclusions/reruns."
+  },
+  "component": {
+    "oracle_tests_passed": 5,
+    "failed": 0,
+    "final_strict_clippy": "passed",
+    "original_clippy": "two chunks_exact_to_as_chunks style lints; full failure and prior source retained",
+    "wire": "version1 + u64LE bytes + count-derived descending CV frontier + full final chunk <=1024bytes",
+    "maximum_encoded_bytes": 2761,
+    "maximum_hex_characters": 5522,
+    "wrapper_maximum_bytes": 2785,
+    "tested_file_sha256": "d0f1f156e5172e6c9f8aba80f072f2764222fd39eb6d4eef4d0349c3cce76a5f",
+    "repository_file_equal_at_packaging": true,
+    "scope": "Tests cover only stream component against ordinary BLAKE3, grouping/reload, byte boundaries, bounded malformed codec and u64 overflow. They do not validate root/native integration."
+  },
+  "integration_design": {
+    "state": "Active hot/history catalog descriptors and saved journal origins; root-only manifests and sealed inactive descriptors. Standalone canonical body retains bounded state.",
+    "cached_root_and_borrowed_revision": "Root caches wrapper identity on state changes/decoding; native borrows revisions. These current integration changes are not claimed tested by the isolated component.",
+    "review_limit": "Native review records a draft and its then-present revision clones; subsequent borrowed integration supersedes that observation. Retain review verbatim, not as final gate evidence.",
+    "journal_size": "6554-byte conservative serialized arithmetic bound in review; not a valid journal runtime test."
+  },
+  "raw_references": {
+    "prototype": "prototype/REPORT.md",
+    "all_samples": "prototype/records.json",
+    "exact_source": "prototype/prototype.rs",
+    "schedule": "prototype/schedule.rs",
+    "component": "component/stream-final.rs",
+    "component_handoff": "component/handoff.json",
+    "original_style_failure": "component/before-clippy-cleanup/",
+    "native_review": "native-review/REPORT.md",
+    "state_design_review": "state-design-review/review.md",
+    "manifest": "packaging/manifest.json",
+    "packager": "packaging/package.py"
+  },
+  "prior_evidence": "2026-09-14-source-identity-content-diagnostic-result-1.json",
+  "prior_dispositions": "All historical packets unchanged, no pooling; material Intel historical-publication hold remains. Full root integration gates are running and excluded from this packet.",
+  "operations": "Packaging only; no new tests, builds, measurements or remote access."
+}

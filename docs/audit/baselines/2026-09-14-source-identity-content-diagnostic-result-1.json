@@ -1,0 +1,140 @@
+{
+  "schema": "logex-source-identity-content-diagnostic-result-v1",
+  "disposition": "PERFORMANCE_HOLD",
+  "acceptance_granted": false,
+  "source_commit": "b6c4741cc77e5fa476f1c11cbbab8386b27b040e",
+  "baseline": "9c0a58fc (PR #149)",
+  "method": "Fixed diagnostic only: two balanced source pairs per publication/dense/sparse suite; unchanged fixtures, no exclusions, no rerun or pooling with prior packets. Two pairs do not support a stable acceptance inference.",
+  "counts": {
+    "processes": 12,
+    "measured_observations": 800,
+    "explicit_warmups": 0,
+    "rss": 12,
+    "metrics": 20
+  },
+  "findings": {
+    "historical_publication": {
+      "pooled_median_percent": 43.443,
+      "pooled_p95_percent": 35.545,
+      "pair_median_percent": [
+        43.245,
+        42.293
+      ],
+      "pair_p95_percent": [
+        35.545,
+        46.236
+      ]
+    },
+    "sparse_historical_ingest": {
+      "pooled_median_percent": 10.477,
+      "pooled_p95_percent": 9.388
+    },
+    "live_publication": {
+      "pooled_median_percent": 4.35,
+      "pooled_p95_percent": 1.077
+    },
+    "rules": "Investigate >5%; reject repeatable source regression >10%. Historical publication materially exceeds limit; no threshold waiver."
+  },
+  "independent_verification": {
+    "status": "ALL_RAW_ARITHMETIC_VERIFIED",
+    "metrics": 20,
+    "processes": 12,
+    "observations": 800,
+    "quantile_scalars": 240,
+    "effect_scalars": 120,
+    "filtering": "none; all declared sample records retained in exact process/iteration order",
+    "before_after_log_hashes": {
+      "/private/tmp/logex-content-diagnostic-b6c4741c-collected-1/unpacked/content-diagnostic-b6c4741c-20260914/packet-1/logs/diagnostic-process-00.stdout.log": "479d88660db1843eda88d3eb76d8a3edd3bafb26b804f4cd69fb7cef3abddd01",
+      "/private/tmp/logex-content-diagnostic-b6c4741c-collected-1/unpacked/content-diagnostic-b6c4741c-20260914/packet-1/logs/diagnostic-process-01.stdout.log": "e8054b2a2345953e0d73607ac7e6f26ecacd1802d089139243882bfc8bb7146e",
+      "/private/tmp/logex-content-diagnostic-b6c4741c-collected-1/unpacked/content-diagnostic-b6c4741c-20260914/packet-1/logs/diagnostic-process-02.stdout.log": "1709ff5e1d812c859f37969a31b3a331eded7a90b2cf64a39027628a3ff0f76f",
+      "/private/tmp/logex-content-diagnostic-b6c4741c-collected-1/unpacked/content-diagnostic-b6c4741c-20260914/packet-1/logs/diagnostic-process-03.stdout.log": "3479c9c4c275839c394b2c8808ae422781877919295cb13574afa2896fa2e861",
+      "/private/tmp/logex-content-diagnostic-b6c4741c-collected-1/unpacked/content-diagnostic-b6c4741c-20260914/packet-1/logs/diagnostic-process-04.stdout.log": "0bf66075b88645096f481dd2143ac2c9e6ae5e0cadc1a4386c43c1531b7daaad",
+      "/private/tmp/logex-content-diagnostic-b6c4741c-collected-1/unpacked/content-diagnostic-b6c4741c-20260914/packet-1/logs/diagnostic-process-05.stdout.log": "2d8f7a2ddd88b875324306f40cb2025b38985f5691920710259703a8c5d401be",
+      "/private/tmp/logex-content-diagnostic-b6c4741c-collected-1/unpacked/content-diagnostic-b6c4741c-20260914/packet-1/logs/diagnostic-process-06.stdout.log": "53ea8a61cdf66328f8fb9d48de4745f72c2653ad0fa8793b140c8ac79b2e51b9",
+      "/private/tmp/logex-content-diagnostic-b6c4741c-collected-1/unpacked/content-diagnostic-b6c4741c-20260914/packet-1/logs/diagnostic-process-07.stdout.log": "24aaa9df2e2ac8a96eba9fd9668a419f231335c2a20c63a1cda52fbb0c7afb47",
+      "/private/tmp/logex-content-diagnostic-b6c4741c-collected-1/unpacked/content-diagnostic-b6c4741c-20260914/packet-1/logs/diagnostic-process-08.stdout.log": "da2e60c7e73382ba79f2f882696d4b38c8fb4851b6ab075b81d39f6c594b099f",
+      "/private/tmp/logex-content-diagnostic-b6c4741c-collected-1/unpacked/content-diagnostic-b6c4741c-20260914/packet-1/logs/diagnostic-process-09.stdout.log": "bd52b3479f9f5d1b86882c4aa3f87be798b28f9d4dcd0497fb501520774280ff",
+      "/private/tmp/logex-content-diagnostic-b6c4741c-collected-1/unpacked/content-diagnostic-b6c4741c-20260914/packet-1/logs/diagnostic-process-10.stdout.log": "b010494c2cf72224d54846d1f2b6f702ef06365a6645092ad436ce76572e3786",
+      "/private/tmp/logex-content-diagnostic-b6c4741c-collected-1/unpacked/content-diagnostic-b6c4741c-20260914/packet-1/logs/diagnostic-process-11.stdout.log": "0cbec8c9bd18f65c0cd314663c7dd6e6372bf98f531ec787a71fe39b25f9e47b"
+    },
+    "analyzer_metrics_sha256": "eb7d859cea53faf9b0c095c980d0c0a6ae0fee5ab652f1fc7f34754e5d57bc50",
+    "independence": "no analyzer/runner imports; explicit sorted median/nearest-rank p95 and percent arithmetic"
+  },
+  "archive": {
+    "status": "ALL_ARCHIVED_BYTES_ROUNDTRIP_VERIFIED",
+    "archive": {
+      "path": "/Users/tdenisenko/code/logex/docs/audit/baselines/2026-09-14-source-identity-content-diagnostic-result-1-raw.jsonl.gz",
+      "bytes": 1836171,
+      "sha256": "39b50b0a267f4ec29e38ba946dc845be3dbcfa6ff837c134a5ecc42a7ca5eb90"
+    },
+    "file_count": 436,
+    "payload_bytes": 18345039,
+    "uncompressed_jsonl_bytes": 19743392,
+    "original_collection_verified_members": 361,
+    "exclusions": [
+      {
+        "path": "/private/tmp/logex-content-diagnostic-b6c4741c-collected-1/evidence.tar",
+        "bytes": 554475520,
+        "sha256": "e078c1954bb168afb77e5bee4318acae23e4567ee123e1520a16aadd934ef397",
+        "reason": "Nonmeasurement reproducible image/executable, or redundant verified tar container; original retained intact."
+      },
+      {
+        "path": "/private/tmp/logex-content-diagnostic-b6c4741c-collected-1/unpacked/content-diagnostic-b6c4741c-20260914/platform-build/retained-binaries/logex_storage",
+        "bytes": 5875584,
+        "sha256": "3bb73a5825eb518245ae90b7e1dde301a6aa1ebe65b1f391a20164f6e30cc16a",
+        "reason": "Nonmeasurement reproducible image/executable, or redundant verified tar container; original retained intact."
+      },
+      {
+        "path": "/private/tmp/logex-content-diagnostic-b6c4741c-collected-1/unpacked/content-diagnostic-b6c4741c-20260914/mount-tests-2/disposable-exfat.dmg",
+        "bytes": 536870912,
+        "sha256": "49409e2c729192caf77f9552e940f7d4feff6eb9f93bfa7986faba4fb0730fd6",
+        "reason": "Nonmeasurement reproducible image/executable, or redundant verified tar container; original retained intact."
+      },
+      {
+        "path": "/private/tmp/logex-source-identity-content-history-profile-1/target",
+        "reason": "Reproducible source or dependency/build tree; source inventory, build proof, logs and exact diagnostic executable identity retained."
+      },
+      {
+        "path": "/private/tmp/logex-source-identity-content-history-profile-1/source",
+        "reason": "Reproducible source or dependency/build tree; source inventory, build proof, logs and exact diagnostic executable identity retained."
+      }
+    ],
+    "profile_executable": {
+      "path": "/private/tmp/logex-source-identity-content-history-profile-1/target/release/build/logex-storage/067ee7a89b6721b9/out/ingestion_publication-067ee7a89b6721b9",
+      "bytes": 3292624,
+      "sha256": "a1534e284a8395c3f5a467430aa29e92d00464bededeea6236d6682b49b8c342"
+    }
+  },
+  "raw_references": {
+    "all_metrics": "analysis/metrics.json",
+    "all_raw_packet": "collected/unpacked/content-diagnostic-b6c4741c-20260914/packet-1/",
+    "verifier": "verification/verify_metrics.py",
+    "packaging_script": "verification/package.py",
+    "manifest": "packaging/manifest.json",
+    "failed_analyzer": "failed-analysis/",
+    "validation_only_analyzer_fix": "analysis-tools/validation-only.diff",
+    "profile": "profile/",
+    "design_review": "design-review/"
+  },
+  "operations": {
+    "original_packet_completed": "2026-09-14T00:14:44.068484+00:00",
+    "host_released": "2026-09-14T10:36:29.516675+00:00",
+    "transport": "SSH interrupted observation, not original workload; every reconnect and collection/release record retained. No rerun.",
+    "mounts": "Four distinct-mount recovery tests and eight journal-origin cases passed. First mount harness failed before image/tests; corrected df preflight passed, image normally detached.",
+    "analysis": "Original analyzer failed because frozen cwd/environment placeholders were compared literally against runner-resolved values. Corrected analyzer resolves only those fields against exact declared root and checks every schedule field; original failure and complete diff retained."
+  },
+  "profile": {
+    "host": "local ARM64, separate from Intel diagnostic",
+    "original_samples": 100,
+    "fixture_returncode": 0,
+    "profiler_returncode": 0,
+    "supervisor_result": "failed: KeyError(route) in reporting; original successful fixture/profiler output retained and reparsed without rerun",
+    "finding": "commitment::extend 886/1184 inclusive historical-ingest samples; 653/886 in portable BLAKE3 compression. Inclusive/overlapping samples are not additive wall time and cannot quantify Intel delta.",
+    "interpretation": "Supports bounded CPU investigation/design work only. No implemented prototype or acceptance claim; unchanged 100 original samples retained."
+  },
+  "prior_dispositions": "All earlier direct/sparse/control packet dispositions remain unchanged. No observation pooling.",
+  "limitations": [
+    "Excluded nonmeasurement image and executables have exact hashes/sizes; complete original local tar remains intact. Reproducible source/target/cache trees are represented by inventories/build proofs, not duplicated.",
+    "No new benchmarks, tests, profiles, remote actions or production changes in this checkpoint."
+  ]
+}

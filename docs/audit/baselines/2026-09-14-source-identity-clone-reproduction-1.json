@@ -1,0 +1,36 @@
+{
+  "schema": 1,
+  "status": "CONFIRMED_BEFORE_FIX",
+  "production_base": "c229ace0345dd7b6b8c07388d3c0aed8a9c6a771",
+  "regression": [
+    "cargo",
+    "test",
+    "-p",
+    "logex-query",
+    "--lib",
+    "--locked",
+    "native::tests::divergent_native_clones_do_not_share_index_publications",
+    "--",
+    "--exact",
+    "--nocapture"
+  ],
+  "exit_code": 101,
+  "rows_per_clone": 4,
+  "expected_row_ids": [
+    2
+  ],
+  "actual_indexed_row_ids": [],
+  "local_index_correct_before_copy": true,
+  "scope": "Generated temporary native datasets only; no SQL fixture or user data. Shared closed ancestor followed by equal-count divergent ordinary appends and a complete index-directory copy.",
+  "source_sha256": "71ff3b7954cc2c35d2d1f81d903d0f3281c08756eae0656cba17d4614426b9ea",
+  "patch_sha256": "3cc819bbecbc653a333c1dae3d33199b79e5fa471cc6fc7d9dbf39c1dbd35b7c",
+  "implementation_status": "New correction required; design notes are not a tested implementation.",
+  "archive": {
+    "path": "2026-09-14-source-identity-clone-reproduction-1-raw.json.gz",
+    "sha256": "92cc40f24fcfcc5e031c04c6bfc22e57da3d58b1ad604a0ab71385aa30df40e2",
+    "compressed_bytes": 16676,
+    "uncompressed_bytes": 49168,
+    "files": 14,
+    "roundtrip": "Every decoded file compared byte-for-byte with its original and size/SHA256."
+  }
+}

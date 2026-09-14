@@ -1,0 +1,155 @@
+{
+  "schema": 1,
+  "scope": "Complete unsuccessful focused checks before acceptance; no pass or performance claim. Includes initial patches, runner source, command outcomes and complete logs.",
+  "runs": [
+    {
+      "head": "f83cccd3075f3b75e853142c667b69564bec91f0",
+      "branch": "audit/source-publication-identity",
+      "checks": [
+        {
+          "name": "fmt",
+          "command": [
+            "cargo",
+            "fmt",
+            "--all"
+          ],
+          "exit": 0,
+          "started_at": "2026-09-13T07:17:53.040214+00:00",
+          "finished_at": "2026-09-13T07:17:53.793389+00:00",
+          "log": "/private/tmp/logex-source-identity-focused-1/fmt.log",
+          "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "name": "storage",
+          "command": [
+            "cargo",
+            "test",
+            "-p",
+            "logex-storage",
+            "--lib",
+            "--locked"
+          ],
+          "exit": 101,
+          "started_at": "2026-09-13T07:17:53.793803+00:00",
+          "finished_at": "2026-09-13T07:17:57.048243+00:00",
+          "log": "/private/tmp/logex-source-identity-focused-1/storage.log",
+          "log_sha256": "35a2d3684fe2ebbbc99f528e0f02e7cb64b5551731bc728b289d2538022763d3"
+        }
+      ]
+    },
+    {
+      "head": "f83cccd3075f3b75e853142c667b69564bec91f0",
+      "branch": "audit/source-publication-identity",
+      "checks": [
+        {
+          "name": "fmt",
+          "command": [
+            "cargo",
+            "fmt",
+            "--all"
+          ],
+          "exit": 0,
+          "started_at": "2026-09-13T07:18:44.477372+00:00",
+          "finished_at": "2026-09-13T07:18:45.210951+00:00",
+          "log": "/private/tmp/logex-source-identity-focused-2/fmt.log",
+          "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "name": "storage",
+          "command": [
+            "cargo",
+            "test",
+            "-p",
+            "logex-storage",
+            "--lib",
+            "--locked"
+          ],
+          "exit": 101,
+          "started_at": "2026-09-13T07:18:45.211363+00:00",
+          "finished_at": "2026-09-13T07:20:31.059719+00:00",
+          "log": "/private/tmp/logex-source-identity-focused-2/storage.log",
+          "log_sha256": "654b4bf6f499c80d3da3a5f741607a5cbc6f7de248fd6dd49d0bae5692274d5a"
+        }
+      ]
+    },
+    {
+      "head": "f83cccd3075f3b75e853142c667b69564bec91f0",
+      "branch": "audit/source-publication-identity",
+      "checks": [
+        {
+          "name": "fmt",
+          "command": [
+            "cargo",
+            "fmt",
+            "--all"
+          ],
+          "exit": 0,
+          "started_at": "2026-09-13T07:34:28.294250+00:00",
+          "finished_at": "2026-09-13T07:34:29.032224+00:00",
+          "log": "/private/tmp/logex-source-identity-focused-3/fmt.log",
+          "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "name": "storage",
+          "command": [
+            "cargo",
+            "test",
+            "-p",
+            "logex-storage",
+            "--lib",
+            "--locked"
+          ],
+          "exit": 101,
+          "started_at": "2026-09-13T07:34:29.032626+00:00",
+          "finished_at": "2026-09-13T07:36:25.816051+00:00",
+          "log": "/private/tmp/logex-source-identity-focused-3/storage.log",
+          "log_sha256": "a5c2b4ee99e41a87d73ff15386d428f956da1628959c597d6a988c2a37bc11fd"
+        }
+      ]
+    },
+    {
+      "head": "f83cccd3075f3b75e853142c667b69564bec91f0",
+      "branch": "audit/source-publication-identity",
+      "checks": [
+        {
+          "name": "fmt",
+          "command": [
+            "cargo",
+            "fmt",
+            "--all"
+          ],
+          "exit": 0,
+          "started_at": "2026-09-13T07:38:10.494195+00:00",
+          "finished_at": "2026-09-13T07:38:11.231001+00:00",
+          "log": "/private/tmp/logex-source-identity-focused-4/fmt.log",
+          "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        {
+          "name": "clippy",
+          "command": [
+            "cargo",
+            "clippy",
+            "--workspace",
+            "--all-targets",
+            "--locked",
+            "--",
+            "-D",
+            "warnings"
+          ],
+          "exit": 101,
+          "started_at": "2026-09-13T07:38:11.231418+00:00",
+          "finished_at": "2026-09-13T07:38:14.848372+00:00",
+          "log": "/private/tmp/logex-source-identity-focused-4/clippy.log",
+          "log_sha256": "7f13c778255caf3823c0ee130494ba65d8ebd452897f26a35fa5cc6b1d855a48"
+        }
+      ]
+    }
+  ],
+  "raw_evidence": {
+    "path": "2026-09-13-source-identity-focused-failures-1.json.gz",
+    "sha256": "2cea032e092ee458e900e7da1cb3f271e659d8ff03f20411b5d69866f9592e6f",
+    "files": 16,
+    "bytes": 95421
+  },
+  "verification": "Every command log hash and all complete patches/logs verified; compressed archive roundtrip checked. These attempts failed and do not satisfy acceptance gates."
+}

@@ -1,0 +1,451 @@
+{
+  "schema": "logex-stream-final-validation-v1",
+  "status": "NINE_LOCAL_GATES_PASS_PERFORMANCE_NOT_ACCEPTED",
+  "acceptance_granted": false,
+  "source_proof": {
+    "parent": "e9c7fb2ca4c2d5ecce886ee4d1a0a16d6f47717b",
+    "source_sha256": {
+      "crates/logex-index/src/builder.rs": "38dff17a2cf2b756f6186f3443971e6bfaa414e26c1b5714941256b9027653a8",
+      "crates/logex-storage/src/column.rs": "70acd774dc80f9c1c43e85705f139223d77b3c6c93b5f3dfc6f358739328fb3f",
+      "crates/logex-storage/src/column_artifact.rs": "88d669b1d7067411b2bf93f117034b22f8d69af7f66b59c05e8073d8ec2318e2",
+      "crates/logex-storage/src/commitment.rs": "75ea286fecac3c829d7c685fa0b7c0154411599126b35f36348d5869918d1869",
+      "crates/logex-storage/src/lib.rs": "83bacb4f88b270cf773deb49b4e80a0f30c2057fec220d67efd41839a17254e5",
+      "crates/logex-storage/src/native/catalog.rs": "ffe52506e6984add993f460c739a55d6e8c9db06b7f95df20a14944fc3ce9731",
+      "crates/logex-storage/src/native/recovery.rs": "e98661d988194233ff37ecc03a30d905485cf57f8a6ae270917b2e7cafcda574",
+      "crates/logex-storage/src/native/segment.rs": "5c92113a4be31b470b6769dbfb45ab9fb27c089b91ff5f940bdaaaa0acf3cc17",
+      "crates/logex-storage/src/native/storage.rs": "d86352786375e2e9794aa80fc6120b513bc73a3442a86e52879e17de13bd211d",
+      "crates/logex-storage/src/segment_reader.rs": "5c4519df5c2717c210a525581164fcd03520971e2af275779e9c0402b5ea6b5d",
+      "crates/logex-storage/src/commitment/stream.rs": "d0f1f156e5172e6c9f8aba80f072f2764222fd39eb6d4eef4d0349c3cce76a5f"
+    },
+    "change_after_prior_all_gate_pass": "Only RowBuffer initialization/type changed from16KiB to64KiB; prior actual-component oracle validated root/state equality.",
+    "scope": "Full local final64KiB gates; no ingestion acceptance"
+  },
+  "input_manifests_byte_identical": true,
+  "all_source_hashes_unchanged": true,
+  "source_inputs": 106,
+  "gates": {
+    "vendor": {
+      "name": "vendor",
+      "command": [
+        "python3",
+        "tools/verify_datafusion_vendor.py"
+      ],
+      "exit_code": 0,
+      "elapsed_s": 0.059626102447509766,
+      "source_unchanged": true
+    },
+    "fmt": {
+      "name": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "exit_code": 0,
+      "elapsed_s": 0.7856099605560303,
+      "source_unchanged": true
+    },
+    "check": {
+      "name": "check",
+      "command": [
+        "cargo",
+        "check",
+        "--workspace",
+        "--all-targets",
+        "--locked",
+        "--offline",
+        "-j",
+        "2"
+      ],
+      "exit_code": 0,
+      "elapsed_s": 7.528014183044434,
+      "source_unchanged": true
+    },
+    "clippy": {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--locked",
+        "--offline",
+        "-j",
+        "2",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit_code": 0,
+      "elapsed_s": 6.863908290863037,
+      "source_unchanged": true
+    },
+    "test": {
+      "name": "test",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace",
+        "--all-targets",
+        "--locked",
+        "--offline",
+        "-j",
+        "2"
+      ],
+      "exit_code": 0,
+      "elapsed_s": 232.18177580833435,
+      "source_unchanged": true
+    },
+    "docs": {
+      "name": "docs",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace",
+        "--doc",
+        "--locked",
+        "--offline",
+        "-j",
+        "2"
+      ],
+      "exit_code": 0,
+      "elapsed_s": 9.633846044540405,
+      "source_unchanged": true
+    },
+    "release": {
+      "name": "release",
+      "command": [
+        "cargo",
+        "build",
+        "-p",
+        "logex-node",
+        "--release",
+        "--locked",
+        "--offline",
+        "-j",
+        "2"
+      ],
+      "exit_code": 0,
+      "elapsed_s": 99.07255697250366,
+      "source_unchanged": true
+    },
+    "query-release": {
+      "name": "query-release",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "logex-query",
+        "--release",
+        "--locked",
+        "--offline",
+        "-j",
+        "2"
+      ],
+      "exit_code": 0,
+      "elapsed_s": 391.10877299308777,
+      "source_unchanged": true
+    },
+    "api-release": {
+      "name": "api-release",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "logex-server",
+        "--release",
+        "--test",
+        "consistency",
+        "--locked",
+        "--offline",
+        "-j",
+        "2"
+      ],
+      "exit_code": 0,
+      "elapsed_s": 84.2046480178833,
+      "source_unchanged": true
+    }
+  },
+  "test_totals": {
+    "test": {
+      "passed": 1179,
+      "failed": 0,
+      "ignored": 23,
+      "measured": 0,
+      "filtered_out": 0
+    },
+    "docs": {
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0,
+      "measured": 0,
+      "filtered_out": 0
+    },
+    "query-release": {
+      "passed": 149,
+      "failed": 0,
+      "ignored": 9,
+      "measured": 0,
+      "filtered_out": 0
+    },
+    "api-release": {
+      "passed": 2,
+      "failed": 0,
+      "ignored": 0,
+      "measured": 0,
+      "filtered_out": 0
+    }
+  },
+  "initial_failed_attempt": {
+    "name": "test",
+    "command": [
+      "cargo",
+      "test",
+      "--workspace",
+      "--all-targets",
+      "--locked",
+      "--offline",
+      "-j",
+      "2"
+    ],
+    "exit_code": 101,
+    "elapsed_s": 39.75883078575134,
+    "source_unchanged": true
+  },
+  "failure_context": "Initial workspace test encountered sandbox loopback listener permission denial; retained original output. Root-authorized enabled continuation reused unchanged tests and source.",
+  "archive": {
+    "source": "/Users/tdenisenko/code/logex/docs/audit/baselines/2026-09-14-source-identity-stream-final-validation-1-raw.jsonl.gz",
+    "bytes": 251633,
+    "sha256": "65933299ed398e71f7416ec3f3eba29c62c9f243bf7a44199d9c766f57342fff"
+  },
+  "files": 44,
+  "payload_bytes": 1309878,
+  "uncompressed_jsonl_bytes": 1371324,
+  "all_decoded_bytes_verified": true,
+  "manifest": {
+    "validation/api-release-enabled-gate.json": {
+      "source": "/private/tmp/logex-source-identity-stream-final-validation-1/api-release-enabled-gate.json",
+      "bytes": 283,
+      "sha256": "fb79ba0a8433a8e854c0bb45a0be7a8a2762c9d74c8e14ac285353e4e326ae65"
+    },
+    "validation/api-release-enabled-gate.log": {
+      "source": "/private/tmp/logex-source-identity-stream-final-validation-1/api-release-enabled-gate.log",
+      "bytes": 1017,
+      "sha256": "2464bd335b62b261cd74cf0f93d17ae3ec11327dc5bad477db1a86ff7d52c9d6"
+    },
+    "validation/check-gate.json": {
+      "source": "/private/tmp/logex-source-identity-stream-final-validation-1/check-gate.json",
+      "bytes": 239,
+      "sha256": "7bbe5c55485a89f54fdf5c2cc7c5e467bb6349a4e63540d4280a12f4913a8f0a"
+    },
+    "validation/check-gate.log": {
+      "source": "/private/tmp/logex-source-identity-stream-final-validation-1/check-gate.log",
+      "bytes": 871,
+      "sha256": "86a5d78c70aef549d81ba644c7747c0b2ba0cb7980c9b457c3b89a0f296e30b1"
+    },
+    "validation/clippy-gate.json": {
+      "source": "/private/tmp/logex-source-identity-stream-final-validation-1/clippy-gate.json",
+      "bytes": 277,
+      "sha256": "f8aa6b95d482c02915deddfd79a96fb542de79b8e788e19dcd1aaf0e55c6b3a5"
+    },
+    "validation/clippy-gate.log": {
+      "source": "/private/tmp/logex-source-identity-stream-final-validation-1/clippy-gate.log",
+      "bytes": 871,
+      "sha256": "a7b3c2feb00cc27d63652b8ac9dba3ab9c6fc1c4a0fdea6d677fdf293edffcea"
+    },
+    "validation/committed-source.json": {
+      "source": "/private/tmp/logex-source-identity-stream-final-validation-1/committed-source.json",
+      "bytes": 264,
+      "sha256": "8385ee6bfbc929d152f5ce40900b5ec63cc0e597c7040dcfff36dc9ca5290680"
+    },
+    "validation/docs-enabled-gate.json": {
+      "source": "/private/tmp/logex-source-identity-stream-final-validation-1/docs-enabled-gate.json",
+      "bytes": 229,
+      "sha256": "90c98f4f274f7b676e0d11f242988f42349f373c248aff05465645ea6d233325"
+    },
+    "validation/docs-enabled-gate.log": {
+      "source": "/private/tmp/logex-source-identity-stream-final-validation-1/docs-enabled-gate.log",
+      "bytes": 1757,
+      "sha256": "ec56c4091ed71fb40cf4d50a64ad6ad2802255a27a9d2bd2892a70e065cbac63"
+    },
+    "validation/expected-counts.json": {
+      "source": "/private/tmp/logex-source-identity-stream-final-validation-1/expected-counts.json",
+      "bytes": 297,
+      "sha256": "fb251552b6eae16f59147f21dc87e259cf87efa8771bf322bd5f217f72e2bdcc"
+    },
+    "validation/fmt-gate.json": {
+      "source": "/private/tmp/logex-source-identity-stream-final-validation-1/fmt-gate.json",
+      "bytes": 182,
+      "sha256": "48105dd4774d0b6270de81c469173c452668dda199b155891f8eb62549c2cb8a"
+    },
+    "validation/fmt-gate.log": {
+      "source": "/private/tmp/logex-source-identity-stream-final-validation-1/fmt-gate.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "validation/package_evidence.py": {
+      "source": "/private/tmp/logex-source-identity-stream-final-validation-1/package_evidence.py",
+      "bytes": 5424,
+      "sha256": "2fc8bb6b328cfc35894afdb3630385d9e37f81b3be8b312dc1b6614248686a90"
+    },
+    "validation/query-release-enabled-gate.json": {
+      "source": "/private/tmp/logex-source-identity-stream-final-validation-1/query-release-enabled-gate.json",
+      "bytes": 253,
+      "sha256": "f95dec4a953c7e16accffcab52f3577a3ed627951171775d00f8c51abbadda33"
+    },
+    "validation/query-release-enabled-gate.log": {
+      "source": "/private/tmp/logex-source-identity-stream-final-validation-1/query-release-enabled-gate.log",
+      "bytes": 15106,
+      "sha256": "5b06d174f1970e193e79847d7a722cc6ab03b6e17a6222b7faff8b746b71e799"
+    },
+    "validation/release-enabled-gate.json": {
+      "source": "/private/tmp/logex-source-identity-stream-final-validation-1/release-enabled-gate.json",
+      "bytes": 246,
+      "sha256": "726193169892addd21b2519e102dbeaf50a6927acff9358b5f9e2e46f2c01233"
+    },
+    "validation/release-enabled-gate.log": {
+      "source": "/private/tmp/logex-source-identity-stream-final-validation-1/release-enabled-gate.log",
+      "bytes": 862,
+      "sha256": "499c1ccf6e9b5dc4eab22f4b31762b5fd0ca9669ad41512bd6a7b7a5e80d14ad"
+    },
+    "validation/source/crates/logex-index/src/builder.rs": {
+      "source": "/private/tmp/logex-source-identity-stream-final-validation-1/source/crates/logex-index/src/builder.rs",
+      "bytes": 30411,
+      "sha256": "38dff17a2cf2b756f6186f3443971e6bfaa414e26c1b5714941256b9027653a8"
+    },
+    "validation/source/crates/logex-storage/src/column.rs": {
+      "source": "/private/tmp/logex-source-identity-stream-final-validation-1/source/crates/logex-storage/src/column.rs",
+      "bytes": 101781,
+      "sha256": "70acd774dc80f9c1c43e85705f139223d77b3c6c93b5f3dfc6f358739328fb3f"
+    },
+    "validation/source/crates/logex-storage/src/column_artifact.rs": {
+      "source": "/private/tmp/logex-source-identity-stream-final-validation-1/source/crates/logex-storage/src/column_artifact.rs",
+      "bytes": 21554,
+      "sha256": "88d669b1d7067411b2bf93f117034b22f8d69af7f66b59c05e8073d8ec2318e2"
+    },
+    "validation/source/crates/logex-storage/src/commitment/stream.rs": {
+      "source": "/private/tmp/logex-source-identity-stream-final-validation-1/source/crates/logex-storage/src/commitment/stream.rs",
+      "bytes": 16713,
+      "sha256": "d0f1f156e5172e6c9f8aba80f072f2764222fd39eb6d4eef4d0349c3cce76a5f"
+    },
+    "validation/source/crates/logex-storage/src/commitment.rs": {
+      "source": "/private/tmp/logex-source-identity-stream-final-validation-1/source/crates/logex-storage/src/commitment.rs",
+      "bytes": 13104,
+      "sha256": "75ea286fecac3c829d7c685fa0b7c0154411599126b35f36348d5869918d1869"
+    },
+    "validation/source/crates/logex-storage/src/lib.rs": {
+      "source": "/private/tmp/logex-source-identity-stream-final-validation-1/source/crates/logex-storage/src/lib.rs",
+      "bytes": 651,
+      "sha256": "83bacb4f88b270cf773deb49b4e80a0f30c2057fec220d67efd41839a17254e5"
+    },
+    "validation/source/crates/logex-storage/src/native/catalog.rs": {
+      "source": "/private/tmp/logex-source-identity-stream-final-validation-1/source/crates/logex-storage/src/native/catalog.rs",
+      "bytes": 36674,
+      "sha256": "ffe52506e6984add993f460c739a55d6e8c9db06b7f95df20a14944fc3ce9731"
+    },
+    "validation/source/crates/logex-storage/src/native/recovery.rs": {
+      "source": "/private/tmp/logex-source-identity-stream-final-validation-1/source/crates/logex-storage/src/native/recovery.rs",
+      "bytes": 10705,
+      "sha256": "e98661d988194233ff37ecc03a30d905485cf57f8a6ae270917b2e7cafcda574"
+    },
+    "validation/source/crates/logex-storage/src/native/segment.rs": {
+      "source": "/private/tmp/logex-source-identity-stream-final-validation-1/source/crates/logex-storage/src/native/segment.rs",
+      "bytes": 119629,
+      "sha256": "5c92113a4be31b470b6769dbfb45ab9fb27c089b91ff5f940bdaaaa0acf3cc17"
+    },
+    "validation/source/crates/logex-storage/src/native/storage.rs": {
+      "source": "/private/tmp/logex-source-identity-stream-final-validation-1/source/crates/logex-storage/src/native/storage.rs",
+      "bytes": 347403,
+      "sha256": "d86352786375e2e9794aa80fc6120b513bc73a3442a86e52879e17de13bd211d"
+    },
+    "validation/source/crates/logex-storage/src/segment_reader.rs": {
+      "source": "/private/tmp/logex-source-identity-stream-final-validation-1/source/crates/logex-storage/src/segment_reader.rs",
+      "bytes": 90517,
+      "sha256": "5c4519df5c2717c210a525581164fcd03520971e2af275779e9c0402b5ea6b5d"
+    },
+    "validation/source-proof.json": {
+      "source": "/private/tmp/logex-source-identity-stream-final-validation-1/source-proof.json",
+      "bytes": 1586,
+      "sha256": "ca8f2bbed2288c7bad29a845bb3fa0b6c76edb0b3d5d1440b7805b32ad0b0215"
+    },
+    "validation/source.patch": {
+      "source": "/private/tmp/logex-source-identity-stream-final-validation-1/source.patch",
+      "bytes": 75850,
+      "sha256": "498dd130495db09a1b557220609ee55f9dd2f62556e2b0936843e1159d81cd04"
+    },
+    "validation/test-enabled-gate.json": {
+      "source": "/private/tmp/logex-source-identity-stream-final-validation-1/test-enabled-gate.json",
+      "bytes": 238,
+      "sha256": "0fe63aa9916a22129b912f4b0403cd8b9a5702c2c1ee5a09d8af15e2ea8b8c4d"
+    },
+    "validation/test-enabled-gate.log": {
+      "source": "/private/tmp/logex-source-identity-stream-final-validation-1/test-enabled-gate.log",
+      "bytes": 110247,
+      "sha256": "8c19a42ec2105391d62edc464275f6d7b141d7d869da1ce6242e78cf6ccc8f87"
+    },
+    "validation/test-gate.json": {
+      "source": "/private/tmp/logex-source-identity-stream-final-validation-1/test-gate.json",
+      "bytes": 239,
+      "sha256": "b4a9e7fae2c39f58d96159b60cc6216beef1b4f0a3c847fc359ce16834766d49"
+    },
+    "validation/test-gate.log": {
+      "source": "/private/tmp/logex-source-identity-stream-final-validation-1/test-gate.log",
+      "bytes": 33798,
+      "sha256": "6b5b84f7157debf0c52b8ac2af261cc93de99701f6114b7a1fe96ca32b675a3e"
+    },
+    "validation/vendor-gate.json": {
+      "source": "/private/tmp/logex-source-identity-stream-final-validation-1/vendor-gate.json",
+      "bytes": 181,
+      "sha256": "146b71943017077e02b08826d70b6d3691424f186325fb9aa36e551370c0b578"
+    },
+    "validation/vendor-gate.log": {
+      "source": "/private/tmp/logex-source-identity-stream-final-validation-1/vendor-gate.log",
+      "bytes": 198,
+      "sha256": "d8d80949d6f3378c14456842b531f0cade514179e4c94781b95ff9abb6447675"
+    },
+    "validation/workspace-gates-enabled-inputs.json": {
+      "source": "/private/tmp/logex-source-identity-stream-final-validation-1/workspace-gates-enabled-inputs.json",
+      "bytes": 11614,
+      "sha256": "528462a0a307e1954d4f4703a4bd90af3eb3c1b0a0e2a2d4dd279f7a4133105f"
+    },
+    "validation/workspace-gates-inputs.json": {
+      "source": "/private/tmp/logex-source-identity-stream-final-validation-1/workspace-gates-inputs.json",
+      "bytes": 11614,
+      "sha256": "528462a0a307e1954d4f4703a4bd90af3eb3c1b0a0e2a2d4dd279f7a4133105f"
+    },
+    "validation/workspace_gates.py": {
+      "source": "/private/tmp/logex-source-identity-stream-final-validation-1/workspace_gates.py",
+      "bytes": 1819,
+      "sha256": "9f9af4eb4199808af3ab877f2f09c44d15bfd9f1141fe2d330865c59ef140a93"
+    },
+    "validation/workspace_gates_enabled.py": {
+      "source": "/private/tmp/logex-source-identity-stream-final-validation-1/workspace_gates_enabled.py",
+      "bytes": 1873,
+      "sha256": "3ef6bcfafa9186a38c7cacda8122b798781ed6b965b37e44fbc7c8b48e260db3"
+    },
+    "packaging/expected-counts.json": {
+      "source": "/private/tmp/logex-source-identity-stream-final-validation-1/expected-counts.json",
+      "bytes": 297,
+      "sha256": "fb251552b6eae16f59147f21dc87e259cf87efa8771bf322bd5f217f72e2bdcc"
+    },
+    "reproduction/Cargo.lock": {
+      "source": "/Users/tdenisenko/code/logex/Cargo.lock",
+      "bytes": 239576,
+      "sha256": "6fa31180fbacb1e40064507911d34c75a2cbd55eaef8d8f76807b94362a511dd"
+    },
+    "reproduction/Cargo.toml": {
+      "source": "/Users/tdenisenko/code/logex/Cargo.toml",
+      "bytes": 3385,
+      "sha256": "5ece3c8c0c78ae1854831bedcfb693bae243dc4ed20c7d03e49b9ff1794ebfd2"
+    },
+    "reproduction/rust-toolchain.toml": {
+      "source": "/Users/tdenisenko/code/logex/rust-toolchain.toml",
+      "bytes": 43,
+      "sha256": "9fdf6a644a249a8bb0417289da8894eecb0de8cdcae1a8267327ea24fa75a276"
+    }
+  },
+  "exclusions": [],
+  "limits": "Final64KiB local correctness/build gates only. No Intel ingestion/performance acceptance, remote platform or exact-head CI claim. Original failed output and all runner scripts/source snapshots retained."
+}

@@ -1,0 +1,628 @@
+{
+  "schema": 1,
+  "verification": [
+    {
+      "folder": ".",
+      "samples": 40800,
+      "warmups": 400,
+      "point_comparisons": 24,
+      "independently_recomputed_bootstrap_draws": 32000
+    },
+    {
+      "folder": "extension",
+      "samples": 4000,
+      "warmups": 0,
+      "point_comparisons": 20,
+      "independently_recomputed_bootstrap_draws": 48000
+    }
+  ],
+  "pooled_source": [
+    {
+      "family": "index_binding_paths",
+      "base": {
+        "max": 5.491083,
+        "median": 0.5431459999999999,
+        "min": 0.532542,
+        "n": 3000,
+        "p05": 0.534583,
+        "p25": 0.5375,
+        "p75": 0.583334,
+        "p90": 0.647375,
+        "p95": 0.68075,
+        "p99": 0.899792
+      },
+      "bootstrap": {
+        "median": {
+          "descriptive_95_percent_interval": [
+            1.1140576799953505,
+            2.1778191201511143
+          ],
+          "draws": 4000,
+          "draws_above_10_percent": 0,
+          "observed_change_percent": 1.6991748075103175
+        },
+        "p95": {
+          "descriptive_95_percent_interval": [
+            -1.84767217466566,
+            10.969135352061276
+          ],
+          "draws": 4000,
+          "draws_above_10_percent": 512,
+          "observed_change_percent": 8.69144326110909
+        }
+      },
+      "candidate": {
+        "max": 4.434,
+        "median": 0.552375,
+        "min": 0.54125,
+        "n": 3000,
+        "p05": 0.544625,
+        "p25": 0.547625,
+        "p75": 0.592917,
+        "p90": 0.653166,
+        "p95": 0.739917,
+        "p99": 1.122625
+      },
+      "domain": "source_pooled",
+      "metric": "binding_block_hash_point",
+      "pairs_per_stratum": {
+        "confirmation": 20,
+        "initial": 10
+      }
+    },
+    {
+      "family": "index_binding_paths",
+      "base": {
+        "max": 3.856541,
+        "median": 0.650708,
+        "min": 0.612042,
+        "n": 3000,
+        "p05": 0.621917,
+        "p25": 0.63425,
+        "p75": 0.698167,
+        "p90": 0.77175,
+        "p95": 0.817708,
+        "p99": 1.002416
+      },
+      "bootstrap": {
+        "median": {
+          "descriptive_95_percent_interval": [
+            3.894738208680093,
+            5.7384909996170075
+          ],
+          "draws": 4000,
+          "draws_above_10_percent": 0,
+          "observed_change_percent": 4.796160489804957
+        },
+        "p95": {
+          "descriptive_95_percent_interval": [
+            2.2563706049674392,
+            12.905070901098693
+          ],
+          "draws": 4000,
+          "draws_above_10_percent": 2058,
+          "observed_change_percent": 10.15545891687497
+        }
+      },
+      "candidate": {
+        "max": 4.783875,
+        "median": 0.681917,
+        "min": 0.639208,
+        "n": 3000,
+        "p05": 0.652916,
+        "p25": 0.665708,
+        "p75": 0.736125,
+        "p90": 0.8095,
+        "p95": 0.90075,
+        "p99": 1.182667
+      },
+      "domain": "source_pooled",
+      "metric": "binding_block_number_range",
+      "pairs_per_stratum": {
+        "confirmation": 20,
+        "initial": 10
+      }
+    },
+    {
+      "family": "index_binding_paths",
+      "base": {
+        "max": 3.555333,
+        "median": 0.6303125,
+        "min": 0.60525,
+        "n": 3000,
+        "p05": 0.611083,
+        "p25": 0.618166,
+        "p75": 0.677417,
+        "p90": 0.747,
+        "p95": 0.785416,
+        "p99": 0.89775
+      },
+      "bootstrap": {
+        "median": {
+          "descriptive_95_percent_interval": [
+            3.9526976901294475,
+            5.689352681594673
+          ],
+          "draws": 4000,
+          "draws_above_10_percent": 0,
+          "observed_change_percent": 4.838869608329199
+        },
+        "p95": {
+          "descriptive_95_percent_interval": [
+            1.6886419349567028,
+            13.793799196787159
+          ],
+          "draws": 4000,
+          "draws_above_10_percent": 2489,
+          "observed_change_percent": 11.543946138097505
+        }
+      },
+      "candidate": {
+        "max": 6.463167,
+        "median": 0.6608125,
+        "min": 0.635042,
+        "n": 3000,
+        "p05": 0.641667,
+        "p25": 0.648209,
+        "p75": 0.709291,
+        "p90": 0.781125,
+        "p95": 0.876084,
+        "p99": 1.107334
+      },
+      "domain": "source_pooled",
+      "metric": "binding_timestamp_range",
+      "pairs_per_stratum": {
+        "confirmation": 20,
+        "initial": 10
+      }
+    },
+    {
+      "family": "index_binding_paths",
+      "base": {
+        "max": 9.234375,
+        "median": 1.3257085000000002,
+        "min": 1.290666,
+        "n": 3000,
+        "p05": 1.298292,
+        "p25": 1.307291,
+        "p75": 1.435333,
+        "p90": 1.586166,
+        "p95": 1.693208,
+        "p99": 2.090084
+      },
+      "bootstrap": {
+        "median": {
+          "descriptive_95_percent_interval": [
+            0.25653010465063186,
+            1.4883723035558294
+          ],
+          "draws": 4000,
+          "draws_above_10_percent": 0,
+          "observed_change_percent": 0.9192820291942017
+        },
+        "p95": {
+          "descriptive_95_percent_interval": [
+            -2.349267222378182,
+            10.492481823789102
+          ],
+          "draws": 4000,
+          "draws_above_10_percent": 167,
+          "observed_change_percent": 7.712165309873331
+        }
+      },
+      "candidate": {
+        "max": 7.5685,
+        "median": 1.3378955000000001,
+        "min": 1.300958,
+        "n": 3000,
+        "p05": 1.309792,
+        "p25": 1.319708,
+        "p75": 1.447209,
+        "p90": 1.616666,
+        "p95": 1.823791,
+        "p99": 2.639208
+      },
+      "domain": "source_pooled",
+      "metric": "binding_erc20_topic1_present",
+      "pairs_per_stratum": {
+        "confirmation": 20,
+        "initial": 10
+      }
+    },
+    {
+      "family": "index_binding_paths",
+      "base": {
+        "max": 3.435333,
+        "median": 0.2985,
+        "min": 0.293291,
+        "n": 3000,
+        "p05": 0.294709,
+        "p25": 0.295791,
+        "p75": 0.319583,
+        "p90": 0.354458,
+        "p95": 0.363084,
+        "p99": 0.438167
+      },
+      "bootstrap": {
+        "median": {
+          "descriptive_95_percent_interval": [
+            1.637283176593507,
+            2.418118443520756
+          ],
+          "draws": 4000,
+          "draws_above_10_percent": 0,
+          "observed_change_percent": 2.06566164154105
+        },
+        "p95": {
+          "descriptive_95_percent_interval": [
+            -1.3359055276157772,
+            12.021576763485475
+          ],
+          "draws": 4000,
+          "draws_above_10_percent": 1452,
+          "observed_change_percent": 11.039594143503972
+        }
+      },
+      "candidate": {
+        "max": 1.893292,
+        "median": 0.304666,
+        "min": 0.299666,
+        "n": 3000,
+        "p05": 0.301125,
+        "p25": 0.30225,
+        "p75": 0.325667,
+        "p90": 0.355166,
+        "p95": 0.403167,
+        "p99": 0.532959
+      },
+      "domain": "source_pooled",
+      "metric": "binding_erc20_topic1_absent",
+      "pairs_per_stratum": {
+        "confirmation": 20,
+        "initial": 10
+      }
+    },
+    {
+      "family": "integrated_sparse",
+      "base": {
+        "max": 26.81025,
+        "median": 12.117332999999999,
+        "min": 10.815,
+        "n": 300,
+        "p05": 11.464083,
+        "p25": 11.867834,
+        "p75": 12.475375,
+        "p90": 14.879833,
+        "p95": 16.448292,
+        "p99": 18.677333
+      },
+      "bootstrap": {
+        "median": {
+          "descriptive_95_percent_interval": [
+            -0.3992858135191235,
+            1.9314278069638258
+          ],
+          "draws": 4000,
+          "draws_above_10_percent": 0,
+          "observed_change_percent": 0.7269215098735238
+        },
+        "p95": {
+          "descriptive_95_percent_interval": [
+            3.6674967570776262,
+            21.904972585207094
+          ],
+          "draws": 4000,
+          "draws_above_10_percent": 2558,
+          "observed_change_percent": 11.548816132398422
+        }
+      },
+      "candidate": {
+        "max": 56.153125,
+        "median": 12.2054165,
+        "min": 10.710334,
+        "n": 300,
+        "p05": 11.529208,
+        "p25": 11.910875,
+        "p75": 12.868083,
+        "p90": 16.980709,
+        "p95": 18.347875,
+        "p99": 20.624
+      },
+      "domain": "source_pooled",
+      "metric": "concurrent_native_queries",
+      "pairs_per_stratum": {
+        "confirmation": 20,
+        "initial": 10
+      }
+    },
+    {
+      "family": "publication",
+      "base": {
+        "max": 206.794583,
+        "median": 133.2039375,
+        "min": 123.663584,
+        "n": 300,
+        "p05": 128.230709,
+        "p25": 131.210167,
+        "p75": 138.08325,
+        "p90": 144.089,
+        "p95": 147.578917,
+        "p99": 168.899167
+      },
+      "bootstrap": {
+        "median": {
+          "descriptive_95_percent_interval": [
+            -0.32086205910417664,
+            1.7518580152528607
+          ],
+          "draws": 4000,
+          "draws_above_10_percent": 0,
+          "observed_change_percent": 0.5790309314242403
+        },
+        "p95": {
+          "descriptive_95_percent_interval": [
+            -1.1881571691831239,
+            16.735401751336543
+          ],
+          "draws": 4000,
+          "draws_above_10_percent": 391,
+          "observed_change_percent": 3.597453557678576
+        }
+      },
+      "candidate": {
+        "max": 307.123166,
+        "median": 133.9752295,
+        "min": 123.726458,
+        "n": 300,
+        "p05": 128.217084,
+        "p25": 131.229625,
+        "p75": 139.951667,
+        "p90": 146.958875,
+        "p95": 152.888,
+        "p99": 180.10025
+      },
+      "domain": "source_pooled",
+      "metric": "live_storage_publication",
+      "pairs_per_stratum": {
+        "confirmation": 20,
+        "initial": 10
+      }
+    },
+    {
+      "family": "publication",
+      "base": {
+        "max": 46.245417,
+        "median": 10.7491875,
+        "min": 8.9325,
+        "n": 300,
+        "p05": 9.527666,
+        "p25": 10.383375,
+        "p75": 11.085875,
+        "p90": 11.57175,
+        "p95": 12.076625,
+        "p99": 15.346
+      },
+      "bootstrap": {
+        "median": {
+          "descriptive_95_percent_interval": [
+            -0.7082555526703671,
+            0.539800814104896
+          ],
+          "draws": 4000,
+          "draws_above_10_percent": 0,
+          "observed_change_percent": -0.11880432823411224
+        },
+        "p95": {
+          "descriptive_95_percent_interval": [
+            -4.389985130127005,
+            25.708552720313627
+          ],
+          "draws": 4000,
+          "draws_above_10_percent": 1202,
+          "observed_change_percent": 6.913835612184704
+        }
+      },
+      "candidate": {
+        "max": 83.14675,
+        "median": 10.736417,
+        "min": 8.802167,
+        "n": 300,
+        "p05": 9.393917,
+        "p25": 10.357792,
+        "p75": 11.11675,
+        "p90": 11.751625,
+        "p95": 12.911583,
+        "p99": 18.3615
+      },
+      "domain": "source_pooled",
+      "metric": "historical_storage_publication",
+      "pairs_per_stratum": {
+        "confirmation": 20,
+        "initial": 10
+      }
+    },
+    {
+      "family": "integrated_dense",
+      "base": {
+        "max": 215.652417,
+        "median": 91.253562,
+        "min": 62.759208,
+        "n": 300,
+        "p05": 70.880791,
+        "p25": 87.896292,
+        "p75": 94.839166,
+        "p90": 99.00675,
+        "p95": 102.938917,
+        "p99": 119.160583
+      },
+      "bootstrap": {
+        "median": {
+          "descriptive_95_percent_interval": [
+            1.3309900895698057,
+            4.046543472828135
+          ],
+          "draws": 4000,
+          "draws_above_10_percent": 0,
+          "observed_change_percent": 2.968948762789103
+        },
+        "p95": {
+          "descriptive_95_percent_interval": [
+            -6.3459308879862615,
+            18.480629241673462
+          ],
+          "draws": 4000,
+          "draws_above_10_percent": 865,
+          "observed_change_percent": 5.7106682014150145
+        }
+      },
+      "candidate": {
+        "max": 318.839833,
+        "median": 93.96283349999999,
+        "min": 65.810625,
+        "n": 300,
+        "p05": 82.858833,
+        "p25": 90.798459,
+        "p75": 96.918,
+        "p90": 101.820792,
+        "p95": 108.817417,
+        "p99": 138.014292
+      },
+      "domain": "source_pooled",
+      "metric": "live_storage_ingest",
+      "pairs_per_stratum": {
+        "confirmation": 20,
+        "initial": 10
+      }
+    },
+    {
+      "family": "integrated_dense",
+      "base": {
+        "max": 48.660625,
+        "median": 26.120479,
+        "min": 20.641625,
+        "n": 300,
+        "p05": 22.127917,
+        "p25": 25.179708,
+        "p75": 27.0255,
+        "p90": 27.922583,
+        "p95": 28.878625,
+        "p99": 32.237375
+      },
+      "bootstrap": {
+        "median": {
+          "descriptive_95_percent_interval": [
+            -0.8091892946794133,
+            2.4285541732093296
+          ],
+          "draws": 4000,
+          "draws_above_10_percent": 0,
+          "observed_change_percent": 0.9738527383054585
+        },
+        "p95": {
+          "descriptive_95_percent_interval": [
+            -0.31207838336902993,
+            14.217631884494498
+          ],
+          "draws": 4000,
+          "draws_above_10_percent": 1241,
+          "observed_change_percent": 6.029691510589585
+        }
+      },
+      "candidate": {
+        "max": 68.990625,
+        "median": 26.374854,
+        "min": 20.682583,
+        "n": 300,
+        "p05": 23.684541,
+        "p25": 25.54175,
+        "p75": 27.256375,
+        "p90": 28.386292,
+        "p95": 30.619917,
+        "p99": 34.302833
+      },
+      "domain": "source_pooled",
+      "metric": "compaction",
+      "pairs_per_stratum": {
+        "confirmation": 20,
+        "initial": 10
+      }
+    },
+    {
+      "family": "integrated_sparse",
+      "base": {
+        "max": 14.827416,
+        "median": 6.8853335,
+        "min": 4.928166,
+        "n": 300,
+        "p05": 6.000875,
+        "p25": 6.402375,
+        "p75": 7.271083,
+        "p90": 7.534042,
+        "p95": 7.659209,
+        "p99": 8.184209
+      },
+      "bootstrap": {
+        "median": {
+          "descriptive_95_percent_interval": [
+            0.07266045791076703,
+            4.743616596025402
+          ],
+          "draws": 4000,
+          "draws_above_10_percent": 0,
+          "observed_change_percent": 2.2084914260144473
+        },
+        "p95": {
+          "descriptive_95_percent_interval": [
+            1.6864057706557078,
+            9.923013622280873
+          ],
+          "draws": 4000,
+          "draws_above_10_percent": 95,
+          "observed_change_percent": 6.396966057461029
+        }
+      },
+      "candidate": {
+        "max": 13.712208,
+        "median": 7.0373955,
+        "min": 4.74025,
+        "n": 300,
+        "p05": 5.985292,
+        "p25": 6.608667,
+        "p75": 7.404416,
+        "p90": 7.734,
+        "p95": 8.149166,
+        "p99": 9.216834
+      },
+      "domain": "source_pooled",
+      "metric": "reopen",
+      "pairs_per_stratum": {
+        "confirmation": 20,
+        "initial": 10
+      }
+    }
+  ],
+  "interpretation": "Descriptive paired process intervals preserve phase strata. They do not establish causality, excuse pooled exceedances, or demonstrate acceptance.",
+  "provenance_limitation": [
+    {
+      "analysis": ".",
+      "completed_log_sha256": "05c73cc815d8b12ec2807d1d1aed7194f9f3fde50f361409bf6e5d1801ad858d",
+      "live_log_hash_limitation": "The analysis hashed redirected run.log before printing DONE; the completed log necessarily differs. The first finalizer refreshed manifest.json before the instruction to preserve original manifests arrived. That refreshed manifest is retained verbatim. The original output list and pre-DONE log hash are reconstructed from unchanged deterministic script/output and labeled reconstructed, not claimed as an independently retained original. Analysis scripts/config/draws/timings/logs were never modified or rerun.",
+      "pre_DONE_log_sha256": "630d5bac09b2faa81cade9a9f41318c567eb5f1326315e4c885ec4f912631763",
+      "reconstructed_manifest": "manifest.original-reconstructed.json",
+      "refreshed_manifest": "manifest.refreshed-before-provenance-review.json"
+    },
+    {
+      "analysis": "extension",
+      "completed_log_sha256": "1393536d86df69e12c4ff250f68bbb158e98e4ea827c265ea3a161ac5fb58ba6",
+      "live_log_hash_limitation": "The analysis hashed redirected run.log before printing DONE; the completed log necessarily differs. The first finalizer refreshed manifest.json before the instruction to preserve original manifests arrived. That refreshed manifest is retained verbatim. The original output list and pre-DONE log hash are reconstructed from unchanged deterministic script/output and labeled reconstructed, not claimed as an independently retained original. Analysis scripts/config/draws/timings/logs were never modified or rerun.",
+      "pre_DONE_log_sha256": "e6940e46b36ed8732c792c1bfeacf16845dd39a193e03da2684d30a2f0893295",
+      "reconstructed_manifest": "manifest.original-reconstructed.json",
+      "refreshed_manifest": "manifest.refreshed-before-provenance-review.json"
+    }
+  ],
+  "raw_evidence": {
+    "path": "2026-09-13-source-identity-distribution-1-raw.json.gz",
+    "sha256": "9ea3acf9f64082069d0477021e47958e4f895d8c19e1686b85e8139e2cf77e32",
+    "files": 52
+  }
+}

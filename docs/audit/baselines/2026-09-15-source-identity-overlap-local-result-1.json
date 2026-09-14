@@ -1,0 +1,167 @@
+{
+  "schema": "logex-overlap-local-result-v1",
+  "disposition": "NOT_CLEAR_STAGED_TAIL_REQUIRES_ATTRIBUTION",
+  "acceptance_granted": false,
+  "baseline_commit": "28ef516acd2a16028464e4e9094dbf19590cd7d2",
+  "candidate_commit": "e76f4ddacd9a7b39c941ac24efcf0e25f8cfb306",
+  "scope": "Local ARM64 release diagnostic relative to28ef516a only; no PR149 compounded inference or sync acceptance.",
+  "completed_packet": {
+    "processes": 48,
+    "measured_samples": 384,
+    "warmups": 48,
+    "rss": 48,
+    "actual_exits": 0
+  },
+  "failed_packet": {
+    "status": "INCONCLUSIVE",
+    "processes_started": 1,
+    "fixture_iterations_preserved": 9,
+    "wrapper_exit": 1,
+    "fixture_passed": true,
+    "rss_missing": true,
+    "reason": "Sandbox resource-counter access failed after fixture completed.",
+    "pooled_with_completed_packet": false
+  },
+  "pooled_effects_percent": {
+    "appended_historical": {
+      "median": -5.931249065770327,
+      "p95": -58.91162435461216
+    },
+    "direct_historical": {
+      "median": -15.871231374395023,
+      "p95": -20.329357039424078
+    },
+    "live": {
+      "median": -1.453843523024534,
+      "p95": -17.299756137965726
+    },
+    "staged_historical": {
+      "median": -9.25928211057906,
+      "p95": 29.524919121344205
+    }
+  },
+  "retained_adverse_direct_pair_p95_percent": 103.36769336995117,
+  "correctness": {
+    "storage_all_targets_passed": 315,
+    "ignored": 8,
+    "baseline_publication_test_passed": 1,
+    "candidate_publication_test_passed": 1,
+    "ordinary_elapsed_values_are_not_performance": true
+  },
+  "limitations": [
+    "Staged historical p95+29.525% requires attribution despite median improvement.",
+    "All order/cycle/pair tails and resource observations retained; no exclusions or adaptive replacement.",
+    "Prior full comparison NOT_CLEAR remains unchanged."
+  ],
+  "warnings_correction": "Earlier progress message incorrectly called the compiler warning an unused harness method. Actual baseline and candidate stderr records show xcrun SDK discovery FSEvents/confstr warnings plus proc-macro-error2 future compatibility warning. Neither build failed. Original proofs/logs remain unchanged.",
+  "archive": {
+    "status": "EVERY_ARCHIVED_BYTE_AND_ALIAS_VERIFIED",
+    "archive": {
+      "source": "/Users/tdenisenko/code/logex/docs/audit/baselines/2026-09-15-source-identity-overlap-local-result-1-raw.jsonl.gz",
+      "bytes": 6413118,
+      "sha256": "be786d4840b56a6689984f59be7159209eb7abdb3501fb2b9b642f465feecaf8"
+    },
+    "records": 224,
+    "aliases": 35,
+    "original_evidence_files": 258,
+    "payload_bytes": 28470993,
+    "uncompressed_jsonl_bytes": 34483414,
+    "source_archives_verified": [
+      {
+        "label": "baseline",
+        "commit": "28ef516acd2a16028464e4e9094dbf19590cd7d2",
+        "files": 215,
+        "archive": {
+          "source": "/private/tmp/logex-source-identity-overlap-baseline-build-1/source.tar",
+          "bytes": 7352320,
+          "sha256": "9586a48482b7ab45dcf06214e4a6097d24fd4f4995e48a6667e896fe794ee14d"
+        },
+        "inventory": {
+          "source": "/private/tmp/logex-source-identity-overlap-baseline-build-1/source-before.json",
+          "bytes": 36785,
+          "sha256": "acca60fc46825c37414551b60ab53a234c66922fcc2de54cda921cb791f5b5f0"
+        }
+      },
+      {
+        "label": "candidate",
+        "commit": "e76f4ddacd9a7b39c941ac24efcf0e25f8cfb306",
+        "files": 215,
+        "archive": {
+          "source": "/private/tmp/logex-source-identity-overlap-candidate-build-1/source.tar",
+          "bytes": 7362560,
+          "sha256": "0c40b07932fc2865dd012da379b72e7ae55c8d41bbcbf35ea667f8357028b348"
+        },
+        "inventory": {
+          "source": "/private/tmp/logex-source-identity-overlap-candidate-build-1/source-before.json",
+          "bytes": 36785,
+          "sha256": "be4c9c07fb47a40a63fa1da041d9e418a5403c4b7ab3e5bb1c8258275da5f08a"
+        }
+      }
+    ],
+    "exclusions": [
+      {
+        "source": "/private/tmp/logex-source-identity-overlap-baseline-build-1/source",
+        "reason": "Recreated full source directory omitted; complete exact Git source.tar and before/after inventories retained and every member verified.",
+        "files": 215,
+        "inventory": {
+          "source": "/private/tmp/logex-source-identity-overlap-baseline-build-1/source-before.json",
+          "bytes": 36785,
+          "sha256": "acca60fc46825c37414551b60ab53a234c66922fcc2de54cda921cb791f5b5f0"
+        }
+      },
+      {
+        "source": "/private/tmp/logex-source-identity-overlap-baseline-build-1/target",
+        "reason": "Recreated dependency/target cache omitted; full source/target recipe, donor before/after inventories, compiler artifacts and exact executed binary identities retained. No whole-target hash claim."
+      },
+      {
+        "source": "/private/tmp/logex-source-identity-overlap-baseline-build-1/retained-binaries/ingestion_publication",
+        "bytes": 3336800,
+        "sha256": "fe2ea024236f6fe2b010baced18cebb1289811cb1534b529b0d2bbe0327681f7",
+        "reason": "Compiled executable omitted; exact fresh artifact/build/correctness/measurement proofs and original binary retained."
+      },
+      {
+        "source": "/private/tmp/logex-source-identity-overlap-baseline-build-1/target/release/build/logex-storage/067ee7a89b6721b9/out/ingestion_publication-067ee7a89b6721b9",
+        "bytes": 3336800,
+        "sha256": "fe2ea024236f6fe2b010baced18cebb1289811cb1534b529b0d2bbe0327681f7",
+        "reason": "Compiled executable omitted; exact fresh artifact/build/correctness/measurement proofs and original binary retained."
+      },
+      {
+        "source": "/private/tmp/logex-source-identity-overlap-candidate-build-1/source",
+        "reason": "Recreated full source directory omitted; complete exact Git source.tar and before/after inventories retained and every member verified.",
+        "files": 215,
+        "inventory": {
+          "source": "/private/tmp/logex-source-identity-overlap-candidate-build-1/source-before.json",
+          "bytes": 36785,
+          "sha256": "be4c9c07fb47a40a63fa1da041d9e418a5403c4b7ab3e5bb1c8258275da5f08a"
+        }
+      },
+      {
+        "source": "/private/tmp/logex-source-identity-overlap-candidate-build-1/target",
+        "reason": "Recreated dependency/target cache omitted; full source/target recipe, donor before/after inventories, compiler artifacts and exact executed binary identities retained. No whole-target hash claim."
+      },
+      {
+        "source": "/private/tmp/logex-source-identity-overlap-candidate-build-1/retained-binaries/ingestion_publication",
+        "bytes": 3571040,
+        "sha256": "60fcce3b083dac3e8f2ad1bf175d73a367f36e483cf2fef715bd90fcc4a4b920",
+        "reason": "Compiled executable omitted; exact fresh artifact/build/correctness/measurement proofs and original binary retained."
+      },
+      {
+        "source": "/private/tmp/logex-source-identity-overlap-candidate-build-1/target/release/build/logex-storage/067ee7a89b6721b9/out/ingestion_publication-067ee7a89b6721b9",
+        "bytes": 3571040,
+        "sha256": "60fcce3b083dac3e8f2ad1bf175d73a367f36e483cf2fef715bd90fcc4a4b920",
+        "reason": "Compiled executable omitted; exact fresh artifact/build/correctness/measurement proofs and original binary retained."
+      }
+    ],
+    "observations_omitted": 0,
+    "originals_unchanged": true
+  },
+  "raw_references": {
+    "manifest": "packaging/evidence-manifest.json",
+    "package_script": "packaging/package.py",
+    "warning_correction": "packaging/warning-correction.json",
+    "completed_raw": "logex-source-identity-overlap-local-packet-2/",
+    "failed_raw": "logex-source-identity-overlap-local-packet-1/",
+    "independent_review": "logex-source-identity-overlap-local-result-review-1/review.json",
+    "engineering_review": "logex-source-identity-overlap-local-engineering-review-1/review.json"
+  }
+}

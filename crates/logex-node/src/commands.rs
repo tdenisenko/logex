@@ -236,7 +236,8 @@ fn segment_matches_filters(
 }
 
 fn index_files_missing(path: &Path, profile: IndexBuildProfile) -> bool {
-    // If inspection fails, let the selected build report the actionable error.
+    // If inspection fails, let the selected build report the actionable error
+    // and prevent the command from claiming a complete skipped build.
     IndexBuilder::indexes_missing(path, profile).unwrap_or(true)
 }
 

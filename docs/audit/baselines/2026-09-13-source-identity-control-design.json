@@ -1,0 +1,204 @@
+{
+  "schema": 1,
+  "status": "fixed_before_remote_timing",
+  "benchmark_processes_run": 0,
+  "design": {
+    "schema": "logex-host-control-eligibility-v1",
+    "status": "design_only_not_executed",
+    "purpose": "Finite control-only host precision check; neither acceptance nor source-causal inference.",
+    "candidate_commit": "c229ace0345dd7b6b8c07388d3c0aed8a9c6a771",
+    "host_root": "/private/tmp/logex-source-identity-controls-3.PeHWi0",
+    "configuration_source": {
+      "path": "/private/tmp/logex-source-identity-complete-baseline-release-plan-1.json",
+      "sha256": "5726d604802238368cc9e5b059168da7be626395d447c7a662b53c68572855bc"
+    },
+    "fixtures": [
+      {
+        "path": "crates/logex-query/tests/audit_harness.rs",
+        "package": "logex-query",
+        "target": "audit_harness",
+        "sha256": "f70018f9aa42a3de4d05e86281406d14e039214d4ad02d82a56fa7a44c21f1b4",
+        "unchanged_from_baseline": true,
+        "changed_dependency_expected": true
+      },
+      {
+        "path": "crates/logex-storage/tests/ingestion_publication.rs",
+        "package": "logex-storage",
+        "target": "ingestion_publication",
+        "sha256": "c87085b1684937ee669cad376493c9a8d7f4008b2a82cf14228c3ba93e880f50",
+        "unchanged_from_baseline": true,
+        "changed_dependency_expected": true
+      }
+    ],
+    "suites": [
+      {
+        "name": "index_binding_paths",
+        "target": "audit_harness",
+        "test": "benchmark_index_publication_binding_query_paths",
+        "environment": {
+          "LOGEX_BINDING_ROWS": "20000",
+          "LOGEX_BINDING_SEGMENT_ROWS": "8192",
+          "LOGEX_BINDING_REPEATS": "100"
+        },
+        "samples_per_process": {
+          "binding_block_hash_point": 100,
+          "binding_block_number_range": 100,
+          "binding_timestamp_range": 100,
+          "binding_erc20_topic1_present": 100,
+          "binding_erc20_topic1_absent": 100
+        }
+      },
+      {
+        "name": "publication",
+        "target": "ingestion_publication",
+        "test": "benchmark_sync_storage_publication",
+        "environment": {
+          "LOGEX_PUBLICATION_BLOCKS": "128",
+          "LOGEX_PUBLICATION_ROWS_PER_BLOCK": "128",
+          "LOGEX_PUBLICATION_WARM_HEADERS": "8192",
+          "LOGEX_PUBLICATION_HISTORY_BLOCKS": "2048",
+          "LOGEX_PUBLICATION_HISTORY_CACHED_HEAD": "1",
+          "LOGEX_PUBLICATION_SEGMENT_ROWS": "1000000",
+          "LOGEX_PUBLICATION_REPEATS": "10",
+          "LOGEX_PUBLICATION_HEADER_FIELDS": "rich",
+          "LOGEX_PUBLICATION_PAYLOAD": "mixed",
+          "LOGEX_PUBLICATION_READ_MODE": "selected",
+          "LOGEX_PUBLICATION_ROUTE": "both",
+          "LOGEX_PUBLICATION_CHECKPOINT_EACH_BLOCK": "0",
+          "LOGEX_PUBLICATION_DURABLE_CHECKPOINT": "0"
+        },
+        "samples_per_process": {
+          "live_storage_publication": 10,
+          "historical_storage_publication": 10
+        }
+      },
+      {
+        "name": "integrated_sparse",
+        "target": "audit_harness",
+        "test": "benchmark_storage_indexes_and_queries",
+        "environment": {
+          "LOGEX_BENCH_PROFILE": "sparse",
+          "LOGEX_BENCH_ROWS": "20000",
+          "LOGEX_BENCH_SEGMENT_ROWS": "8192",
+          "LOGEX_BENCH_BATCH_ROWS": "4096",
+          "LOGEX_BENCH_WORKERS": "4",
+          "LOGEX_BENCH_REPEATS": "10"
+        },
+        "samples_per_process": {
+          "live_storage_ingest": 10,
+          "index_build": 10,
+          "compaction": 10,
+          "reopen": 10,
+          "native_filter": 10,
+          "sql_count": 10,
+          "sql_ordered": 10,
+          "concurrent_native_queries": 10,
+          "historical_storage_ingest": 10
+        }
+      }
+    ],
+    "binary_rule": "One exact candidate release binary per harness for both A/B labels; same fixture configuration in independent temporary directories; record hashes before execution.",
+    "schedule": {
+      "rounds": 12,
+      "pairs_per_suite": 12,
+      "execution": "Sequential processes, each pair completed before next; no adaptive additions.",
+      "suite_order_by_round_modulo_3": [
+        [
+          "index_binding_paths",
+          "publication",
+          "integrated_sparse"
+        ],
+        [
+          "publication",
+          "integrated_sparse",
+          "index_binding_paths"
+        ],
+        [
+          "integrated_sparse",
+          "index_binding_paths",
+          "publication"
+        ]
+      ],
+      "pair_order": "AB in odd one-based rounds, BA in even rounds; six each per suite.",
+      "balance": "Each suite occupies each position four times.",
+      "processes": 72,
+      "measured_timings": {
+        "index_binding_paths": 12000,
+        "publication": 480,
+        "integrated_sparse": 2160,
+        "total": 14640
+      },
+      "explicit_short_query_warmups": 120,
+      "rss_records": 72
+    },
+    "analysis": {
+      "statistics": [
+        "median",
+        "p95"
+      ],
+      "median_definition": "Middle ordered observation, or arithmetic mean of the two middle observations for even n.",
+      "p95_definition": "Nearest rank, one-based ceil(0.95*n).",
+      "label_effect_percent": "100*(statistic(B)/statistic(A)-1), pooling observations from resampled whole processes within the relevant group.",
+      "bootstrap": {
+        "draws": 4000,
+        "seed": 2026091304,
+        "generator": "Python random.Random",
+        "procedure": "Visit suites in declared suite order. For each draw sample six AB pair indices and six BA pair indices independently with replacement, using random.randrange(6) six times per stratum. Reuse each suite draw for all its metrics/statistics. Preserve ascending round order in each original stratum and retain exact draw indices.",
+        "interval": "Two-sided percentile95 interval: sorted bootstrap values at zero-based indices99 and3899.",
+        "unit": "Whole paired processes, retaining every measured observation within each selected process.",
+        "reruns": false
+      },
+      "order_drift": {
+        "effect": "AB label-effect percent minus BA label-effect percent, computed independently within the two strata for each bootstrap draw.",
+        "units": "percentage points",
+        "eligibility": "Entire95% interval inside[-5,5] percentage points for both statistics of every required metric.",
+        "limit": "Detects within-pair order sensitivity; does not establish absence of all temporal drift."
+      },
+      "required_metrics": {
+        "index_binding_paths": [
+          "binding_block_hash_point",
+          "binding_block_number_range",
+          "binding_timestamp_range",
+          "binding_erc20_topic1_present",
+          "binding_erc20_topic1_absent"
+        ],
+        "publication": [
+          "live_storage_publication",
+          "historical_storage_publication"
+        ],
+        "integrated_sparse": [
+          "concurrent_native_queries"
+        ]
+      },
+      "reporting": "Report all5short,2publication,9integrated-sparse metrics, RSS, warmups, per-process summaries, all bootstrap draws and failures. Other metrics remain context, not undeclared gating endpoints.",
+      "exclusions": "Only declared warmups excluded from measured summaries. No trimming, dropped outliers, control subtraction or pooling with previous host/source evidence."
+    },
+    "outcomes": {
+      "ELIGIBLE": "Every required median/p95 label-effect95% interval lies wholly within[-5,5] percent, every required order-drift interval lies wholly within[-5,5] percentage points, and all expected counts, hashes and correctness oracles verify.",
+      "INCONCLUSIVE": "Any required wide/out-of-band interval, order drift, execution error, missing records, hash mismatch or oracle failure. Retain evidence and stop without replacing processes or repeating the packet.",
+      "stopping_rule": "One fixed packet only. No repeats to obtain eligibility."
+    },
+    "limits": [
+      "Hardware preflight is not proof of memory pressure or timing stability; low unused memory alone is insufficient.",
+      "Five percent is a precision budget, not permission for source regressions.",
+      "Intervals are conditional descriptive bootstrap intervals, not simultaneous guarantees.",
+      "Twelve pairs may not resolve publication tails; this produces INCONCLUSIVE.",
+      "Eligibility covers declared required metrics in this packet, not sustained host quietness.",
+      "A subsequent source comparison still requires a separate predeclared design and contemporary controls."
+    ],
+    "prepared_assets_scope": "Design and build-only script. No control runner prepared; no remote commands, transfers, builds, tests or workloads executed by preparation."
+  },
+  "final_assets": {
+    "build_only.py": "a429ecfceb3ec428da81c2e40d5eee2e6cabc82bcb9462cf968057f9d915ff75",
+    "control_run.py": "215b8d77911435d6b723a7c50ac9de03d9c499628068ced78b14d09ad78d0e98",
+    "control_analyze.py": "08d818c411464452390a82cc4427f4b80082231d24562ba21b5da61324b57d01",
+    "control_design.json": "ac4f6906cc933d7f84abc77f6abdc6616a635ba9288fcb84bbcfa8318be20e4a"
+  },
+  "preparation_checks": "Python 3.9 grammar; eight synthetic analysis tests; normal/nonzero/timeout subprocess checks and lifetime-pipe EOF cleanup. Runtime checks used local Python 3.13.",
+  "raw_evidence": {
+    "path": "2026-09-13-source-identity-control-design-raw.json.gz",
+    "sha256": "6b1b09a47a8353417138c0927c506b3399e8c6d382ecbf75d2301051d642fde8",
+    "files": 60
+  },
+  "limits": "Identical-binary controls assess precision only. This is no source-performance acceptance or release-readiness result."
+}

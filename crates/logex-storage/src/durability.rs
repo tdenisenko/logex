@@ -194,11 +194,41 @@ impl ReplacementBatch {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn publish(self) -> io::Result<()> {
-        let pending = self
+        self.publish_with_final(None, false)
+    }
+
+    /// Publish the canonical snapshot after every noncanonical replacement,
+    /// independently of worker completion order. Append reuses its existing
+    /// content barrier (`order_names = false`); destructive replacement also
+    /// orders every noncanonical rename before the final rename (`true`).
+    pub(crate) fn publish_canonical_last(
+        self,
+        canonical: &Path,
+        order_names: bool,
+    ) -> io::Result<()> {
+        self.publish_with_final(Some(canonical), order_names)
+    }
+
+    fn publish_with_final(self, final_path: Option<&Path>, order_names: bool) -> io::Result<()> {
+        let mut pending = self
             .pending
             .into_inner()
             .map_err(|_| io::Error::other("column replacement lock poisoned"))?;
+        if let Some(path) = final_path {
+            let position = pending
+                .iter()
+                .position(|replacement| replacement.destination == path)
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "canonical replacement is missing",
+                    )
+                })?;
+            let final_replacement = pending.remove(position);
+            pending.push(final_replacement);
+        }
         if self.publication != Publication::Deferred {
             let mut group = SyncGroup::default();
             for replacement in &pending {
@@ -210,6 +240,15 @@ impl ReplacementBatch {
             group.order()?;
         }
         for replacement in pending {
+            if order_names && final_path == Some(replacement.destination.as_path()) {
+                // The final committed envelope must never persist ahead of the
+                // noncanonical names it attests, including across power loss.
+                checkpoint(
+                    "order_canonical_directory",
+                    parent(&replacement.destination),
+                )?;
+                order_file(&File::open(parent(&replacement.destination))?)?;
+            }
             replacement.publish()?;
         }
         Ok(())

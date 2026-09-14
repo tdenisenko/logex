@@ -1,0 +1,16 @@
+{
+  "checks": "Python 3.9 grammar, pure path/state/device-mapping/prefix checks and root integration review. Collector adjusted before transfer to retain terminal mount failures and separate platform build evidence.",
+  "corrected_source": "b6c4741cc77e5fa476f1c11cbbab8386b27b040e",
+  "execution": "After corrected benchmark compilation: separate storage lib-test build, four exact existing cross-mount tests and eight journal-origin tests using a fresh 512 MiB ExFAT UDIF image inside the private task folder, verified normal detach, then a single fixed 600-second cooldown before the unchanged diagnostic.",
+  "isolation": "No important external volume, existing image, service, or unrelated directory is used. Source and original benchmark proof/binaries remain unchanged. The platform producer reuses only this task child's private Cargo cache/target.",
+  "limits": "Preparation is not platform acceptance. Frozen input/build/binary identities are resolved before execution. Ambiguous image attachment or cleanup failure stops and remains actionable. No performance clearance follows from image-backed correctness checks.",
+  "raw_evidence": {
+    "bytes": 109855,
+    "decoded_bytes": 374461,
+    "files": 70,
+    "path": "2026-09-14-source-identity-platform-preparation-1-raw.json.gz",
+    "sha256": "41898192c63704b61bdb59fc35a8642aae2dae1132c203e003fb717aaebc3e34"
+  },
+  "schema": 1,
+  "status": "REVIEWED_PREPARATION_PLATFORM_WORKLOADS_NOT_EXECUTED"
+}

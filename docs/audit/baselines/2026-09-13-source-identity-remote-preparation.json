@@ -1,0 +1,38 @@
+{
+  "schema": 1,
+  "candidate_commit": "c229ace0345dd7b6b8c07388d3c0aed8a9c6a771",
+  "attempts": [
+    {
+      "number": 1,
+      "root": "/private/tmp/logex-source-identity-controls.0ivODK",
+      "status": "failed_before_compilation",
+      "started": "2026-09-13T14:09:46.635815+00:00",
+      "finished": "2026-09-13T14:10:01.468029+00:00",
+      "command_count": 11,
+      "diagnostic": "error: could not execute process `rustc -vV` (never executed)\n\nCaused by:\n  No such file or directory (os error 2)\n",
+      "transport_tar_sha256": "a071b4abf57a191ee994c57b2c4f9f395861b0cddcd3013731e608413c412c7a"
+    },
+    {
+      "number": 2,
+      "root": "/private/tmp/logex-source-identity-controls-2.7cJ6mL",
+      "status": "failed_before_compilation",
+      "started": "2026-09-13T14:19:58.308040+00:00",
+      "finished": "2026-09-13T14:20:12.884531+00:00",
+      "command_count": 13,
+      "diagnostic": "error: failed to download `android_system_properties v0.1.5`\n\nCaused by:\n  attempting to make an HTTP request, but --offline was specified\n",
+      "transport_tar_sha256": "4ac5f592e6bff3e90160d7532a346bf2b1c543878c433028a128c741f5616a01"
+    }
+  ],
+  "benchmark_processes": 0,
+  "disposition": "Build environment preparation failures; no source or performance conclusion.",
+  "corrections": [
+    "Resolve installed pinned rustc/rustdoc explicitly before Cargo.",
+    "Fetch Cargo.lock dependencies into a private cache, then compile offline."
+  ],
+  "preserved": "Original failed directories, scripts, results and logs retained. External-volume data untouched.",
+  "raw_evidence": {
+    "path": "2026-09-13-source-identity-remote-preparation-raw.json.gz",
+    "sha256": "2a1c5c3c96ab4c2373c566d06cfd5aa1735c638bf0fef28cd683e8d6ff77d94a",
+    "files": 58
+  }
+}

@@ -1,0 +1,628 @@
+{
+  "schema": "logex-aligned-full-comparison-result-v1",
+  "disposition": "NOT_CLEAR",
+  "acceptance_granted": false,
+  "candidate_commit": "28ef516acd2a16028464e4e9094dbf19590cd7d2",
+  "baseline_commit": "9c0a58fc64fac3da7f5a50b3a20b7ab729f029e9",
+  "archive": {
+    "status": "EVERY_ARCHIVED_BYTE_AND_ALIAS_VERIFIED",
+    "started": "2026-09-14T19:28:49.439615+00:00",
+    "acceptance_granted": false,
+    "disposition": "NOT_CLEAR",
+    "actual_statuses": {
+      "packet": {
+        "path": "/private/tmp/logex-source-identity-aligned-full-diagnostic-collected-1/unpacked/stream-acceptance-28ef516a-20260914-1/packet-1/execution-result.json",
+        "sha256": "185dd9b65e2a792077a9d92e3465b5d118877e8906d995813e7657fe9953bfbc",
+        "status": "complete_pending_analysis",
+        "disposition": null,
+        "finished": "2026-09-14T19:14:50.506955+00:00",
+        "errors": [],
+        "cleanup_errors": []
+      },
+      "analysis": {
+        "path": "/private/tmp/logex-source-identity-aligned-full-diagnostic-collected-1/analysis-1/result.json",
+        "sha256": "8910c8b975535feed969d0ff26a274270a31341dcf76e86684bca397622d5018",
+        "status": "NUMERICAL_RESULTS_PENDING_ENGINEERING_REVIEW",
+        "disposition": null,
+        "finished": null,
+        "errors": [],
+        "cleanup_errors": []
+      },
+      "independent_numeric": {
+        "path": "/private/tmp/logex-source-identity-aligned-full-diagnostic-collected-1/independent-verification-1/verification/result.json",
+        "sha256": "463392f4083472a744b36562396c0db01f0bb3aefad68a26d8d08b411570c6e7",
+        "status": "INDEPENDENT_VERIFICATION_PASSED",
+        "disposition": null,
+        "finished": null,
+        "errors": [],
+        "cleanup_errors": []
+      },
+      "engineering": {
+        "path": "/private/tmp/logex-source-identity-aligned-full-engineering-review-1/derived-summary.json",
+        "sha256": "467b6ba9747427ebe13227031317c65f13f01ef08ca51ae64917cf6d9f64dfcb",
+        "status": null,
+        "disposition": "NOT_CLEAR",
+        "finished": null,
+        "errors": [],
+        "cleanup_errors": []
+      },
+      "independent_engineering": {
+        "path": "/private/tmp/logex-source-identity-aligned-full-engineering-independent-review-1/review.json",
+        "sha256": "505328f46a00337619f2d89ef1d2ffa3372e4d2b0dff2758cdd373b5e258b844",
+        "status": "PASS_NO_WORDING_CORRECTION_REQUIRED",
+        "disposition": null,
+        "finished": null,
+        "errors": [],
+        "cleanup_errors": []
+      }
+    },
+    "archive": {
+      "source": "/private/tmp/logex-source-identity-aligned-full-archive-result-1/raw.jsonl.gz",
+      "bytes": 22200140,
+      "sha256": "2bd78f8b76199a7eed59f76182c18bbfc6c9d030898bbf1543676005047b6624",
+      "tracked_path": "docs/audit/baselines/2026-09-14-source-identity-aligned-full-result-1-raw.jsonl.gz"
+    },
+    "files": 1455,
+    "aliases": 1304,
+    "uncompressed_jsonl_bytes": 283919162,
+    "originals_unchanged": true,
+    "exclusions": [
+      {
+        "source": "/private/tmp/logex-source-identity-aligned-full-diagnostic-collected-1/evidence.tar",
+        "bytes": 103270400,
+        "sha256": "3bb207c6cdaed003ec443e4dcf3f4b68eb5b24e0599261b6ab4449cea22992c3",
+        "reason": "Only excluded container: exact byte-verified complete member set remains included under unpacked/.",
+        "verified_members": 1864,
+        "coverage_manifest_sha256": "fcb17517c3403dd0b9076ba14b9f02048ea7434671ea4ee611cea00aabf593a6"
+      }
+    ],
+    "finished": "2026-09-14T19:28:57.000495+00:00"
+  },
+  "root_archive_verification": {
+    "status": "ALL_ARCHIVED_RECORDS_AND_ALIASES_MATCH_ORIGINAL_BYTES",
+    "checked_at": "2026-09-14T19:29:37.239764+00:00",
+    "records": 1455,
+    "aliases": 1304,
+    "archive_sha256": "2bd78f8b76199a7eed59f76182c18bbfc6c9d030898bbf1543676005047b6624",
+    "exclusions": [
+      {
+        "source": "/private/tmp/logex-source-identity-aligned-full-diagnostic-collected-1/evidence.tar",
+        "bytes": 103270400,
+        "sha256": "3bb207c6cdaed003ec443e4dcf3f4b68eb5b24e0599261b6ab4449cea22992c3",
+        "reason": "Only excluded container: exact byte-verified complete member set remains included under unpacked/.",
+        "verified_members": 1864,
+        "coverage_manifest_sha256": "fcb17517c3403dd0b9076ba14b9f02048ea7434671ea4ee611cea00aabf593a6"
+      }
+    ],
+    "acceptance_granted": false
+  },
+  "collection": {
+    "status": "ALL_COLLECTION_BYTES_VERIFIED",
+    "missing_expected": [],
+    "files": 1863,
+    "tar_bytes": 103270400,
+    "tar_sha256": "3bb207c6cdaed003ec443e4dcf3f4b68eb5b24e0599261b6ab4449cea22992c3",
+    "manifest_sha256": "fcb17517c3403dd0b9076ba14b9f02048ea7434671ea4ee611cea00aabf593a6"
+  },
+  "numeric_result": {
+    "acceptance_granted": false,
+    "confounding_review_required": true,
+    "controls_subtracted": false,
+    "draws": 10000,
+    "engineering_review_required": true,
+    "errors": [],
+    "explicit_warmups": 320,
+    "metrics": 25,
+    "numerical_below_limit_count": 42,
+    "numerical_eligibility_only": false,
+    "observations": 44800,
+    "observed_temporal_units": 8,
+    "primary_endpoints": 50,
+    "processes": 256,
+    "rss_records": 256,
+    "sensitivity_hold_count": 5,
+    "status": "NUMERICAL_RESULTS_PENDING_ENGINEERING_REVIEW",
+    "units_per_control_stratum": 4
+  },
+  "independent_verification": {
+    "status": "INDEPENDENT_VERIFICATION_PASSED",
+    "acceptance_granted": false,
+    "errors": [],
+    "script_sha256": "4931c7f1e239edf846a534729ce320555e0173de8bc51ecacf6ff8c70b74e3a6",
+    "chunk": 128,
+    "counts": {
+      "exact_checks": 25364,
+      "draw_effect_scalars": 1500000
+    },
+    "processes": 256,
+    "samples": 44800,
+    "warmups": 320,
+    "rss": 256,
+    "commands": 646
+  },
+  "engineering_summary": {
+    "disposition": "NOT_CLEAR",
+    "acceptance_granted": false,
+    "primary_endpoints": 50,
+    "numerical_below_limit": 42,
+    "sensitivity_holds": 5,
+    "distinct_primary_clearance_holds": 10,
+    "review_flag_counts": {
+      "control_baseline": 20,
+      "control_candidate": 15,
+      "source": 18
+    },
+    "source_supported_above_limit": 0,
+    "host_observations": 390,
+    "thermal_observations": 130,
+    "cpu_speed_limit_values": [
+      78,
+      80,
+      82,
+      85,
+      87,
+      90,
+      92,
+      95,
+      97,
+      100
+    ],
+    "all_observations_retained": true,
+    "controls_subtracted": false,
+    "limits": "Derived summaries preserve every original endpoint and flag. These are conditional numerical checks and host observations, not per-process causal attribution or performance acceptance.",
+    "inputs": {
+      "/private/tmp/logex-source-identity-aligned-full-diagnostic-collected-1/analysis-1/metrics.json": "e2c247801ea49fc0ee32c90c2f920881d55775ea81c4e1be83362c34b8c4bad5",
+      "/private/tmp/logex-source-identity-aligned-full-diagnostic-collected-1/analysis-1/result.json": "8910c8b975535feed969d0ff26a274270a31341dcf76e86684bca397622d5018",
+      "/private/tmp/logex-source-identity-aligned-full-diagnostic-collected-1/analysis-1/host-observations.json": "61bca26134f62c25ce32b089c2f88d7acfdec795da027ec8cf049b0d3b9c1156",
+      "/private/tmp/logex-source-identity-aligned-full-diagnostic-collected-1/analysis-1/rss-and-processes.json": "4355119c3078a2618058f5160ba9af1e30a812613ddbaf669b159ee65ebca87b",
+      "/private/tmp/logex-source-identity-aligned-full-engineering-review-1/derive.py": "95e9cf1575ccea7021fada4934366f955907975a6b864b230292a591dccbcb02"
+    }
+  },
+  "publication": {
+    "historical_storage_publication": {
+      "pooled_ms": {
+        "baseline": {
+          "median": 23.462567,
+          "p95": 28.073539
+        },
+        "candidate": {
+          "median": 25.7413625,
+          "p95": 30.235858
+        }
+      },
+      "effect_percent": {
+        "median": 9.71247306400873,
+        "p95": 7.702338490348515
+      },
+      "endpoints": {
+        "median": {
+          "engineering_review_required": true,
+          "half_gap_percentage_points": 2.282370220658425,
+          "investigate": true,
+          "lower_one_sided_99": 7.1517254569441135,
+          "nominal_indices": {
+            "lower": 99,
+            "two_sided": [
+              49,
+              9949
+            ],
+            "upper": 9899
+          },
+          "numerical_below_limit": false,
+          "order_gap_percentage_points": 1.2034488945992479,
+          "point_percent": 9.71247306400873,
+          "sensitivity_hold": true,
+          "supported_above_limit_under_assumptions": false,
+          "two_sided_99": [
+            6.878947208462516,
+            13.050830393328393
+          ],
+          "upper_one_sided_99": 12.891681806613754
+        },
+        "p95": {
+          "engineering_review_required": true,
+          "half_gap_percentage_points": 2.3607248265546277,
+          "investigate": true,
+          "lower_one_sided_99": 2.502681514374494,
+          "nominal_indices": {
+            "lower": 99,
+            "two_sided": [
+              49,
+              9949
+            ],
+            "upper": 9899
+          },
+          "numerical_below_limit": false,
+          "order_gap_percentage_points": 3.858083780585053,
+          "point_percent": 7.702338490348515,
+          "sensitivity_hold": false,
+          "supported_above_limit_under_assumptions": false,
+          "two_sided_99": [
+            2.452168535397603,
+            11.201079501227373
+          ],
+          "upper_one_sided_99": 10.532451929199249
+        }
+      }
+    },
+    "live_storage_publication": {
+      "pooled_ms": {
+        "baseline": {
+          "median": 551.0745075,
+          "p95": 586.026513
+        },
+        "candidate": {
+          "median": 560.979771,
+          "p95": 603.985276
+        }
+      },
+      "effect_percent": {
+        "median": 1.7974454207537516,
+        "p95": 3.0644966740608792
+      },
+      "endpoints": {
+        "median": {
+          "engineering_review_required": true,
+          "half_gap_percentage_points": 1.201142743230954,
+          "investigate": false,
+          "lower_one_sided_99": 1.061108666566768,
+          "nominal_indices": {
+            "lower": 99,
+            "two_sided": [
+              49,
+              9949
+            ],
+            "upper": 9899
+          },
+          "numerical_below_limit": true,
+          "order_gap_percentage_points": 0.0039407995557905195,
+          "point_percent": 1.7974454207537516,
+          "sensitivity_hold": false,
+          "supported_above_limit_under_assumptions": false,
+          "two_sided_99": [
+            0.916925631024812,
+            3.4760980310406087
+          ],
+          "upper_one_sided_99": 3.3769840584651822
+        },
+        "p95": {
+          "engineering_review_required": true,
+          "half_gap_percentage_points": 1.195400906400157,
+          "investigate": false,
+          "lower_one_sided_99": 0.8107126222324235,
+          "nominal_indices": {
+            "lower": 99,
+            "two_sided": [
+              49,
+              9949
+            ],
+            "upper": 9899
+          },
+          "numerical_below_limit": false,
+          "order_gap_percentage_points": 1.882937603350987,
+          "point_percent": 3.0644966740608792,
+          "sensitivity_hold": false,
+          "supported_above_limit_under_assumptions": false,
+          "two_sided_99": [
+            0.3328683600431148,
+            11.599347383110636
+          ],
+          "upper_one_sided_99": 11.599347383110636
+        }
+      }
+    }
+  },
+  "primary_clearance_holds": [
+    {
+      "suite": "publication",
+      "metric": "historical_storage_publication",
+      "statistic": "median",
+      "endpoint": {
+        "engineering_review_required": true,
+        "half_gap_percentage_points": 2.282370220658425,
+        "investigate": true,
+        "lower_one_sided_99": 7.1517254569441135,
+        "nominal_indices": {
+          "lower": 99,
+          "two_sided": [
+            49,
+            9949
+          ],
+          "upper": 9899
+        },
+        "numerical_below_limit": false,
+        "order_gap_percentage_points": 1.2034488945992479,
+        "point_percent": 9.71247306400873,
+        "sensitivity_hold": true,
+        "supported_above_limit_under_assumptions": false,
+        "two_sided_99": [
+          6.878947208462516,
+          13.050830393328393
+        ],
+        "upper_one_sided_99": 12.891681806613754
+      }
+    },
+    {
+      "suite": "publication",
+      "metric": "historical_storage_publication",
+      "statistic": "p95",
+      "endpoint": {
+        "engineering_review_required": true,
+        "half_gap_percentage_points": 2.3607248265546277,
+        "investigate": true,
+        "lower_one_sided_99": 2.502681514374494,
+        "nominal_indices": {
+          "lower": 99,
+          "two_sided": [
+            49,
+            9949
+          ],
+          "upper": 9899
+        },
+        "numerical_below_limit": false,
+        "order_gap_percentage_points": 3.858083780585053,
+        "point_percent": 7.702338490348515,
+        "sensitivity_hold": false,
+        "supported_above_limit_under_assumptions": false,
+        "two_sided_99": [
+          2.452168535397603,
+          11.201079501227373
+        ],
+        "upper_one_sided_99": 10.532451929199249
+      }
+    },
+    {
+      "suite": "publication",
+      "metric": "live_storage_publication",
+      "statistic": "p95",
+      "endpoint": {
+        "engineering_review_required": true,
+        "half_gap_percentage_points": 1.195400906400157,
+        "investigate": false,
+        "lower_one_sided_99": 0.8107126222324235,
+        "nominal_indices": {
+          "lower": 99,
+          "two_sided": [
+            49,
+            9949
+          ],
+          "upper": 9899
+        },
+        "numerical_below_limit": false,
+        "order_gap_percentage_points": 1.882937603350987,
+        "point_percent": 3.0644966740608792,
+        "sensitivity_hold": false,
+        "supported_above_limit_under_assumptions": false,
+        "two_sided_99": [
+          0.3328683600431148,
+          11.599347383110636
+        ],
+        "upper_one_sided_99": 11.599347383110636
+      }
+    },
+    {
+      "suite": "integrated_dense",
+      "metric": "sql_count",
+      "statistic": "p95",
+      "endpoint": {
+        "engineering_review_required": true,
+        "half_gap_percentage_points": 9.861225364767645,
+        "investigate": true,
+        "lower_one_sided_99": -13.415961321191183,
+        "nominal_indices": {
+          "lower": 99,
+          "two_sided": [
+            49,
+            9949
+          ],
+          "upper": 9899
+        },
+        "numerical_below_limit": false,
+        "order_gap_percentage_points": 20.28605889729824,
+        "point_percent": -0.5347533488306411,
+        "sensitivity_hold": true,
+        "supported_above_limit_under_assumptions": false,
+        "two_sided_99": [
+          -13.540879209073342,
+          25.934526262188086
+        ],
+        "upper_one_sided_99": 25.636744628198826
+      }
+    },
+    {
+      "suite": "integrated_sparse",
+      "metric": "sql_ordered",
+      "statistic": "p95",
+      "endpoint": {
+        "engineering_review_required": true,
+        "half_gap_percentage_points": 3.237182262903593,
+        "investigate": true,
+        "lower_one_sided_99": -8.043781071618273,
+        "nominal_indices": {
+          "lower": 99,
+          "two_sided": [
+            49,
+            9949
+          ],
+          "upper": 9899
+        },
+        "numerical_below_limit": true,
+        "order_gap_percentage_points": 22.44337740387087,
+        "point_percent": 2.51780850497465,
+        "sensitivity_hold": true,
+        "supported_above_limit_under_assumptions": false,
+        "two_sided_99": [
+          -8.043781071618273,
+          8.888726384858735
+        ],
+        "upper_one_sided_99": 8.888726384858735
+      }
+    },
+    {
+      "suite": "index_binding_paths",
+      "metric": "binding_block_hash_point",
+      "statistic": "p95",
+      "endpoint": {
+        "engineering_review_required": true,
+        "half_gap_percentage_points": 4.119115612604896,
+        "investigate": true,
+        "lower_one_sided_99": -2.2824176580072186,
+        "nominal_indices": {
+          "lower": 99,
+          "two_sided": [
+            49,
+            9949
+          ],
+          "upper": 9899
+        },
+        "numerical_below_limit": false,
+        "order_gap_percentage_points": 10.53387792305428,
+        "point_percent": 1.2416568588076604,
+        "sensitivity_hold": false,
+        "supported_above_limit_under_assumptions": false,
+        "two_sided_99": [
+          -2.553301677857367,
+          12.70445382325114
+        ],
+        "upper_one_sided_99": 11.945159904071389
+      }
+    },
+    {
+      "suite": "index_binding_paths",
+      "metric": "binding_block_number_range",
+      "statistic": "p95",
+      "endpoint": {
+        "engineering_review_required": true,
+        "half_gap_percentage_points": 10.801686781706898,
+        "investigate": true,
+        "lower_one_sided_99": -2.728163588884358,
+        "nominal_indices": {
+          "lower": 99,
+          "two_sided": [
+            49,
+            9949
+          ],
+          "upper": 9899
+        },
+        "numerical_below_limit": false,
+        "order_gap_percentage_points": 6.985420847616108,
+        "point_percent": 3.3948878127660898,
+        "sensitivity_hold": false,
+        "supported_above_limit_under_assumptions": false,
+        "two_sided_99": [
+          -3.394840571243063,
+          13.764378705699375
+        ],
+        "upper_one_sided_99": 12.989377288651083
+      }
+    },
+    {
+      "suite": "index_binding_paths",
+      "metric": "binding_erc20_topic1_absent",
+      "statistic": "p95",
+      "endpoint": {
+        "engineering_review_required": true,
+        "half_gap_percentage_points": 6.086794228782134,
+        "investigate": true,
+        "lower_one_sided_99": 2.1726808993009605,
+        "nominal_indices": {
+          "lower": 99,
+          "two_sided": [
+            49,
+            9949
+          ],
+          "upper": 9899
+        },
+        "numerical_below_limit": false,
+        "order_gap_percentage_points": 9.825062844911692,
+        "point_percent": 6.23730113091816,
+        "sensitivity_hold": true,
+        "supported_above_limit_under_assumptions": false,
+        "two_sided_99": [
+          1.866604328827215,
+          16.44859534217553
+        ],
+        "upper_one_sided_99": 15.562537743414072
+      }
+    },
+    {
+      "suite": "index_binding_paths",
+      "metric": "binding_erc20_topic1_present",
+      "statistic": "p95",
+      "endpoint": {
+        "engineering_review_required": true,
+        "half_gap_percentage_points": 2.890965400840617,
+        "investigate": true,
+        "lower_one_sided_99": -1.251863972895384,
+        "nominal_indices": {
+          "lower": 99,
+          "two_sided": [
+            49,
+            9949
+          ],
+          "upper": 9899
+        },
+        "numerical_below_limit": false,
+        "order_gap_percentage_points": 7.687708563673046,
+        "point_percent": 3.419696655452631,
+        "sensitivity_hold": false,
+        "supported_above_limit_under_assumptions": false,
+        "two_sided_99": [
+          -1.916002199245348,
+          13.378718102640864
+        ],
+        "upper_one_sided_99": 11.688743769449395
+      }
+    },
+    {
+      "suite": "index_binding_paths",
+      "metric": "binding_timestamp_range",
+      "statistic": "p95",
+      "endpoint": {
+        "engineering_review_required": true,
+        "half_gap_percentage_points": 1.9376739492907413,
+        "investigate": true,
+        "lower_one_sided_99": -2.085518364796324,
+        "nominal_indices": {
+          "lower": 99,
+          "two_sided": [
+            49,
+            9949
+          ],
+          "upper": 9899
+        },
+        "numerical_below_limit": true,
+        "order_gap_percentage_points": 14.36945548647568,
+        "point_percent": 1.9968161762912384,
+        "sensitivity_hold": true,
+        "supported_above_limit_under_assumptions": false,
+        "two_sided_99": [
+          -2.2881661738533454,
+          7.694543268026277
+        ],
+        "upper_one_sided_99": 7.0892418700205795
+      }
+    }
+  ],
+  "release": {
+    "finished": "2026-09-14T19:16:30.240751+00:00",
+    "status": "REVIEWED_IDLE",
+    "remaining_audit_workloads": false,
+    "matched_processes": "Only reporter and its wrapper; both completed.",
+    "temporary_root_kib": 18193688,
+    "existing_external_volume_data": "untouched",
+    "disposable_image": "detached during preceding platform phase"
+  },
+  "limits": "All50 primary endpoint rules retained:42 numerical below-limit and5 sensitivity holds, ten distinct holds. No current one-sided99% source lower bound above10%, but upper/sensitivity/confounding uncertainty prevents clearance. Conditional eight-block/four-per-stratum estimates, not simultaneous coverage or live-sync acceptance. Earlier results remain separate.",
+  "next_action": "Evaluate one bounded direct-row-header reservation prototype with exact transcript/state equivalence and fixed component measurements before any retained optimization. No production change or speedup claim yet.",
+  "raw_references": {
+    "completed_packet": "logex-source-identity-aligned-full-diagnostic-collected-1/unpacked/",
+    "all_observations_draws_and_metrics": "logex-source-identity-aligned-full-diagnostic-collected-1/analysis-1/",
+    "independent_verifier": "logex-source-identity-aligned-full-diagnostic-collected-1/independent-verification-1/",
+    "all_flags_and_engineering_disposition": "logex-source-identity-aligned-full-engineering-review-1/",
+    "independent_engineering": "logex-source-identity-aligned-full-engineering-independent-review-1/",
+    "source_cost_review": "logex-source-identity-aligned-full-source-cost-review-1/",
+    "original_and_resolved_preparation": "logex-source-identity-aligned-full-resolved-1/",
+    "manifest": "packaging/manifest.json"
+  }
+}

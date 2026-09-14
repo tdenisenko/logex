@@ -1,0 +1,80 @@
+{
+  "status": "FROZEN_BEFORE_MEASUREMENTS",
+  "source_performance_accepted": false,
+  "prior_packet": "2026-09-14-source-identity-direct-result-1.json",
+  "prior_disposition": "INCONCLUSIVE_UNCHANGED",
+  "baseline": "9c0a58fc64fac3da7f5a50b3a20b7ab729f029e9",
+  "candidate": "c229ace0345dd7b6b8c07388d3c0aed8a9c6a771",
+  "counts": {
+    "passed": true,
+    "processes": 320,
+    "total_timings": 28800,
+    "explicit_warmups": 0,
+    "implicit_fixture_warmup": "Original unchanged fixture has its existing unmeasured warmup; no explicit warmup records are emitted.",
+    "rss": 320,
+    "commands": 800,
+    "host_probes": 480,
+    "metrics": 9,
+    "primary_endpoints": 18,
+    "source_pairs": 80,
+    "baseline_control_pairs": 40,
+    "candidate_control_pairs": 40,
+    "rounds": 80,
+    "blocks": 20,
+    "temporal_cycles": 5,
+    "factorial_cells": {
+      "s1-o1-c1-p1": 5,
+      "s1-o0-c0-p1": 5,
+      "s0-o1-c0-p0": 5,
+      "s0-o0-c1-p0": 5,
+      "s1-o1-c1-p0": 5,
+      "s0-o1-c0-p1": 5,
+      "s1-o0-c0-p0": 5,
+      "s0-o0-c1-p1": 5,
+      "s1-o0-c1-p1": 5,
+      "s0-o0-c0-p0": 5,
+      "s0-o1-c1-p0": 5,
+      "s1-o1-c0-p1": 5,
+      "s1-o1-c0-p0": 5,
+      "s1-o0-c1-p0": 5,
+      "s0-o0-c0-p1": 5,
+      "s0-o1-c1-p1": 5
+    },
+    "within_each_block_all_factor_levels_balanced": true,
+    "source_control_order_independent_globally_and_per_cycle": true,
+    "original_sparse_suite_equal": true
+  },
+  "manifest": {
+    "bytes": 1728,
+    "sha256": "d16e97512d47205ce69cc93b7a4a5f45f46b9b7cdf49e85de16bda80a9941dd8"
+  },
+  "runner": {
+    "bytes": 28727,
+    "sha256": "2cb72357e91e38b40c67349904aba661e27fb6f9367236e175b1e2d5f2a05ca6"
+  },
+  "analyzer": {
+    "bytes": 24824,
+    "sha256": "d273ad4a41ab0436b5ca37f88d25ec0c837820281e0b70e279f62ceac4e5d201"
+  },
+  "arithmetic": {
+    "bytes": 5037,
+    "sha256": "76962b39c987cafb7dddf7e508013355e181e454d7cb3028fe639159fc33acfd"
+  },
+  "source_inputs": {
+    "bytes": 2171,
+    "sha256": "c2fbd29dba478e28d6126a2ed7ed4d37a8e5c517df36fa321fd735d812cab22e"
+  },
+  "design_archive": {
+    "path": "2026-09-14-source-identity-sparse-confirmation-design-1-raw.json.gz",
+    "bytes": 65639,
+    "sha256": "a9b4b8eff022d92fe940474d4f233f2f3e70c32b8d42de70940781ff0f4fe020",
+    "uncompressed_bytes": 471652,
+    "uncompressed_sha256": "f7ccec18d7c8cc48130f7ad69e4be7a45fb5406f13a834131b40280e0b43a28a",
+    "files": 44,
+    "roundtrip": "Every decoded file compared to its original bytes, size and SHA256."
+  },
+  "execution_transfer": "4e0b9f85cddc841f0170f7ef773d5e4799dfeb7780ec537d4c5a16c56e05eba9",
+  "decision": "All18pooled endpoints below10% with nominal one-sided99% bounds, plus fixed block/cycle/order stop rules and independent engineering review. No automatic acceptance or further unchanged confirmation.",
+  "inference_limits": "Conditional block bootstrap; no exact unconditional, simultaneous historical or global sequential guarantee.",
+  "mac_mini": "No transfer or measurement has started for this confirmation. All new remote writes will remain under the user-authorized named root."
+}

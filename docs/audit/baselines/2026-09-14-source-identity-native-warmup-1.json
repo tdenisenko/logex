@@ -1,0 +1,368 @@
+{
+  "schema": 1,
+  "disposition": "COMPLETE_DIAGNOSTIC_NO_SOURCE_ACCEPTANCE",
+  "source_performance_accepted": false,
+  "scope": "One local aarch64 macOS measurement-method diagnostic: same newly compiled binary, 1 versus 100 rotated native warmup passes. No mac-mini execution and no production changes.",
+  "source_commit": "c229ace0345dd7b6b8c07388d3c0aed8a9c6a771",
+  "source_archive": {
+    "path": "/private/tmp/logex-source-identity-c229ace0.tar",
+    "sha256": "e71ab97d8888fadc8c435498cd2fd5eca53534ed811a8b2d7c8d7cda502378df",
+    "included": false
+  },
+  "build": {
+    "result_path": "/private/tmp/logex-native-warmup-20260914-1/build-result.json",
+    "result_sha256": "d624f49b1ee992f6d0fc8349a60a5aa0ba35cd5065a42d12c0022e58e3a7988b",
+    "dependency_cache": "/Users/tdenisenko/code/logex/target",
+    "cache_policy": "Reuse local Cargo dependencies; require newly compiled diagnostic test artifact.",
+    "diagnostic_artifact_newly_compiled": true,
+    "binary": {
+      "path": "/private/tmp/logex-native-warmup-20260914-1/bin/audit_harness",
+      "sha256": "6820e204b8d39d02a546ad99e6376d3f5524ea80c9cb3f978b9f54b60d0ad36d",
+      "bytes": 118257232,
+      "fresh": false
+    },
+    "binary_included": false,
+    "full_source_tree_included": false,
+    "fixture_sha256": "8f298e6c5f1fe12e45f95fbea029e33609f441bc8e20b4a4d1a6363aac999973",
+    "patch_sha256": "77e9b99452523dfdff7b66a03dc4a78a066fa5997c265773e0ad25e478f0f425",
+    "zstd_version": "0.13.3",
+    "zstd_features": [
+      "arrays",
+      "default",
+      "experimental",
+      "legacy",
+      "zdict_builder"
+    ],
+    "commands_passed": [
+      "rustc",
+      "cargo",
+      "format",
+      "metadata",
+      "build"
+    ],
+    "warnings": "Retained logs include xcrun SDK-discovery warning and proc-macro-error2 future incompatibility warning."
+  },
+  "attempts": [
+    {
+      "name": "run-1",
+      "disposition": "INCONCLUSIVE_WRAPPER_COUNTER_FAILURE",
+      "fixture_passed": true,
+      "retained_observations": {
+        "processes": 1,
+        "measured": 500,
+        "warmups": 5,
+        "rss": 0
+      },
+      "runner_verified_counts": {
+        "processes": 0,
+        "measured": 0,
+        "warmups": 0,
+        "rss": 0
+      },
+      "reason": "Fixture completed and passed, then /usr/bin/time -l failed to read kern.clockrate under sandbox (Operation not permitted). Raw observations retained without pooling.",
+      "counter_probe": {
+        "command": [
+          "/usr/bin/time",
+          "-l",
+          "/usr/bin/true"
+        ],
+        "sandbox_permissions": "require_escalated",
+        "exit_code": 0,
+        "maximum_resident_set_size": 1146880,
+        "source": "exec_command tool result c08f15; no data workload"
+      }
+    },
+    {
+      "name": "run-2",
+      "disposition": "COMPLETE_DIAGNOSTIC_NO_ACCEPTANCE_VERDICT",
+      "counts": {
+        "measured": 12000,
+        "processes": 24,
+        "rss": 24,
+        "warmups": 6060
+      },
+      "started": "2026-09-13T17:15:42.523315+00:00",
+      "finished": "2026-09-13T17:16:10.458243+00:00",
+      "reason": "Separately identified complete fixed packet outside sandbox; unchanged frozen tooling/binary/schedule. No observations from run-1 included."
+    }
+  ],
+  "statistics": {
+    "seed": 2026091312,
+    "draws": 4000,
+    "method": {
+      "intervals": "4000 paired bootstrap draws; sorted replicate indices99 and3899.",
+      "median": "Ordinary middle value, or mean of two middle values for even n.",
+      "p95": "Nearest rank: sorted observations at one-based index ceil(0.95*n)."
+    },
+    "metrics": [
+      {
+        "metric": "binding_block_hash_point",
+        "point": {
+          "A_median_second_vs_first_percent": 0.10381329035098474,
+          "A_p95_second_vs_first_percent": 2.2238971577154265,
+          "B_median_second_vs_first_percent": 0.10766747376915742,
+          "B_p95_second_vs_first_percent": 1.7649966124203331,
+          "absolute_settling_paired_difference_pp": -0.596993217096442,
+          "median_arm100_vs_arm1_percent": -0.4582864567398204,
+          "p95_arm100_vs_arm1_percent": -6.610754604624825,
+          "settling_paired_difference_pp": 0.8322928573648247
+        },
+        "intervals95": {
+          "A_median_second_vs_first_percent": [
+            -1.202696272799364,
+            1.037992542577837
+          ],
+          "A_p95_second_vs_first_percent": [
+            -12.984480469321912,
+            20.01151189562549
+          ],
+          "B_median_second_vs_first_percent": [
+            -0.10420413687195484,
+            0.36348017329494997
+          ],
+          "B_p95_second_vs_first_percent": [
+            -5.615149517588536,
+            10.916104146576666
+          ],
+          "absolute_settling_paired_difference_pp": [
+            -1.3099912818987647,
+            0.046756651520019066
+          ],
+          "median_arm100_vs_arm1_percent": [
+            -1.0513169809332035,
+            -0.17101473301983638
+          ],
+          "p95_arm100_vs_arm1_percent": [
+            -11.578397865130775,
+            0.07992613111726943
+          ],
+          "settling_paired_difference_pp": [
+            0.13390307758434639,
+            1.6567042031346901
+          ]
+        }
+      },
+      {
+        "metric": "binding_block_number_range",
+        "point": {
+          "A_median_second_vs_first_percent": -0.5005179620961919,
+          "A_p95_second_vs_first_percent": 5.061722341403629,
+          "B_median_second_vs_first_percent": 0.30094812743386434,
+          "B_p95_second_vs_first_percent": 3.176006628003303,
+          "absolute_settling_paired_difference_pp": -0.8330477258063129,
+          "median_arm100_vs_arm1_percent": -0.5080714800056341,
+          "p95_arm100_vs_arm1_percent": -8.697053165233747,
+          "settling_paired_difference_pp": 1.866351445101927
+        },
+        "intervals95": {
+          "A_median_second_vs_first_percent": [
+            -3.731555327748981,
+            2.318249971166053
+          ],
+          "A_p95_second_vs_first_percent": [
+            -12.49767731013014,
+            35.649935649935635
+          ],
+          "B_median_second_vs_first_percent": [
+            -1.8699010077588563,
+            2.31013712823811
+          ],
+          "B_p95_second_vs_first_percent": [
+            -5.974782566262404,
+            9.4794756927161
+          ],
+          "absolute_settling_paired_difference_pp": [
+            -3.2400665500933954,
+            1.0908216822832606
+          ],
+          "median_arm100_vs_arm1_percent": [
+            -2.1614134275618313,
+            0.6572753645841312
+          ],
+          "p95_arm100_vs_arm1_percent": [
+            -12.591162069632256,
+            -0.4170973508857423
+          ],
+          "settling_paired_difference_pp": [
+            0.8330477258063129,
+            4.025098011831762
+          ]
+        }
+      },
+      {
+        "metric": "binding_timestamp_range",
+        "point": {
+          "A_median_second_vs_first_percent": -0.32281121281129144,
+          "A_p95_second_vs_first_percent": 0.7546789585251679,
+          "B_median_second_vs_first_percent": 0.2303479773397621,
+          "B_p95_second_vs_first_percent": 0.8681948385040439,
+          "absolute_settling_paired_difference_pp": -0.702866072831515,
+          "median_arm100_vs_arm1_percent": -0.6069904925319558,
+          "p95_arm100_vs_arm1_percent": -6.102018115366281,
+          "settling_paired_difference_pp": 1.1023075982800223
+        },
+        "intervals95": {
+          "A_median_second_vs_first_percent": [
+            -2.05584125838969,
+            0.839558823529396
+          ],
+          "A_p95_second_vs_first_percent": [
+            -9.786681368673966,
+            18.065152608981204
+          ],
+          "B_median_second_vs_first_percent": [
+            -0.3115995516953851,
+            0.9885272894427866
+          ],
+          "B_p95_second_vs_first_percent": [
+            -3.0872688985796093,
+            7.702166246851405
+          ],
+          "absolute_settling_paired_difference_pp": [
+            -1.7686401587699907,
+            0.0939401902039394
+          ],
+          "median_arm100_vs_arm1_percent": [
+            -1.2888001452169284,
+            -0.24224442550835334
+          ],
+          "p95_arm100_vs_arm1_percent": [
+            -10.915470595706855,
+            -0.7288100562804045
+          ],
+          "settling_paired_difference_pp": [
+            0.21524248959779446,
+            1.875438400393975
+          ]
+        }
+      },
+      {
+        "metric": "binding_erc20_topic1_present",
+        "point": {
+          "A_median_second_vs_first_percent": -0.2332297016025775,
+          "A_p95_second_vs_first_percent": 1.3455466251127701,
+          "B_median_second_vs_first_percent": 0.114730187637746,
+          "B_p95_second_vs_first_percent": 1.1788745677460133,
+          "absolute_settling_paired_difference_pp": -0.44173105712427274,
+          "median_arm100_vs_arm1_percent": -0.6089417106220685,
+          "p95_arm100_vs_arm1_percent": -9.884723854421452,
+          "settling_paired_difference_pp": 1.234616511733
+        },
+        "intervals95": {
+          "A_median_second_vs_first_percent": [
+            -1.9824276020224296,
+            0.9455922906511427
+          ],
+          "A_p95_second_vs_first_percent": [
+            -16.35051837888787,
+            21.696215398664087
+          ],
+          "B_median_second_vs_first_percent": [
+            -0.490113182223173,
+            0.6298548788502334
+          ],
+          "B_p95_second_vs_first_percent": [
+            -4.47242333836072,
+            5.7885819688642925
+          ],
+          "absolute_settling_paired_difference_pp": [
+            -1.6443663963110144,
+            0.2948676544522466
+          ],
+          "median_arm100_vs_arm1_percent": [
+            -1.319774551905184,
+            -0.13418685116464157
+          ],
+          "p95_arm100_vs_arm1_percent": [
+            -15.532255216502799,
+            -2.4810964083175846
+          ],
+          "settling_paired_difference_pp": [
+            0.15259254760119356,
+            1.9076535341653988
+          ]
+        }
+      },
+      {
+        "metric": "binding_erc20_topic1_absent",
+        "point": {
+          "A_median_second_vs_first_percent": -0.13990103400853826,
+          "A_p95_second_vs_first_percent": -0.9062886418060967,
+          "B_median_second_vs_first_percent": 0.09407364219906622,
+          "B_p95_second_vs_first_percent": 2.0796052835731382,
+          "absolute_settling_paired_difference_pp": -0.3097485695699065,
+          "median_arm100_vs_arm1_percent": -0.5482674133706733,
+          "p95_arm100_vs_arm1_percent": -0.887574714771544,
+          "settling_paired_difference_pp": 0.6125426305216064
+        },
+        "intervals95": {
+          "A_median_second_vs_first_percent": [
+            -0.9267226101134618,
+            0.3451023523074248
+          ],
+          "A_p95_second_vs_first_percent": [
+            -8.259657412876543,
+            9.626533166458074
+          ],
+          "B_median_second_vs_first_percent": [
+            -0.14066359457376443,
+            0.5524799553278115
+          ],
+          "B_p95_second_vs_first_percent": [
+            -3.408884627676567,
+            9.985682493736103
+          ],
+          "absolute_settling_paired_difference_pp": [
+            -0.6125426305216064,
+            0.570618909308418
+          ],
+          "median_arm100_vs_arm1_percent": [
+            -0.7976705616388857,
+            -0.3740441950192852
+          ],
+          "p95_arm100_vs_arm1_percent": [
+            -4.831637915832232,
+            1.4985903957916769
+          ],
+          "settling_paired_difference_pp": [
+            0.15100168781068124,
+            1.302696121299679
+          ]
+        }
+      }
+    ]
+  },
+  "interpretation": [
+    "Extra warmup changes some observed tails: p95 point estimates decrease about 6\u201310% for four cases, with the absent case about 0.89% lower.",
+    "Every absolute-settling paired-difference 95% interval includes zero; order-dependence intervals remain wide. No stable measurement-method fix or source acceptance is established.",
+    "All original measurements and warmups remain retained. No pooling, exclusions, replacement acceptance samples or corrected source estimates.",
+    "The direct source comparison retains unchanged original fixture bytes and default one warmup pass.",
+    "Original first20/last20 retained-data exploration is non-gating, preserves all 24 original processes, and is not a causal attribution to cache or DVFS."
+  ],
+  "independent_verification": {
+    "status": "verified",
+    "counts": {
+      "processes": 24,
+      "measured": 12000,
+      "warmups": 6060,
+      "rss": 24
+    },
+    "independently_recomputed_points": 40,
+    "seeded_index_records_verified": 4000,
+    "intervals_verified_from_all_saved_replicates": 40,
+    "scope": "Reparsed original stdout using integer nanoseconds; independently recomputed all points and all seeded indices; checked every interval against retained replicate values. Individual replicate arithmetic was not independently recomputed.",
+    "acceptance_data": false
+  },
+  "raw_packet": {
+    "path": "2026-09-14-source-identity-native-warmup-1-raw.json.gz",
+    "sha256": "c4b636ea59e64a89290acfa9a14e63dd87eef12903963ff23c844173babed2b2",
+    "bytes": 2656692,
+    "uncompressed_json_bytes": 28691026,
+    "files": 135,
+    "source_bytes": 26258202,
+    "roundtrip": "All archived files decoded and compared byte-for-byte to retained originals, with per-file SHA256 and length checks."
+  },
+  "exclusions": [
+    "Compiled 118257232-byte binary and full source tree omitted; exact paths/hashes/commit and inventory retained."
+  ]
+}
