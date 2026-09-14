@@ -3,11 +3,49 @@
 This batch follows merged PR #149 and is in progress. It binds derived indexes
 and recovery to the exact logical source prefix. Current aligned-writer source
 `28ef516a` passes all nine local gates and all 25 focused Intel platform checks.
-Its preliminary Intel comparison and platform validation permit one frozen full
-comparison; **performance acceptance remains pending**. Earlier `da36819b`
+Its completed full comparison is **NOT CLEAR** for performance. Earlier `da36819b`
 and `84ecac65` failures remain retained separately. CI, merge and the remaining
 offline audit are incomplete. Current formats and design are in
 [Logical-prefix commitment and compatibility](#logical-prefix-commitment-and-compatibility).
+
+## Aligned full comparison: NOT CLEAR
+
+The [complete comparison evidence](baselines/2026-09-14-source-identity-aligned-full-result-1.json)
+contains all 256 processes, 44,800 timings, 320 warmups and 256 RSS records.
+All 1,863 collected files and every command exit verify. Independent arithmetic
+matches all 1.5 million saved draw-effect values and 25,364 exact checks. The
+archive preserves 1,455 records and 1,304 exact-byte aliases; every byte was also
+compared independently with its original. Only the redundant collection tar is
+excluded after verifying its complete member set; original containers and all
+preparation failures remain retained.
+
+Historical publication median/p95 effects are **+9.7125%/+7.7023%**, with nominal
+one-sided 99% upper bounds **+12.8917%/+10.5325%**. The median also crosses 10% in
+one source order, one temporal half and three leave-one-block-out sensitivities.
+Live publication is +1.7974%/+3.0645%; its median upper is +3.3770%, but its p95
+upper remains +11.5993%. Integrated dense/sparse ingestion medians range
++1.6402% to +2.3511%; these do not offset the publication holds.
+
+Overall, 42 of 50 primary endpoints meet the numerical upper-bound rule and
+five sensitivity holds remain, leaving ten distinct primary endpoints uncleared.
+The other holds concern count/ordered-query tails and indexed query tails/order
+effects. All 18 source review flags and 35 separate control flags are retained.
+No current source lower bound exceeds 10%; the observed positive costs and
+remaining uncertainty still prevent clearance. Thermal snapshots report CPU
+speed limits 78–100, which cannot assign a cause to individual samples or justify
+excluding them. Controls are never subtracted, and earlier packets are not pooled.
+
+The next bounded hypothesis is direct reservation of each row header to reduce
+repeated capacity checks while preserving the exact transcript and recovery state.
+The isolated prototype has passed source review only; it is unbuilt, untested
+and unmeasured. No further performance claim or unchanged benchmark rerun follows
+from this result. CI, PR and merge remain pending.
+
+Mac-mini testing finished on September 14 at 19:14:50 UTC. Collection and the
+final read-only process review completed at 19:16:30 UTC; only the reporter and
+its wrapper matched, and no audit workloads remained. The user was told the Mac
+was free. The disposable ExFAT image had detached normally in the platform phase,
+and important external-volume data was untouched. Local analysis followed release.
 
 ## Aligned Intel platform validation
 
@@ -35,10 +73,10 @@ against their original bytes; nothing was excluded from the archive.
 
 The build completed at 2026-09-14 18:03:26 UTC and the final recovery/cleanup
 phase at 18:10:18 UTC. These are correctness results. Full performance acceptance,
-exact-head Linux/macOS CI, PR and merge remain outstanding. The Mac-mini remains
-reserved for the subsequent fixed comparison.
+exact-head Linux/macOS CI, PR and merge remain outstanding. The Mac-mini was
+subsequently used for the full comparison and released as recorded above.
 
-## Aligned Intel diagnostic: full validation pending
+## Preliminary aligned Intel diagnostic
 
 The [complete aligned diagnostic evidence](baselines/2026-09-14-source-identity-aligned-intel-diagnostic-result-1.json)
 retains all 12 processes, 800 timings, zero explicit warmups and 12 RSS records.
@@ -66,8 +104,8 @@ existing work there. Normal query capture reads cached roots or bounded canonica
 metadata; it does not recompute whole-row commitments. Direct row-header
 reservation remains an unmeasured fallback, with no additional source change
 selected. Exact-source Intel commitment and isolated APFS/ExFAT recovery controls
-have now passed, as recorded above. One frozen full comparison follows with the
-existing acceptance rules and all sensitivity checks.
+have passed, as recorded above. The subsequent full comparison retained the
+existing acceptance rules and sensitivity checks; its NOT CLEAR result is above.
 
 The single 600.00107659-second cooldown ended at 2026-09-14 17:07:16 UTC; the
 complete diagnostic ended at 17:09:59 UTC with zero outer/watcher exits.
@@ -409,10 +447,12 @@ isolated Intel Mac-mini build. Corrected-source performance is on HOLD after the
 
 ## Logical-prefix commitment and compatibility
 
-The integrated streaming candidate passed all nine local gates with a 16 KiB
-encoding buffer. A fixed CPU comparison selected the equivalent 64 KiB buffer;
-all nine final-source gates also pass at `84ecac65`. Ingestion acceptance remains open:
-the preceding serial-chain diagnostic is on performance HOLD.
+Current aligned-writer source `28ef516a` passes all nine local gates and the
+25 focused Intel platform controls. The earlier streaming implementation passed
+the local gates with both 16 KiB and 64 KiB buffers, but its full comparison at
+`84ecac65` did not clear the performance limit. The current implementation keeps
+the same transcript and bounded state while aligning the carrying buffer.
+Current ingestion acceptance is NOT CLEAR after the full comparison review.
 Its 32-byte published root is standard BLAKE3 over the following concatenation:
 
 `logex.logical-prefix.stream.v2\0 || namespace[16] || row_count_LE_u64 || transcript_bytes_LE_u64 || BLAKE3(logical_row_concat)`.

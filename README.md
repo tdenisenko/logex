@@ -369,7 +369,7 @@ builds the current query index profile. `build-indexes` handles interrupted
 indexing and changed index profiles. `compact` handles older representations or
 changed compression profiles.
 
-This version uses catalog 12 and segment manifest 10. Start sync in a new data
+This version uses catalog 13 and segment manifest 11. Start sync in a new data
 directory when upgrading from earlier native formats; they are rejected without
 migration or reset. Retain the original directory until its replacement is
 validated. The version checks also prevent earlier native readers and writers
