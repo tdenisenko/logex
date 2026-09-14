@@ -15,6 +15,7 @@ mod wal;
 
 pub use bundle::BundleReference;
 pub use column::{ColumnFile, ColumnFileHeader, NullBitmap};
+pub use commitment::PrefixState;
 pub use index_checkpoint::{IndexBuildCheckpoint, IndexReadCheckpoint};
 pub use page::PageIndexEntry;
 pub use partition::{Partition, PartitionManager, PartitionManagerConfig};

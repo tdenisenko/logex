@@ -67,6 +67,12 @@ impl RecoveryJournal {
     }
 
     fn validate(&self) -> io::Result<()> {
+        crate::commitment::validate_state(
+            self.start.source_namespace,
+            self.start.row_count,
+            self.start.source_commitment,
+            self.start.source_state.as_ref(),
+        )?;
         let valid_shape = match (self.version, self.checkpoint) {
             (JOURNAL_VERSION, None) => self.start.kind == SegmentKind::Hot && self.row_count > 0,
             (CHECKPOINT_JOURNAL_VERSION, Some(checkpoint)) => {

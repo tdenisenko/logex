@@ -1194,10 +1194,11 @@ mod tests {
     fn write_native_raw(dir: &Path, rows: &[LogRow], descriptor: &mut SegmentDescriptor) {
         let namespace = [descriptor.id as u8; 16];
         descriptor.source_namespace = Some(namespace.into());
-        descriptor.source_commitment = Some(crate::commitment::extend(
-            crate::commitment::empty(namespace),
-            rows,
-        ));
+        descriptor.source_state = Some(crate::PrefixState::from_rows(namespace, rows).unwrap());
+        descriptor.source_commitment = descriptor
+            .source_state
+            .as_ref()
+            .map(crate::PrefixState::commitment);
         ColumnFile::write_initial_batch_with_source_identity(
             dir,
             rows,
@@ -1209,10 +1210,7 @@ mod tests {
                 segment_id: descriptor.id,
                 kind: descriptor.kind,
             },
-            Some(crate::commitment::extend(
-                crate::commitment::empty(namespace),
-                rows,
-            )),
+            descriptor.source_state.as_ref(),
         )
         .unwrap();
     }
@@ -1225,6 +1223,7 @@ mod tests {
             column_bundle: None,
             source_namespace: None,
             source_commitment: None,
+            source_state: None,
             id: 11,
             generation: 3,
             kind: SegmentKind::Hot,
@@ -1528,8 +1527,8 @@ mod tests {
                 let path = dir.join("canonical.bitmap");
                 let mut bytes = fs::read(&path).unwrap();
                 bytes[9] = 1;
-                let crc = crc32fast::hash(&bytes[..124]);
-                bytes[124..128].copy_from_slice(&crc.to_le_bytes());
+                let crc = crc32fast::hash(&bytes[..128]);
+                bytes[128..132].copy_from_slice(&crc.to_le_bytes());
                 fs::write(path, bytes).unwrap();
                 assert_eq!(
                     SegmentReader::open(&dir).unwrap_err().kind(),
@@ -1663,6 +1662,7 @@ mod tests {
             column_bundle: None,
             source_namespace: None,
             source_commitment: None,
+            source_state: None,
             id: 12,
             generation: 0,
             kind: SegmentKind::Hot,
@@ -1709,6 +1709,7 @@ mod tests {
             column_bundle: None,
             source_namespace: None,
             source_commitment: None,
+            source_state: None,
             id: 1,
             generation: 0,
             kind: SegmentKind::Sealed,
@@ -1830,6 +1831,7 @@ mod tests {
             column_bundle: None,
             source_namespace: None,
             source_commitment: None,
+            source_state: None,
             id: 2,
             generation: 0,
             kind: SegmentKind::Sealed,
@@ -1882,6 +1884,7 @@ mod tests {
             column_bundle: None,
             source_namespace: None,
             source_commitment: None,
+            source_state: None,
             id: 1,
             generation: 0,
             kind: SegmentKind::Sealed,
@@ -2161,6 +2164,14 @@ mod tests {
             }
             let mut bytes = Vec::new();
             let manifest = load_manifest(&dir).unwrap().unwrap();
+            let prefix_rows = make_rows()
+                .into_iter()
+                .cycle()
+                .take(len as usize)
+                .collect::<Vec<_>>();
+            let prefix =
+                crate::PrefixState::from_rows(manifest.source_namespace.unwrap().0, &prefix_rows)
+                    .unwrap();
             crate::column::write_raw_canonical_with_previous(
                 &mut bytes,
                 &bitmap,
@@ -2171,7 +2182,8 @@ mod tests {
                         generation: manifest.generation,
                         segment_id: manifest.segment_id,
                     }),
-                manifest.source_commitment,
+                Some(prefix.commitment()),
+                Some(&prefix),
                 (len > 20).then(|| (20, manifest.source_commitment.unwrap())),
             )
             .unwrap();

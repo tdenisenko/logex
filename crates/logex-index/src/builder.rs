@@ -469,63 +469,53 @@ mod tests {
     }
 
     #[test]
-    fn namespace_only_sources_remain_readable_without_rebuild_scheduling() {
-        let dir = TempDir::new().unwrap();
-        let rows = make_test_rows();
-        ColumnFile::write_batch(dir.path(), &rows).unwrap();
-        let bitmap = SegmentReader::open(dir.path())
-            .unwrap()
-            .read_canonical()
-            .unwrap();
-
-        // Preserve the original namespace-only encodings: their first 50 bytes
-        // carry the same source fields, followed by the old header checksum.
-        let marker_path = dir.path().join(".source-publication");
-        let marker = fs::read(&marker_path).unwrap();
-        let mut legacy_marker = marker[..50].to_vec();
-        legacy_marker[..8].copy_from_slice(b"LXSRC001");
-        let checksum = crc32fast::hash(&legacy_marker);
-        legacy_marker.extend_from_slice(&checksum.to_le_bytes());
-        fs::write(marker_path, legacy_marker).unwrap();
-
-        let canonical_path = dir.path().join("canonical.bitmap");
-        let canonical = fs::read(&canonical_path).unwrap();
-        let mut legacy_canonical = canonical[..50].to_vec();
-        legacy_canonical[8] = 1;
-        let checksum = crc32fast::hash(&legacy_canonical);
-        legacy_canonical.extend_from_slice(&checksum.to_le_bytes());
-        bitmap.write_to(&mut legacy_canonical).unwrap();
-        fs::write(canonical_path, legacy_canonical).unwrap();
-
-        let reader = SegmentReader::open(dir.path()).unwrap();
-        assert!(reader.source_namespace().is_some());
-        assert!(reader.source_commitment().unwrap().is_none());
-        assert_eq!(reader.read_log_rows(None).unwrap(), rows);
-        for profile in [
-            IndexBuildProfile::All,
-            IndexBuildProfile::LogQuery,
-            IndexBuildProfile::Erc20Transfer,
-        ] {
+    fn obsolete_canonical_envelopes_fail_before_index_rebuild() {
+        for (version, header_bytes) in [(1, 50), (2, 124)] {
+            let dir = TempDir::new().unwrap();
+            ColumnFile::write_batch(dir.path(), &make_test_rows()).unwrap();
+            let bitmap = SegmentReader::open(dir.path())
+                .unwrap()
+                .read_canonical()
+                .unwrap();
+            let canonical_path = dir.path().join("canonical.bitmap");
+            let current = fs::read(&canonical_path).unwrap();
+            // Reproduce the complete older envelope, including its own checksum.
+            // Unsupported formats must fail before rebuilding derived artifacts.
+            let mut obsolete = current[..header_bytes].to_vec();
+            obsolete[8] = version;
+            let checksum = crc32fast::hash(&obsolete);
+            obsolete.extend_from_slice(&checksum.to_le_bytes());
+            bitmap.write_to(&mut obsolete).unwrap();
+            fs::write(&canonical_path, &obsolete).unwrap();
+            let reader = SegmentReader::open(dir.path()).unwrap();
             assert_eq!(
-                IndexBuilder::indexes_missing(dir.path(), profile)
-                    .unwrap_err()
-                    .kind(),
-                std::io::ErrorKind::Unsupported
+                reader.source_commitment().unwrap_err().kind(),
+                std::io::ErrorKind::InvalidData
             );
-            assert_eq!(
-                IndexBuilder::build_missing_indexes(dir.path(), profile)
-                    .unwrap_err()
-                    .kind(),
-                std::io::ErrorKind::Unsupported
-            );
-            assert!(!dir.path().join("indexes").exists());
+            for profile in [
+                IndexBuildProfile::All,
+                IndexBuildProfile::LogQuery,
+                IndexBuildProfile::Erc20Transfer,
+            ] {
+                assert_eq!(
+                    IndexBuilder::indexes_missing(dir.path(), profile)
+                        .unwrap_err()
+                        .kind(),
+                    std::io::ErrorKind::InvalidData
+                );
+                assert_eq!(
+                    IndexBuilder::build_missing_indexes(dir.path(), profile)
+                        .unwrap_err()
+                        .kind(),
+                    std::io::ErrorKind::InvalidData
+                );
+                assert!(!dir.path().join("indexes").exists());
+                assert_eq!(fs::read(&canonical_path).unwrap(), obsolete);
+            }
+            ColumnFile::write_batch(dir.path(), &make_test_rows()).unwrap();
+            IndexBuilder::build_all_indexes(dir.path()).unwrap();
+            assert!(!IndexBuilder::indexes_missing(dir.path(), IndexBuildProfile::All).unwrap());
         }
-
-        // A complete owned rewrite provides a new verifiable source history.
-        ColumnFile::write_batch(dir.path(), &rows).unwrap();
-        assert!(IndexBuilder::indexes_missing(dir.path(), IndexBuildProfile::All).unwrap());
-        IndexBuilder::build_all_indexes(dir.path()).unwrap();
-        assert!(!IndexBuilder::indexes_missing(dir.path(), IndexBuildProfile::All).unwrap());
     }
 
     #[test]

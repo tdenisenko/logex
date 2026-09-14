@@ -11,9 +11,9 @@ use crate::durability;
 use logex_types::ChainAnchors;
 use serde::{Deserialize, Serialize};
 
-pub const STORAGE_FORMAT_VERSION: u32 = 10;
-pub const CATALOG_FORMAT_VERSION: u32 = 12;
-const CATALOG_MAGIC: &[u8; 8] = b"LXCAT012";
+pub const STORAGE_FORMAT_VERSION: u32 = 11;
+pub const CATALOG_FORMAT_VERSION: u32 = 13;
+const CATALOG_MAGIC: &[u8; 8] = b"LXCAT013";
 const CATALOG_PREFIX_BYTES: usize = 20;
 const MAX_CACHED_HEADERS: usize = 8192;
 const MAX_CACHED_HEADER_BYTES: usize = 16 * 1024;
@@ -107,6 +107,8 @@ pub struct SegmentDescriptor {
     pub source_namespace: Option<FixedBytes<16>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_commitment: Option<FixedBytes<32>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_state: Option<crate::PrefixState>,
     pub generation: u64,
     pub kind: SegmentKind,
     pub relative_path: PathBuf,
@@ -442,6 +444,20 @@ impl NativeStorageCatalog {
             validate_cached_headers(std::slice::from_ref(header))?;
         }
         for segment in &self.segments {
+            // Completed sealed segments never append again. Keep their small
+            // published root, without accumulating restart buffers in catalog
+            // rewrites. Active segments and any supplied state remain checked.
+            if segment.kind == SegmentKind::Hot
+                || Some(segment.id) == self.active_historical_segment
+                || segment.source_state.is_some()
+            {
+                crate::commitment::validate_state(
+                    segment.source_namespace,
+                    segment.row_count,
+                    segment.source_commitment,
+                    segment.source_state.as_ref(),
+                )?;
+            }
             if let Some(reference) = &segment.column_bundle {
                 reference.end()?;
                 if reference.row_count != segment.row_count {
@@ -509,11 +525,13 @@ impl NativeStorageCatalog {
         let mut source_namespace = [0; 16];
         getrandom::fill(&mut source_namespace)
             .map_err(|error| io::Error::other(error.to_string()))?;
+        let source_state = crate::PrefixState::empty(source_namespace);
         Ok(SegmentDescriptor {
             column_bundle: None,
             id,
             source_namespace: Some(FixedBytes::from(source_namespace)),
-            source_commitment: Some(crate::commitment::empty(source_namespace)),
+            source_commitment: Some(source_state.commitment()),
+            source_state: Some(source_state),
             generation: 0,
             kind,
             relative_path,

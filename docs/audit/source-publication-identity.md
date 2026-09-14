@@ -1,8 +1,14 @@
 # Source publication identity
 
-This batch follows merged PR #149 and is in progress. It addresses source identity
-behind derived indexes; it does not claim the rest of the offline audit is done.
-The measured source checkpoint is `c229ace0`, with production behavior restored to
+This batch follows merged PR #149 and is in progress. It binds derived indexes
+and recovery to the exact logical source prefix. The serial implementation is
+rejected on ingestion cost; its streaming replacement has passed all local gates
+with a 16 KiB buffer and is validating the measured 64 KiB buffer choice.
+Corrected-source Intel performance, platform recovery, CI and merge remain open.
+The rest of the offline audit is also incomplete. Current formats and the
+replacement design are in [Logical-prefix commitment and compatibility](#logical-prefix-commitment-and-compatibility).
+
+Earlier namespace-only measurements used `c229ace0`, with production behavior restored to
 `179e0ff7` and all nine local workspace/release gates passing before the new clone
 regression below. The
 [direct mac-mini comparison](#completed-direct-mac-mini-comparison) completed
@@ -148,11 +154,19 @@ isolated Intel Mac-mini build. Corrected-source performance is on HOLD after the
 
 ## Logical-prefix commitment and compatibility
 
-The current implementation extends the stable source namespace with a 32-byte
-BLAKE3 commitment. The empty root hashes the domain
-`logex.logical-prefix.empty.v1\0` followed by the 16-byte namespace. Each row hashes
-`logex.logical-prefix.row.v1\0`, the previous root, and the following ordered
-encoding. The displayed `\0` denotes one zero byte.
+The integrated streaming candidate passed all nine local gates with a 16 KiB
+encoding buffer. A fixed CPU comparison then selected the equivalent 64 KiB
+buffer; its final-source gates are running. Ingestion acceptance remains open:
+the preceding serial-chain diagnostic is on performance HOLD.
+Its 32-byte published root is standard BLAKE3 over the following concatenation:
+
+`logex.logical-prefix.stream.v2\0 || namespace[16] || row_count_LE_u64 || transcript_bytes_LE_u64 || BLAKE3(logical_row_concat)`.
+
+The displayed `\0` denotes one zero byte. Logical rows retain the ordered encoding
+below, with no per-row domain or previous-root field. The outer domain binds the
+schema and namespace, so the inner ordinary BLAKE3 transcript needs no separate
+domain. Fixed widths, topic presence and actual payload length make the encoding
+unambiguous; the minimum row occupies 125 bytes.
 
 | Fields, in order | Encoding |
 |---|---|
@@ -169,7 +183,26 @@ updates preserve it: canonical filtering remains separate because indexes cover
 all source rows. The commitment is a consistency check, not authentication of
 arbitrarily replaced metadata or a full payload scrub on every query.
 
-The catalog and manifest carry the current root. Raw canonical framing also
+The catalog and manifest carry the current root. Bounded append state is retained
+only for active hot/historical catalog descriptors and saved journal origins;
+sealed inactive descriptors retain only the root. Manifests and query captures
+never carry or deserialize full resume state. Native append borrows the validated
+catalog revision state, without an extra state-vector clone, durability barrier
+or old-row reread. The wrapper caches its root when state changes or is decoded;
+ordinary catalog validation compares the cached root and scalar boundaries.
+The encoding buffer is 64 KiB on the stack per active call. The measured change
+affects bulk hashing efficiency, without altering roots or persisted state.
+
+The resumable stream wire contains version byte 1, a little-endian u64 transcript
+byte count, descending power-of-two subtree chaining values, and the full final
+chunk of at most 1,024 bytes. The byte count determines frontier and tail lengths;
+keeping a full final chunk preserves BLAKE3's root/non-root distinction. Public
+BLAKE3 hazmat operations hash aligned subtrees and merge the frontier. The stream
+wire is bounded to 2,761 bytes; `PrefixState` adds namespace[16] and row count[8],
+for at most 2,785 bytes. Decoding checks canonical geometry and recomputes the
+root; trusted publication metadata then binds namespace, row count and root.
+
+Raw canonical framing also
 carries the exact previous `(row count, root)` so a reader that captured the old
 manifest can finish during the canonical-before-manifest append window. Writers
 require the current root and physical boundary; they cannot append using this
@@ -189,18 +222,26 @@ root, accounting for any already-applied starting-segment suffix.
 
 | Persisted artifact | Current format and compatibility |
 |---|---|
-| Native catalog | `LXCAT012`, metadata version 12; earlier catalogs require a new directory |
-| Segment manifest | Version 10; older native manifests are rejected |
+| Native catalog | `LXCAT013`, metadata version 13; earlier catalogs require a new directory |
+| Segment manifest | Version 11; root only, no resume state; older native manifests are rejected |
 | Raw source marker | `LXSRC002`, 87 bytes; `LXSRC001` remains readable without a commitment |
-| Raw canonical bitmap | `LXCAN001`, version 2, 128-byte header; version 1 and supported plain legacy bitmaps remain readable |
+| Raw canonical bitmap | `LXCAN001`, version 3, 132-byte header and 140-byte fixed query prefix; canonical versions 1/2 rejected; supported plain unidentified bitmaps remain scan-readable |
 | Index checkpoint | `LXICP006`; older checkpoints are ineligible and rebuild only for an identified source |
 | Column payloads and bundles | Existing encodings remain unchanged |
+
+Raw v3 stores `state_len` at bytes 124..128 and the header CRC at 128..132,
+followed by the ordinary bitmap length/bits and bounded state body. Queries read
+the fixed prefix without hashing resume state. Standalone writers decode the body
+and validate it against the header's root, namespace and physical row boundary
+before mutation. The source-marker and index-checkpoint root layouts are unchanged.
+Generic unidentified legacy scans remain for the pending storage-boundary audit;
+they do not permit old native formats or inferred content identity.
 
 The catalog and manifest version checks are necessary even for entirely bundled
 data: older binaries otherwise ignore the added JSON fields and can publish
 appends without updating the root. Existing native directories are preserved and
 rejected rather than silently migrated or reset. This follows the authorized
-fresh-directory compatibility policy. Standalone legacy raw sources remain
+fresh-directory compatibility policy. Supported plain unidentified raw sources remain
 scan-readable and index-ineligible until a complete owned rewrite establishes
 identity. Rollback uses a preserved pre-upgrade directory with its matching
 binary; version fields must not be manually changed to bypass the fence.
@@ -208,12 +249,38 @@ binary; version fields must not be manually changed to bypass the fence.
 Regressions cover divergent indexes, recovery prefix substitution with a
 valid-copy control, append grouping and every row field, previous-prefix capture,
 legacy index eligibility, and public query snapshot behavior. All nine local
-workspace/release gates also pass after the journal-origin correction.
+workspace/release gates passed for the integrated 16 KiB streaming source: 1,179
+workspace tests, 149 release query tests, two release API consistency tests,
+documentation checks and the release node build. The [complete validation packet](baselines/2026-09-14-source-identity-stream-validation-1.json)
+retains source hashes, original failed iterations and all passing gate outputs.
+The 64 KiB buffer-only final source is now undergoing the same gates.
 The 23 existing ignored workspace tests include
-four distinct-mount recovery tests, now passed separately on isolated APFS/ExFAT
-mounts. They remain ignored in ordinary workspace runs. New-source
-performance and CI remain pending; these changes are not yet accepted for
-deployment.
+four distinct-mount recovery tests, passed separately for the preceding serial
+source on isolated APFS/ExFAT mounts. They require repetition for this new state
+format and remain ignored in ordinary workspace runs. New-source
+performance remains on HOLD and exact-candidate CI is pending; these changes
+are not accepted for deployment.
+
+A separate [CPU prototype and stream-component evidence](baselines/2026-09-14-source-identity-stream-design-1.json)
+records approximately 18% less component time for buffered serial encoding and
+66% less for a buffered logical stream. That ARM64 experiment used warm in-memory
+rows and no storage publication. It measured neither this persisted-state
+implementation nor ingestion performance, and cannot clear the Intel 10% limit.
+The report's original pre-integration conclusions and all observations remain
+unchanged. The tracked packet also retains five passing stream oracle tests and
+final strict Clippy, including the original style-lint failure. Those component
+checks are separate from the integrated-source gate packet above.
+
+A subsequent [fixed component comparison](baselines/2026-09-14-source-identity-stream-cost-1.json)
+used the actual resumable implementation with an
+independent ordinary-BLAKE3 oracle. Across 24 balanced rounds, median component
+times per 15,360 rows were 9.325 ms for the rejected serial chain, 4.509 ms for
+16 KiB streaming state and 3.810 ms for 64 KiB. The paired median reduction from
+16 to 64 KiB was 15.4%, with the larger buffer faster in all 24 rounds. All 72
+samples and three warmups remain retained. Both streaming versions produced
+identical roots and continuation bytes through grouping and reload checks. This
+warm, in-memory ARM64 component result supports the buffer choice; it does not
+measure storage publication or clear the Intel ingestion limit.
 
 The [fixed initial diagnostic](baselines/2026-09-14-source-identity-content-diagnostic-design-1.json)
 uses two balanced source pairs for each unchanged publication, dense and sparse

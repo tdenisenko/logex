@@ -1104,9 +1104,10 @@ impl NativeStorage {
                 fs::remove_dir_all(&segment_dir)?;
             }
             let columns = write_bundled_rows(&segment_dir, chunk)?;
-            descriptor.source_commitment = descriptor
-                .source_commitment
-                .map(|root| crate::commitment::extend(root, chunk));
+            let revision =
+                crate::commitment::AppendRevision::new(descriptor.source_state.as_ref(), chunk)?;
+            descriptor.source_commitment = revision.next;
+            descriptor.source_state = None;
             apply_ordered_rows_to_descriptor(&mut descriptor, chunk);
             let columns = columns.apply_to(&mut descriptor);
             persist_ingest_manifest_with_columns(
@@ -1183,9 +1184,9 @@ impl NativeStorage {
             }
 
             let revision = crate::commitment::AppendRevision::new(
-                self.catalog.segments[segment_index].source_commitment,
+                self.catalog.segments[segment_index].source_state.as_ref(),
                 chunk,
-            );
+            )?;
             let publication = self.segment_publication(segment_id);
             let columns = if existing_rows == 0 {
                 write_bundled_rows(&segment_dir, chunk)?
@@ -1203,13 +1204,14 @@ impl NativeStorage {
                     chunk,
                     publication,
                     inspected,
-                    revision,
+                    &revision,
                 )?
             };
             {
                 let descriptor = &mut self.catalog.segments[segment_index];
                 apply_ordered_rows_to_descriptor(descriptor, chunk);
                 descriptor.source_commitment = revision.next;
+                descriptor.source_state = revision.state;
                 let columns = columns.apply_to(descriptor);
                 persist_ingest_manifest_with_columns(
                     &self.paths,
@@ -1275,6 +1277,14 @@ impl NativeStorage {
                 self.segment_publication(descriptor.id),
             )?;
         }
+        if let Some(segment) = self
+            .catalog
+            .segments
+            .iter_mut()
+            .find(|segment| segment.id == segment_id)
+        {
+            segment.source_state = None;
+        }
         self.catalog.active_historical_segment = None;
         self.persist_catalog()?;
         Ok(true)
@@ -1332,9 +1342,9 @@ impl NativeStorage {
             }
             let chunk = &rows[offset..offset + take];
             let revision = crate::commitment::AppendRevision::new(
-                self.catalog.segments[segment_index].source_commitment,
+                self.catalog.segments[segment_index].source_state.as_ref(),
                 chunk,
-            );
+            )?;
             let publication = self.segment_publication(hot_id);
             let columns = if bundled {
                 Some(if existing_rows == 0 {
@@ -1346,7 +1356,7 @@ impl NativeStorage {
                         chunk,
                         publication,
                         inspected,
-                        revision,
+                        &revision,
                     )?
                 })
             } else {
@@ -1368,13 +1378,14 @@ impl NativeStorage {
                     chunk,
                     publication,
                     source_identity,
-                    revision,
+                    &revision,
                 )?;
                 None
             };
             let descriptor = &mut self.catalog.segments[segment_index];
             apply_rows_to_descriptor(descriptor, chunk);
             descriptor.source_commitment = revision.next;
+            descriptor.source_state = revision.state;
             let should_seal = descriptor.row_count >= target_rows;
             if let Some(columns) = columns {
                 let columns = columns.apply_to(descriptor);
@@ -1788,6 +1799,7 @@ impl NativeStorage {
             .find(|segment| segment.id == hot_id)
         {
             descriptor.kind = SegmentKind::Sealed;
+            descriptor.source_state = None;
             persist_ingest_manifest(&self.paths, descriptor, publication)?;
             tracing::info!(
                 segment_id = descriptor.id,
@@ -2198,9 +2210,13 @@ impl NativeStorage {
                 // A legitimate interrupted transaction can advance the catalog.
                 // Bind its saved origin to that publication using only the WAL
                 // suffix already read above, without rereading the old prefix.
-                let expected = journal.start.source_commitment.map(|root| {
-                    crate::commitment::extend(root, &applied[applied_before_segment..])
-                });
+                let expected = journal
+                    .start
+                    .source_state
+                    .as_ref()
+                    .map(|state| state.extend(&applied[applied_before_segment..]))
+                    .transpose()?
+                    .map(|state| state.commitment());
                 if expected != segment.source_commitment {
                     return Err(invalid_commitment());
                 }
@@ -3128,6 +3144,46 @@ mod tests {
         }
         rows.sort_by_key(|row| (row.block_number, row.log_index));
         rows
+    }
+
+    #[test]
+    fn only_appendable_segments_retain_restart_state_across_rotation_and_reopen() {
+        let tmp = TempDir::new().unwrap();
+        let config = NativeStorageConfig {
+            data_dir: tmp.path().to_owned(),
+            hot_target_rows: 4,
+            ..Default::default()
+        };
+        let mut expected = Vec::new();
+        for round in 0..3 {
+            let mut storage = NativeStorage::open(config.clone()).unwrap();
+            let live = make_rows(7, 100 + round * 10);
+            storage.write_batch(&live).unwrap();
+            expected.extend(live);
+            let historical = make_rows(11, 50 - round * 10);
+            storage.write_historical_batch(&historical).unwrap();
+            expected.extend(historical);
+            storage.checkpoint_durable().unwrap();
+            let mut retained = 0;
+            for segment in storage.segments() {
+                assert!(segment.source_commitment.is_some());
+                let active = segment.kind == SegmentKind::Hot
+                    || Some(segment.id) == storage.active_historical_segment_id();
+                assert_eq!(
+                    segment.source_state.is_some(),
+                    active,
+                    "segment {}",
+                    segment.id
+                );
+                retained += usize::from(segment.source_state.is_some());
+            }
+            assert!(retained <= 2);
+            expected.sort_by_key(|row| (row.block_number, row.log_index));
+            assert_eq!(read_ingestion_rows(&storage), expected);
+            drop(storage);
+            let reopened = NativeStorage::open(config.clone()).unwrap();
+            assert_eq!(read_ingestion_rows(&reopened), expected);
+        }
     }
 
     fn ingest_test_batch(
@@ -6933,10 +6989,13 @@ mod tests {
                     segment_id: descriptor.id,
                     kind: descriptor.kind,
                 },
-                Some(crate::commitment::extend(
-                    crate::commitment::empty(descriptor.source_namespace.unwrap().0),
-                    &pending,
-                )),
+                Some(
+                    &crate::PrefixState::from_rows(
+                        descriptor.source_namespace.unwrap().0,
+                        &pending,
+                    )
+                    .unwrap(),
+                ),
             )
             .unwrap();
             fs::remove_file(dir.join(missing)).unwrap();
@@ -7066,6 +7125,13 @@ mod tests {
             .find(|segment| segment.id == id)
             .unwrap()
             .source_commitment = None;
+        storage
+            .catalog
+            .segments
+            .iter_mut()
+            .find(|segment| segment.id == id)
+            .unwrap()
+            .source_state = None;
         let manifest_path = storage.paths.segment_manifest_path(id);
         let mut manifest = SegmentManifest::load(&manifest_path).unwrap().unwrap();
         manifest.source_namespace = None;
@@ -7333,6 +7399,7 @@ mod tests {
                     .unwrap();
                 storage.catalog.segments[index].source_namespace = None;
                 storage.catalog.segments[index].source_commitment = None;
+                storage.catalog.segments[index].source_state = None;
                 assert_eq!(storage.catalog.segments[index].row_count, 0);
                 let dir = storage.segment_path(id);
                 let path = storage.paths.segment_manifest_path(id);
@@ -7410,6 +7477,7 @@ mod tests {
         }
         storage.catalog.segments[index].source_namespace = None;
         storage.catalog.segments[index].source_commitment = None;
+        storage.catalog.segments[index].source_state = None;
         let path = storage.paths.segment_manifest_path(id);
         let mut manifest = SegmentManifest::load(&path).unwrap().unwrap();
         manifest.source_namespace = None;
@@ -8139,9 +8207,13 @@ mod tests {
 
             {
                 let descriptor = &mut storage.catalog.segments[segment_index];
-                descriptor.source_commitment = descriptor
-                    .source_commitment
-                    .map(|root| crate::commitment::extend(root, &applied_rows));
+                let revision = crate::commitment::AppendRevision::new(
+                    descriptor.source_state.as_ref(),
+                    &applied_rows,
+                )
+                .unwrap();
+                descriptor.source_commitment = revision.next;
+                descriptor.source_state = revision.state;
                 apply_rows_to_descriptor(descriptor, &applied_rows);
                 persist_ingest_manifest(&storage.paths, descriptor, Publication::Durable).unwrap();
             }

@@ -1,0 +1,86 @@
+{
+  "schema": "logex-source-identity-stream-cost-v1",
+  "disposition": "CPU_COMPONENT_EVIDENCE_ONLY",
+  "acceptance_granted": false,
+  "archive": {
+    "status": "EVERY_DECODED_BYTE_VERIFIED",
+    "archive": {
+      "source": "/Users/tdenisenko/code/logex/docs/audit/baselines/2026-09-14-source-identity-stream-cost-1-raw.jsonl.gz",
+      "bytes": 121894,
+      "sha256": "cf501de9cb0dda47acffcd766ccd6640419e625f034c082e9225466acc905c65"
+    },
+    "files": 43,
+    "payload_bytes": 682155,
+    "uncompressed_jsonl_bytes": 744040,
+    "stable_inventory_verified_files": 36,
+    "exclusions": [
+      {
+        "path": "/private/tmp/logex-source-identity-stream-cost-prototype-1/target",
+        "reason": "Duplicate exact b6 source/dependency/build tree; inputs contain exact fixture and both candidate modules; commands, 837-file source proof and executable identity retained. No observations excluded."
+      },
+      {
+        "path": "/private/tmp/logex-source-identity-stream-cost-prototype-1/source",
+        "reason": "Duplicate exact b6 source/dependency/build tree; inputs contain exact fixture and both candidate modules; commands, 837-file source proof and executable identity retained. No observations excluded."
+      }
+    ]
+  },
+  "counts": {
+    "samples": 72,
+    "explicit_warmups": 3,
+    "implementations": 3,
+    "balanced_rounds": 24,
+    "rows_per_fixture": 15360,
+    "fixture_passes_per_sample": 8
+  },
+  "results_ms_per_fixture": {
+    "b6_serial_chain": {
+      "median": 9.325,
+      "p95": 9.764
+    },
+    "actual_prefix_state_16KiB": {
+      "median": 4.509,
+      "p95": 4.589
+    },
+    "actual_prefix_state_64KiB": {
+      "median": 3.81,
+      "p95": 3.964
+    }
+  },
+  "paired_buffer_effect": {
+    "median_ratio_64_over_16": 0.846,
+    "range": [
+      0.8259,
+      0.8708
+    ],
+    "median_reduction_percent": 15.4,
+    "rounds_favoring_64KiB": 24,
+    "median_saving_ms": 0.693
+  },
+  "provenance": {
+    "source_tree": "Exact b6c4741cc77e5fa476f1c11cbbab8386b27b040e dependency/fixture tree; actual candidate modules compiled as retained path snapshots.",
+    "wrapper16_sha256": "b5f93c2e2ac870b10912b0895a6c66d5f287f1cfbbfdb2e478a764fe7600b6ec",
+    "wrapper64_sha256": "75ea286fecac3c829d7c685fa0b7c0154411599126b35f36348d5869918d1869",
+    "stream_sha256": "d0f1f156e5172e6c9f8aba80f072f2764222fd39eb6d4eef4d0349c3cce76a5f",
+    "binary_sha256": "cd554358a872b46e293075546b4bf4eb5f6f127423a9353392147a9f8cb609c4",
+    "buffer_difference": "Exactly two buffer-size literals; full patch retained."
+  },
+  "validation": "Retained build/run exit0 and independent ordinary-Hasher oracle, empty/nonempty two-namespace checks,11payload boundaries and11grouping/reload splits. Both buffer variants agree in root and canonical continuation bytes. All36stable-inventory entries independently hash/size-verified, including executable.",
+  "limitations": [
+    "Local ARM64, one process, warm in-memory rows without storage publication; this is not Intel ingestion evidence or acceptance under the10% limit.",
+    "Actual state construction/finalization/materialization/drop measured; no substitution of earlier nonresumable prototype.",
+    "No exclusions, replacements, bootstrap or pooling with prior packets. Larger stack buffer broad workload behavior is not measured.",
+    "Root chooses64KiB and runs final integration gates separately; those gates are not included or claimed here."
+  ],
+  "raw_references": {
+    "report": "experiment/REPORT.md",
+    "all_observations": "experiment/records.json",
+    "analysis": "experiment/analysis.json",
+    "paired_buffer_effect": "experiment/buffer-effect.json",
+    "exact_inputs": "experiment/inputs/",
+    "schedule": "experiment/schedule.rs",
+    "build_run_proofs": "experiment/build-result.json and experiment/execution-result.json",
+    "manifest": "packaging/manifest.json",
+    "packager": "packaging/package.py"
+  },
+  "operations": "Packaging only; original files untouched. No source edits, Cargo, timing, remote action or commit."
+}
