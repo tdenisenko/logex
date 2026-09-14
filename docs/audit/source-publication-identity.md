@@ -195,6 +195,19 @@ of the changed source, with unchanged fixtures and exact build proof. Performanc
 HOLD, prior failed endpoints and all observations remain; no PR/merge or automatic
 full campaign follows from this result.
 
+The committed fast-copy source `da36819b` now passes
+[all nine local gates](baselines/2026-09-14-source-identity-stream-fastcopy-validation-1.json):
+1,180 workspace tests (23 ignored), 149 release query tests (nine ignored), two
+release API consistency tests, documentation checks (zero tests), vendor,
+formatting, workspace check, strict Clippy and release node build. Independent
+review verifies all 106 source/build inputs against the commit and unchanged
+working bytes; every gate reports zero exit and unchanged source.
+
+Its isolated Mac-mini build began at 2026-09-14 14:55:25 UTC, PID 70879, in
+`content-diagnostic-fastpath-da36819b-20260914-1`. That build is active at this
+checkpoint. No new-source Intel control or timing result is claimed. The earlier
+full-comparison failure and sync performance hold remain unresolved.
+
 ## Completed content diagnostic: performance HOLD
 
 The [complete diagnostic evidence](baselines/2026-09-14-source-identity-content-diagnostic-result-1.json)
