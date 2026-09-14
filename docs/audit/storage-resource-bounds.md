@@ -2,7 +2,8 @@
 
 This follow-up to PR #150 reviews stored lengths, decoder allocations and
 selected payload reads. Work is on `audit/storage-resource-bounds`, based on
-`8595e040`. Final validation and merge are pending. The broader storage and query
+`8595e040`. All nine local gates pass on production source `0cf9e944`.
+Linux/macOS CI and merge follow local acceptance; the PR records their outcome. The broader storage and query
 resource audit remains open.
 
 ## Findings and corrections
@@ -34,8 +35,9 @@ resource audit remains open.
   iterator now prepares captured artifacts once and follows physical page
   boundaries. It caches the current companion length page, including when data
   and length page boundaries differ. Initialization is lazy so cancellation can
-  be checked before the first payload read; any storage error ends iteration. Existing result semantics and arbitrary-order reader
-  APIs remain required invariants; the new monotonic scan API serves bitmap IDs.
+  be checked before the first payload read; any storage error ends iteration.
+  Existing result semantics and arbitrary-order reader APIs remain required
+  invariants; the new monotonic scan API serves bitmap IDs.
 
 ## Implementation costs and limits
 
@@ -72,6 +74,22 @@ required for these necessary fixes. Further measurement is reserved for concrete
 implementation opportunities likely to yield substantial gains. Allocation and
 I/O changes above are source-level properties, not measured latency claims.
 
+## Adjacent paths reviewed without changes
+
+Bundle reference validation runs before parent-depth arithmetic and table reads.
+It bounds chain depth and decoded table bytes (4 MiB), validates decreasing
+references, and checks stored checksums. Table parsing bounds streams (33),
+extents (4,096 per stream) and extent sizes (1 MiB), checks counts against input,
+and rejects invalid logical lengths, physical overlap and trailing bytes. Larger
+read buffers use fallible reservation. No additional defect was established in
+this pass; existing bundle regressions remain part of the workspace gate.
+
+Production page-index validation enforces the 16,384-row ceiling. Fixed-page
+size arithmetic is checked; dictionary/packed integer decoders validate their
+input/index bounds, and variable pages use companion lengths and exact decoded
+row lengths. The earlier PR #147 corrections remain in place. Valid payload byte
+size and whole-query accounting are separate limits, described above.
+
 ## Regression evidence and validation
 
 The new append regression tests were run before the production append fix:
@@ -96,5 +114,25 @@ reader tests and a focused repeat after strengthening a fused-error assertion.
 The final SQL integration passes both aggregate controls. Coverage includes raw
 and compacted storage, mixed column layouts, exact once-only data/length page
 reads across differing boundaries, snapshot replacement and rename, raw buffers
-retained across batches, and invalid stored lengths. Final workspace results will
-be recorded before this batch's PR.
+retained across batches, and invalid stored lengths. The complete workspace and release results are
+recorded below.
+
+## Final local acceptance
+
+All nine local gates pass on `0cf9e944`: vendor verification, formatting, workspace
+check, strict Clippy, workspace tests, documentation tests, release query tests,
+release API consistency and release node build. The [command/result record](baselines/2026-09-15-storage-resource-bounds-gates.json)
+retains commands, compiler identity, log hashes and the initial failed attempt.
+
+Workspace tests pass 1,198 (23 ignored); release query tests pass 151 (nine
+ignored); release API consistency passes both tests. The seven documentation
+test groups contain no examples. The initial workspace run stopped when the
+sandbox denied localhost listeners in existing checkpoint fixtures. An approved
+rerun of the same source passed; no test or protection was disabled. No benchmark
+ran, and no timing improvement is claimed.
+
+The temporary page-size export and count-based query batching were removed after
+the captured storage iterator replaced them. Variable appends no longer allocate
+two redundant offset arrays. Remaining resource/legacy-reader work stays in the
+batch ledger and local roadmap. This milestone does not complete the offline
+audit or authorize live-sync deployment.
