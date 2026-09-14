@@ -36,6 +36,24 @@ Frozen source/proof bytes identify `da36819b`; any subsequent uncommitted
 optimization is separate. No full campaign, threshold waiver or performance
 closure follows from these results.
 
+### Aligned-writer component candidate
+
+A subsequent [aligned-writer experiment](baselines/2026-09-14-source-identity-stream-aligned-result-1.json)
+compares actual candidate modules with exact `da36819b` fast-copy modules. All
+48 ARM64 samples, 384 fixture passes and two warmups are retained. Paired median
+component cost improves 8.5404%; 22 of 24 pairs improve, while the adverse +23.6622%
+and +3.3606% pairs remain included. Every cycle median improves, but one cycle's
+mean worsens. Independent reconstruction verifies all observations and 222
+reported arithmetic values; boundary/state and reload controls pass.
+
+Final wrapper `3592f7d5` and stream `275a4654` pass formatting, 13 focused tests,
+309 storage tests (five ignored) and strict storage Clippy. Exact module bytes,
+donor inventories, build/run proofs and reviews are retained with this source
+checkpoint. Full workspace gates are running on the same frozen source.
+The ARM component saving cannot be translated into Intel publication margin.
+It supports a bounded Intel diagnostic after validation, not sync acceptance or
+a full campaign. Prior measured performance holds remain unchanged.
+
 Earlier namespace-only measurements used `c229ace0`, with production behavior restored to
 `179e0ff7` and all nine local workspace/release gates passing before the new clone
 regression below. The

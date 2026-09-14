@@ -60,18 +60,13 @@ impl PrefixState {
     }
 
     pub(crate) fn extend(&self, rows: &[LogRow]) -> io::Result<Self> {
-        let mut next = self.clone();
-        next.rows = next
+        let row_count = self
             .rows
             .checked_add(u64::try_from(rows.len()).map_err(io::Error::other)?)
             .ok_or_else(|| {
                 io::Error::new(io::ErrorKind::InvalidInput, "logical row count overflow")
             })?;
-        let mut encoded = RowBuffer {
-            stream: &mut next.stream,
-            bytes: [0; 64 * 1024],
-            len: 0,
-        };
+        let mut encoded = self.stream.clone().writer();
         for row in rows {
             encoded.put(&row.block_number.to_le_bytes())?;
             encoded.put(row.block_hash.as_slice())?;
@@ -97,8 +92,11 @@ impl PrefixState {
             encoded.put(&row.data)?;
             encoded.put(&[row.source as u8])?;
         }
-        encoded.finish()?;
-        Ok(Self::from_parts(next.namespace, next.rows, next.stream))
+        Ok(Self::from_parts(
+            self.namespace,
+            row_count,
+            encoded.finish()?,
+        ))
     }
 
     pub(crate) fn validate(
@@ -169,48 +167,6 @@ impl<'de> Deserialize<'de> for PrefixState {
             .validate(state.namespace.0, state.rows, state.root)
             .map_err(serde::de::Error::custom)?;
         Ok(state)
-    }
-}
-
-struct RowBuffer<'a> {
-    stream: &'a mut StreamState,
-    bytes: [u8; 64 * 1024],
-    len: usize,
-}
-
-impl RowBuffer<'_> {
-    #[inline]
-    fn put(&mut self, value: &[u8]) -> io::Result<()> {
-        // Most fields fit without reaching a flush boundary. Keep that copy
-        // separate so fixed-size fields compile to fixed-size stores instead
-        // of the variable-length copies needed when a field spans buffers.
-        if value.len() < self.bytes.len() - self.len {
-            let end = self.len + value.len();
-            self.bytes[self.len..end].copy_from_slice(value);
-            self.len = end;
-            Ok(())
-        } else {
-            self.put_across_boundary(value)
-        }
-    }
-
-    #[inline(never)]
-    fn put_across_boundary(&mut self, mut value: &[u8]) -> io::Result<()> {
-        while !value.is_empty() {
-            let count = value.len().min(self.bytes.len() - self.len);
-            self.bytes[self.len..self.len + count].copy_from_slice(&value[..count]);
-            self.len += count;
-            value = &value[count..];
-            if self.len == self.bytes.len() {
-                self.stream.update(&self.bytes)?;
-                self.len = 0;
-            }
-        }
-        Ok(())
-    }
-
-    fn finish(self) -> io::Result<()> {
-        self.stream.update(&self.bytes[..self.len])
     }
 }
 
@@ -363,21 +319,33 @@ mod tests {
                 stream.update(&bytes[..prefix_len]).unwrap();
                 let mut flat = blake3::Hasher::new();
                 flat.update(&bytes[..prefix_len]);
-                let mut buffered = RowBuffer {
-                    stream: &mut stream,
-                    bytes: [0; 64 * 1024],
-                    len: 0,
-                };
+                let mut buffered = stream.writer();
                 // Cover empty input, exact fills, split fields and inputs that
                 // span several buffers, followed by ordinary small fields.
                 for len in [first_len, 0, 1, 4, 8, 20, 32, 65536, 131073, 0, 1] {
                     buffered.put(&bytes[..len]).unwrap();
                     flat.update(&bytes[..len]);
                 }
-                buffered.finish().unwrap();
+                let stream = buffered.finish().unwrap();
                 assert_eq!(stream.digest().as_slice(), flat.finalize().as_bytes());
             }
         }
+    }
+
+    #[test]
+    fn failed_extension_does_not_change_published_prefix() {
+        // A shape-valid opaque frontier near the byte-count limit makes an
+        // actual row append overflow without allocating an enormous prefix.
+        let mut encoded = vec![1];
+        encoded.extend_from_slice(&u64::MAX.to_le_bytes());
+        encoded.resize(9 + 54 * 32 + 1023, 0x5a);
+        let stream = StreamState::from_bytes(&encoded).unwrap();
+        let state = PrefixState::from_parts([1; 16].into(), 1, stream);
+        let before = state.to_bytes();
+        let root = state.commitment();
+        assert!(state.extend(&[row()]).is_err());
+        assert_eq!(state.to_bytes(), before);
+        assert_eq!(state.commitment(), root);
     }
 
     #[test]

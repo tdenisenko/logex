@@ -41,7 +41,13 @@ impl StreamState {
         self.total_bytes
     }
 
-    /// Append bytes without changing the state if the u64 byte count overflows.
+    #[inline]
+    pub(super) fn writer(self) -> StreamWriter {
+        StreamWriter::new(self)
+    }
+
+    /// Original update algorithm, retained as an independent state-shape oracle.
+    #[cfg(test)]
     pub(crate) fn update(&mut self, mut bytes: &[u8]) -> io::Result<()> {
         let added = u64::try_from(bytes.len()).map_err(|_| invalid("stream input is too long"))?;
         let new_total = self
@@ -158,6 +164,116 @@ impl StreamState {
     }
 }
 
+// The extra byte proves that the preceding 64 chunks cannot be the final
+// subtree. Carry it into the next flush instead of hashing a tail separately.
+const BUFFER_BYTES: usize = 64 * CHUNK_BYTES + 1;
+
+/// An unpublished append owns its state until finish restores canonical shape.
+/// On an error, discard the writer; the original published state is untouched.
+pub(super) struct StreamWriter {
+    stream: StreamState,
+    bytes: [u8; BUFFER_BYTES],
+    len: usize,
+    accounted: usize,
+    limit: usize,
+}
+
+impl StreamWriter {
+    #[inline]
+    fn new(stream: StreamState) -> Self {
+        let len = stream.tail.len();
+        let completed = completed_chunks(stream.total_bytes);
+        let mut writer = Self {
+            stream,
+            bytes: [0; BUFFER_BYTES],
+            len,
+            accounted: len,
+            // Reach the next globally aligned 64-chunk start once, even when
+            // resuming a prefix at an arbitrary chunk and byte offset.
+            limit: (64 - (completed % 64) as usize) * CHUNK_BYTES + 1,
+        };
+        writer.bytes[..len].copy_from_slice(&writer.stream.tail);
+        writer
+    }
+
+    #[inline]
+    pub(super) fn put(&mut self, value: &[u8]) -> io::Result<()> {
+        // Keep fixed-size field copies separate from the rare boundary path.
+        // Byte-count overflow is checked in bulk before committing a buffer.
+        if value.len() < self.limit - self.len {
+            let end = self.len + value.len();
+            self.bytes[self.len..end].copy_from_slice(value);
+            self.len = end;
+            Ok(())
+        } else {
+            self.put_across_boundary(value)
+        }
+    }
+
+    #[inline(never)]
+    fn put_across_boundary(&mut self, mut value: &[u8]) -> io::Result<()> {
+        while !value.is_empty() {
+            let count = value.len().min(self.limit - self.len);
+            self.bytes[self.len..self.len + count].copy_from_slice(&value[..count]);
+            self.len += count;
+            value = &value[count..];
+            if self.len == self.limit {
+                let consumed = self.consume_nonfinal()?;
+                debug_assert_eq!(consumed + 1, self.len);
+                self.bytes[0] = self.bytes[consumed];
+                self.len = 1;
+                self.accounted = 1;
+                self.limit = BUFFER_BYTES;
+            }
+        }
+        Ok(())
+    }
+
+    // Commit only complete nonfinal subtrees. Initially, the existing tail is
+    // already included in total_bytes, and after a flush the carried byte is.
+    fn consume_nonfinal(&mut self) -> io::Result<usize> {
+        let added = (self.len - self.accounted) as u64;
+        let total = self
+            .stream
+            .total_bytes
+            .checked_add(added)
+            .ok_or_else(|| invalid("stream byte count overflows u64"))?;
+        let mut completed = completed_chunks(self.stream.total_bytes);
+        let mut consumed = 0;
+        while self.len - consumed > CHUNK_BYTES {
+            let available = (self.len - consumed - 1) / CHUNK_BYTES;
+            let mut chunks = 1usize << (usize::BITS - 1 - available.leading_zeros());
+            if completed != 0 {
+                let alignment = 1u64 << completed.trailing_zeros();
+                chunks = chunks.min(usize::try_from(alignment).unwrap_or(usize::MAX));
+            }
+            let end = consumed + chunks * CHUNK_BYTES;
+            let cv = subtree_cv(completed, &self.bytes[consumed..end]);
+            self.stream.push_subtree(completed, chunks as u64, cv);
+            completed += chunks as u64;
+            consumed = end;
+        }
+        self.stream.total_bytes = total;
+        debug_assert_eq!(completed, completed_chunks(total));
+        Ok(consumed)
+    }
+
+    #[inline]
+    pub(super) fn finish(mut self) -> io::Result<StreamState> {
+        let consumed = self.consume_nonfinal()?;
+        self.stream.tail.clear();
+        self.stream
+            .tail
+            .extend_from_slice(&self.bytes[consumed..self.len]);
+        debug_assert_eq!(self.stream.tail.len(), tail_len(self.stream.total_bytes));
+        debug_assert_eq!(
+            self.stream.frontier.len(),
+            completed_chunks(self.stream.total_bytes).count_ones() as usize
+        );
+        Ok(self.stream)
+    }
+}
+
 fn completed_chunks(total: u64) -> u64 {
     total.saturating_sub(1) / CHUNK_BYTES as u64
 }
@@ -235,6 +351,16 @@ impl<'de> Deserialize<'de> for StreamState {
 mod tests {
     use super::*;
 
+    impl StreamState {
+        // Exercise the production writer with publication-style error atomicity.
+        fn append(&mut self, bytes: &[u8]) -> io::Result<()> {
+            let mut writer = self.clone().writer();
+            writer.put(bytes)?;
+            *self = writer.finish()?;
+            Ok(())
+        }
+    }
+
     fn input(len: usize) -> Vec<u8> {
         let mut seed = 0x243f_6a88_85a3_08d3u64;
         (0..len)
@@ -277,7 +403,7 @@ mod tests {
         lengths.dedup();
         for len in lengths {
             let mut state = StreamState::new();
-            state.update(&bytes[..len]).unwrap();
+            state.append(&bytes[..len]).unwrap();
             assert_oracle(&state, &bytes[..len]);
             if len != 0 && len % CHUNK_BYTES == 0 {
                 assert_eq!(state.tail.len(), CHUNK_BYTES);
@@ -289,15 +415,15 @@ mod tests {
     fn every_small_split_preserves_state_and_resume_digest() {
         let bytes = input(2051);
         let mut whole = StreamState::new();
-        whole.update(&bytes).unwrap();
+        whole.append(&bytes).unwrap();
         for split in 0..=bytes.len() {
             let mut state = StreamState::new();
-            state.update(&bytes[..split]).unwrap();
+            state.append(&bytes[..split]).unwrap();
             assert_oracle(&state, &bytes[..split]);
             let saved = serde_json::to_string(&state).unwrap();
             state = serde_json::from_str(&saved).unwrap();
-            state.update(&[]).unwrap();
-            state.update(&bytes[split..]).unwrap();
+            state.append(&[]).unwrap();
+            state.append(&bytes[split..]).unwrap();
             assert_eq!(state, whole, "split {split}");
             assert_oracle(&state, &bytes);
         }
@@ -307,7 +433,7 @@ mod tests {
     fn aligned_bulk_and_random_splits_reload_at_every_publication() {
         let bytes = input(131_077);
         let mut whole = StreamState::new();
-        whole.update(&bytes).unwrap();
+        whole.append(&bytes).unwrap();
         for fixed in [Some(1), Some(1024), Some(16_384), Some(16_385), None] {
             let mut state = StreamState::new();
             let mut offset = 0;
@@ -320,7 +446,7 @@ mod tests {
                 let take = fixed
                     .unwrap_or((seed as usize % 8193) + 1)
                     .min(limit - offset);
-                state.update(&bytes[offset..offset + take]).unwrap();
+                state.append(&bytes[offset..offset + take]).unwrap();
                 offset += take;
                 assert_oracle(&state, &bytes[..offset]);
                 state = StreamState::from_bytes(&state.to_bytes()).unwrap();
@@ -328,6 +454,72 @@ mod tests {
             if limit == bytes.len() {
                 assert_eq!(state, whole);
             }
+        }
+    }
+
+    #[test]
+    fn carrying_writer_matches_legacy_state_at_every_chunk_alignment() {
+        let bytes = input(5 * BUFFER_BYTES);
+        for residue in 0..64 {
+            // Include a preexisting 64-chunk frontier so binary carries and
+            // offsets above the first buffer are exercised on every origin.
+            for tail in [1, CHUNK_BYTES - 1, CHUNK_BYTES] {
+                let prefix = (64 + residue) * CHUNK_BYTES + tail;
+                let first_fill = (64 - residue) * CHUNK_BYTES + 1 - tail;
+                let mut old_prefix = StreamState::new();
+                old_prefix.update(&bytes[..prefix]).unwrap();
+                let resumed = StreamState::from_bytes(&old_prefix.to_bytes()).unwrap();
+                for added in [
+                    0,
+                    1,
+                    CHUNK_BYTES - tail,
+                    first_fill - 1,
+                    first_fill,
+                    first_fill + 1,
+                    first_fill + 2 * (BUFFER_BYTES - 1) + CHUNK_BYTES - 1,
+                ] {
+                    let end = prefix + added;
+                    let mut expected = old_prefix.clone();
+                    expected.update(&bytes[prefix..end]).unwrap();
+                    let mut writer = resumed.clone().writer();
+                    writer.put(&bytes[prefix..end]).unwrap();
+                    let actual = writer.finish().unwrap();
+                    assert_eq!(
+                        actual.to_bytes(),
+                        expected.to_bytes(),
+                        "chunk residue {residue}, tail {tail}, added {added}"
+                    );
+                    assert_oracle(&actual, &bytes[..end]);
+
+                    // Restart publication immediately before/at the initial
+                    // alignment flush, with full tails possible at the split.
+                    let split = prefix + added.min(first_fill.saturating_sub(1));
+                    let mut grouped = resumed.clone();
+                    grouped.append(&bytes[prefix..split]).unwrap();
+                    grouped = StreamState::from_bytes(&grouped.to_bytes()).unwrap();
+                    grouped.append(&bytes[split..end]).unwrap();
+                    assert_eq!(grouped.to_bytes(), actual.to_bytes());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn carrying_writer_preserves_final_full_chunks_and_empty_input() {
+        let bytes = input(2 * BUFFER_BYTES);
+        for end in [
+            0, 1, 1023, 1024, 1025, 65535, 65536, 65537, 65538, 131072, 131073,
+        ] {
+            let mut expected = StreamState::new();
+            expected.update(&bytes[..end]).unwrap();
+            let mut writer = StreamState::new().writer();
+            for part in bytes[..end].chunks(32) {
+                writer.put(&[]).unwrap();
+                writer.put(part).unwrap();
+            }
+            let actual = writer.finish().unwrap();
+            assert_eq!(actual.to_bytes(), expected.to_bytes(), "end {end}");
+            assert_oracle(&actual, &bytes[..end]);
         }
     }
 
@@ -342,7 +534,7 @@ mod tests {
         let bytes = input(3073);
         for len in [0, 1, 1024, 1025, 2048, 2049, 3072, 3073] {
             let mut state = StreamState::new();
-            state.update(&bytes[..len]).unwrap();
+            state.append(&bytes[..len]).unwrap();
             let encoded = state.to_bytes();
             let mut extra = encoded.clone();
             extra.push(0);
@@ -375,6 +567,32 @@ mod tests {
     }
 
     #[test]
+    fn carrying_writer_overflow_after_bulk_flush_leaves_published_state_unchanged() {
+        for remaining in [0, 1, 65535, 131072] {
+            let total = u64::MAX - remaining;
+            let mut encoded = vec![VERSION];
+            encoded.extend_from_slice(&total.to_le_bytes());
+            encoded.resize(
+                HEADER_BYTES + completed_chunks(total).count_ones() as usize * 32 + tail_len(total),
+                0x5a,
+            );
+            let mut state = StreamState::from_bytes(&encoded).unwrap();
+            let before = state.clone();
+            let bytes = input(remaining as usize + 1);
+            assert_eq!(
+                state.append(&bytes).unwrap_err().kind(),
+                io::ErrorKind::InvalidData
+            );
+            assert_eq!(state, before);
+            let mut legacy = before;
+            legacy.update(&bytes[..remaining as usize]).unwrap();
+            state.append(&bytes[..remaining as usize]).unwrap();
+            assert_eq!(state.to_bytes(), legacy.to_bytes());
+            assert_eq!(state.byte_len(), u64::MAX);
+        }
+    }
+
+    #[test]
     fn maximum_byte_count_is_bounded_and_overflow_is_atomic() {
         // Structural fixtures need no giant input. CV values are opaque;
         // callers must bind decoded state to their trusted published digest.
@@ -387,16 +605,16 @@ mod tests {
         );
         let mut state = StreamState::from_bytes(&encoded).unwrap();
         assert_eq!(state.frontier.len(), MAX_FRONTIER);
-        state.update(&[1]).unwrap();
+        state.append(&[1]).unwrap();
         assert_eq!(state.byte_len(), u64::MAX);
         assert!(state.to_bytes().len() <= MAX_ENCODED_BYTES);
         let before = state.clone();
         assert_eq!(
-            state.update(&[2]).unwrap_err().kind(),
+            state.append(&[2]).unwrap_err().kind(),
             io::ErrorKind::InvalidData
         );
         assert_eq!(state, before);
-        state.update(&[]).unwrap();
+        state.append(&[]).unwrap();
         assert_eq!(state, before);
         assert_eq!(StreamState::from_bytes(&state.to_bytes()).unwrap(), state);
         assert_eq!(
