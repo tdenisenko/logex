@@ -7,11 +7,12 @@ workers. All nine local gates pass. Final Intel checks, CI and merge are pending
 the remaining offline audit is incomplete. Current formats and design are in
 [Logical-prefix commitment and compatibility](#logical-prefix-commitment-and-compatibility).
 
-The final Intel rerun is currently blocked before source transfer by the
-execution environment's approval review. No new build, test or image operation
-started on Mac mini, and no audit workload remains there. The earlier 25 Intel
-controls cover `28ef516a`, not the final overlap implementation; they are not
-relabeled as current-source results. Linux/macOS PR CI can proceed independently.
+The final Intel rerun initially stopped before source transfer because of the
+execution environment's approval review. The audit owner subsequently approved
+the exact source archive and destination; isolated correctness work is resuming.
+No benchmark is planned. The earlier 25 Intel controls cover `28ef516a`, not the
+final overlap implementation; they are not relabeled as current-source results.
+Linux/macOS PR CI can proceed independently.
 
 ## Engineering disposition
 
