@@ -1,13 +1,40 @@
 # Source publication identity
 
 This batch follows merged PR #149 and is in progress. It binds derived indexes
-and recovery to the exact logical source prefix. The serial implementation is
-rejected on ingestion cost; its streaming replacement at `84ecac65` passes all
-nine local gates with the measured 64 KiB buffer choice. Its Intel commitment and
-APFS/ExFAT recovery controls pass. The full streaming comparison is **NOT CLEAR**: historical publication is
-+16.352% median and +14.510% p95. Performance correction, CI and merge remain open.
-The rest of the offline audit is also incomplete. Current formats and the
-replacement design are in [Logical-prefix commitment and compatibility](#logical-prefix-commitment-and-compatibility).
+and recovery to the exact logical source prefix. The latest committed fast-copy
+candidate `da36819b` remains on **performance HOLD**: its preliminary Intel
+diagnostic reports historical publication **+14.4447% median/+27.4705% p95**, with
+both pair medians above 10%. This does not justify a full acceptance campaign.
+All nine local gates pass, but performance correction, CI and merge remain open.
+The earlier full `84ecac65` comparison remains NOT CLEAR (+16.352% median/+14.510%
+p95); it is retained separately rather than pooled with this diagnostic. The
+rest of the offline audit is also incomplete. Current formats and the design are
+in [Logical-prefix commitment and compatibility](#logical-prefix-commitment-and-compatibility).
+
+## Latest fast-copy Intel diagnostic: performance HOLD
+
+The [complete preliminary evidence](baselines/2026-09-14-source-identity-fastpath-intel-diagnostic-result-1.json)
+retains all 12 processes, 800 timings and 12 RSS records, plus every oracle, host
+observation and operational result. Independent raw reconstruction checks all
+800 observations, 240 quantiles and 120 effects. Historical pair medians are
++11.86%/+19.31%, with p95 +20.61%/+11.14%. Live pooled median/p95 is +4.7211%/+7.6032%;
+dense ordered-query p95 is +15.9183%. Every other investigation flag is retained.
+Two pairs do not support confidence bounds or dismiss order/host uncertainty,
+but the repeated above-limit historical cost holds further acceptance work.
+
+The original audit-harness compiler succeeded; a postcompile artifact checker
+then failed. The corrected resume selected the library artifact and completed
+proof/finalization without rebuilding that audit harness. Both the failed
+`395faa4f` and successful `cb18394b` proofs, corrected tools and all original
+outputs remain in the archive. No sample or workload was rerun.
+
+The fixed cooldown lasted 600.001927333 seconds. The diagnostic finished at
+2026-09-14 15:55:23 UTC with zero outer/watcher exits. Collection verifies all
+297 members; release completed with SSH exit zero at 16:05:28 UTC. Only the
+reporter and wrapper matched the retained idle report, and Mac-mini is free.
+Frozen source/proof bytes identify `da36819b`; any subsequent uncommitted
+optimization is separate. No full campaign, threshold waiver or performance
+closure follows from these results.
 
 Earlier namespace-only measurements used `c229ace0`, with production behavior restored to
 `179e0ff7` and all nine local workspace/release gates passing before the new clone
@@ -204,8 +231,8 @@ review verifies all 106 source/build inputs against the commit and unchanged
 working bytes; every gate reports zero exit and unchanged source.
 
 Its isolated Mac-mini build began at 2026-09-14 14:55:25 UTC, PID 70879, in
-`content-diagnostic-fastpath-da36819b-20260914-1`. That build is active at this
-checkpoint. No new-source Intel control or timing result is claimed. The earlier
+`content-diagnostic-fastpath-da36819b-20260914-1`. The build/checker-resume history
+and completed preliminary diagnostic are now retained above. The earlier
 full-comparison failure and sync performance hold remain unresolved.
 
 ## Completed content diagnostic: performance HOLD
