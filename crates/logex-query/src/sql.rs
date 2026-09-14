@@ -2037,12 +2037,17 @@ fn scan_native_data_sum_partition(
         let states = groups
             .entry(None)
             .or_insert_with(|| initial_native_sum_states(&scan.sum_inputs));
-        let values = reader.read_var_bytes("data", Some(&row_ids))?;
-        for value in values {
-            let value = BigInt::from(BigUint::from_bytes_be(value.as_ref()));
-            for state in states.iter_mut() {
-                state.sum += value.clone();
-                state.count += 1;
+        // The storage format's page-row bound is private to the storage crate.
+        // Reuse the execution batch size so a valid aggregate does not retain
+        // every decoded payload in the segment at once.
+        for row_ids in row_ids.chunks(DATAFUSION_BATCH_SIZE) {
+            check_query_canceled(scan.cancel_check.as_ref())?;
+            for value in reader.read_var_bytes("data", Some(row_ids))? {
+                let value = BigInt::from(BigUint::from_bytes_be(value.as_ref()));
+                for state in states.iter_mut() {
+                    state.sum += value.clone();
+                    state.count += 1;
+                }
             }
         }
         return Ok((groups, row_ids.len() as u64));
@@ -5479,6 +5484,31 @@ mod tests {
         ]
     }
 
+    fn setup_batched_sum_storage() -> (TempDir, PartitionManager) {
+        let tmp = TempDir::new().unwrap();
+        let mut storage = PartitionManager::open(PartitionManagerConfig {
+            data_dir: tmp.path().to_path_buf(),
+            partition_target_rows: 1_000_000,
+            compaction_safety_margin_blocks: 2_048,
+        })
+        .unwrap();
+        let template = LogRow {
+            data: bytes!("01"),
+            data_len: 1,
+            ..make_test_rows().remove(0)
+        };
+        let rows = (0..=DATAFUSION_BATCH_SIZE)
+            .map(|index| LogRow {
+                block_number: index as u64,
+                log_index: index as u32,
+                ..template.clone()
+            })
+            .collect::<Vec<_>>();
+        storage.write_batch(&rows).unwrap();
+        storage.checkpoint().unwrap();
+        (tmp, storage)
+    }
+
     fn setup_storage() -> (TempDir, PartitionManager) {
         let tmp = TempDir::new().unwrap();
         let mut storage = PartitionManager::open(PartitionManagerConfig {
@@ -5710,6 +5740,55 @@ mod tests {
             "340282366920938463463374607431768211461"
         );
         assert_eq!(result.total_scanned, 2);
+    }
+
+    #[tokio::test]
+    async fn data_only_sum_preserves_exact_result_across_batches() {
+        let (_tmp, storage) = setup_batched_sum_storage();
+        let result = execute_sql_page(
+            "SELECT SUM(data) AS total FROM logs",
+            &storage,
+            storage.head_block(),
+            SqlQueryPage::new(None, 0),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            result.rows,
+            vec![serde_json::json!({"total": (DATAFUSION_BATCH_SIZE + 1).to_string()})]
+        );
+        assert_eq!(result.total_scanned, (DATAFUSION_BATCH_SIZE + 1) as u64);
+    }
+
+    #[test]
+    fn data_only_sum_observes_cancellation_between_batches() {
+        let (_tmp, storage) = setup_batched_sum_storage();
+        let checks = Arc::new(AtomicU64::new(0));
+        let cancel_checks = Arc::clone(&checks);
+        let scan = NativeDataSumPartitionScan {
+            visible_rows: (DATAFUSION_BATCH_SIZE + 1) as u64,
+            candidate_filters: vec![NativeLogFilter::default()],
+            selection: None,
+            cases: Arc::new(PreparedSqlExpressions::empty()),
+            group_by: NativeDataSumGroupBy::None,
+            sum_inputs: vec![PreparedRowValueExpr::Data],
+            data_only: true,
+            cancel_check: Some(Arc::new(move || {
+                cancel_checks.fetch_add(1, Ordering::Relaxed) >= 2
+            })),
+        };
+
+        let error = match scan_native_data_sum_partition(&storage.hot_partition().meta.path, scan) {
+            Ok(_) => panic!("cancellation before the second batch must stop the aggregate"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            SqlQueryError::DataFusion(DataFusionError::Execution(message))
+                if message == "query canceled"
+        ));
+        assert_eq!(checks.load(Ordering::Relaxed), 3);
     }
 
     #[test]
