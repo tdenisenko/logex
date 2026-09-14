@@ -3,16 +3,42 @@
 This batch follows merged PR #149. It binds derived indexes and recovery to the
 exact logical source prefix. The retained implementation is `e76f4dda`: bounded
 streaming commitments with historical hashing overlapped with existing column
-workers. All nine local gates pass. Final Intel checks, CI and merge are pending;
-the remaining offline audit is incomplete. Current formats and design are in
+workers. All nine local gates and 30 final-source Intel/APFS/ExFAT controls pass.
+All six CI jobs passed on PR #150 at `459be851`; the final documentation commit
+must also pass CI before merge. The remaining offline audit is incomplete.
+Current formats and design are in
 [Logical-prefix commitment and compatibility](#logical-prefix-commitment-and-compatibility).
 
-The final Intel rerun initially stopped before source transfer because of the
-execution environment's approval review. The audit owner subsequently approved
-the exact source archive and destination; isolated correctness work is resuming.
-No benchmark is planned. The earlier 25 Intel controls cover `28ef516a`, not the
-final overlap implementation; they are not relabeled as current-source results.
-Linux/macOS PR CI can proceed independently.
+## Final Intel correctness validation
+
+The [compact final-source result](baselines/2026-09-15-source-identity-overlap-intel-correctness.json)
+records 30 distinct tests, each with exit zero, one passed and zero failed:
+18 commitment/oracle/preflight/worker controls on Intel/APFS, followed by four
+cross-mount recovery and eight journal-origin controls using the guarded
+APFS/disposable-ExFAT harness. The image detached, cleanup succeeded and no
+audit-owned jobs remained. Mac mini was released; other applications and the
+important physical external volume were untouched.
+
+The release storage test binary was built with pinned `nightly-2026-08-24` from
+the exact `e76f4dda` archive. Its SHA-256 is
+`02d3f32783362f233714d4e81d6e50a43562e1265daf96f263d3c548292a7a7d`.
+The final build used `cargo test -p logex-storage --lib --release --locked
+--offline --no-run -j 2`, with private source, target and Cargo cache directories.
+Protoc verification and the scoped build both exited zero. A preceding workspace
+build was deliberately interrupted when unrelated dependency work remained;
+its unobserved child exit remains unobserved, and owned cleanup completed before
+the scoped build began. This is correctness validation, with storage's actual
+default features, not a benchmark-profile equivalence claim. Detailed compiler
+version was absent from the final result files and remains explicitly null.
+
+Source transfer initially required an additional explicit approval. Raw-log
+collection was separately rejected by execution-environment approval review;
+the narrower pass/fail and cleanup summary was approved and retained. Its exact
+SHA-256 is `2675e635ccfde194bcf52770f615d491713d7b3bb74ac63c137f491ad6a500eb`.
+Full original logs and proofs remain under the private remote directory
+`/private/tmp/logex-audit-overlap-20260915.OqQ5V0`; no raw-log transfer is claimed.
+Earlier 25-control results below remain attributed to `28ef516a`. No benchmark
+ran in this final correctness phase.
 
 ## Engineering disposition
 
@@ -120,7 +146,7 @@ not prove active paging during a sample. None of these traces grants performance
 acceptance or identifies a CPU, disk or scheduling cause.
 
 The audit owner subsequently selected overlap for retention without another full
-comparison. Intel/platform validation and CI remain required before merge.
+comparison. Final Intel/platform validation now passes; final-head CI gates merge.
 
 The remaining sections preserve the measurements and development decisions at
 their named source revisions. Their earlier provisional status and benchmark

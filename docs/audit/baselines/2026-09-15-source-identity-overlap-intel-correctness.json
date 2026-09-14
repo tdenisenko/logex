@@ -1,0 +1,199 @@
+{
+  "source_commit": "e76f4ddacd9a7b39c941ac24efcf0e25f8cfb306",
+  "source_archive_sha256": "0c40b07932fc2865dd012da379b72e7ae55c8d41bbcbf35ea667f8357028b348",
+  "compiler_toolchain": "nightly-2026-08-24",
+  "compiler_version": null,
+  "compiler_version_note": "Detailed rustc version was not recorded in these result files; pinned toolchain shown.",
+  "storage_binary_sha256": "02d3f32783362f233714d4e81d6e50a43562e1265daf96f263d3c548292a7a7d",
+  "tests": [
+    {
+      "name": "commitment::tests::logical_prefix_is_independent_of_append_and_replay_grouping",
+      "exit": 0,
+      "passed": 1,
+      "failed": 0
+    },
+    {
+      "name": "commitment::tests::logical_encoding_matches_the_documented_flat_bytes",
+      "exit": 0,
+      "passed": 1,
+      "failed": 0
+    },
+    {
+      "name": "commitment::tests::buffered_bytes_match_flat_hash_across_flush_boundaries",
+      "exit": 0,
+      "passed": 1,
+      "failed": 0
+    },
+    {
+      "name": "commitment::tests::failed_extension_does_not_change_published_prefix",
+      "exit": 0,
+      "passed": 1,
+      "failed": 0
+    },
+    {
+      "name": "commitment::tests::commitment_covers_every_logical_field_and_topic_presence",
+      "exit": 0,
+      "passed": 1,
+      "failed": 0
+    },
+    {
+      "name": "commitment::stream::tests::ordinary_hasher_matches_chunk_and_power_of_two_boundaries",
+      "exit": 0,
+      "passed": 1,
+      "failed": 0
+    },
+    {
+      "name": "commitment::stream::tests::every_small_split_preserves_state_and_resume_digest",
+      "exit": 0,
+      "passed": 1,
+      "failed": 0
+    },
+    {
+      "name": "commitment::stream::tests::aligned_bulk_and_random_splits_reload_at_every_publication",
+      "exit": 0,
+      "passed": 1,
+      "failed": 0
+    },
+    {
+      "name": "commitment::stream::tests::carrying_writer_matches_legacy_state_at_every_chunk_alignment",
+      "exit": 0,
+      "passed": 1,
+      "failed": 0
+    },
+    {
+      "name": "commitment::stream::tests::carrying_writer_preserves_final_full_chunks_and_empty_input",
+      "exit": 0,
+      "passed": 1,
+      "failed": 0
+    },
+    {
+      "name": "commitment::stream::tests::rejects_noncanonical_wire_shapes_and_unbounded_hex",
+      "exit": 0,
+      "passed": 1,
+      "failed": 0
+    },
+    {
+      "name": "commitment::stream::tests::carrying_writer_overflow_after_bulk_flush_leaves_published_state_unchanged",
+      "exit": 0,
+      "passed": 1,
+      "failed": 0
+    },
+    {
+      "name": "commitment::stream::tests::maximum_byte_count_is_bounded_and_overflow_is_atomic",
+      "exit": 0,
+      "passed": 1,
+      "failed": 0
+    },
+    {
+      "name": "commitment::tests::new_bundle_preflight_checks_empty_origin_and_exact_length_without_restricting_data_len",
+      "exit": 0,
+      "passed": 1,
+      "failed": 0
+    },
+    {
+      "name": "native::segment::tests::parent_callback_overlaps_and_all_column_workers_are_joined_on_errors",
+      "exit": 0,
+      "passed": 1,
+      "failed": 0
+    },
+    {
+      "name": "native::segment::tests::failed_bundle_callback_does_not_finish_or_remove_raw_artifacts",
+      "exit": 0,
+      "passed": 1,
+      "failed": 0
+    },
+    {
+      "name": "native::segment::tests::new_historical_bundle_preflight_preserves_existing_files",
+      "exit": 0,
+      "passed": 1,
+      "failed": 0
+    },
+    {
+      "name": "native::segment::tests::new_historical_bundle_matches_serial_columns_root_and_reopen",
+      "exit": 0,
+      "passed": 1,
+      "failed": 0
+    },
+    {
+      "name": "native::storage::tests::checkpoint_recovery_across_distinct_mounts",
+      "exit": 0,
+      "passed": 1,
+      "failed": 0
+    },
+    {
+      "name": "native::storage::tests::sync_checkpoint_recovery_across_distinct_mounts",
+      "exit": 0,
+      "passed": 1,
+      "failed": 0
+    },
+    {
+      "name": "native::storage::tests::published_checkpoint_recovery_across_distinct_mounts",
+      "exit": 0,
+      "passed": 1,
+      "failed": 0
+    },
+    {
+      "name": "native::storage::tests::sparse_repacking_recovery_across_distinct_mounts",
+      "exit": 0,
+      "passed": 1,
+      "failed": 0
+    },
+    {
+      "name": "native::storage::tests::journal_origin_commitment_batch_unapplied_matching",
+      "exit": 0,
+      "passed": 1,
+      "failed": 0
+    },
+    {
+      "name": "native::storage::tests::journal_origin_commitment_batch_unapplied_foreign",
+      "exit": 0,
+      "passed": 1,
+      "failed": 0
+    },
+    {
+      "name": "native::storage::tests::journal_origin_commitment_batch_partly_applied_matching",
+      "exit": 0,
+      "passed": 1,
+      "failed": 0
+    },
+    {
+      "name": "native::storage::tests::journal_origin_commitment_batch_partly_applied_foreign",
+      "exit": 0,
+      "passed": 1,
+      "failed": 0
+    },
+    {
+      "name": "native::storage::tests::journal_origin_commitment_checkpoint_unapplied_matching",
+      "exit": 0,
+      "passed": 1,
+      "failed": 0
+    },
+    {
+      "name": "native::storage::tests::journal_origin_commitment_checkpoint_unapplied_foreign",
+      "exit": 0,
+      "passed": 1,
+      "failed": 0
+    },
+    {
+      "name": "native::storage::tests::journal_origin_commitment_checkpoint_partly_applied_matching",
+      "exit": 0,
+      "passed": 1,
+      "failed": 0
+    },
+    {
+      "name": "native::storage::tests::journal_origin_commitment_checkpoint_partly_applied_foreign",
+      "exit": 0,
+      "passed": 1,
+      "failed": 0
+    }
+  ],
+  "passed": 30,
+  "failed": 0,
+  "build_exits": [
+    0,
+    0
+  ],
+  "image_detached": true,
+  "cleanup_success": true,
+  "no_owned_jobs": true
+}
