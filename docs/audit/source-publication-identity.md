@@ -2,8 +2,8 @@
 
 This batch follows merged PR #149 and is in progress. It binds derived indexes
 and recovery to the exact logical source prefix. The serial implementation is
-rejected on ingestion cost; its streaming replacement has passed all local gates
-with a 16 KiB buffer and is validating the measured 64 KiB buffer choice.
+rejected on ingestion cost; its streaming replacement at `84ecac65` passes all
+nine local gates with the measured 64 KiB buffer choice.
 Corrected-source Intel performance, platform recovery, CI and merge remain open.
 The rest of the offline audit is also incomplete. Current formats and the
 replacement design are in [Logical-prefix commitment and compatibility](#logical-prefix-commitment-and-compatibility).
@@ -155,8 +155,8 @@ isolated Intel Mac-mini build. Corrected-source performance is on HOLD after the
 ## Logical-prefix commitment and compatibility
 
 The integrated streaming candidate passed all nine local gates with a 16 KiB
-encoding buffer. A fixed CPU comparison then selected the equivalent 64 KiB
-buffer; its final-source gates are running. Ingestion acceptance remains open:
+encoding buffer. A fixed CPU comparison selected the equivalent 64 KiB buffer;
+all nine final-source gates also pass at `84ecac65`. Ingestion acceptance remains open:
 the preceding serial-chain diagnostic is on performance HOLD.
 Its 32-byte published root is standard BLAKE3 over the following concatenation:
 
@@ -253,7 +253,12 @@ workspace/release gates passed for the integrated 16 KiB streaming source: 1,179
 workspace tests, 149 release query tests, two release API consistency tests,
 documentation checks and the release node build. The [complete validation packet](baselines/2026-09-14-source-identity-stream-validation-1.json)
 retains source hashes, original failed iterations and all passing gate outputs.
-The 64 KiB buffer-only final source is now undergoing the same gates.
+The [final 64 KiB source evidence](baselines/2026-09-14-source-identity-stream-final-validation-1.json)
+records the same nine passing gates and exact test totals at `84ecac65`. The
+initial final-source workspace attempt encountered sandbox denial of existing
+loopback listeners; the unchanged enabled suite passed. Both input manifests
+match byte-for-byte, all 106 Rust/build input hashes stayed unchanged, and all
+failed/passing outputs are retained. Every decoded archive byte is verified.
 The 23 existing ignored workspace tests include
 four distinct-mount recovery tests, passed separately for the preceding serial
 source on isolated APFS/ExFAT mounts. They require repetition for this new state
