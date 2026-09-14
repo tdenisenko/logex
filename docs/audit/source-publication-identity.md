@@ -56,9 +56,38 @@ Independent review reconstructed every timing, order, cycle and resource result.
 The archive preserves 224 records and 35 aliases; every decoded byte and alias
 also matches its original in a separate verification. Source inspection found
 no additional hash, column rewrite or persistence barrier specific to the
-slower staged tail. Parent-thread phase attribution is being prepared in isolated
-snapshots to locate the pauses. CPU contention and storage scheduling remain
-hypotheses, not established causes. The previous full comparison remains NOT CLEAR.
+slower staged tail. The subsequent isolated phase diagnostic below locates pauses
+in its own samples. The previous full comparison remains NOT CLEAR.
+
+### Historical phase diagnostic
+
+The [fixed instrumented comparison](baselines/2026-09-15-source-identity-overlap-phase-result-1.json)
+retains all 24 processes, 192 measurements, 24 warmups, 216 traces and 24 resource
+records. Both exact release builds passed their ordinary row/reopen test and
+staged/direct trace checks. Independent reconstruction verified all raw records,
+phase topology, descriptive results and interval unions. The archive retains
+every observation and preparation/reviewer correction; a separate verification
+compares all 212 decoded records and 43 aliases with their original bytes.
+
+The median interval before the final checkpoint fell by 2.347 ms for direct
+history and 1.803 ms for staged history. Parent waits after hashing became short
+because column workers ran during the hash. These nested wall intervals are not
+additive CPU measurements. Larger observed pauses mostly fall inside checkpoint
+publication on both sources; one candidate direct sample spent 4.156 ms finishing
+the bundle. Staged profile inspection remained about 0.36 ms. No redundant hash,
+rewrite or persistence barrier was demonstrated, so no further production change
+was selected from these traces.
+
+Instrumented staged median/p95 improved 12.437%/11.131%; direct median improved
+16.370%, while p95 increased 9.066%, with order/cycle tail effects above 10%.
+The earlier staged p95 increase did not recur. This does not explain or erase
+it: the diagnostic omitted live/appended workloads and the local host had
+ordinary background CPU activity and substantial swap usage. Swap usage does
+not prove active paging during a sample. None of these traces grants performance
+acceptance or identifies a CPU, disk or scheduling cause.
+
+Overlap remains provisional. Intel/platform validation and the complete
+comparison against PR #149 remain required before CI, PR and merge.
 
 ## Aligned full comparison: NOT CLEAR
 
