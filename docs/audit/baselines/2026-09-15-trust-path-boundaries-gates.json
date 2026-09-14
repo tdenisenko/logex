@@ -1,0 +1,184 @@
+{
+  "commit": "b7a3d76347a6ae09a67b579e12e93400e5b14e00",
+  "rustc": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+  "gates": [
+    {
+      "name": "vendor",
+      "command": [
+        "python3",
+        "tools/verify_datafusion_vendor.py"
+      ],
+      "exit_code": 0,
+      "started": "2026-09-14T23:23:51.965649+00:00",
+      "finished": "2026-09-14T23:23:52.024742+00:00",
+      "sha256": "d8d80949d6f3378c14456842b531f0cade514179e4c94781b95ff9abb6447675",
+      "log": "/private/tmp/logex-trust-paths.lvcYcq/gates/vendor.log"
+    },
+    {
+      "name": "format",
+      "command": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "exit_code": 0,
+      "started": "2026-09-14T23:23:52.025229+00:00",
+      "finished": "2026-09-14T23:23:52.827383+00:00",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "log": "/private/tmp/logex-trust-paths.lvcYcq/gates/format.log"
+    },
+    {
+      "name": "check",
+      "command": [
+        "cargo",
+        "check",
+        "--workspace",
+        "--all-targets",
+        "--locked",
+        "--offline",
+        "-j",
+        "2"
+      ],
+      "exit_code": 0,
+      "started": "2026-09-14T23:23:52.827753+00:00",
+      "finished": "2026-09-14T23:24:02.640648+00:00",
+      "sha256": "4466f75e6147407d92df986280e9d272af13c87a45968d1c0495f5bfdaa93ee3",
+      "log": "/private/tmp/logex-trust-paths.lvcYcq/gates/check.log"
+    },
+    {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--locked",
+        "--offline",
+        "-j",
+        "2",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit_code": 0,
+      "started": "2026-09-14T23:24:02.641552+00:00",
+      "finished": "2026-09-14T23:24:12.678928+00:00",
+      "sha256": "d3374b666aa29a89dffa6ba15d9046c140794f65c503e3e7134b4e494c544d1f",
+      "log": "/private/tmp/logex-trust-paths.lvcYcq/gates/clippy.log"
+    },
+    {
+      "name": "test",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace",
+        "--all-targets",
+        "--locked",
+        "--offline",
+        "-j",
+        "2"
+      ],
+      "exit_code": 0,
+      "started": "2026-09-14T23:24:12.679693+00:00",
+      "finished": "2026-09-14T23:29:20.501634+00:00",
+      "sha256": "c5e1cd7b29ebcbbdb432a319a1d3d8a4eba78dc6ae6c6af3cbadf80572ca8986",
+      "log": "/private/tmp/logex-trust-paths.lvcYcq/gates/test.log"
+    },
+    {
+      "name": "doc",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace",
+        "--doc",
+        "--locked",
+        "--offline",
+        "-j",
+        "2"
+      ],
+      "exit_code": 0,
+      "started": "2026-09-14T23:29:20.504924+00:00",
+      "finished": "2026-09-14T23:29:32.856865+00:00",
+      "sha256": "19a6d7928e139cffea100f70c48a1b0d56f3cfe3751ee05adcda06c8b15ff1f4",
+      "log": "/private/tmp/logex-trust-paths.lvcYcq/gates/doc.log"
+    },
+    {
+      "name": "release-build",
+      "command": [
+        "cargo",
+        "build",
+        "-p",
+        "logex-node",
+        "--release",
+        "--locked",
+        "--offline",
+        "-j",
+        "2"
+      ],
+      "exit_code": 0,
+      "started": "2026-09-14T23:29:32.857757+00:00",
+      "finished": "2026-09-14T23:31:47.376570+00:00",
+      "sha256": "78b94dff37b201a452a0998d6b50bc79f82cbd51e70bad402687970edf579507",
+      "log": "/private/tmp/logex-trust-paths.lvcYcq/gates/release-build.log"
+    }
+  ],
+  "workspace_tests": {
+    "passed": 1207,
+    "failed": 0,
+    "ignored": 23
+  },
+  "notes": [
+    "No benchmark ran.",
+    "Existing Apple debug linker unwind warning and dependency future-incompatibility warnings retained."
+  ],
+  "focused": [
+    {
+      "name": "historical-before",
+      "log": "/private/tmp/logex-trust-execution.hjwtfs/before-regression.log",
+      "sha256": "b4813a267da605f31bac57e02bac3067721dc224f654981fd019574befff79ba",
+      "passed": 1,
+      "ignored": 0,
+      "failed": 2
+    },
+    {
+      "name": "historical-after",
+      "log": "/private/tmp/logex-trust-execution.hjwtfs/after.log",
+      "sha256": "6b22ce8162bbf2a871fac8f1b296977fa048e360d3620516682a84395de2be2d",
+      "passed": 3,
+      "ignored": 0,
+      "failed": 0
+    },
+    {
+      "name": "beacon",
+      "log": "/private/tmp/logex-trust-cl.0ZiT5k/beacon-tests.log",
+      "sha256": "bef64b735319ce4f8b53b9a280252995b2ba5753e2e4b91eb23642258eb91d57",
+      "passed": 12,
+      "ignored": 1,
+      "failed": 0
+    },
+    {
+      "name": "domains",
+      "log": "/private/tmp/logex-trust-cl.0ZiT5k/light-client-tests.log",
+      "sha256": "0af00ffb42e2ac3c9481c8965b4a979fa32015d20a5c4ba2ab5af0cdb94bbc68",
+      "passed": 16,
+      "ignored": 0,
+      "failed": 0
+    },
+    {
+      "name": "validation",
+      "log": "/private/tmp/logex-trust-paths.lvcYcq/validation-tests.log",
+      "sha256": "db4eea7efdf60778f99a6541f25f31aceaf98fbdafe9fc7b70b3f2c64e6e139a",
+      "passed": 22,
+      "ignored": 0,
+      "failed": 0
+    }
+  ],
+  "domain_derivation": {
+    "script": "tools/derive_sync_domains.py",
+    "script_sha256": "1c65054a84610c153abeeafe9efa902c9e64d2b46e9d867a6ca5711255d73226",
+    "output_sha256": "175f627fde27d3ff889d6f558ff1aca95da89324ac0e1947aa7ce47f5e15b269",
+    "comparison": "Identical to independently retained expected domain output."
+  }
+}

@@ -86,8 +86,12 @@ valid empty/full/prefix scenarios. The fixtures contain at most two empty blocks
 
 Focused checks pass: 12 beacon decoder tests (one benchmark ignored), 16
 light-client tests, 22 execution-validation tests and three historical-shape tests.
-Full workspace gates, final source identity and CI/merge will be recorded before
-completion. No timing comparison is claimed for removing the duplicate hash.
+All seven local gates pass on source `b7a3d763`: vendor verification, formatting,
+workspace check, strict Clippy, 1,207 workspace tests (23 ignored), documentation
+checks and release node build. The [gate record](baselines/2026-09-15-trust-path-boundaries-gates.json)
+retains commands, toolchain and source/log identities. Independent reviews of
+both production changes and the boundary controls found no required changes.
+Linux/macOS CI and merge remain pending. No timing comparison is claimed for removing the duplicate hash.
 
 Remaining evidence and lifecycle work:
 
