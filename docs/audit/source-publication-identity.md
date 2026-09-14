@@ -1,15 +1,16 @@
 # Source publication identity
 
 This batch follows merged PR #149 and is in progress. It binds derived indexes
-and recovery to the exact logical source prefix. The latest committed fast-copy
-candidate `da36819b` remains on **performance HOLD**: its preliminary Intel
-diagnostic reports historical publication **+14.4447% median/+27.4705% p95**, with
-both pair medians above 10%. This does not justify a full acceptance campaign.
-All nine local gates pass, but performance correction, CI and merge remain open.
-The earlier full `84ecac65` comparison remains NOT CLEAR (+16.352% median/+14.510%
-p95); it is retained separately rather than pooled with this diagnostic. The
-rest of the offline audit is also incomplete. Current formats and the design are
-in [Logical-prefix commitment and compatibility](#logical-prefix-commitment-and-compatibility).
+and recovery to the exact logical source prefix. Current aligned-writer source
+`28ef516a` passes all nine local gates; Intel performance acceptance is pending.
+The last measured Intel source, `da36819b`, remains on **performance HOLD**:
+its preliminary diagnostic reports historical publication **+14.4447% median/
++27.4705% p95**, with both pair medians above 10%. That result does not justify a
+full acceptance campaign or clear the new aligned candidate. The earlier full
+`84ecac65` comparison remains NOT CLEAR (+16.352% median/+14.510% p95), retained
+separately rather than pooled. Performance validation, CI, merge and the rest of
+the offline audit remain incomplete. Current formats and the design are in
+[Logical-prefix commitment and compatibility](#logical-prefix-commitment-and-compatibility).
 
 ## Latest fast-copy Intel diagnostic: performance HOLD
 
@@ -49,10 +50,19 @@ reported arithmetic values; boundary/state and reload controls pass.
 Final wrapper `3592f7d5` and stream `275a4654` pass formatting, 13 focused tests,
 309 storage tests (five ignored) and strict storage Clippy. Exact module bytes,
 donor inventories, build/run proofs and reviews are retained with this source
-checkpoint. Full workspace gates are running on the same frozen source.
+checkpoint. Full workspace gates pass on the same frozen source, as recorded below.
 The ARM component saving cannot be translated into Intel publication margin.
 It supports a bounded Intel diagnostic after validation, not sync acceptance or
 a full campaign. Prior measured performance holds remain unchanged.
+
+Committed `28ef516a` now passes
+[all nine full local gates](baselines/2026-09-14-source-identity-stream-aligned-validation-1.json):
+1,184 workspace tests (23 ignored), 149 release query tests (nine ignored), two
+release API consistency tests, documentation checks (zero tests), vendor,
+format-check, workspace check, strict Clippy and release node build. Independent
+review verifies all 106 inputs against the exact commit and unchanged working
+bytes, with zero exit and unchanged source in every gate. These checks do not
+claim Intel validation or performance acceptance for the aligned writer.
 
 Earlier namespace-only measurements used `c229ace0`, with production behavior restored to
 `179e0ff7` and all nine local workspace/release gates passing before the new clone
@@ -371,8 +381,11 @@ never carry or deserialize full resume state. Native append borrows the validate
 catalog revision state, without an extra state-vector clone, durability barrier
 or old-row reread. The wrapper caches its root when state changes or is decoded;
 ordinary catalog validation compares the cached root and scalar boundaries.
-The encoding buffer is 64 KiB on the stack per active call. The measured change
-affects bulk hashing efficiency, without altering roots or persisted state.
+The encoding buffer is 65,537 bytes on the stack per active call. It carries the
+saved final chunk into the first globally aligned flush, then hashes 64 complete
+chunks per full flush while retaining one byte of lookahead. Finalization restores
+the canonical final chunk. The extra byte replaces repeated partial-subtree
+setup without altering roots or persisted state; ingestion acceptance is pending.
 
 The resumable stream wire contains version byte 1, a little-endian u64 transcript
 byte count, descending power-of-two subtree chaining values, and the full final
