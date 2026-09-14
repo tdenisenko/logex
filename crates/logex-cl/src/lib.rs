@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::fs;
-use std::io;
+use std::io::{self, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -62,6 +62,8 @@ pub enum ConsensusStateError {
     ParseState { path: PathBuf, message: String },
     #[error("failed to persist consensus state {path}: {source}")]
     PersistState { path: PathBuf, source: io::Error },
+    #[error("consensus storage stopped after a previous save failure: {0}")]
+    StorageFailed(Arc<str>),
     #[error("invalid checkpoint string: {0}")]
     InvalidCheckpoint(String),
     #[error(
@@ -132,6 +134,10 @@ pub struct PersistedLightClientPayloads {
 pub struct ConsensusStore {
     path: PathBuf,
     inner: Arc<Mutex<ConsensusSnapshot>>,
+    // Readers never wait for filesystem I/O. Writers serialize the entire
+    // candidate -> durable replacement -> publication transaction.
+    writer: Mutex<()>,
+    storage_failure: tokio::sync::watch::Sender<Option<Arc<str>>>,
 }
 
 impl ConsensusStore {
@@ -140,41 +146,57 @@ impl ConsensusStore {
         checkpoint: Option<&str>,
     ) -> Result<Self, ConsensusStateError> {
         let path = consensus_state_path(data_dir.as_ref());
-        if path.exists() {
-            let json =
-                fs::read_to_string(&path).map_err(|source| ConsensusStateError::ReadState {
+        let (mut snapshot, mut needs_save) = match fs::File::open(&path) {
+            Ok(file) => {
+                let snapshot: ConsensusSnapshot = serde_json::from_reader(BufReader::new(file))
+                    .map_err(|error| ConsensusStateError::ParseState {
+                        path: path.clone(),
+                        message: error.to_string(),
+                    })?;
+                let snapshot = restore_snapshot(snapshot).map_err(|message| {
+                    ConsensusStateError::ParseState {
+                        path: path.clone(),
+                        message,
+                    }
+                })?;
+                (snapshot, false)
+            }
+            Err(source) if source.kind() == io::ErrorKind::NotFound => {
+                // A dangling state-file link is an existing, unavailable state,
+                // not permission to initialize a replacement database.
+                if fs::symlink_metadata(&path).is_ok() {
+                    return Err(ConsensusStateError::ReadState { path, source });
+                }
+                let checkpoint = checkpoint.ok_or(ConsensusStateError::MissingCheckpoint)?;
+                (load_checkpoint_descriptor(checkpoint)?, true)
+            }
+            Err(source) => return Err(ConsensusStateError::ReadState { path, source }),
+        };
+        if !needs_save && let Some(checkpoint) = checkpoint {
+            let requested = load_checkpoint_descriptor(checkpoint)?.checkpoint;
+            needs_save = reconcile_checkpoint(&mut snapshot, requested)?;
+        }
+        ensure_snapshot_within_weak_subjectivity_period(&snapshot)?;
+        // Only startup may initialize directories. An already opened store must
+        // fail if its directory disappears instead of creating a replacement.
+        if needs_save {
+            let parent = path.parent().expect("consensus state path has a parent");
+            create_synced_directory(parent).map_err(|source| {
+                ConsensusStateError::PersistState {
                     path: path.clone(),
                     source,
-                })?;
-            let snapshot: ConsensusSnapshot =
-                serde_json::from_str(&json).map_err(|error| ConsensusStateError::ParseState {
-                    path: path.clone(),
-                    message: error.to_string(),
-                })?;
-            let snapshot = rehydrate_verified_light_client_state(snapshot);
-            ensure_snapshot_within_weak_subjectivity_period(&snapshot)?;
-            let store = Self {
-                path,
-                inner: Arc::new(Mutex::new(snapshot)),
-            };
-            if let Some(checkpoint) = checkpoint {
-                let requested = load_checkpoint_descriptor(checkpoint)?.checkpoint;
-                if store.reconcile_checkpoint(requested)? {
-                    ensure_snapshot_within_weak_subjectivity_period(&store.inner.lock().unwrap())?;
-                    store.persist()?;
                 }
-            }
-            return Ok(store);
+            })?;
         }
-
-        let checkpoint = checkpoint.ok_or(ConsensusStateError::MissingCheckpoint)?;
-        let snapshot = load_checkpoint_descriptor(checkpoint)?;
-        ensure_snapshot_within_weak_subjectivity_period(&snapshot)?;
         let store = Self {
             path,
             inner: Arc::new(Mutex::new(snapshot)),
+            writer: Mutex::new(()),
+            storage_failure: tokio::sync::watch::channel(None).0,
         };
-        store.persist()?;
+        if needs_save {
+            store.persist()?;
+        }
         Ok(store)
     }
 
@@ -252,21 +274,19 @@ impl ConsensusStore {
     }
 
     pub fn replace_anchors(&self, anchors: Vec<AnchorRecord>) -> Result<(), ConsensusStateError> {
-        let mut snapshot = self.inner.lock().unwrap();
-        snapshot.ordered_anchors = normalize_anchor_records(anchors);
-        recompute_snapshot_anchors(&mut snapshot);
-        drop(snapshot);
-        self.persist()
+        self.update(|snapshot| {
+            snapshot.ordered_anchors = normalize_anchor_records(anchors);
+            recompute_snapshot_anchors(snapshot);
+        })
     }
 
     pub fn append_anchors(&self, anchors: Vec<AnchorRecord>) -> Result<(), ConsensusStateError> {
-        let mut snapshot = self.inner.lock().unwrap();
-        snapshot.ordered_anchors.extend(anchors);
-        let ordered = std::mem::take(&mut snapshot.ordered_anchors);
-        snapshot.ordered_anchors = normalize_anchor_records(ordered);
-        recompute_snapshot_anchors(&mut snapshot);
-        drop(snapshot);
-        self.persist()
+        self.update(|snapshot| {
+            snapshot.ordered_anchors.extend(anchors);
+            let ordered = std::mem::take(&mut snapshot.ordered_anchors);
+            snapshot.ordered_anchors = normalize_anchor_records(ordered);
+            recompute_snapshot_anchors(snapshot);
+        })
     }
 
     pub fn replace_anchor_range(
@@ -275,16 +295,15 @@ impl ConsensusStore {
         end_block: u64,
         anchors: Vec<AnchorRecord>,
     ) -> Result<(), ConsensusStateError> {
-        let mut snapshot = self.inner.lock().unwrap();
-        snapshot.ordered_anchors.retain(|record| {
-            record.anchor.block_number < start_block || record.anchor.block_number > end_block
-        });
-        snapshot.ordered_anchors.extend(anchors);
-        let ordered = std::mem::take(&mut snapshot.ordered_anchors);
-        snapshot.ordered_anchors = normalize_anchor_records(ordered);
-        recompute_snapshot_anchors(&mut snapshot);
-        drop(snapshot);
-        self.persist()
+        self.update(|snapshot| {
+            snapshot.ordered_anchors.retain(|record| {
+                record.anchor.block_number < start_block || record.anchor.block_number > end_block
+            });
+            snapshot.ordered_anchors.extend(anchors);
+            let ordered = std::mem::take(&mut snapshot.ordered_anchors);
+            snapshot.ordered_anchors = normalize_anchor_records(ordered);
+            recompute_snapshot_anchors(snapshot);
+        })
     }
 
     pub(crate) fn record_verified_bootstrap(
@@ -293,8 +312,7 @@ impl ConsensusStore {
         payload: RawRpcResponse,
         store: VerifiedLightClientStore,
     ) -> Result<(), ConsensusStateError> {
-        {
-            let mut snapshot = self.inner.lock().unwrap();
+        self.update(|snapshot| {
             snapshot.checkpoint.beacon_slot = Some(store.bootstrap_slot());
             snapshot.light_client.bootstrap = Some(status);
             snapshot.light_client.finality_update = None;
@@ -303,9 +321,8 @@ impl ConsensusStore {
             snapshot.light_client_payloads.finality_update = None;
             snapshot.light_client_payloads.optimistic_update = None;
             snapshot.verified_light_client_store = Some(store);
-            apply_verified_store(&mut snapshot);
-        }
-        self.persist()
+            apply_verified_store(snapshot);
+        })
     }
 
     pub(crate) fn record_verified_finality_update(
@@ -314,14 +331,12 @@ impl ConsensusStore {
         payload: RawRpcResponse,
         store: VerifiedLightClientStore,
     ) -> Result<(), ConsensusStateError> {
-        {
-            let mut snapshot = self.inner.lock().unwrap();
+        self.update(|snapshot| {
             snapshot.light_client.finality_update = Some(status);
             snapshot.light_client_payloads.finality_update = Some(payload);
             snapshot.verified_light_client_store = Some(store);
-            apply_verified_store(&mut snapshot);
-        }
-        self.persist()
+            apply_verified_store(snapshot);
+        })
     }
 
     pub(crate) fn record_verified_optimistic_update(
@@ -330,14 +345,12 @@ impl ConsensusStore {
         payload: RawRpcResponse,
         store: VerifiedLightClientStore,
     ) -> Result<(), ConsensusStateError> {
-        {
-            let mut snapshot = self.inner.lock().unwrap();
+        self.update(|snapshot| {
             snapshot.light_client.optimistic_update = Some(status);
             snapshot.light_client_payloads.optimistic_update = Some(payload);
             snapshot.verified_light_client_store = Some(store);
-            apply_verified_store(&mut snapshot);
-        }
-        self.persist()
+            apply_verified_store(snapshot);
+        })
     }
 
     pub(crate) fn record_verified_applied_update(
@@ -345,8 +358,7 @@ impl ConsensusStore {
         applied: AppliedLightClientUpdate,
         verified_updates_by_period: Vec<(u64, RawRpcResponse)>,
     ) -> Result<(), ConsensusStateError> {
-        {
-            let mut snapshot = self.inner.lock().unwrap();
+        self.update(|snapshot| {
             snapshot.light_client.optimistic_update = Some(applied.optimistic_status);
             if let Some(status) = applied.finality_status {
                 snapshot.light_client.finality_update = Some(status);
@@ -358,84 +370,141 @@ impl ConsensusStore {
                     .insert(period, payload);
             }
             snapshot.verified_light_client_store = Some(applied.store);
-            apply_verified_store(&mut snapshot);
-        }
-        self.persist()
+            apply_verified_store(snapshot);
+        })
     }
 
     pub(crate) fn replace_verified_light_client_store(
         &self,
         store: VerifiedLightClientStore,
     ) -> Result<(), ConsensusStateError> {
-        {
-            let mut snapshot = self.inner.lock().unwrap();
+        self.update(|snapshot| {
             snapshot.verified_light_client_store = Some(store);
-            apply_verified_store(&mut snapshot);
-        }
-        self.persist()
+            apply_verified_store(snapshot);
+        })
+    }
+
+    /// Subscribe to the first failed save. The error remains latched even when
+    /// there were no subscribers at the time of failure; reopening is required.
+    pub fn subscribe_storage_failure(&self) -> tokio::sync::watch::Receiver<Option<Arc<str>>> {
+        self.storage_failure.subscribe()
     }
 
     pub fn persist(&self) -> Result<(), ConsensusStateError> {
-        if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent).map_err(|source| ConsensusStateError::PersistState {
+        self.update(|_| {})
+    }
+
+    fn update(
+        &self,
+        mutate: impl FnOnce(&mut ConsensusSnapshot),
+    ) -> Result<(), ConsensusStateError> {
+        self.update_with_writer(mutate, write_snapshot)
+    }
+
+    fn update_with_writer(
+        &self,
+        mutate: impl FnOnce(&mut ConsensusSnapshot),
+        write: impl FnOnce(&Path, &ConsensusSnapshot) -> io::Result<()>,
+    ) -> Result<(), ConsensusStateError> {
+        let _writer = self.writer.lock().unwrap();
+        if let Some(message) = self.storage_failure.borrow().clone() {
+            return Err(ConsensusStateError::StorageFailed(message));
+        }
+        let mut candidate = self.inner.lock().unwrap().clone();
+        mutate(&mut candidate);
+        if let Err(source) = write(&self.path, &candidate) {
+            let error = ConsensusStateError::PersistState {
                 path: self.path.clone(),
                 source,
-            })?;
+            };
+            // The rename may have succeeded before a directory-sync failure.
+            // Retrying from the old in-memory snapshot would be unsafe; only a
+            // fresh open may reconcile the durable state after any write error.
+            self.storage_failure
+                .send_replace(Some(error.to_string().into()));
+            return Err(error);
         }
-
-        let tmp = self.path.with_extension("json.tmp");
-        let snapshot = self.inner.lock().unwrap().clone();
-        let json = serde_json::to_vec_pretty(&snapshot).map_err(|error| {
-            ConsensusStateError::ParseState {
-                path: self.path.clone(),
-                message: error.to_string(),
-            }
-        })?;
-        fs::write(&tmp, json).map_err(|source| ConsensusStateError::PersistState {
-            path: tmp.clone(),
-            source,
-        })?;
-        fs::rename(&tmp, &self.path).map_err(|source| ConsensusStateError::PersistState {
-            path: self.path.clone(),
-            source,
-        })?;
+        *self.inner.lock().unwrap() = candidate;
         Ok(())
     }
 
     pub fn state_path(&self) -> &Path {
         &self.path
     }
+}
 
-    fn reconcile_checkpoint(
-        &self,
-        requested: WeakSubjectivityCheckpoint,
-    ) -> Result<bool, ConsensusStateError> {
-        let mut snapshot = self.inner.lock().unwrap();
-        if snapshot.checkpoint.beacon_root != requested.beacon_root {
-            return Err(ConsensusStateError::ConflictingCheckpoint {
+fn reconcile_checkpoint(
+    snapshot: &mut ConsensusSnapshot,
+    requested: WeakSubjectivityCheckpoint,
+) -> Result<bool, ConsensusStateError> {
+    if snapshot.checkpoint.beacon_root != requested.beacon_root {
+        return Err(ConsensusStateError::ConflictingCheckpoint {
+            persisted_root: snapshot.checkpoint.beacon_root,
+            persisted_slot: snapshot.checkpoint.beacon_slot,
+            requested_root: requested.beacon_root,
+            requested_slot: requested.beacon_slot,
+        });
+    }
+
+    match (snapshot.checkpoint.beacon_slot, requested.beacon_slot) {
+        (Some(existing_slot), Some(requested_slot)) if existing_slot != requested_slot => {
+            Err(ConsensusStateError::ConflictingCheckpoint {
                 persisted_root: snapshot.checkpoint.beacon_root,
                 persisted_slot: snapshot.checkpoint.beacon_slot,
                 requested_root: requested.beacon_root,
                 requested_slot: requested.beacon_slot,
-            });
+            })
         }
+        (None, Some(slot)) => {
+            snapshot.checkpoint.beacon_slot = Some(slot);
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
+}
 
-        match (snapshot.checkpoint.beacon_slot, requested.beacon_slot) {
-            (Some(existing_slot), Some(requested_slot)) if existing_slot != requested_slot => {
-                Err(ConsensusStateError::ConflictingCheckpoint {
-                    persisted_root: snapshot.checkpoint.beacon_root,
-                    persisted_slot: snapshot.checkpoint.beacon_slot,
-                    requested_root: requested.beacon_root,
-                    requested_slot: requested.beacon_slot,
-                })
-            }
-            (None, Some(slot)) => {
-                snapshot.checkpoint.beacon_slot = Some(slot);
-                Ok(true)
-            }
-            _ => Ok(false),
+/// Durably replace one complete snapshot. Temp files are unique and owned, so
+/// failed writes neither truncate the published file nor reuse another writer's
+/// scratch path. Sync the file before rename and its directory before publishing.
+fn write_snapshot(path: &Path, snapshot: &ConsensusSnapshot) -> io::Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| io::Error::other("consensus state has no parent"))?;
+    let mut staged = tempfile::Builder::new()
+        .prefix(".consensus-state-")
+        .tempfile_in(parent)?;
+    {
+        let mut writer = BufWriter::new(staged.as_file_mut());
+        serde_json::to_writer_pretty(&mut writer, snapshot).map_err(io::Error::other)?;
+        writer.flush()?;
+    }
+    staged.as_file().sync_all()?;
+    let _published = staged.persist(path).map_err(|error| error.error)?;
+    fs::File::open(parent)?.sync_all()
+}
+
+fn create_synced_directory(path: &Path) -> io::Result<()> {
+    let mut missing = Vec::new();
+    let mut ancestor = path;
+    while !ancestor.try_exists()? {
+        missing.push(ancestor);
+        ancestor = ancestor
+            .parent()
+            .ok_or_else(|| io::Error::other("directory has no parent"))?;
+        if ancestor.as_os_str().is_empty() {
+            ancestor = Path::new(".");
         }
     }
+    fs::create_dir_all(path)?;
+    for directory in missing.into_iter().rev() {
+        fs::File::open(directory)?.sync_all()?;
+        let parent = directory
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        fs::File::open(parent)?.sync_all()?;
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -625,73 +694,25 @@ fn recompute_snapshot_anchors(snapshot: &mut ConsensusSnapshot) {
     apply_verified_store(snapshot);
 }
 
-fn rehydrate_verified_light_client_state(mut snapshot: ConsensusSnapshot) -> ConsensusSnapshot {
-    if let Some(store) = snapshot.verified_light_client_store.as_mut() {
-        if store.bootstrap_slot == 0 {
-            store.bootstrap_slot = snapshot
-                .checkpoint
-                .beacon_slot
-                .unwrap_or(store.finalized_header.beacon.slot);
-        }
-        recompute_snapshot_anchors(&mut snapshot);
-        return snapshot;
+fn restore_snapshot(mut snapshot: ConsensusSnapshot) -> Result<ConsensusSnapshot, String> {
+    if snapshot
+        .ordered_anchors
+        .windows(2)
+        .any(|pair| pair[0].anchor.block_number >= pair[1].anchor.block_number)
+    {
+        return Err("persisted anchor block numbers must be strictly increasing and unique".into());
     }
-
+    if let Some(store) = &snapshot.verified_light_client_store {
+        store.validate_persisted_state(snapshot.checkpoint)?;
+    } else if snapshot.light_client != ConsensusLightClientStatus::default()
+        || snapshot.light_client_payloads != PersistedLightClientPayloads::default()
+    {
+        return Err("persisted light-client data is missing its verified store; use a fresh checkpoint in a new data directory".into());
+    }
+    // These summaries are derived from materialized anchors and the selected
+    // verified headers. Never let serialized summaries override those sources.
     recompute_snapshot_anchors(&mut snapshot);
-    snapshot.light_client = ConsensusLightClientStatus::default();
-    let mut verified_payloads = PersistedLightClientPayloads::default();
-    let mut verified_store = None;
-
-    if let Some(payload) = snapshot.light_client_payloads.bootstrap.clone() {
-        match verify_bootstrap_payload(&payload.bytes, snapshot.checkpoint) {
-            Ok((status, store)) => {
-                snapshot.checkpoint.beacon_slot = Some(store.bootstrap_slot());
-                snapshot.light_client.bootstrap = Some(status);
-                verified_payloads.bootstrap = Some(payload);
-                verified_store = Some(store);
-            }
-            Err(error) => {
-                tracing::warn!(%error, "discarding previously persisted unverified bootstrap payload");
-            }
-        }
-    }
-
-    if let (Some(payload), Some(store)) = (
-        snapshot.light_client_payloads.finality_update.clone(),
-        verified_store.clone(),
-    ) {
-        match apply_finality_update_payload(&payload.bytes, &store) {
-            Ok((status, next_store, _, _)) => {
-                snapshot.light_client.finality_update = Some(status);
-                verified_payloads.finality_update = Some(payload);
-                verified_store = Some(next_store);
-            }
-            Err(error) => {
-                tracing::warn!(%error, "discarding previously persisted unverified finality update payload");
-            }
-        }
-    }
-
-    if let (Some(payload), Some(store)) = (
-        snapshot.light_client_payloads.optimistic_update.clone(),
-        verified_store.clone(),
-    ) {
-        match apply_optimistic_update_payload(&payload.bytes, &store) {
-            Ok((status, next_store, _)) => {
-                snapshot.light_client.optimistic_update = Some(status);
-                verified_payloads.optimistic_update = Some(payload);
-                verified_store = Some(next_store);
-            }
-            Err(error) => {
-                tracing::warn!(%error, "discarding previously persisted unverified optimistic update payload");
-            }
-        }
-    }
-
-    snapshot.light_client_payloads = verified_payloads;
-    snapshot.verified_light_client_store = verified_store;
-    recompute_snapshot_anchors(&mut snapshot);
-    snapshot
+    Ok(snapshot)
 }
 
 trait ConsensusSnapshotExt {
@@ -747,6 +768,323 @@ mod tests {
             .saturating_sub(8)
             .saturating_mul(32)
             .saturating_add(offset)
+    }
+
+    #[test]
+    fn failed_anchor_save_does_not_publish_candidate() {
+        for operation in ["append", "replace", "range"] {
+            let temp = TempDir::new().unwrap();
+            let store = ConsensusStore::open(
+                temp.path(),
+                Some("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            )
+            .unwrap();
+            let before = store.inner.lock().unwrap().clone();
+            let original_bytes = fs::read(store.state_path()).unwrap();
+            let saved_path = temp.path().join("saved-consensus-state.json");
+            fs::rename(store.state_path(), &saved_path).unwrap();
+            // An occupied destination makes the atomic replacement fail on both
+            // supported platforms, without changing permissions or user files.
+            fs::create_dir(store.state_path()).unwrap();
+            let anchors = vec![AnchorRecord {
+                anchor: ExecutionAnchor {
+                    beacon_root: B256::repeat_byte(1),
+                    beacon_slot: 1,
+                    block_number: 10,
+                    block_hash: B256::repeat_byte(2),
+                    receipts_root: B256::repeat_byte(3),
+                },
+                finalized: true,
+                parent_beacon_root: None,
+            }];
+            let result = match operation {
+                "append" => store.append_anchors(anchors),
+                "replace" => store.replace_anchors(anchors),
+                "range" => store.replace_anchor_range(10, 10, anchors),
+                _ => unreachable!(),
+            };
+            assert!(result.is_err(), "{operation}: save must fail");
+            assert_eq!(fs::read(&saved_path).unwrap(), original_bytes);
+            assert_eq!(
+                *store.inner.lock().unwrap(),
+                before,
+                "{operation}: failed candidate must remain private"
+            );
+            fs::remove_dir(store.state_path()).unwrap();
+            fs::rename(&saved_path, store.state_path()).unwrap();
+            let failure = store.subscribe_storage_failure();
+            assert!(
+                failure.borrow().is_some(),
+                "failure must survive without subscribers"
+            );
+            assert!(matches!(
+                store.persist(),
+                Err(ConsensusStateError::StorageFailed(_))
+            ));
+            assert_eq!(fs::read(store.state_path()).unwrap(), original_bytes);
+            assert_eq!(
+                fs::read_dir(store.state_path().parent().unwrap())
+                    .unwrap()
+                    .count(),
+                1,
+                "failed save must clean up its staging file"
+            );
+            let reopened = ConsensusStore::open(temp.path(), None).unwrap();
+            assert_eq!(*reopened.inner.lock().unwrap(), before);
+        }
+    }
+
+    fn test_anchor(block_number: u64) -> AnchorRecord {
+        AnchorRecord {
+            anchor: ExecutionAnchor {
+                beacon_root: B256::repeat_byte(1),
+                beacon_slot: block_number,
+                block_number,
+                block_hash: B256::repeat_byte(2),
+                receipts_root: B256::repeat_byte(3),
+            },
+            finalized: false,
+            parent_beacon_root: None,
+        }
+    }
+
+    #[test]
+    fn readers_keep_previous_snapshot_until_save_completes() {
+        let temp = TempDir::new().unwrap();
+        let store = Arc::new(
+            ConsensusStore::open(temp.path(), Some(&format!("{:#x}", B256::repeat_byte(1))))
+                .unwrap(),
+        );
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (resume_tx, resume_rx) = mpsc::channel();
+        let writer_store = Arc::clone(&store);
+        let writer = std::thread::spawn(move || {
+            writer_store.update_with_writer(
+                |candidate| {
+                    candidate.ordered_anchors.push(test_anchor(10));
+                    recompute_snapshot_anchors(candidate);
+                },
+                |path, candidate| {
+                    entered_tx.send(()).unwrap();
+                    resume_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                    write_snapshot(path, candidate)
+                },
+            )
+        });
+        entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let (read_tx, read_rx) = mpsc::channel();
+        let reader_store = Arc::clone(&store);
+        let reader =
+            std::thread::spawn(move || read_tx.send(reader_store.ordered_anchors()).unwrap());
+        let observed = read_rx.recv_timeout(Duration::from_secs(2));
+        resume_tx.send(()).unwrap();
+        writer.join().unwrap().unwrap();
+        reader.join().unwrap();
+        assert_eq!(observed.unwrap(), Vec::<AnchorRecord>::new());
+        assert_eq!(store.ordered_anchors(), vec![test_anchor(10)]);
+        assert_eq!(
+            ConsensusStore::open(temp.path(), None)
+                .unwrap()
+                .ordered_anchors(),
+            store.ordered_anchors()
+        );
+    }
+
+    #[test]
+    fn concurrent_anchor_appends_reopen_as_the_published_snapshot() {
+        let temp = TempDir::new().unwrap();
+        let store = Arc::new(
+            ConsensusStore::open(temp.path(), Some(&format!("{:#x}", B256::repeat_byte(1))))
+                .unwrap(),
+        );
+        let start = Arc::new(std::sync::Barrier::new(8));
+        let writers: Vec<_> = (0..8)
+            .map(|block| {
+                let store = Arc::clone(&store);
+                let start = Arc::clone(&start);
+                std::thread::spawn(move || {
+                    start.wait();
+                    store.append_anchors(vec![test_anchor(block)])
+                })
+            })
+            .collect();
+        for writer in writers {
+            writer.join().unwrap().unwrap();
+        }
+        assert_eq!(
+            store.ordered_anchors(),
+            (0..8).map(test_anchor).collect::<Vec<_>>()
+        );
+        let reopened = ConsensusStore::open(temp.path(), None).unwrap();
+        assert_eq!(
+            *reopened.inner.lock().unwrap(),
+            *store.inner.lock().unwrap()
+        );
+    }
+
+    #[test]
+    fn uncertain_save_requires_reopen_and_never_rolls_back_published_file() {
+        let temp = TempDir::new().unwrap();
+        let store =
+            ConsensusStore::open(temp.path(), Some(&format!("{:#x}", B256::repeat_byte(1))))
+                .unwrap();
+        let result = store.update_with_writer(
+            |candidate| {
+                candidate.ordered_anchors.push(test_anchor(10));
+                recompute_snapshot_anchors(candidate);
+            },
+            |path, candidate| {
+                write_snapshot(path, candidate)?;
+                // Model an error reported after replacement. The caller cannot
+                // assume whether the new file became durable in this case.
+                Err(io::Error::other("injected error after replacement"))
+            },
+        );
+        assert!(result.is_err());
+        assert!(store.ordered_anchors().is_empty());
+        let disk_after_error = fs::read(store.state_path()).unwrap();
+        assert!(matches!(
+            store.append_anchors(vec![test_anchor(11)]),
+            Err(ConsensusStateError::StorageFailed(_))
+        ));
+        assert_eq!(fs::read(store.state_path()).unwrap(), disk_after_error);
+        let reopened = ConsensusStore::open(temp.path(), None).unwrap();
+        assert_eq!(reopened.ordered_anchors(), vec![test_anchor(10)]);
+        reopened.append_anchors(vec![test_anchor(11)]).unwrap();
+        assert_eq!(
+            reopened.ordered_anchors(),
+            vec![test_anchor(10), test_anchor(11)]
+        );
+    }
+
+    #[test]
+    fn save_does_not_recreate_a_disappeared_directory() {
+        let temp = TempDir::new().unwrap();
+        let store =
+            ConsensusStore::open(temp.path(), Some(&format!("{:#x}", B256::repeat_byte(1))))
+                .unwrap();
+        let directory = store.state_path().parent().unwrap();
+        let original = fs::read(store.state_path()).unwrap();
+        let moved_directory = temp.path().join("unavailable-consensus-directory");
+        fs::rename(directory, &moved_directory).unwrap();
+        assert!(store.append_anchors(vec![test_anchor(10)]).is_err());
+        assert!(!directory.exists());
+        assert!(store.ordered_anchors().is_empty());
+        assert!(store.subscribe_storage_failure().borrow().is_some());
+        assert_eq!(
+            fs::read(moved_directory.join(CONSENSUS_STATE_FILE)).unwrap(),
+            original
+        );
+    }
+
+    #[test]
+    fn reopening_rejects_payloads_without_verified_state() {
+        let temp = TempDir::new().unwrap();
+        let store =
+            ConsensusStore::open(temp.path(), Some(&format!("{:#x}", B256::repeat_byte(1))))
+                .unwrap();
+        let mut snapshot = store.inner.lock().unwrap().clone();
+        snapshot.light_client_payloads.bootstrap = Some(RawRpcResponse {
+            context_bytes: None,
+            bytes: vec![1, 2, 3],
+        });
+        let bytes = serde_json::to_vec(&snapshot).unwrap();
+        fs::write(store.state_path(), &bytes).unwrap();
+        assert!(matches!(
+            ConsensusStore::open(temp.path(), None),
+            Err(ConsensusStateError::ParseState { .. })
+        ));
+        assert_eq!(fs::read(store.state_path()).unwrap(), bytes);
+    }
+
+    #[test]
+    fn reopening_validates_verified_store_before_exposing_it() {
+        let temp = TempDir::new().unwrap();
+        let slot = recent_test_slot(0);
+        let checkpoint = format!("{slot}@{:#x}", B256::repeat_byte(1));
+        let store = ConsensusStore::open(temp.path(), Some(&checkpoint)).unwrap();
+        let mut snapshot = store.inner.lock().unwrap().clone();
+        snapshot.verified_light_client_store = Some(VerifiedLightClientStore {
+            checkpoint_root: snapshot.checkpoint.beacon_root,
+            bootstrap_slot: slot,
+            current_sync_committee: crate::light_client::test_sync_committee(),
+            next_sync_committee: None,
+            finalized_header: verified_header(slot, 1, 100),
+            optimistic_header: verified_header(slot, 1, 100),
+            best_valid_update: None,
+            previous_max_active_participants: 0,
+            current_max_active_participants: 0,
+        });
+        fs::write(store.state_path(), serde_json::to_vec(&snapshot).unwrap()).unwrap();
+        let valid = ConsensusStore::open(temp.path(), None).unwrap();
+        assert_eq!(valid.trusted_beacon_slot(), Some(slot));
+        assert_eq!(
+            valid.chain_anchors().finalized_head.unwrap().block_number,
+            100
+        );
+
+        snapshot
+            .verified_light_client_store
+            .as_mut()
+            .unwrap()
+            .previous_max_active_participants = 513;
+        let bytes = serde_json::to_vec(&snapshot).unwrap();
+        fs::write(store.state_path(), &bytes).unwrap();
+        let error = ConsensusStore::open(temp.path(), None).unwrap_err();
+        assert!(matches!(error, ConsensusStateError::ParseState { .. }));
+        assert!(error.to_string().contains("participant count"));
+        assert_eq!(fs::read(store.state_path()).unwrap(), bytes);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dangling_state_link_is_not_reinitialized() {
+        let temp = TempDir::new().unwrap();
+        fs::create_dir(temp.path().join("cl")).unwrap();
+        let missing_target = temp.path().join("missing-state.json");
+        let path = consensus_state_path(temp.path());
+        std::os::unix::fs::symlink(&missing_target, &path).unwrap();
+        assert!(matches!(
+            ConsensusStore::open(temp.path(), Some(&format!("{:#x}", B256::repeat_byte(1)))),
+            Err(ConsensusStateError::ReadState { .. })
+        ));
+        assert_eq!(fs::read_link(&path).unwrap(), missing_target);
+        assert!(!missing_target.exists());
+    }
+
+    #[test]
+    fn reopening_rejects_unordered_or_duplicate_anchor_records() {
+        for blocks in [[11, 10], [10, 10]] {
+            let temp = TempDir::new().unwrap();
+            let store = ConsensusStore::open(
+                temp.path(),
+                Some("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            )
+            .unwrap();
+            let mut snapshot = store.inner.lock().unwrap().clone();
+            snapshot.ordered_anchors = blocks
+                .into_iter()
+                .map(|block_number| AnchorRecord {
+                    anchor: ExecutionAnchor {
+                        beacon_root: B256::repeat_byte(1),
+                        beacon_slot: block_number,
+                        block_number,
+                        block_hash: B256::repeat_byte(2),
+                        receipts_root: B256::repeat_byte(3),
+                    },
+                    finalized: true,
+                    parent_beacon_root: None,
+                })
+                .collect();
+            fs::write(store.state_path(), serde_json::to_vec(&snapshot).unwrap()).unwrap();
+            assert!(
+                matches!(
+                    ConsensusStore::open(temp.path(), None),
+                    Err(ConsensusStateError::ParseState { .. })
+                ),
+                "invalid order {blocks:?} must not affect anchor lookup"
+            );
+        }
     }
 
     #[test]
@@ -812,7 +1150,7 @@ mod tests {
             verified_light_client_store: Some(VerifiedLightClientStore {
                 checkpoint_root: B256::repeat_byte(0x10),
                 bootstrap_slot: 32,
-                current_sync_committee: crate::light_client::SyncCommitteeData::default(),
+                current_sync_committee: crate::light_client::test_sync_committee(),
                 next_sync_committee: None,
                 finalized_header: verified_header(3_200, 0x20, 3_200),
                 optimistic_header: verified_header(3_232, 0x21, 3_232),
@@ -1108,7 +1446,7 @@ mod tests {
                 VerifiedLightClientStore {
                     checkpoint_root: B256::repeat_byte(0xaa),
                     bootstrap_slot,
-                    current_sync_committee: crate::light_client::SyncCommitteeData::default(),
+                    current_sync_committee: crate::light_client::test_sync_committee(),
                     next_sync_committee: None,
                     finalized_header: crate::light_client::VerifiedLightClientHeader {
                         fork: logex_types::ConsensusDataFork::Deneb,
@@ -1212,7 +1550,7 @@ mod tests {
                 VerifiedLightClientStore {
                     checkpoint_root: B256::repeat_byte(0xaa),
                     bootstrap_slot: checkpoint_slot,
-                    current_sync_committee: crate::light_client::SyncCommitteeData::default(),
+                    current_sync_committee: crate::light_client::test_sync_committee(),
                     next_sync_committee: None,
                     finalized_header: verified_header(checkpoint_slot, 0x10, 100),
                     optimistic_header: verified_header(checkpoint_slot, 0x10, 100),
@@ -1255,7 +1593,7 @@ mod tests {
                 VerifiedLightClientStore {
                     checkpoint_root: B256::repeat_byte(0xaa),
                     bootstrap_slot: checkpoint_slot,
-                    current_sync_committee: crate::light_client::SyncCommitteeData::default(),
+                    current_sync_committee: crate::light_client::test_sync_committee(),
                     next_sync_committee: None,
                     finalized_header: verified_header(finality_slot, 0x20, 101),
                     optimistic_header: verified_header(finality_slot, 0x20, 101),
@@ -1321,7 +1659,7 @@ mod tests {
                 VerifiedLightClientStore {
                     checkpoint_root: B256::repeat_byte(0xaa),
                     bootstrap_slot: checkpoint_slot,
-                    current_sync_committee: crate::light_client::SyncCommitteeData::default(),
+                    current_sync_committee: crate::light_client::test_sync_committee(),
                     next_sync_committee: None,
                     finalized_header: verified_header(checkpoint_slot, 0x10, 100),
                     optimistic_header: verified_header(checkpoint_slot, 0x10, 100),
@@ -1355,7 +1693,7 @@ mod tests {
                 VerifiedLightClientStore {
                     checkpoint_root: B256::repeat_byte(0xaa),
                     bootstrap_slot: checkpoint_slot,
-                    current_sync_committee: crate::light_client::SyncCommitteeData::default(),
+                    current_sync_committee: crate::light_client::test_sync_committee(),
                     next_sync_committee: None,
                     finalized_header: verified_header(checkpoint_slot, 0x10, 100),
                     optimistic_header: verified_header(optimistic_slot, 0x30, 102),
@@ -1422,7 +1760,7 @@ mod tests {
                 VerifiedLightClientStore {
                     checkpoint_root: B256::repeat_byte(0xaa),
                     bootstrap_slot: checkpoint_slot,
-                    current_sync_committee: crate::light_client::SyncCommitteeData::default(),
+                    current_sync_committee: crate::light_client::test_sync_committee(),
                     next_sync_committee: None,
                     finalized_header: verified_header(checkpoint_slot, 0x10, 100),
                     optimistic_header: verified_header(checkpoint_slot, 0x10, 100),
@@ -1439,10 +1777,8 @@ mod tests {
                     store: VerifiedLightClientStore {
                         checkpoint_root: B256::repeat_byte(0xaa),
                         bootstrap_slot: checkpoint_slot,
-                        current_sync_committee: crate::light_client::SyncCommitteeData::default(),
-                        next_sync_committee: Some(
-                            crate::light_client::SyncCommitteeData::default(),
-                        ),
+                        current_sync_committee: crate::light_client::test_sync_committee(),
+                        next_sync_committee: Some(crate::light_client::test_sync_committee()),
                         finalized_header: verified_header(finalized_slot, 0x20, 101),
                         optimistic_header: verified_header(optimistic_slot, 0x21, 102),
                         best_valid_update: None,
