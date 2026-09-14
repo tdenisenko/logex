@@ -123,8 +123,10 @@ baseline prerequisite. `PartitionManager` is the current public storage facade.
 - External-volume supervision targets macOS and Linux. Check stable expected
   identity before any directory creation and on restart. Service logs must not
   depend on the removable volume. Production installation is a separate step.
-- Public formats stay compatible by default. Any unavoidable migration requires
-  an explicit design decision and recovery/rollback instructions.
+- The audit owner waived backward compatibility and migration requirements.
+  Formats and legacy helpers may change when correctness or maintainability
+  benefits justify it. Existing user data remains protected; tests use isolated
+  fixtures, and any fresh production sync is a later deployment step.
 
 See [benchmark instructions](benchmarks.md) for commands and measurement limits,
 and the [initial results](baselines/2026-09-07.md) for raw samples and validation.

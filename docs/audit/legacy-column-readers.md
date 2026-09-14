@@ -1,8 +1,8 @@
 # Legacy column-reader consolidation
 
 This follow-up to merged PR #151 removes weaker duplicate readers on
-`audit/legacy-column-readers`, based on `29376426`. Final gates and merge are
-pending. The exported methods have only test callers in the current repository;
+`audit/legacy-column-readers`, based on `29376426`. All eight local gates
+passed on source `1cbc1e90`; PR CI and merge are pending. The exported methods have only test callers in the current repository;
 production query reads already use `SegmentReader`.
 
 ## Findings
@@ -55,5 +55,12 @@ failure. Production code at reproduction matched `29376426`.
 After consolidation, all 56 reader/segment-reader tests pass. Controls retain
 empty/all-null/replaced sources, arbitrary selected order, incomplete append
 prefixes, captured manifest boundaries, per-row length validation, and unchanged
-dangling aliases. Independent review found no additional concrete issue. Final
-workspace and release results will be recorded before the PR.
+dangling aliases. Independent review found no additional concrete issue.
+
+All eight local gates pass on source `1cbc1e90`: vendor verification, formatting,
+workspace check, strict Clippy, 1,201 workspace tests (23 ignored), seven
+documentation test groups (zero examples), all 56 focused release reader tests,
+and the release node build. The [gate record](baselines/2026-09-15-legacy-column-readers-gates.json)
+retains commands, toolchain, log hashes and source identity. Existing local
+HTTP checkpoint fixtures require localhost access; the suite ran with that
+permission. No benchmark ran. Final Linux/macOS CI and merge remain required.
