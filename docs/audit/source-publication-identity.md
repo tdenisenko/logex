@@ -1,16 +1,42 @@
 # Source publication identity
 
-This batch follows merged PR #149 and is in progress. It binds derived indexes
-and recovery to the exact logical source prefix. Current aligned-writer source
-`28ef516a` passes all nine local gates and all 25 focused Intel platform checks.
-Its completed full comparison is **NOT CLEAR** for performance. Earlier `da36819b`
-and `84ecac65` failures remain retained separately. CI, merge and the remaining
-offline audit are incomplete. Current formats and design are in
+This batch follows merged PR #149. It binds derived indexes and recovery to the
+exact logical source prefix. The retained implementation is `e76f4dda`: bounded
+streaming commitments with historical hashing overlapped with existing column
+workers. All nine local gates pass. Final Intel checks, CI and merge are pending;
+the remaining offline audit is incomplete. Current formats and design are in
 [Logical-prefix commitment and compatibility](#logical-prefix-commitment-and-compatibility).
 
-## Provisional historical worker overlap
+## Engineering disposition
 
-A provisional implementation computes a new historical segment's commitment on
+The audit owner has ended the benchmark campaign and chosen to retain the best
+implementation reached so far. Necessary correctness and integrity fixes may
+carry a modest performance cost. Further performance experiments require a
+concrete implementation opportunity with a potentially substantial benefit;
+uncertainty caused by shared host resources alone is not a reason to keep
+benchmarking. No additional full comparison will run for this milestone.
+
+This is an explicit engineering acceptance decision, not a passing statistical
+result. The previous `28ef516a` comparison remains **NOT CLEAR** under its original
+rules: historical median/p95 were +9.7125%/+7.7023% against PR #149, with bounds
+and sensitivity checks crossing 10%. The retained overlap implementation improves
+typical historical timings against `28ef516a`, but its local staged p95 increase
+of 29.525% remains unexplained. These comparisons cannot be compounded into a
+final-source result against PR #149. No claim of a uniform sub-10% regression,
+hardware causation, or live-sync performance is made.
+
+The integrity checks close demonstrated missing-result and divergent-recovery
+bugs. Their bounded streaming implementation hashes new rows once, avoids an
+old-column reread or extra steady-state fsync, and overlaps independent work
+without adding threads. Source inspection and the phase diagnostic did not find
+another redundant hash, rewrite or durability barrier to remove. The rejected
+prototypes and all original observations remain available below. Correctness,
+platform checks and CI still gate merge; live testing remains deferred until
+the offline audit is complete.
+
+## Historical worker overlap
+
+The retained implementation computes a new historical segment's commitment on
 its existing parent thread after spawning the existing 14 column workers. It
 adds no threads or persistence barriers. Both staged new segments and direct
 historical segments use it; existing-prefix and live hashing remain serial.
@@ -32,8 +58,8 @@ unchanged source was independently reviewed. All [nine local workspace gates](ba
 also pass: 1,189 workspace tests (23 ignored), 149 release query tests (nine
 ignored), two release API consistency tests, vendor verification, formatting,
 check, strict Clippy, documentation tests and the release node build. Source
-bytes remained unchanged throughout. The implementation has not cleared the
-performance limit.
+bytes remained unchanged throughout. These checks establish correctness coverage;
+the performance decision and remaining measurement limits are recorded above.
 
 The [fixed local comparison](baselines/2026-09-15-source-identity-overlap-local-result-1.json)
 compares provisional source `e76f4dda` with `28ef516a`, retaining 48 processes,
@@ -86,8 +112,13 @@ ordinary background CPU activity and substantial swap usage. Swap usage does
 not prove active paging during a sample. None of these traces grants performance
 acceptance or identifies a CPU, disk or scheduling cause.
 
-Overlap remains provisional. Intel/platform validation and the complete
-comparison against PR #149 remain required before CI, PR and merge.
+The audit owner subsequently selected overlap for retention without another full
+comparison. Intel/platform validation and CI remain required before merge.
+
+The remaining sections preserve the measurements and development decisions at
+their named source revisions. Their earlier provisional status and benchmark
+prerequisites are historical; the engineering disposition above governs the
+retained implementation and current merge requirements.
 
 ## Aligned full comparison: NOT CLEAR
 
@@ -123,8 +154,8 @@ Independent arithmetic verifies a paired median change of -1.4150%, with
 opposite-order means -1.9664%/+0.3031% and an adverse pair of +10.5793%. Pooled
 mean savings were only 0.0271 ms per 15,360-row fixture. This small mixed component
 effect does not justify duplicated header encoding or establish useful ingestion
-margin, so the prototype is not retained in production. The provisional worker
-overlap above is now being investigated. CI, PR and
+margin, so the prototype is not retained in production. The worker overlap above
+was subsequently selected for retention. CI, PR and
 merge remain pending.
 
 Mac-mini testing finished on September 14 at 19:14:50 UTC. Collection and the
