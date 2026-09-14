@@ -28,10 +28,33 @@ retains Rust's scoped unwinding behavior; this is no new panic-recovery promise.
 The storage all-targets check passes: 314 unit tests and one integration test,
 including five new preflight, scheduling, cleanup and serial-equivalence tests.
 Eight benchmarks/platform checks remain ignored by this ordinary suite. The
-unchanged source was independently reviewed. Complete workspace gates and
-release performance measurement remain pending. This implementation has not
-cleared the performance limit; it may contend with column workers for CPU and
-memory bandwidth. The previous full comparison remains NOT CLEAR.
+unchanged source was independently reviewed. Complete workspace validation is
+running. The implementation has not cleared the performance limit.
+
+The [fixed local comparison](baselines/2026-09-15-source-identity-overlap-local-result-1.json)
+compares provisional source `e76f4dda` with `28ef516a`, retaining 48 processes,
+384 measured timings, 48 warmups and 48 resource records. Direct historical
+median/p95 improve 15.871%/20.329%; staged historical median improves 9.259%,
+but its p95 worsens **29.525%**. All three staged temporal cycles have higher
+p95 values. One direct pair also has a **103.368%** p95 increase. Appended
+historical and live medians improve 5.931% and 1.454%, respectively. These are
+descriptive diagnostics against the prior candidate, not performance acceptance
+against PR #149, and the percentages are not compounded with earlier results.
+
+The first local attempt completed its fixture but failed to collect resource
+counters under the sandbox. Its nine iterations and failed wrapper remain
+separate. After a successful resource-counter preflight, the same source, plan,
+fixtures and analysis completed with the required permission. No observations
+were filtered or replaced based on their values. Both build warnings and an
+earlier inaccurate description of those warnings remain recorded.
+
+Independent review reconstructed every timing, order, cycle and resource result.
+The archive preserves 224 records and 35 aliases; every decoded byte and alias
+also matches its original in a separate verification. Source inspection found
+no additional hash, column rewrite or persistence barrier specific to the
+slower staged tail. Parent-thread phase attribution is being prepared in isolated
+snapshots to locate the pauses. CPU contention and storage scheduling remain
+hypotheses, not established causes. The previous full comparison remains NOT CLEAR.
 
 ## Aligned full comparison: NOT CLEAR
 
@@ -67,8 +90,8 @@ Independent arithmetic verifies a paired median change of -1.4150%, with
 opposite-order means -1.9664%/+0.3031% and an adverse pair of +10.5793%. Pooled
 mean savings were only 0.0271 ms per 15,360-row fixture. This small mixed component
 effect does not justify duplicated header encoding or establish useful ingestion
-margin, so the prototype is not retained in production. The next source review
-examines overlapping commitment work with existing column workers. CI, PR and
+margin, so the prototype is not retained in production. The provisional worker
+overlap above is now being investigated. CI, PR and
 merge remain pending.
 
 Mac-mini testing finished on September 14 at 19:14:50 UTC. Collection and the
