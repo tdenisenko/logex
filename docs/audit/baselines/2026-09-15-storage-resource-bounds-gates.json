@@ -1,0 +1,208 @@
+{
+  "commit": "0cf9e9440867afc3f5d5d3eb837a9bc1e7803d9f",
+  "rustc": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+  "gates": [
+    {
+      "name": "vendor",
+      "command": [
+        "python3",
+        "tools/verify_datafusion_vendor.py"
+      ],
+      "exit_code": 0,
+      "started": "2026-09-14T22:15:11.222854+00:00",
+      "finished": "2026-09-14T22:15:11.294884+00:00",
+      "sha256": "d8d80949d6f3378c14456842b531f0cade514179e4c94781b95ff9abb6447675",
+      "log": "/private/tmp/logex-storage-resource-bounds-root-1/gates/vendor.log"
+    },
+    {
+      "name": "format",
+      "command": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "exit_code": 0,
+      "started": "2026-09-14T22:15:11.295333+00:00",
+      "finished": "2026-09-14T22:15:12.165173+00:00",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "log": "/private/tmp/logex-storage-resource-bounds-root-1/gates/format.log"
+    },
+    {
+      "name": "check",
+      "command": [
+        "cargo",
+        "check",
+        "--workspace",
+        "--all-targets",
+        "--locked",
+        "--offline",
+        "-j",
+        "2"
+      ],
+      "exit_code": 0,
+      "started": "2026-09-14T22:15:12.165793+00:00",
+      "finished": "2026-09-14T22:15:24.876478+00:00",
+      "sha256": "f50452a5b536e624441e478517686c94e2ad4e245a6e42cb606be892015481ac",
+      "log": "/private/tmp/logex-storage-resource-bounds-root-1/gates/check.log"
+    },
+    {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--locked",
+        "--offline",
+        "-j",
+        "2",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit_code": 0,
+      "started": "2026-09-14T22:15:24.877254+00:00",
+      "finished": "2026-09-14T22:15:38.072484+00:00",
+      "sha256": "8018e6169e9588048084865ea4dd5d6cf3062a5b0631fd06db0c8af306f19bcf",
+      "log": "/private/tmp/logex-storage-resource-bounds-root-1/gates/clippy.log"
+    },
+    {
+      "name": "test",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace",
+        "--all-targets",
+        "--locked",
+        "--offline",
+        "-j",
+        "2"
+      ],
+      "exit_code": 101,
+      "started": "2026-09-14T22:15:38.073209+00:00",
+      "finished": "2026-09-14T22:16:44.552565+00:00",
+      "sha256": "ca1be5a809a77ec627c99968341b95de916bdcc21ecd1b3c5ea6240a2a4e88a7",
+      "log": "/private/tmp/logex-storage-resource-bounds-root-1/gates/test.log"
+    },
+    {
+      "name": "test",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace",
+        "--all-targets",
+        "--locked",
+        "--offline",
+        "-j",
+        "2"
+      ],
+      "exit_code": 0,
+      "started": "2026-09-14T22:17:13.853690+00:00",
+      "finished": "2026-09-14T22:21:14.987455+00:00",
+      "sha256": "6125d37d8092505024d1ea1f0190c71b42c81fcce4728e101cde8aa787cb4d3c",
+      "log": "/private/tmp/logex-storage-resource-bounds-root-1/gates/test-retry-1.log"
+    },
+    {
+      "name": "doc",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace",
+        "--doc",
+        "--locked",
+        "--offline",
+        "-j",
+        "2"
+      ],
+      "exit_code": 0,
+      "started": "2026-09-14T22:21:14.989379+00:00",
+      "finished": "2026-09-14T22:21:30.193007+00:00",
+      "sha256": "75cd73bc40cee76dd7ead90d8104c80f629f532adcae281d1c4642569b6c3d89",
+      "log": "/private/tmp/logex-storage-resource-bounds-root-1/gates/doc.log"
+    },
+    {
+      "name": "release-query",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "logex-query",
+        "--all-targets",
+        "--release",
+        "--locked",
+        "--offline",
+        "-j",
+        "2"
+      ],
+      "exit_code": 0,
+      "started": "2026-09-14T22:21:30.193880+00:00",
+      "finished": "2026-09-14T22:31:00.919542+00:00",
+      "sha256": "2bb0c45bee550ffd2379f8c0aeeb248cac9f54b32290eed7fa71563a56553323",
+      "log": "/private/tmp/logex-storage-resource-bounds-root-1/gates/release-query.log"
+    },
+    {
+      "name": "release-consistency",
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "logex-server",
+        "--test",
+        "consistency",
+        "--release",
+        "--locked",
+        "--offline",
+        "-j",
+        "2"
+      ],
+      "exit_code": 0,
+      "started": "2026-09-14T22:31:00.925985+00:00",
+      "finished": "2026-09-14T22:33:10.544470+00:00",
+      "sha256": "a791693999ed129b18ad3146c432ed15e943796bc34855e84a275724d75e156c",
+      "log": "/private/tmp/logex-storage-resource-bounds-root-1/gates/release-consistency.log"
+    },
+    {
+      "name": "release-build",
+      "command": [
+        "cargo",
+        "build",
+        "-p",
+        "logex-node",
+        "--release",
+        "--locked",
+        "--offline",
+        "-j",
+        "2"
+      ],
+      "exit_code": 0,
+      "started": "2026-09-14T22:33:10.547937+00:00",
+      "finished": "2026-09-14T22:35:45.248158+00:00",
+      "sha256": "55a12ed633a204cbf52053b522a9dc0b43aff4b2c800457cfd982cb3da42488a",
+      "log": "/private/tmp/logex-storage-resource-bounds-root-1/gates/release-build.log"
+    }
+  ],
+  "test_totals": {
+    "test": {
+      "suites": 25,
+      "passed": 1198,
+      "failed": 0,
+      "ignored": 23
+    },
+    "release-query": {
+      "suites": 13,
+      "passed": 151,
+      "failed": 0,
+      "ignored": 9
+    },
+    "release-consistency": {
+      "suites": 1,
+      "passed": 2,
+      "failed": 0,
+      "ignored": 0
+    }
+  },
+  "initial_workspace_failure": "Sandbox denied existing localhost test listeners; same source passes after authorized execution with localhost access.",
+  "scope": "Correctness and build checks only; ignored benchmarks were not run. Documentation changed after the source commit without source modifications."
+}

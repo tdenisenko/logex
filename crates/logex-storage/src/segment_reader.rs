@@ -19,6 +19,7 @@ use crate::{
 #[cfg(test)]
 thread_local! {
     static AFTER_ARTIFACT_CAPTURE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    static BATCH_PAGE_READS: std::cell::RefCell<Option<Vec<(String, u64)>>> = const { std::cell::RefCell::new(None) };
 }
 
 #[derive(Debug, Clone)]
@@ -36,6 +37,157 @@ struct PageSelection {
     entry: PageIndexEntry,
     local_rows: Vec<usize>,
     output_positions: Vec<usize>,
+}
+
+enum BatchPayload<'a> {
+    Raw(RawBytesColumn),
+    Paged {
+        descriptor: &'a ColumnDescriptor,
+        entries: Vec<PageIndexEntry>,
+    },
+}
+
+enum BatchLengths<'a> {
+    Raw(RawFixedColumn<4>),
+    Paged {
+        descriptor: &'a ColumnDescriptor,
+        entries: Vec<PageIndexEntry>,
+        cached: Option<(PageIndexEntry, Vec<u32>)>,
+    },
+}
+
+impl BatchLengths<'_> {
+    fn row(&mut self, reader: &SegmentReader, row: u64) -> io::Result<u32> {
+        let missing = || io::Error::new(io::ErrorKind::InvalidData, "data length row is missing");
+        match self {
+            Self::Raw(column) => column
+                .values()
+                .get(usize::try_from(row).map_err(|_| missing())?)
+                .map(|bytes| u32::from_le_bytes(*bytes))
+                .ok_or_else(missing),
+            Self::Paged {
+                descriptor,
+                entries,
+                cached,
+            } => {
+                if !cached.as_ref().is_some_and(|(entry, _)| {
+                    row >= entry.first_row && row - entry.first_row < u64::from(entry.row_count)
+                }) {
+                    let index = entries.partition_point(|entry| {
+                        entry.first_row + u64::from(entry.row_count) <= row
+                    });
+                    let entry = *entries.get(index).ok_or_else(missing)?;
+                    if row < entry.first_row {
+                        return Err(missing());
+                    }
+                    let values = decode_u32_page(
+                        &reader.read_page_payload(descriptor, &entry)?,
+                        entry.row_count as usize,
+                        descriptor.codec,
+                    )?;
+                    *cached = Some((entry, values));
+                }
+                let (entry, values) = cached.as_ref().ok_or_else(missing)?;
+                values
+                    .get((row - entry.first_row) as usize)
+                    .copied()
+                    .ok_or_else(missing)
+            }
+        }
+    }
+}
+
+struct PreparedVarBytes<'a> {
+    payload: BatchPayload<'a>,
+    lengths: BatchLengths<'a>,
+}
+
+impl<'a> PreparedVarBytes<'a> {
+    fn new(reader: &'a SegmentReader) -> io::Result<Self> {
+        let payload = match reader.compacted_column("data") {
+            Some(descriptor) => BatchPayload::Paged {
+                descriptor,
+                entries: reader.read_compacted_page_index(descriptor, None)?,
+            },
+            None => {
+                let column = RawBytesColumn::from_bytes(
+                    &reader.dir.join("data.col"),
+                    reader.artifacts.read("data.col")?,
+                )?;
+                if (column.row_count() as u64) < reader.read_row_count()? {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "raw data does not cover the captured segment rows",
+                    ));
+                }
+                BatchPayload::Raw(column)
+            }
+        };
+        let lengths = match reader.compacted_column("data_len") {
+            Some(descriptor) => BatchLengths::Paged {
+                descriptor,
+                entries: reader.read_compacted_page_index(descriptor, None)?,
+                cached: None,
+            },
+            None => BatchLengths::Raw(reader.raw_fixed::<4>("data_len.col", None)?),
+        };
+        Ok(Self { payload, lengths })
+    }
+
+    fn next_batch(
+        &mut self,
+        reader: &SegmentReader,
+        remaining: &mut &[u32],
+    ) -> io::Result<Vec<Bytes>> {
+        let count;
+        let mut output = Vec::new();
+        match &self.payload {
+            BatchPayload::Raw(column) => {
+                count = remaining.len().min(crate::page::MAX_PAGE_ROWS as usize);
+                output.try_reserve_exact(count).map_err(io::Error::other)?;
+                for &row in &remaining[..count] {
+                    let bytes = column.row(row as usize)?;
+                    if bytes.len() != self.lengths.row(reader, u64::from(row))? as usize {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "data bytes differ from their row-length metadata",
+                        ));
+                    }
+                    output.push(Bytes::copy_from_slice(bytes));
+                }
+            }
+            BatchPayload::Paged {
+                descriptor,
+                entries,
+            } => {
+                let row = u64::from(remaining[0]);
+                let index = entries
+                    .partition_point(|entry| entry.first_row + u64::from(entry.row_count) <= row);
+                let entry = entries
+                    .get(index)
+                    .filter(|entry| entry.first_row <= row)
+                    .ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::InvalidData, "selected data page is missing")
+                    })?;
+                let end = entry.first_row + u64::from(entry.row_count);
+                count = remaining.partition_point(|&row| u64::from(row) < end);
+                let expected: Vec<u32> = (entry.first_row..end)
+                    .map(|row| self.lengths.row(reader, row))
+                    .collect::<io::Result<_>>()?;
+                let page = decode_var_bytes_page_bounded(
+                    &reader.read_page_payload(descriptor, entry)?,
+                    descriptor.codec,
+                    &expected,
+                )?;
+                output.try_reserve_exact(count).map_err(io::Error::other)?;
+                for &row in &remaining[..count] {
+                    output.push(page[(u64::from(row) - entry.first_row) as usize].clone());
+                }
+            }
+        }
+        *remaining = &remaining[count..];
+        Ok(output)
+    }
 }
 
 impl SegmentReader {
@@ -384,6 +536,52 @@ impl SegmentReader {
     pub fn read_var_bytes(&self, column: &str, row_ids: Option<&[u32]>) -> io::Result<Vec<Bytes>> {
         self.read_var_bytes_with_lengths(column, row_ids)
             .map(|(values, _)| values)
+    }
+
+    /// Read strictly increasing, unique selected data rows in bounded batches.
+    /// Raw columns are loaded once and copied in groups of at most 16,384 rows;
+    /// compacted columns yield one selected physical page per batch. Payload and
+    /// companion-length initialization is deferred until the first `next()`, so
+    /// callers can check cancellation before any batch's payload I/O. Raw file
+    /// buffers and page indexes remain owned until the iterator is dropped.
+    /// Preparation validates each complete captured page index; decoded data
+    /// pages are checked against every companion length, including unselected rows.
+    pub fn var_bytes_batches<'a>(
+        &'a self,
+        column: &str,
+        row_ids: &'a [u32],
+    ) -> io::Result<impl Iterator<Item = io::Result<Vec<Bytes>>> + 'a> {
+        let visible = self.read_row_count()?;
+        if column != "data"
+            || row_ids.windows(2).any(|pair| pair[0] >= pair[1])
+            || row_ids.last().is_some_and(|&row| u64::from(row) >= visible)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "data batches require increasing unique rows within the captured segment",
+            ));
+        }
+        let mut remaining = row_ids;
+        let mut prepared = None;
+        Ok(std::iter::from_fn(move || {
+            if remaining.is_empty() {
+                return None;
+            }
+            let result = (|| {
+                if prepared.is_none() {
+                    prepared = Some(PreparedVarBytes::new(self)?);
+                }
+                prepared
+                    .as_mut()
+                    .expect("initialized above")
+                    .next_batch(self, &mut remaining)
+            })();
+            if result.is_err() {
+                remaining = &[];
+                prepared = None;
+            }
+            Some(result)
+        }))
     }
 
     fn read_var_bytes_with_lengths(
@@ -983,6 +1181,12 @@ impl SegmentReader {
         descriptor: &ColumnDescriptor,
         entry: &PageIndexEntry,
     ) -> io::Result<Vec<u8>> {
+        #[cfg(test)]
+        BATCH_PAGE_READS.with_borrow_mut(|reads| {
+            if let Some(reads) = reads {
+                reads.push((descriptor.name.clone(), entry.first_row));
+            }
+        });
         let end = entry
             .offset
             .checked_add(u64::from(entry.encoded_len))
@@ -1299,12 +1503,35 @@ mod tests {
         fs::write(&length_path, lengths).unwrap();
 
         let corrupt = SegmentReader::open_projected(tmp.path(), &["data"]).unwrap();
+        assert!(
+            corrupt
+                .var_bytes_batches("data", &[0])
+                .unwrap()
+                .next()
+                .unwrap()
+                .is_err()
+        );
         for row_ids in [None, Some(&[1, 0, 1][..])] {
             assert_eq!(
                 corrupt.read_var_bytes("data", row_ids).unwrap_err().kind(),
                 io::ErrorKind::InvalidData
             );
         }
+        // A structurally valid shorter data file must not turn a selected
+        // prefix into success when the captured segment still contains 20 rows.
+        let shorter = TempDir::new().unwrap();
+        ColumnFile::write_batch(shorter.path(), &rows[..19]).unwrap();
+        fs::write(
+            tmp.path().join("data.col"),
+            fs::read(shorter.path().join("data.col")).unwrap(),
+        )
+        .unwrap();
+        let mut batches = corrupt.var_bytes_batches("data", &[2]).unwrap();
+        assert_eq!(
+            batches.next().unwrap().unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert!(batches.next().is_none());
     }
 
     #[test]
@@ -1314,12 +1541,19 @@ mod tests {
         ColumnFile::write_batch(tmp.path(), &original).unwrap();
         let captured = SegmentReader::open(tmp.path()).unwrap();
         let captured_namespace = captured.source_namespace().unwrap();
+        let batches = captured.var_bytes_batches("data", &[0, 19]).unwrap();
 
         let mut replacement = original.clone();
         replacement[0].block_number += 1_000;
+        replacement[0].data = bytes!("aabbcc");
+        replacement[0].data_len = 3;
         ColumnFile::write_batch(tmp.path(), &replacement).unwrap();
 
         assert_eq!(captured.read_log_rows(None).unwrap(), original);
+        assert_eq!(
+            batches.collect::<io::Result<Vec<_>>>().unwrap().concat(),
+            [original[0].data.clone(), original[19].data.clone()]
+        );
         let current = SegmentReader::open(tmp.path()).unwrap();
         assert_eq!(current.read_log_rows(None).unwrap(), replacement);
         assert_ne!(current.source_namespace().unwrap(), captured_namespace);
@@ -1988,6 +2222,17 @@ mod tests {
         )
         .unwrap();
 
+        let reader = SegmentReader::open_projected(&dir, &["data"]).unwrap();
+        assert_eq!(
+            reader
+                .var_bytes_batches("data", &[19])
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
         for row_ids in [None, Some(&[1, 0, 1][..]), Some(&[19][..])] {
             let reader = SegmentReader::open_projected(&dir, &["data"]).unwrap();
             let Err(error) = reader.read_var_bytes("data", row_ids) else {
@@ -2018,6 +2263,14 @@ mod tests {
         .unwrap();
 
         let reader = SegmentReader::open_projected(&dir, &["data"]).unwrap();
+        assert!(
+            reader
+                .var_bytes_batches("data", &[0])
+                .unwrap()
+                .next()
+                .unwrap()
+                .is_err()
+        );
         let Err(error) = reader.read_var_bytes("data", Some(&[0])) else {
             panic!("inconsistent page size must be rejected");
         };
@@ -2073,6 +2326,123 @@ mod tests {
             reader.read_var_bytes("data", Some(&ids)).unwrap(),
             ids.map(|row| values[row as usize].clone())
         );
+        BATCH_PAGE_READS.with_borrow_mut(|reads| *reads = Some(Vec::new()));
+        let sorted = [0, 8, 11, 19];
+        let batches = reader
+            .var_bytes_batches("data", &sorted)
+            .unwrap()
+            .collect::<io::Result<Vec<_>>>()
+            .unwrap();
+        let reads = BATCH_PAGE_READS.with_borrow_mut(Option::take).unwrap();
+        assert_eq!(batches.iter().map(Vec::len).collect::<Vec<_>>(), [2, 2]);
+        assert_eq!(
+            batches.concat(),
+            sorted.map(|row| values[row as usize].clone())
+        );
+        assert_eq!(
+            reads,
+            [
+                ("data_len".to_owned(), 0),
+                ("data_len".to_owned(), 7),
+                ("data".to_owned(), 0),
+                ("data_len".to_owned(), 13),
+                ("data".to_owned(), 11),
+            ]
+        );
+    }
+
+    #[test]
+    fn variable_batches_retain_raw_buffers_and_validate_selection() {
+        let tmp = TempDir::new().unwrap();
+        let rows = vec![make_rows()[0].clone(); crate::page::MAX_PAGE_ROWS as usize + 1];
+        ColumnFile::write_batch(tmp.path(), &rows).unwrap();
+        let reader = SegmentReader::open_projected(tmp.path(), &["data"]).unwrap();
+        assert!(
+            reader
+                .var_bytes_batches("data", &[])
+                .unwrap()
+                .next()
+                .is_none()
+        );
+        for ids in [&[1, 0][..], &[0, 0], &[rows.len() as u32]] {
+            assert_eq!(
+                reader.var_bytes_batches("data", ids).err().unwrap().kind(),
+                io::ErrorKind::InvalidInput
+            );
+        }
+        assert!(reader.var_bytes_batches("source", &[0]).is_err());
+        let ids: Vec<_> = (0..rows.len() as u32).collect();
+        let mut batches = reader.var_bytes_batches("data", &ids).unwrap();
+        let first = batches.next().unwrap().unwrap();
+        assert_eq!(
+            first,
+            vec![rows[0].data.clone(); crate::page::MAX_PAGE_ROWS as usize]
+        );
+        // Once prepared, later batches must use the validated retained buffers,
+        // even if the captured files are subsequently damaged in place.
+        fs::write(tmp.path().join("data.col"), []).unwrap();
+        fs::write(tmp.path().join("data_len.col"), []).unwrap();
+        assert_eq!(batches.next().unwrap().unwrap(), [rows[0].data.clone()]);
+        assert!(batches.next().is_none());
+        assert!(batches.next().is_none());
+    }
+
+    #[test]
+    fn variable_batches_initialize_lazily_and_stop_after_corruption() {
+        let (_tmp, dir) = compacted_fixture();
+        let reader = SegmentReader::open_projected(&dir, &["data"]).unwrap();
+        let mut batches = reader.var_bytes_batches("data", &[0, 19]).unwrap();
+        let descriptor = reader.compacted_column("data").unwrap();
+        fs::write(dir.join(&descriptor.data_path), []).unwrap();
+        assert!(batches.next().unwrap().is_err());
+        assert!(batches.next().is_none());
+        assert!(
+            reader
+                .var_bytes_batches("data", &[])
+                .unwrap()
+                .next()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn variable_batches_support_mixed_raw_and_paged_columns() {
+        for raw_name in ["data", "data_len"] {
+            let (_tmp, dir) = compacted_fixture();
+            let raw = TempDir::new().unwrap();
+            let rows = make_rows();
+            ColumnFile::write_batch(raw.path(), &rows).unwrap();
+            let mut manifest = load_manifest(&dir).unwrap().unwrap();
+            let descriptor = manifest
+                .columns
+                .iter_mut()
+                .find(|column| column.name == raw_name)
+                .unwrap();
+            descriptor.codec = crate::native::CompressionCodec::None;
+            descriptor.page_index_path = None;
+            descriptor.data_path = format!("{raw_name}.col");
+            fs::copy(
+                raw.path().join(&descriptor.data_path),
+                dir.join(&descriptor.data_path),
+            )
+            .unwrap();
+            fs::write(
+                dir.join("segment.json"),
+                serde_json::to_vec(&manifest).unwrap(),
+            )
+            .unwrap();
+            let reader = SegmentReader::open_projected(&dir, &["data"]).unwrap();
+            let ids = [0, 3, 19];
+            let batches = reader
+                .var_bytes_batches("data", &ids)
+                .unwrap()
+                .collect::<io::Result<Vec<_>>>()
+                .unwrap();
+            assert_eq!(
+                batches.concat(),
+                ids.map(|row| rows[row as usize].data.clone())
+            );
+        }
     }
 
     #[test]
@@ -2082,6 +2452,7 @@ mod tests {
         assert!(manifest.column_bundle.is_none());
         let data_reader = SegmentReader::open_projected(&dir, &["data"]).unwrap();
         let length_reader = SegmentReader::open_projected(&dir, &["data_len"]).unwrap();
+        let batches = data_reader.var_bytes_batches("data", &[0, 7, 19]).unwrap();
 
         for descriptor in manifest
             .columns
@@ -2106,6 +2477,10 @@ mod tests {
                 .read_u32("data_len", Some(&[19, 0, 7, 7]))
                 .unwrap(),
             vec![4; 4]
+        );
+        assert_eq!(
+            batches.collect::<io::Result<Vec<_>>>().unwrap().concat(),
+            vec![bytes!("deadbeef"); 3]
         );
         assert!(
             length_reader.read_var_bytes("data", Some(&[0])).is_err(),

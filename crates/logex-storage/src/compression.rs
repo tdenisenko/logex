@@ -477,7 +477,15 @@ pub(crate) fn lz4_decompress_bounded(data: &[u8], limit: usize) -> io::Result<Ve
             "decoded page exceeds its byte budget",
         ));
     }
-    lz4_decompress(data)
+    let mut output = Vec::new();
+    output.try_reserve_exact(size).map_err(io::Error::other)?;
+    // The enabled safe-decode implementation also initializes its output before
+    // decoding. Reserve fallibly while retaining the same bounded slice decoder.
+    output.resize(size, 0);
+    let actual = lz4_flex::block::decompress_into(&data[4..], &mut output)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    output.truncate(actual);
+    Ok(output)
 }
 
 // ---------------------------------------------------------------------------
@@ -836,6 +844,30 @@ mod tests {
         let compressed = lz4_compress(data);
         let decompressed = lz4_decompress(&compressed).unwrap();
         assert_eq!(decompressed, data);
+    }
+
+    #[test]
+    fn bounded_lz4_preserves_output_and_rejects_invalid_input() {
+        for data in [b"".as_slice(), b"record data record data record data"] {
+            let encoded = lz4_compress(data);
+            assert_eq!(lz4_decompress_bounded(&encoded, data.len()).unwrap(), data);
+            // The public helper treats the advertised size as capacity, so a
+            // larger size still returns only the bytes actually decoded.
+            let mut roomy = encoded.clone();
+            roomy[..4].copy_from_slice(&(data.len() as u32 + 1).to_le_bytes());
+            assert_eq!(
+                lz4_decompress_bounded(&roomy, data.len() + 1).unwrap(),
+                lz4_decompress(&roomy).unwrap()
+            );
+        }
+        let encoded = lz4_compress(b"record data");
+        for truncated in [&encoded[..3], &encoded[..4], &encoded[..encoded.len() - 1]] {
+            assert!(lz4_decompress_bounded(truncated, 11).is_err());
+        }
+        assert!(lz4_decompress_bounded(&encoded, 10).is_err());
+        let mut too_small = encoded;
+        too_small[..4].copy_from_slice(&10u32.to_le_bytes());
+        assert!(lz4_decompress_bounded(&too_small, 11).is_err());
     }
 
     #[test]

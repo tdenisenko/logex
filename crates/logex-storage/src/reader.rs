@@ -287,6 +287,15 @@ impl RawBytesColumn {
         self.row_count
     }
 
+    /// Validated little-endian offsets, excluding the final payload sentinel.
+    pub(crate) fn encoded_row_offsets(&self) -> &[u8] {
+        &self.data[ColumnFileHeader::SIZE..self.blob_start - 8]
+    }
+
+    pub(crate) fn payload(&self) -> &[u8] {
+        &self.data[self.blob_start..]
+    }
+
     pub(crate) fn row(&self, row: usize) -> io::Result<&[u8]> {
         if row >= self.row_count {
             return Err(io::Error::new(
