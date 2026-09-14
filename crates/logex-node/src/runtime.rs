@@ -32,6 +32,10 @@ use crate::background::{log_task_exit, run_background_indexer};
 use crate::checkpoint::{RECENT_CHECKPOINT_MAX_FINALIZED_EPOCH_LAG, resolve_checkpoint};
 
 const SYNC_ENGINE_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(120);
+// Fatal store failures allow the engine's 120-second grace plus 60 seconds
+// for shared cleanup. An independent thread enforces this even if startup,
+// filesystem calls or post-abort joins block application runtime workers.
+const CONSENSUS_STORAGE_FAILURE_CLEANUP_GRACE: Duration = Duration::from_secs(180);
 const LOW_DISK_SPACE_POLL_INTERVAL: Duration = Duration::from_secs(10);
 const LOW_DISK_SPACE_MIN_FREE_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 const SYNC_MODE_FILE_NAME: &str = "sync-mode.json";
@@ -470,6 +474,17 @@ pub async fn run_sync(options: RunSyncOptions) {
     let mut consensus_storage_failure = consensus
         .as_ref()
         .map(|store| store.subscribe_storage_failure());
+    let _consensus_storage_watchdog = consensus_storage_failure.as_ref().map(|receiver| {
+        start_consensus_storage_watchdog(
+            receiver.clone(),
+            CONSENSUS_STORAGE_FAILURE_CLEANUP_GRACE,
+            || std::process::exit(1),
+        )
+        .unwrap_or_else(|error| {
+            tracing::error!(%error, "failed to start consensus storage shutdown watchdog");
+            std::process::exit(1);
+        })
+    });
 
     let consensus_network_handle = consensus.as_ref().map(|consensus| {
         spawn_consensus_network(
@@ -685,6 +700,68 @@ async fn wait_for_consensus_storage_failure(
             // A closed channel without a failure is not a storage failure.
             return std::future::pending().await;
         }
+    }
+}
+
+struct ConsensusStorageWatchdog {
+    waiting_complete: Option<tokio::sync::oneshot::Sender<()>>,
+    deadline_complete: std::sync::mpsc::Sender<()>,
+}
+
+impl Drop for ConsensusStorageWatchdog {
+    fn drop(&mut self) {
+        if let Some(complete) = self.waiting_complete.take() {
+            let _ = complete.send(());
+        }
+        let _ = self.deadline_complete.send(());
+    }
+}
+
+fn start_consensus_storage_watchdog(
+    receiver: tokio::sync::watch::Receiver<Option<Arc<str>>>,
+    grace: Duration,
+    on_expiry: impl FnOnce() + Send + 'static,
+) -> std::io::Result<ConsensusStorageWatchdog> {
+    // Tokio watch has no blocking receiver API. This runtime belongs solely to
+    // the watchdog thread and only awaits notifications; it starts no workers.
+    let runtime = tokio::runtime::Builder::new_current_thread().build()?;
+    let (waiting_complete, mut waiting_done) = tokio::sync::oneshot::channel();
+    let (deadline_complete, deadline_done) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("consensus-storage-watchdog".to_owned())
+        .spawn(move || {
+            let mut receiver = Some(receiver);
+            let failed = runtime.block_on(async {
+                tokio::select! {
+                    biased;
+                    _ = &mut waiting_done => false,
+                    _ = wait_for_consensus_storage_failure(&mut receiver) => true,
+                }
+            });
+            if failed {
+                finish_consensus_storage_watchdog(deadline_done, grace, on_expiry);
+            }
+        })?;
+    // Dropping the guard wakes either notification wait without joining the
+    // thread. Normal shutdown never leaves a thread waiting for a future fault.
+    Ok(ConsensusStorageWatchdog {
+        waiting_complete: Some(waiting_complete),
+        deadline_complete,
+    })
+}
+
+fn finish_consensus_storage_watchdog(
+    completed: std::sync::mpsc::Receiver<()>,
+    grace: Duration,
+    on_expiry: impl FnOnce(),
+) {
+    if matches!(
+        completed.recv_timeout(grace),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+    ) {
+        // Do not acquire application locks or log before terminating: those
+        // facilities may be the reason orderly cleanup has not completed.
+        on_expiry();
     }
 }
 
@@ -1652,6 +1729,59 @@ fn free_space_bytes(_path: &Path) -> std::io::Result<u64> {
 mod tests {
     use super::*;
     use alloy_primitives::B256;
+
+    #[test]
+    fn consensus_storage_watchdog_expires_without_application_runtime() {
+        for initially_failed in [true, false] {
+            let message: Arc<str> = Arc::from("state write failed");
+            let (failure, receiver) =
+                tokio::sync::watch::channel(initially_failed.then(|| Arc::clone(&message)));
+            let (expired, observed) = std::sync::mpsc::channel();
+            let _watchdog =
+                start_consensus_storage_watchdog(receiver, Duration::from_millis(20), move || {
+                    expired.send(()).unwrap()
+                })
+                .unwrap();
+            if !initially_failed {
+                failure.send(Some(message)).unwrap();
+            }
+            // No Tokio application runtime exists in this test. The expiry
+            // callback reports through a channel instead of exiting a process.
+            observed.recv_timeout(Duration::from_secs(5)).unwrap();
+        }
+    }
+
+    #[test]
+    fn consensus_storage_watchdog_drop_releases_waiting_thread() {
+        let (_failure, receiver) = tokio::sync::watch::channel(None);
+        let (expired, observed) = std::sync::mpsc::channel();
+        let watchdog =
+            start_consensus_storage_watchdog(receiver, Duration::from_secs(30), move || {
+                expired.send(()).unwrap()
+            })
+            .unwrap();
+        drop(watchdog);
+        // Disconnection proves the worker released its callback without firing
+        // it or remaining blocked on the fault/grace period.
+        assert_eq!(
+            observed.recv_timeout(Duration::from_secs(5)),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected)
+        );
+    }
+
+    #[test]
+    fn consensus_storage_watchdog_deadline_is_disarmed_by_cleanup() {
+        for send_completion in [true, false] {
+            let (complete, completed) = std::sync::mpsc::channel();
+            if send_completion {
+                complete.send(()).unwrap();
+            }
+            drop(complete);
+            let expired = std::cell::Cell::new(false);
+            finish_consensus_storage_watchdog(completed, Duration::ZERO, || expired.set(true));
+            assert!(!expired.get());
+        }
+    }
 
     #[tokio::test]
     async fn consensus_storage_failure_waiter_observes_existing_latch() {
