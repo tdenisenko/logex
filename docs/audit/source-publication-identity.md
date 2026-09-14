@@ -21,8 +21,8 @@ The logical-prefix implementation at `b0650204` passes all nine local gates, inc
 tests. The [complete validation evidence](baselines/2026-09-14-source-identity-content-validation-1.json)
 retains the exact source, commands and logs, including the initial loopback
 permission failure and unchanged-source passing run with the required access.
-New-source performance validation, exact-head Linux/macOS CI, PR and merge remain
-pending. The earlier namespace measurements do not clear the new implementation.
+New-source performance is on HOLD after the fixed content diagnostic below.
+Exact-head Linux/macOS CI, PR and merge remain pending. The earlier namespace measurements do not clear the new implementation.
 A further journal-origin regression confirms a missing recovery check, described
 below. Its recovery-only correction now passes all nine local gates: 1,171
 workspace tests (23 ignored), 149 release query tests (nine ignored), two release
@@ -52,18 +52,41 @@ resolves its backing device with `df` and verifies the device, filesystem and
 mount identity independently. Both attempts and their exact tools are retained.
 No LogEx test failed in either attempt; none ran in the first attempt.
 The fixed cooldown completed in 600.008936449 seconds before the twelve-process
-diagnostic started. SSH then disconnected with “No route to host”; a read-only
-reconnect timed out, as did a second bounded read-only attempt. The
+diagnostic started. SSH disconnected during observation, then recovered. The
+original run completed without rerun: all 12 processes, 800 measurements and 12
+RSS records were collected and verified, including failed reconnects and the
+first mount attempt. Mac-mini was released at 2026-09-14 10:36:29 UTC after the
+read-only process check. The earlier
 [platform progress record](baselines/2026-09-14-source-identity-platform-progress-1.json)
-retains the corrected local tools and the status/hashes verified before the
-disconnect. The remote execution state and full raw logs are not yet collected.
-No benchmark rerun or host-release claim follows from this transport failure.
+remains an accurate record of what was known during the disconnect.
 No performance clearance follows from the correctness checks. The [platform preparation](baselines/2026-09-14-source-identity-platform-preparation-1.json)
 records the separate storage-test build, disposable-image recovery checks,
 bounded cooldown and evidence collection tools before those workloads execute.
 Preparation checks exposed two collector integration mistakes, both corrected
 before workload execution: terminal mount outcomes and nested sample result
 files now receive the appropriate handling. Earlier tool versions remain retained.
+
+## Completed content diagnostic: performance HOLD
+
+The [complete diagnostic evidence](baselines/2026-09-14-source-identity-content-diagnostic-result-1.json)
+retains every observation and all 20 metrics. Historical publication has pooled
+median/p95 changes of +43.44%/+35.55%; its two balanced pair medians are +43.25%
+and +42.29%. Sparse historical ingestion is +10.48%/+9.39% pooled. This is a
+material performance hold under the unchanged 10% limit. Live publication is
++4.35%/+1.08%; that result does not clear the other routes. Two pairs are diagnostic,
+not acceptance evidence. Independent raw-log arithmetic matches all 240 quantile
+values and 120 effects without filtering. The original analyzer's literal-path
+validation failure and its narrow placeholder-resolution correction are retained;
+no timing, statistic or schedule was changed.
+
+A separate local ARM64 profile retains its original 100 samples. The fixture and
+profiler succeeded, but the supervisor's reporting step raised `KeyError('route')`;
+a retained parser subsequently validated the original output. Commitment hashing
+accounts for 886/1,184 inclusive historical-ingest stack samples, with 653/886 in
+portable BLAKE3 compression. These overlapping CPU samples cannot quantify the
+Intel slowdown. They justify bounded investigation of encoding and resumable
+commitments, not a source-acceptance claim or a measured prototype improvement.
+Prior packet dispositions and the original fixtures remain unchanged.
 
 ## Confirmed failures
 
@@ -121,7 +144,7 @@ before-fix wrapper did not separately capture Cargo's exit code; the untouched
 test log reports four failures and four passing controls, with no inferred exit
 value. The before-fix production source is verified identical to `b0650204`.
 All four separate-mount tests and eight journal-origin cases also pass on the
-isolated Intel Mac-mini build. Corrected-source performance remains pending.
+isolated Intel Mac-mini build. Corrected-source performance is on HOLD after the diagnostic above.
 
 ## Logical-prefix commitment and compatibility
 
