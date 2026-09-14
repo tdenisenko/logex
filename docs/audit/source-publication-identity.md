@@ -3,8 +3,9 @@
 This batch follows merged PR #149 and is in progress. It binds derived indexes
 and recovery to the exact logical source prefix. The serial implementation is
 rejected on ingestion cost; its streaming replacement at `84ecac65` passes all
-nine local gates with the measured 64 KiB buffer choice.
-Corrected-source Intel performance, platform recovery, CI and merge remain open.
+nine local gates with the measured 64 KiB buffer choice. Its Intel commitment and
+APFS/ExFAT recovery controls pass. The fixed streaming diagnostic substantially
+reduces historical ingestion cost, but performance clearance, CI and merge remain open.
 The rest of the offline audit is also incomplete. Current formats and the
 replacement design are in [Logical-prefix commitment and compatibility](#logical-prefix-commitment-and-compatibility).
 
@@ -72,18 +73,67 @@ Preparation checks exposed two collector integration mistakes, both corrected
 before workload execution: terminal mount outcomes and nested sample result
 files now receive the appropriate handling. Earlier tool versions remain retained.
 
-The final streaming candidate `84ecac65` is now compiling in a fresh private
-Mac-mini child after its source archive and all transferred tools passed hash
-verification. The [streaming platform preparation](baselines/2026-09-14-source-identity-stream-platform-preparation-1.json)
-retains exact source packaging, tools and the unchanged twelve-process diagnostic
-schedule. Eight existing commitment oracle checks are planned on Intel, followed
-by four disposable APFS/ExFAT recovery tests and eight journal-origin cases.
-The collector now recognizes the additional correctness results and rejects
-partial output; eight local JSON checks cover that tool change. No Intel tests,
-new-candidate measurements or host-release claim is made at this checkpoint.
+The final streaming candidate `84ecac65` completed fresh release benchmark and
+storage-test builds in its private Mac-mini child. Eight existing commitment
+oracle checks passed on Intel, followed by four disposable APFS/ExFAT recovery
+tests and eight journal-origin cases. Exact emitted names and counts were
+independently verified; the image detached normally at 12:28:17 UTC. The
+[streaming platform preparation](baselines/2026-09-14-source-identity-stream-platform-preparation-1.json)
+retains the earlier preparation checkpoint: exact source packaging, tools and
+unchanged twelve-process schedule. Eight local JSON checks cover the collector's
+handling of the additional correctness results; those are separate from the
+20 executed storage controls.
 The first local packaging attempt stopped on Git tar permission-mode assumptions
 before transfer; an explicit tar umask corrected packaging, with source bytes
 unchanged and the original archive/failure retained.
+
+## Completed streaming diagnostic: clearance pending
+
+The [streaming diagnostic evidence](baselines/2026-09-14-source-identity-stream-diagnostic-result-1.json)
+retains the complete final-source platform and timing results. One fixed
+600.0034-second cooldown preceded the single comparison, which finished at
+12:48:36 UTC on September 14. All 12 processes, 800 timings, zero explicit warmups
+and 12 RSS records are complete. All 335 collected files pass byte verification.
+Independent raw-log arithmetic agrees with all 20 metrics, 240 quantiles and
+120 effects. No observations were excluded, replaced or pooled with earlier runs.
+Mac-mini was released at 12:50:03 UTC with no matching test processes; only the
+read-only reporter itself appeared in the filtered process inventory. Test files
+remain under the named private temporary root, and the important external volume
+was untouched.
+
+| Publication route | Pooled median change | Pooled p95 change | Two pair median changes |
+| --- | ---: | ---: | --- |
+| Live | -3.64% | -6.10% | -5.51%, -4.04% |
+| Historical | +7.07% | +8.34% | +7.88%, +6.43% |
+
+All 20 pooled median/p95 effects are below 10%, but this diagnostic does not
+grant acceptance. Historical publication's first pair p95 is +10.77%, compared
+with +1.93% in the opposite-order pair. Dense native filtering, COUNT and ordered
+queries also have substantial pair variation, including individual changes above
+10%. Historical publication's pooled median increased by 1.657 ms for the fixed
+15,360-row batch. The normal path adds one streaming logical-row commitment over
+new rows, retaining bounded continuation state, without new flushes or rereading
+old columns. This identifies additional work to investigate, not a measured
+causal decomposition of the 1.657 ms difference. The earlier serial implementation
+remains rejected; its +43.44% historical median is not an accepted tradeoff.
+
+The unchanged rules require investigation above 5% and hold clearance for
+unresolved effects at the 10% limit. Independent source review found no duplicate
+whole-prefix hash or demonstrated avoidable-cost defect requiring a new source
+change before confirmation. Host probes report CPU speed limits of 82–95%,
+including 92% initially and 87% finally; the cooldown did not establish an
+unthrottled host. Those observations cannot attribute a particular timing effect
+to throttling and are retained without exclusions.
+
+The engineering disposition is to prepare one separately frozen full comparison
+of the exact tested source against PR #149, with contemporary same-binary
+controls, balanced process order and all earlier observations retained separately.
+The proposed four-suite campaign covers 25 metrics and 50 median/p95 endpoints;
+the runner and independent checks must pass review before execution. Controls
+will not be subtracted from source effects, and neither favorable pooled values
+nor correctness gates override unresolved order, host or tail-latency uncertainty.
+No additional diagnostic pairs or favorable-result reruns are authorized by this
+disposition. Performance acceptance remains pending.
 
 ## Completed content diagnostic: performance HOLD
 
