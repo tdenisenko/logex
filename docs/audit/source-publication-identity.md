@@ -42,8 +42,23 @@ requirement. Existing user data remains untouched.
 
 The [superseded content build](baselines/2026-09-14-source-identity-superseded-content-build-1.json)
 finished successfully on Mac-mini without running workloads. Its exact source,
-compiler logs and artifact hashes are retained. Corrected `b6c4741c` is being
-built in a fresh private child. The [platform preparation](baselines/2026-09-14-source-identity-platform-preparation-1.json)
+compiler logs and artifact hashes are retained. Corrected `b6c4741c` completed
+both release benchmark and storage-test builds in a fresh private child. All four
+distinct-mount recovery tests and eight journal-origin cases then passed using
+new APFS directories and a disposable ExFAT image. The image detached normally
+at 2026-09-14 00:00:01 UTC. The first mount attempt stopped before image creation
+because `diskutil info` did not resolve a nested directory; the corrected harness
+resolves its backing device with `df` and verifies the device, filesystem and
+mount identity independently. Both attempts and their exact tools are retained.
+No LogEx test failed in either attempt; none ran in the first attempt.
+The fixed cooldown completed in 600.008936449 seconds before the twelve-process
+diagnostic started. SSH then disconnected with “No route to host”; a read-only
+reconnect timed out, as did a second bounded read-only attempt. The
+[platform progress record](baselines/2026-09-14-source-identity-platform-progress-1.json)
+retains the corrected local tools and the status/hashes verified before the
+disconnect. The remote execution state and full raw logs are not yet collected.
+No benchmark rerun or host-release claim follows from this transport failure.
+No performance clearance follows from the correctness checks. The [platform preparation](baselines/2026-09-14-source-identity-platform-preparation-1.json)
 records the separate storage-test build, disposable-image recovery checks,
 bounded cooldown and evidence collection tools before those workloads execute.
 Preparation checks exposed two collector integration mistakes, both corrected
@@ -105,7 +120,8 @@ and retire the transaction. All nine corrected-source gates pass. The original
 before-fix wrapper did not separately capture Cargo's exit code; the untouched
 test log reports four failures and four passing controls, with no inferred exit
 value. The before-fix production source is verified identical to `b0650204`.
-Corrected-source performance and separate-mount checks remain pending.
+All four separate-mount tests and eight journal-origin cases also pass on the
+isolated Intel Mac-mini build. Corrected-source performance remains pending.
 
 ## Logical-prefix commitment and compatibility
 
@@ -171,7 +187,8 @@ valid-copy control, append grouping and every row field, previous-prefix capture
 legacy index eligibility, and public query snapshot behavior. All nine local
 workspace/release gates also pass after the journal-origin correction.
 The 23 existing ignored workspace tests include
-four distinct-mount recovery tests still awaiting isolated execution. New-source
+four distinct-mount recovery tests, now passed separately on isolated APFS/ExFAT
+mounts. They remain ignored in ordinary workspace runs. New-source
 performance and CI remain pending; these changes are not yet accepted for
 deployment.
 

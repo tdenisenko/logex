@@ -1,0 +1,84 @@
+{
+  "archive": {
+    "bytes": 60634,
+    "decoded_bytes": 175258,
+    "files": 31,
+    "path": "2026-09-14-source-identity-platform-progress-1-raw.json.gz",
+    "sha256": "0a60a82b2238fbe9872a3537c905799c0382eb4e8a62df23049a80dd74af9e28"
+  },
+  "evidence_scope": "Exact local corrected harness/collector tools, read-only ingestion review, reconnect records and preparation scripts. Remote test/build/run logs are not yet collected; the full named remote tree remains the primary pending evidence.",
+  "limits": [
+    "Platform success was read and its log counts/hashes verified remotely before the transport failed; full raw logs remain pending retrieval.",
+    "SSH exit 255 establishes a transport failure, not whether the remote runner completed, failed or is still running.",
+    "No observation, failure or prior tool version is replaced or discarded; no benchmark rerun has occurred.",
+    "Local gates, filesystem recovery and performance acceptance are separate; CI, PR and merge remain pending."
+  ],
+  "mac_mini_released": false,
+  "next_steps": [
+    "Restore SSH access",
+    "Inspect the original diagnostic and process state without restarting it",
+    "Collect every complete or partial result",
+    "Verify owned-process cleanup",
+    "Report host availability",
+    "Analyze preserved measurements before deciding further work"
+  ],
+  "observed_progress": {
+    "benchmark_build": {
+      "audit_harness_sha256": "798e2bfe8ff201d33d618b4f5c431e4330aad25af145ec1f2cc6ad2471d5048f",
+      "finished": "2026-09-13T23:39:23.147929+00:00",
+      "ingestion_publication_sha256": "04677f39c1529915c83b3324b452115fa59e2c3b8be037b2fe17fc6dca1776e5",
+      "proof_sha256": "f90029d1bd68df1ccbc83e03918f8543f4a5a7b0ecdf91e47da19ea83da5ea04",
+      "status": "built_not_executed"
+    },
+    "cooldown": {
+      "elapsed_seconds": 600.0089364490001,
+      "finished": "2026-09-14T00:11:14.812139+00:00",
+      "inputs_sha256": "934079fa0e388166af623c6e4c48dff96f597681790236f175b7aaf225e0e46d",
+      "proof_sha256": "da4993919384c74a6e2f4cd30bc5f7ec6fdf28a9ba6ca1046581bf9463f4d866",
+      "status": "COMPLETE_FIXED_COOLDOWN_NO_ADMISSION_VERDICT"
+    },
+    "diagnostic": {
+      "actual_completion_state": "unknown_until_read_only_reconnect",
+      "inputs_sha256": "1cae25e8d80c7cf68f6970cc4cd0ee8d4d96fd8c38a8e077b1e9f8aa56ee3ee2",
+      "rerun": false,
+      "scheduled_processes": 12,
+      "scheduled_timings": 800,
+      "ssh_session_exit_code": 255,
+      "timings_collected": false
+    },
+    "first_mount_attempt": {
+      "image_created": false,
+      "reason": "diskutil info could not resolve the nested APFS test directory; no image creation or LogEx test ran",
+      "status": "FAILED_RETAINED",
+      "tests_executed": 0
+    },
+    "platform_build": {
+      "finished": "2026-09-13T23:42:45.146641+00:00",
+      "proof_sha256": "80f31de24d8be650e09b3f29c48cafb3e6c289cd1a000ed2e1284c3c36eba8f2",
+      "status": "built_not_executed",
+      "storage_test_binary_sha256": "3bb73a5825eb518245ae90b7e1dde301a6aa1ebe65b1f391a20164f6e30cc16a"
+    },
+    "remote_root": "/private/tmp/logex-audit-source-identity-quiet-20260913.YSSYXA/content-diagnostic-b6c4741c-20260914",
+    "rust_build_inventory": {
+      "files": 105,
+      "reverified_unchanged_locally_after_documentation_updates": true
+    },
+    "second_mount_attempt": {
+      "cleanup_errors": [],
+      "coverage": "Four existing distinct-mount recovery tests plus eight journal-origin cases. New private APFS directories and a fresh disposable 512 MiB ExFAT UDIF image only; existing external-volume contents untouched.",
+      "detached": true,
+      "failed_tests": 0,
+      "finished": "2026-09-14T00:00:01.145960+00:00",
+      "ignored_tests": 0,
+      "passed_tests": 12,
+      "proof_sha256": "eaf8931831c82b08203ccf767496b963af58c68671227d67740fc671da257850",
+      "started": "2026-09-13T23:58:23.457908+00:00",
+      "status": "COMPLETE_TESTS_AND_DETACH",
+      "test_invocations": 5
+    }
+  },
+  "performance_accepted": false,
+  "schema": 1,
+  "source_commit": "b6c4741cc77e5fa476f1c11cbbab8386b27b040e",
+  "status": "PLATFORM_TESTS_VERIFIED_DIAGNOSTIC_TRANSPORT_INTERRUPTED"
+}
