@@ -40,10 +40,11 @@ use rpc::RawRpcResponse;
 
 const CONSENSUS_STATE_DIR: &str = "cl";
 const CONSENSUS_STATE_FILE: &str = "consensus_state.json";
-// The full consensus-spec weak-subjectivity period is state-derived. Until LogEx
-// persists enough beacon state to compute it exactly, use the published mainnet
-// upper-bound reference window for Electra-style weak subjectivity protection.
-pub const CONSERVATIVE_WEAK_SUBJECTIVITY_FRESHNESS_EPOCHS: u64 = 3_532;
+/// Mainnet reference age limit for opening the consensus store. The Electra
+/// reference assumes at least 8,388,608 ETH of active balance; it is not a
+/// universal lower bound on the state-derived weak-subjectivity period.
+/// Node startup also applies its stricter 256-epoch checkpoint refresh policy.
+pub const MAINNET_WEAK_SUBJECTIVITY_MAX_AGE_EPOCHS: u64 = 3_532;
 
 #[derive(Debug, Error)]
 pub enum ConsensusStateError {
@@ -73,7 +74,7 @@ pub enum ConsensusStateError {
         requested_slot: Option<u64>,
     },
     #[error(
-        "persisted consensus trusted slot {trusted_slot} at epoch {trusted_epoch} is stale at current epoch {current_epoch}; it exceeds the conservative weak-subjectivity freshness window of {max_epochs} epochs. Start with a recent --checkpoint in a fresh data directory."
+        "persisted consensus trusted slot {trusted_slot} at epoch {trusted_epoch} is stale at current epoch {current_epoch}; it exceeds the mainnet reference age limit of {max_epochs} epochs. Start with a recent --checkpoint in a fresh data directory."
     )]
     StaleWeakSubjectivityCheckpoint {
         trusted_slot: u64,
@@ -536,7 +537,7 @@ fn ensure_snapshot_within_weak_subjectivity_period(
     match weak_subjectivity_staleness_for_epoch(
         snapshot,
         MAINNET_CONSENSUS_CHAIN_SPEC.wall_clock_epoch(),
-        CONSERVATIVE_WEAK_SUBJECTIVITY_FRESHNESS_EPOCHS,
+        MAINNET_WEAK_SUBJECTIVITY_MAX_AGE_EPOCHS,
     ) {
         Some(staleness) => Err(ConsensusStateError::StaleWeakSubjectivityCheckpoint {
             trusted_slot: staleness.trusted_slot,

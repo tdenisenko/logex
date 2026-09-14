@@ -1835,6 +1835,135 @@ mod tests {
     use blst::min_pk::SecretKey;
     use ssz::Encode;
 
+    // Independently derived with Python hashlib.sha256 from SSZ ForkData:
+    // version padded to 32 bytes || mainnet genesis_validators_root. These
+    // literals deliberately do not call the production fork/domain helpers.
+    // https://github.com/ethereum/consensus-specs/blob/v1.6.0/specs/phase0/beacon-chain.md#compute_domain
+    const MAINNET_SYNC_DOMAINS: [B256; 5] = [
+        alloy_primitives::b256!("070000004a26c58b08add8089b75caa540848881a8d4f0af0be83417a85c0f45"),
+        alloy_primitives::b256!("07000000bba4da96354c9f25476cf1bc69bf583a7f9e0af049305b62de676640"),
+        alloy_primitives::b256!("070000006a95a1a967855d676d48be69883b712607f952d5198d0f5677564636"),
+        alloy_primitives::b256!("07000000ad532ceb9ec5d246daad29da8aa157bfdab35e5f069f9db81f1da754"),
+        alloy_primitives::b256!("0700000082fae541f8a3db43adb5e7997ac5f562cf682ce6bc41b8ec28ba1a07"),
+    ];
+
+    #[test]
+    fn sync_signature_domains_match_independent_mainnet_fork_boundaries() {
+        // The signature domain uses signature_slot - 1, including when the
+        // first signature slot of a fork is also a committee-period boundary.
+        // https://github.com/ethereum/consensus-specs/blob/v1.6.0/specs/altair/light-client/sync-protocol.md#validate_light_client_update
+        for (index, epoch) in [194_048u64, 269_568, 364_032, 411_392]
+            .into_iter()
+            .enumerate()
+        {
+            let slot = epoch * 32;
+            for signature_slot in [slot - 1, slot] {
+                assert_eq!(
+                    compute_sync_committee_domain(signature_slot),
+                    MAINNET_SYNC_DOMAINS[index].0,
+                    "signature slot {signature_slot}"
+                );
+            }
+            assert_eq!(
+                compute_sync_committee_domain(slot + 1),
+                MAINNET_SYNC_DOMAINS[index + 1].0,
+                "signature slot {}",
+                slot + 1
+            );
+        }
+
+        // Blob-parameter-only forks change networking digests, not BLS domains.
+        for epoch in [412_672u64, 419_072] {
+            let slot = epoch * 32;
+            for signature_slot in [slot - 1, slot, slot + 1] {
+                assert_eq!(
+                    compute_sync_committee_domain(signature_slot),
+                    MAINNET_SYNC_DOMAINS[4].0,
+                    "BPO signature slot {signature_slot}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn signed_updates_require_independent_fork_boundary_domains() {
+        for (epoch, old_domain, new_domain) in [
+            (269_568u64, MAINNET_SYNC_DOMAINS[1], MAINNET_SYNC_DOMAINS[2]),
+            (364_032u64, MAINNET_SYNC_DOMAINS[2], MAINNET_SYNC_DOMAINS[3]),
+        ] {
+            let fork_slot = epoch * 32;
+            let (checkpoint, bootstrap, sk) = bootstrap_payload(fork_slot - 2);
+            let (_, mut store) = verify_bootstrap_payload(&bootstrap, checkpoint).unwrap();
+            // Both activations also start a new committee period. Model an
+            // already learned next committee so these cases isolate domains.
+            store.next_sync_committee = Some(store.current_sync_committee.clone());
+            let original_store = store.clone();
+            for (signature_slot, expected_domain, wrong_domain) in [
+                (fork_slot, old_domain, new_domain),
+                (fork_slot + 1, new_domain, old_domain),
+            ] {
+                let attested_slot = signature_slot - 1;
+                let mut execution = deneb_execution(19_000_010, 0x44);
+                let roots = if attested_slot < 269_568 * 32 {
+                    execution.blob_gas_used = 0;
+                    execution.excess_blob_gas = 0;
+                    execution_payload_header_deneb_field_roots(&execution)[..15].to_vec()
+                } else {
+                    execution_payload_header_deneb_field_roots(&execution).to_vec()
+                };
+                let execution_siblings = [B256::repeat_byte(0xc1); EXECUTION_BRANCH_DEPTH];
+                let attested_header = LightClientHeaderDeneb {
+                    beacon: beacon_header(
+                        attested_slot,
+                        B256::repeat_byte(0xdd),
+                        branch_root(container_root_from_roots(&roots), &execution_siblings, 9),
+                        0x33,
+                    ),
+                    execution,
+                    execution_branch: FixedBytes::from_slice(
+                        &execution_siblings
+                            .iter()
+                            .flat_map(|root| root.as_slice().iter().copied())
+                            .collect::<Vec<_>>(),
+                    ),
+                };
+                let payload_with_domain = |domain: B256| {
+                    // SigningData has two roots, so its SSZ root is SHA-256
+                    // of their concatenation. Never use the production domain
+                    // or signing-root helper to choose the expected signature.
+                    let mut hasher = Sha256::new();
+                    hasher.update(beacon_block_header_root(&attested_header.beacon));
+                    hasher.update(domain);
+                    let signature = sk.sign(
+                        &hasher.finalize(),
+                        b"BLS_SIG_BLS12381G2_XMD:SHA-256_SSWU_RO_POP_",
+                        &[],
+                    );
+                    let mut bits = [0u8; SYNC_COMMITTEE_BITS_BYTES];
+                    bits[0] = 1;
+                    LightClientOptimisticUpdateDeneb {
+                        attested_header: attested_header.clone(),
+                        sync_aggregate: SyncAggregateRaw {
+                            sync_committee_bits: FixedBytes::from(bits),
+                            sync_committee_signature: FixedBytes::from_slice(&signature.compress()),
+                        },
+                        signature_slot,
+                    }
+                    .as_ssz_bytes()
+                };
+                let (_, next_store, _) =
+                    apply_optimistic_update_payload(&payload_with_domain(expected_domain), &store)
+                        .unwrap();
+                assert_eq!(next_store.optimistic_header.beacon.slot, attested_slot);
+                assert!(matches!(
+                    apply_optimistic_update_payload(&payload_with_domain(wrong_domain), &store),
+                    Err(LightClientVerificationError::InvalidSyncCommitteeSignature)
+                ));
+                assert_eq!(store, original_store);
+            }
+        }
+    }
+
     fn fixed<const N: usize>(byte: u8) -> FixedBytes<N> {
         FixedBytes::from_slice(&vec![byte; N])
     }
