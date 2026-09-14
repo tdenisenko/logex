@@ -1,0 +1,83 @@
+{
+  "schema": "logex-stream-intel-profile-v1",
+  "disposition": "ATTRIBUTION_ONLY_PERFORMANCE_HOLD",
+  "acceptance_granted": false,
+  "profiled_candidate": "84ecac65488f858c4e9d4c4294b0b5c7f68e80b2",
+  "baseline": "9c0a58fc64fac3da7f5a50b3a20b7ab729f029e9",
+  "archive": {
+    "status": "EVERY_DECODED_BYTE_VERIFIED",
+    "archive": {
+      "source": "/Users/tdenisenko/code/logex/docs/audit/baselines/2026-09-14-source-identity-stream-intel-profile-1-raw.jsonl.gz",
+      "bytes": 5113209,
+      "sha256": "cfb9053191ab70c914b49ad43f1d3fd1a9bf9c2d46fb91627d7a875e799f8531"
+    },
+    "files": 111,
+    "payload_bytes": 35276659,
+    "uncompressed_jsonl_bytes": 37719445,
+    "profile_tar_members_verified": 64,
+    "exclusions": [
+      {
+        "source": "/private/tmp/logex-source-identity-stream-intel-profile-collected-1/evidence.tar",
+        "bytes": 31313920,
+        "sha256": "789cc4f94fd038333db6bab2e6ca763d41c678ae72327a3375c731ffd990ca39",
+        "reason": "Redundant container; all safe regular members independently byte-compared with included unpacked files. Original tar retained intact."
+      }
+    ]
+  },
+  "profile_execution": {
+    "historical_fixture_samples_per_source": 30,
+    "sources": 2,
+    "fixture_oracles": "passed",
+    "fixture_returncodes": [
+      0,
+      0
+    ],
+    "sampler_returncodes": [
+      0,
+      0
+    ],
+    "outer_driver_returncode": 0,
+    "source_proofs": "unchanged; complete pinned artifact/source inputs and invocation sources retained",
+    "released": "2026-09-14T14:21:45.557072UTC"
+  },
+  "stack_attribution": {
+    "historical_ingest": {
+      "candidate": 395,
+      "baseline": 316
+    },
+    "finalize_including_checkpoint": {
+      "candidate": 284,
+      "baseline": 294
+    },
+    "candidate_commitment_extend": {
+      "total": 79,
+      "hash": 43,
+      "avx2": 37,
+      "sse41": 6,
+      "copy": 24,
+      "self": 12
+    },
+    "interpretation": "Sampled thread-stack occupancy, including waits, not exclusive cycles, wall regression percentages or a speedup bound. Independent process exposures differ. Not all copy samples are fixed scalar fields."
+  },
+  "assembly": "Complete collected disassembly.stdout.log and exact PrefixState::extend/StreamState::update excerpts retained. Repeated dynamic memcpy in generic RowBuffer spill loop plus sampled offsets justify a bounded small-copy fast path. Active AVX2 contradicts portable-only hashing hypothesis.",
+  "analysis_history": "First local parser attempt produced no output files; its failure/invocation metadata retained in invocation-sources, with corrected attribution-2. No profile/sample rerun or replacement. Empty attribution-1 directory has no file records. Independent parse/review retained separately.",
+  "provisional_change": {
+    "source_wrapper_sha256": "db946ce67759e369efdd57947b9b4c92632d405d3e0eab9245fe3b12a036b4b5",
+    "description": "Root-authored16-line contiguous-fit fast path plus28-line boundary regression, preserving transcript/state and spill behavior. Exact wrapper snapshot included.",
+    "checks": "fmt and9focused commitment tests pass, source hash unchanged.",
+    "limits": "Provisional unmeasured candidate; these focused checks and parent profile do not establish end-to-end improvement or performance acceptance."
+  },
+  "raw_references": {
+    "profiles_and_oracles": "collected/unpacked/profiles-1/",
+    "full_assembly": "collected/unpacked/disassembly.stdout.log",
+    "invocation_failure_release": "collected/invocation-sources/",
+    "corrected_analysis": "collected/attribution-2/",
+    "independent_review": "independent-review/review.md",
+    "provisional_source": "provisional/focused-commitment.rs",
+    "focused_checks": "focused/",
+    "manifest": "packaging/manifest.json",
+    "packager": "packaging/package.py"
+  },
+  "preservation": "All63collected sourcefiles plus manifest (64tar members) byte-verified. Every111archive record decoded against originals. Redundant originaltar excluded with exact hash/size; tiny inspection/transfer archives retained. No observed samples omitted.",
+  "scope": "Performance HOLD remains unchanged. No acceptance rerun, source edits, tests, Cargo or remote actions by evidence packager. Root owns subsequent implementation/measurement decisions."
+}

@@ -179,7 +179,23 @@ struct RowBuffer<'a> {
 }
 
 impl RowBuffer<'_> {
-    fn put(&mut self, mut value: &[u8]) -> io::Result<()> {
+    #[inline]
+    fn put(&mut self, value: &[u8]) -> io::Result<()> {
+        // Most fields fit without reaching a flush boundary. Keep that copy
+        // separate so fixed-size fields compile to fixed-size stores instead
+        // of the variable-length copies needed when a field spans buffers.
+        if value.len() < self.bytes.len() - self.len {
+            let end = self.len + value.len();
+            self.bytes[self.len..end].copy_from_slice(value);
+            self.len = end;
+            Ok(())
+        } else {
+            self.put_across_boundary(value)
+        }
+    }
+
+    #[inline(never)]
+    fn put_across_boundary(&mut self, mut value: &[u8]) -> io::Result<()> {
         while !value.is_empty() {
             let count = value.len().min(self.bytes.len() - self.len);
             self.bytes[self.len..self.len + count].copy_from_slice(&value[..count]);
@@ -336,6 +352,32 @@ mod tests {
         state.validate([1; 16], 1, state.commitment()).unwrap();
         assert!(state.validate([2; 16], 1, state.commitment()).is_err());
         assert!(state.validate([1; 16], 2, state.commitment()).is_err());
+    }
+
+    #[test]
+    fn buffered_bytes_match_flat_hash_across_flush_boundaries() {
+        let bytes: Vec<u8> = (0..2 * 64 * 1024 + 1).map(|i| (i % 251) as u8).collect();
+        for prefix_len in [0, 1, 1024] {
+            for first_len in [0, 1, 32, 1024, 65535, 65536, 65537, 131073] {
+                let mut stream = StreamState::new();
+                stream.update(&bytes[..prefix_len]).unwrap();
+                let mut flat = blake3::Hasher::new();
+                flat.update(&bytes[..prefix_len]);
+                let mut buffered = RowBuffer {
+                    stream: &mut stream,
+                    bytes: [0; 64 * 1024],
+                    len: 0,
+                };
+                // Cover empty input, exact fills, split fields and inputs that
+                // span several buffers, followed by ordinary small fields.
+                for len in [first_len, 0, 1, 4, 8, 20, 32, 65536, 131073, 0, 1] {
+                    buffered.put(&bytes[..len]).unwrap();
+                    flat.update(&bytes[..len]);
+                }
+                buffered.finish().unwrap();
+                assert_eq!(stream.digest().as_slice(), flat.finalize().as_bytes());
+            }
+        }
     }
 
     #[test]

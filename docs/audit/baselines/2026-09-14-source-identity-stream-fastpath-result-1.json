@@ -1,0 +1,77 @@
+{
+  "schema": "logex-stream-fastpath-result-v1",
+  "disposition": "COMPONENT_IMPROVEMENT_PERFORMANCE_HOLD",
+  "acceptance_granted": false,
+  "candidate_wrapper_sha256": "db946ce67759e369efdd57947b9b4c92632d405d3e0eab9245fe3b12a036b4b5",
+  "archive": {
+    "status": "EVERY_DECODED_BYTE_VERIFIED",
+    "archive": {
+      "source": "/Users/tdenisenko/code/logex/docs/audit/baselines/2026-09-14-source-identity-stream-fastpath-result-1-raw.jsonl.gz",
+      "bytes": 206126,
+      "sha256": "fe55398522825a7fa70af0b54f373c0803a87319db375f444752139673fd091c"
+    },
+    "files": 90,
+    "payload_bytes": 883365,
+    "uncompressed_jsonl_bytes": 944318,
+    "exclusions": [
+      {
+        "path": "/private/tmp/logex-source-identity-stream-fastpath-component-run-1/target",
+        "reason": "Recreated source/dependency/target tree; exact donor inventories, source additions, inputs and command/artifact proofs retained. No observations omitted."
+      },
+      {
+        "path": "/private/tmp/logex-source-identity-stream-fastpath-component-run-1/source",
+        "reason": "Recreated source/dependency/target tree; exact donor inventories, source additions, inputs and command/artifact proofs retained. No observations omitted."
+      },
+      {
+        "source": "/private/tmp/logex-source-identity-stream-fastpath-component-run-1/build/retained-binaries/row_buffer_fastpath_cost",
+        "bytes": 3503968,
+        "sha256": "156ca868ee0c84620bd2f99d1dd193be868430c5b3f25f17278185987ae0f5bf",
+        "reason": "Compiled executable omitted; exact hash/size and build/run proof retained, original intact."
+      }
+    ]
+  },
+  "component": {
+    "host": "local ARM64",
+    "samples": 48,
+    "fixture_passes": 384,
+    "explicit_warmups": 2,
+    "rows_per_fixture": 15360,
+    "old64_median_ms": 4.0371406875,
+    "fastpath_median_ms": 3.4418099375,
+    "paired_median_effect_percent": -14.6980919,
+    "pairs_faster": 23,
+    "pairs_total": 24,
+    "adverse_pair_percent": 2.4880428,
+    "controls": "Passing fixture reports448boundary/state cases and11grouping/reload splits per namespace. Complete exact emitted controls/oracle retained.",
+    "method": "Unchanged frozen schedule; all observations retained, no reruns or exclusions. Construction/finalization/drop included; no storage writes."
+  },
+  "independent_review": "All48rawsamples/384passes/2warmups, every summary and24pair effects independently recomputed without analyzer import; original hashes unchanged. Supports a separately frozen smallIntel end-to-end diagnostic, not acceptance or repeating ARM run.",
+  "validation": {
+    "fmt": "passed",
+    "focused_commitment_tests": 9,
+    "strict_storage_clippy": "passed",
+    "storage_tests_passed": 305,
+    "storage_ignored": 5,
+    "source_hash_before_after": "db946ce67759e369efdd57947b9b4c92632d405d3e0eab9245fe3b12a036b4b5"
+  },
+  "prior_profile_reference": "2026-09-14-source-identity-stream-intel-profile-1.json",
+  "prior_full_failure_reference": "2026-09-14-source-identity-stream-acceptance-result-1.json",
+  "limitations": [
+    "ARM component0.5953ms saving cannot be subtracted from priorIntel27.0001ms or assumed to close its1.4740ms minimum point gap.",
+    "The full16.352%historical median failure and unresolved query/tail bounds remain. No sync acceptance, threshold waiver, unchanged-candidate rerun or automatic fullcampaign.",
+    "Exact candidate source/build/features must be frozen before any Intel diagnostic. Root owns subsequent execution authorization.",
+    "Original recreation source/target and executable retained but excluded from compact archive with inventories/proofs/executable hash; no observations omitted."
+  ],
+  "raw_references": {
+    "preparation_sources_oracle_schedule": "preparation/",
+    "all_run_data": "component/run/",
+    "build_donor_source_proof": "component/build/",
+    "authorizations": "authorizations/",
+    "focused": "focused/",
+    "storage": "storage-validation/",
+    "independent_review": "independent-review/review.md",
+    "manifest": "packaging/manifest.json",
+    "packager": "packaging/package.py"
+  },
+  "operations": "Evidence/docs checkpoint only; no source edits, Cargo, remote actions or new measurements. External volume untouched; host free. No PR/merge while performance unresolved."
+}

@@ -160,6 +160,41 @@ subtree dispatch, bounded state work and publication costs; these are hypotheses
 not measured explanations. Any later profile is separate from acceptance samples.
 The full offline audit, relevant validation, CI and PR/merge remain incomplete.
 
+### Intel attribution and provisional fast-copy change
+
+The [bounded Intel profile](baselines/2026-09-14-source-identity-stream-intel-profile-1.json)
+retains 30 historical fixture samples for each unchanged baseline/candidate,
+passing row oracles and zero fixture, sampler and outer-driver exits. Source
+proofs are unchanged. The first local parser failure and corrected analysis are
+both retained; no workload was rerun. Mac-mini was released at
+2026-09-14 14:21:45.557072 UTC.
+
+Ingestion stack observations are 395 candidate versus 316 baseline; finalization
+including checkpoint is 284 versus 294. Candidate commitment extension has 79
+observations: 43 hashing (37 AVX2, six SSE4.1), 24 copying and 12 self. These include
+thread waits and are not wall-regression percentages. Exact assembly shows
+repeated dynamic copies in the generic row-buffer loop, supporting a bounded
+small-field fast path; it does not establish the recoverable time or a speedup.
+
+The same-format change keeps the spill behavior and adds a contiguous-copy fast
+path for small fields. Wrapper `db946ce6` passes formatting, nine focused tests,
+strict storage Clippy and 305 storage tests (five ignored). The
+[complete component and validation evidence](baselines/2026-09-14-source-identity-stream-fastpath-result-1.json)
+retains exact source, donor inventories, commands, authorizations and all results.
+
+The fixed ARM64 component run retains all 48 samples, 384 fixture passes and two
+warmups. Median cost falls from 4.03714 to 3.44181 ms per 15,360 rows; paired median
+effect is −14.6981%. Twenty-three of 24 pairs improve; the +2.4880% adverse pair
+remains included. Independent raw arithmetic reproduces every summary and pair.
+Passing boundary/state and grouping/reload controls preserve transcript identity.
+
+This is measured component improvement, not sync acceptance. The ARM saving cannot
+be subtracted from the Intel full-comparison regression or assumed to close its
+margin. The next justified step is one separately frozen small Intel diagnostic
+of the changed source, with unchanged fixtures and exact build proof. Performance
+HOLD, prior failed endpoints and all observations remain; no PR/merge or automatic
+full campaign follows from this result.
+
 ## Completed content diagnostic: performance HOLD
 
 The [complete diagnostic evidence](baselines/2026-09-14-source-identity-content-diagnostic-result-1.json)
