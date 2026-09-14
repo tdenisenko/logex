@@ -42,7 +42,7 @@ use roaring::RoaringBitmap;
 use serde_json::{Map, Value};
 
 use logex_storage::native::{NativeLogFilter, TopicConstraint};
-use logex_storage::{MAX_PAGE_ROWS, PartitionManager, SegmentReader};
+use logex_storage::{PartitionManager, SegmentReader};
 
 use crate::json::{record_batches_to_json, unique_names};
 use crate::lexer::{Token, tokenize};
@@ -2037,11 +2037,13 @@ fn scan_native_data_sum_partition(
         let states = groups
             .entry(None)
             .or_insert_with(|| initial_native_sum_states(&scan.sum_inputs));
-        // Match the storage page-row bound so dense scans decode each page once
-        // without retaining every payload in the segment at once.
-        for row_ids in row_ids.chunks(MAX_PAGE_ROWS as usize) {
+        let mut batches = reader.var_bytes_batches("data", &row_ids)?;
+        loop {
             check_query_canceled(scan.cancel_check.as_ref())?;
-            for value in reader.read_var_bytes("data", Some(row_ids))? {
+            let Some(values) = batches.next() else {
+                break;
+            };
+            for value in values? {
                 let value = BigInt::from(BigUint::from_bytes_be(value.as_ref()));
                 for state in states.iter_mut() {
                     state.sum += value.clone();
@@ -5292,6 +5294,8 @@ mod tests {
 
     use super::*;
 
+    const BATCHED_SUM_TEST_ROWS: usize = 16_385;
+
     #[tokio::test]
     async fn datafusion_arithmetic_returns_exact_decimal_values() {
         let (_tmp, storage) = setup_storage();
@@ -5496,7 +5500,7 @@ mod tests {
             data_len: 1,
             ..make_test_rows().remove(0)
         };
-        let rows = (0..=MAX_PAGE_ROWS as usize)
+        let rows = (0..BATCHED_SUM_TEST_ROWS)
             .map(|index| LogRow {
                 block_number: index as u64,
                 log_index: index as u32,
@@ -5755,9 +5759,9 @@ mod tests {
 
         assert_eq!(
             result.rows,
-            vec![serde_json::json!({"total": (MAX_PAGE_ROWS + 1).to_string()})]
+            vec![serde_json::json!({"total": BATCHED_SUM_TEST_ROWS.to_string()})]
         );
-        assert_eq!(result.total_scanned, u64::from(MAX_PAGE_ROWS + 1));
+        assert_eq!(result.total_scanned, BATCHED_SUM_TEST_ROWS as u64);
     }
 
     #[test]
@@ -5766,7 +5770,7 @@ mod tests {
         let checks = Arc::new(AtomicU64::new(0));
         let cancel_checks = Arc::clone(&checks);
         let scan = NativeDataSumPartitionScan {
-            visible_rows: u64::from(MAX_PAGE_ROWS + 1),
+            visible_rows: BATCHED_SUM_TEST_ROWS as u64,
             candidate_filters: vec![NativeLogFilter::default()],
             selection: None,
             cases: Arc::new(PreparedSqlExpressions::empty()),
