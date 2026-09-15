@@ -1,0 +1,240 @@
+{
+  "status": "All seven local gates and final independent review pass; PR/CI/merge pending",
+  "branch": "audit/execution-response-attribution",
+  "base": "9912844170251f26b6a54752fdaa4f3c329aab9d",
+  "source_sha256": {
+    "crates/logex-sync/src/p2p/peer_manager/requests.rs": "60613fb2ac67ecc4aa0730a689f9117fcfe041234486e79f4042196dffbd1ea8",
+    "crates/logex-sync/src/engine/live.rs": "6ca997f0527ded5802b19a276d7c2850f9443cad8612ae97428181c36422d75f",
+    "crates/logex-sync/src/engine/historical.rs": "f72586fc19e0d50defcd2f67d817def726d93585bfa0aa896db1d80607e8e261",
+    "crates/logex-sync/src/engine/anchored.rs": "6bc24149e6e1e4aa8a717220a2e2e5e9018f5669e458896678261ea0c0831f5e",
+    "crates/logex-sync/src/validation.rs": "13ee33b67364deef2d7195cea8ca8dfe3b7de1295c1c11281a7b2939074b5fd6"
+  },
+  "findings": {
+    "B4-12": {
+      "severity": "medium",
+      "effect": "An unvalidated body count can cause unsupported receipt-peer protocol penalties or receipt-role quarantine",
+      "disposition": "Remove unverified count hints; retain source pairing and established body-first content validation before ingestion"
+    }
+  },
+  "evidence_directory": "/private/tmp/logex-execution-response-attribution-kfydwarx",
+  "evidence": {
+    "receipt-plan-design.json": {
+      "sha256": "bd8c8247d860822b7e9d9c91a442e6f58945a6afbc7e74e027a0a79848487770",
+      "bytes": 5412
+    },
+    "receipt-attribution-review.json": {
+      "sha256": "97158002057ca8b1f11a5b3a5321b1e0838fc4f67f14a0d405cbfcbf3044ca61",
+      "bytes": 6539
+    },
+    "engine-review.json": {
+      "sha256": "2b55c2a5dac26ec18a868f085ee872da89547a14cbfa21a5cfc40e0e3094934b",
+      "bytes": 2531
+    },
+    "consumer-review.json": {
+      "sha256": "305c9aa2d5d41e538fb58ba509810d13246e776574abed746a4614b89f8b890e",
+      "bytes": 1259
+    },
+    "request-implementation.json": {
+      "sha256": "13d73bbce8410f2431fa2bfad71494fc45564bec10ec79b832269c75c9badf4c",
+      "bytes": 1929
+    },
+    "final-review.json": {
+      "sha256": "3957477f5e89bbaff23a72d4ec19964fa218e5f87ae5271803042e6e53b89ccf",
+      "bytes": 4604
+    },
+    "original-count-controls.json": {
+      "sha256": "7615809349ad798a021ed73b5c0a6b9465548f2d196de6fd19114aefa52e8812",
+      "bytes": 707
+    },
+    "original-count-controls.log": {
+      "sha256": "0ce324d20e1a32165466815118e11627b4420f4cf5c4488dd63abf4285427e9e",
+      "bytes": 2214
+    },
+    "original-count-module.rs": {
+      "sha256": "e7eaf580f79c50c0a96d84fb59d1fb908b34883d9a182b375b0ef9e7e5b270ac",
+      "bytes": 2916
+    },
+    "sync-tests-first.log": {
+      "sha256": "316766cac04cbda97ba028dd96d5300bf85c2947f953312700c11aa67f8a16b9",
+      "bytes": 34076
+    },
+    "cleanup-review.json": {
+      "sha256": "42397c7f89535124786f4065c2f35716c34cbc2dce92a2dc0dc6c5b3b8e8be19",
+      "bytes": 1215
+    },
+    "obsolete-count-identifiers-exact.log": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    "retained-count-validation.log": {
+      "sha256": "49f6dbc190f2c4f0894afcdaf472ee035a3de9b632cea42a678b92080107850c",
+      "bytes": 857
+    },
+    "pairing-callers.log": {
+      "sha256": "05dd8d983776737524e19cbe249962deae792217585f388f1a25c3f9761f1c83",
+      "bytes": 1181
+    },
+    "gates/results.json": {
+      "sha256": "cff3e31a2d00c51f3b4d36c381546e82adf1e66a232a92b69ab4220b15401417",
+      "bytes": 3828
+    }
+  },
+  "focused_sync_tests": {
+    "passed": 344,
+    "failed": 0,
+    "ignored": 1
+  },
+  "new_tests": 3,
+  "original_helper_controls": {
+    "base": "9912844170251f26b6a54752fdaa4f3c329aab9d",
+    "scope": "Exact original count validator and two peer-classification helpers in a temporary test module, using real receipt types and body-derived count inputs 0/2 against one receipt. Not a full baseline checkout or network-peer test.",
+    "original_requests_sha256": "c28028c398e6b5c1dbc7773667626c36ac6cda366207b1bc4360c019058810a6",
+    "candidate_sha256": "60613fb2ac67ecc4aa0730a689f9117fcfe041234486e79f4042196dffbd1ea8",
+    "restored_sha256": "60613fb2ac67ecc4aa0730a689f9117fcfe041234486e79f4042196dffbd1ea8",
+    "module_sha256": "e7eaf580f79c50c0a96d84fb59d1fb908b34883d9a182b375b0ef9e7e5b270ac",
+    "expected_failures": 2,
+    "exit_code": 101
+  },
+  "contract": {
+    "assembly": "Complete outer responses only; exact complete-body internal invariant before zip; preserve all receipt entries and both sources",
+    "validation": "Body commitment first, then receipt count and gas/root/bloom, before ingestion",
+    "eth70": "Merge, cursor, incomplete-last-block, overflow and no-progress semantics preserved",
+    "cost": "Remove per-block vectors and premature comparisons; no extra hashing, storage write, format or dependency change; no benchmark",
+    "remaining": "Send-queue deadlines and continuation memory budgets remain separate; offline audit, volume supervision and verified repair incomplete",
+    "remote": "No remote work; mac-mini cleanup complete"
+  },
+  "source_commit": "4c60b745ee7d39d312694a7f391c5ab8eb0f9094",
+  "workspace_tests": {
+    "groups": 25,
+    "passed": 1448,
+    "failed": 0,
+    "ignored": 23
+  },
+  "gates": {
+    "commit": "4c60b745ee7d39d312694a7f391c5ab8eb0f9094",
+    "rustc": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+    "gates": [
+      {
+        "name": "vendor",
+        "command": [
+          "python3",
+          "tools/verify_datafusion_vendor.py"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T18:46:38.950169+00:00",
+        "finished": "2026-09-15T18:46:39.006949+00:00",
+        "sha256": "d8d80949d6f3378c14456842b531f0cade514179e4c94781b95ff9abb6447675",
+        "log": "/private/tmp/logex-execution-response-attribution-kfydwarx/gates/vendor.log"
+      },
+      {
+        "name": "format",
+        "command": [
+          "cargo",
+          "fmt",
+          "--all",
+          "--",
+          "--check"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T18:46:39.007263+00:00",
+        "finished": "2026-09-15T18:46:39.865752+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-execution-response-attribution-kfydwarx/gates/format.log"
+      },
+      {
+        "name": "check",
+        "command": [
+          "cargo",
+          "check",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T18:46:39.866202+00:00",
+        "finished": "2026-09-15T18:46:47.177253+00:00",
+        "sha256": "39f4b9c995125aad0890d9397f9088a4402187a3f11d3c2d70342a9806086013",
+        "log": "/private/tmp/logex-execution-response-attribution-kfydwarx/gates/check.log"
+      },
+      {
+        "name": "clippy",
+        "command": [
+          "cargo",
+          "clippy",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T18:46:47.178465+00:00",
+        "finished": "2026-09-15T18:46:53.550414+00:00",
+        "sha256": "a717179302290500d68cc66033436bc7cefa94851c3d44686d14350f36130141",
+        "log": "/private/tmp/logex-execution-response-attribution-kfydwarx/gates/clippy.log"
+      },
+      {
+        "name": "test",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T18:46:53.551146+00:00",
+        "finished": "2026-09-15T18:49:39.662492+00:00",
+        "sha256": "a9fa0a2ef77be30811ad1f7e52cb08a0c28eaa3155118641b2bdb7b8a8b9b4d0",
+        "log": "/private/tmp/logex-execution-response-attribution-kfydwarx/gates/test.log"
+      },
+      {
+        "name": "doc",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--doc",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T18:49:39.665689+00:00",
+        "finished": "2026-09-15T18:49:50.087866+00:00",
+        "sha256": "653415b59af3dc09314d35f147614c83a5778fd46e452955967564a2e5aec150",
+        "log": "/private/tmp/logex-execution-response-attribution-kfydwarx/gates/doc.log"
+      },
+      {
+        "name": "release-build",
+        "command": [
+          "cargo",
+          "build",
+          "-p",
+          "logex-node",
+          "--release",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T18:49:50.088397+00:00",
+        "finished": "2026-09-15T18:50:33.475418+00:00",
+        "sha256": "7487c4f50495c3427a8decf7a923cc6419e76c8822a0acacd880b352b93165a6",
+        "log": "/private/tmp/logex-execution-response-attribution-kfydwarx/gates/release-build.log"
+      }
+    ]
+  }
+}

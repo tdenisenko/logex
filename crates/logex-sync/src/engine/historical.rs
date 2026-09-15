@@ -262,17 +262,12 @@ impl SyncEngine {
                     break;
                 }
 
-                let expected_receipt_counts: Vec<usize> = bodies
-                    .iter()
-                    .map(|(_peer_id, body)| body.transaction_count())
-                    .collect();
                 let receipt_peer_preference = preferred_body_peers(&bodies, header_peer);
                 let (receipt_peer, receipts) = match cancelable(
                     &mut self.shutdown,
-                    self.peers.get_receipts_matching_counts_prefer_peers(
+                    self.peers.get_receipts_prefer_peers(
                         chunk_hashes.clone(),
                         required_block,
-                        &expected_receipt_counts,
                         &receipt_peer_preference,
                     ),
                 )

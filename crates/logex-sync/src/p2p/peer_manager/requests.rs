@@ -1,7 +1,6 @@
 use alloy_eips::BlockHashOrNumber;
 use eyre::{Result, bail};
 use futures_util::{FutureExt, StreamExt};
-use reth_primitives_traits::BlockBody as _;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::timeout;
 use tracing::{debug, trace, warn};
@@ -292,7 +291,6 @@ struct PlanLiveBodyReceiptChunk {
     candidates: BodyReceiptChunkLiveCandidates,
     state: BodyReceiptChunkLiveState,
     bodies: Option<Vec<SourcedBlockBody>>,
-    expected_receipt_counts: Option<Vec<usize>>,
     cached_receipts: Vec<(PeerId, ReceiptBatch)>,
     completed: bool,
     hedges: usize,
@@ -706,7 +704,7 @@ pub(crate) struct ReverseHeaderPagesRequestOutcome {
 enum ChunkFailureKind {
     Request(RequestAttempt),
     Incomplete { returned: usize },
-    ReceiptCountMismatch(ReceiptCountMismatch),
+    ReceiptResponseShapeMismatch(ReceiptResponseShapeMismatch),
 }
 
 impl PeerManager {
@@ -2345,10 +2343,6 @@ impl BodyReceiptRequestPlan {
                 .into_iter()
                 .map(|body| (body_peer, body))
                 .collect::<Vec<_>>();
-            let expected_receipt_counts = sourced_bodies
-                .iter()
-                .map(|(_, body)| body.transaction_count())
-                .collect::<Vec<_>>();
             let (receipt_ordered, _) = body_receipt_attempt_peer_ids(
                 &self.receipt_peer_ids,
                 &receipt_bad_peers,
@@ -2374,12 +2368,8 @@ impl BodyReceiptRequestPlan {
                         receipt_peer,
                         PeerRequestKind::Receipts,
                     );
-                    self.request_receipts_until_complete(
-                        receipt_peer,
-                        request_hashes.clone(),
-                        Some(expected_receipt_counts.clone()),
-                    )
-                    .await
+                    self.request_receipts_until_complete(receipt_peer, request_hashes.clone())
+                        .await
                 };
                 match receipt_result {
                     Ok(receipts) => {
@@ -2400,7 +2390,7 @@ impl BodyReceiptRequestPlan {
                             elapsed,
                             payload_bytes,
                         );
-                        match body_receipt_blocks_if_counts_match(
+                        match pair_body_receipt_blocks(
                             &sourced_bodies,
                             receipt_peer,
                             receipts,
@@ -2412,7 +2402,7 @@ impl BodyReceiptRequestPlan {
                                     role: ChunkRequestRole::Receipts,
                                     peer_id: receipt_peer,
                                     requested: range.len(),
-                                    kind: ChunkFailureKind::ReceiptCountMismatch(kind),
+                                    kind: ChunkFailureKind::ReceiptResponseShapeMismatch(kind),
                                 };
                                 if chunk_failure_disables_role_peer(&failure) {
                                     receipt_bad_peers.insert(receipt_peer);
@@ -2490,39 +2480,23 @@ impl BodyReceiptRequestPlan {
         &self,
         peer_id: PeerId,
         hashes: Vec<B256>,
-        expected_receipt_counts: Option<Vec<usize>>,
     ) -> std::result::Result<ReceiptBatch, ChunkFailureKind> {
         let Some(version) = self.peers.get(&peer_id).map(|peer| peer.version) else {
             return Err(ChunkFailureKind::Request(RequestAttempt::Disconnected));
         };
-
-        if expected_receipt_counts
-            .as_ref()
-            .is_some_and(|expected| expected.len() != hashes.len())
-        {
-            return Err(ChunkFailureKind::Request(RequestAttempt::Request(
-                reth_network::p2p::error::RequestError::BadResponse,
-            )));
-        }
 
         if version >= EthVersion::Eth70 {
             let receipts = self
                 .request_receipts70(peer_id, hashes.clone())
                 .await
                 .map_err(ChunkFailureKind::Request)?;
-            validate_receipt_response_counts(
-                "receipts70",
-                hashes.len(),
-                &receipts,
-                expected_receipt_counts.as_deref(),
-            )
-            .map_err(ChunkFailureKind::ReceiptCountMismatch)?;
+            validate_receipt_response_shape("receipts70", hashes.len(), &receipts)
+                .map_err(ChunkFailureKind::ReceiptResponseShapeMismatch)?;
             return Ok(receipts);
         }
 
         let mut remaining_hashes = hashes.clone();
         let mut receipts = Vec::with_capacity(hashes.len());
-        let mut offset = 0usize;
 
         while !remaining_hashes.is_empty() {
             let request_hashes = remaining_hashes.clone();
@@ -2539,31 +2513,11 @@ impl BodyReceiptRequestPlan {
 
             match classify_response_progress(request_hashes.len(), response.len()) {
                 ResponseProgress::Complete => {
-                    let returned = response.len();
-                    validate_receipt_response_counts(
-                        "receipts",
-                        returned,
-                        &response,
-                        expected_receipt_counts
-                            .as_deref()
-                            .map(|expected| &expected[offset..offset + returned]),
-                    )
-                    .map_err(ChunkFailureKind::ReceiptCountMismatch)?;
                     receipts.extend(response);
                     return Ok(receipts);
                 }
                 ResponseProgress::Partial { returned } => {
-                    validate_receipt_response_counts(
-                        "receipts",
-                        returned,
-                        &response,
-                        expected_receipt_counts
-                            .as_deref()
-                            .map(|expected| &expected[offset..offset + returned]),
-                    )
-                    .map_err(ChunkFailureKind::ReceiptCountMismatch)?;
                     receipts.extend(response);
-                    offset += returned;
                     remaining_hashes = request_hashes[returned..].to_vec();
                 }
                 ResponseProgress::Empty => {
@@ -2853,45 +2807,16 @@ impl PeerManager {
             >,
         >,
     )> {
-        self.get_receipts_inner(hashes, required_block, None, &[], None, None)
+        self.get_receipts_inner(hashes, required_block, &[], None, None)
             .await
     }
 
-    /// Request receipts and only return a peer response whose per-block receipt
-    /// counts match the already fetched bodies. Peers that return receipt sets
-    /// inconsistent with the bodies are disconnected and the request is retried
-    /// against the next eligible peer.
-    pub async fn get_receipts_matching_counts(
-        &mut self,
-        hashes: Vec<B256>,
-        required_block: u64,
-        expected_receipt_counts: &[usize],
-    ) -> Result<(
-        PeerId,
-        Vec<
-            Vec<
-                alloy_consensus::ReceiptWithBloom<
-                    <LogexNetworkPrimitives as NetworkPrimitives>::Receipt,
-                >,
-            >,
-        >,
-    )> {
-        self.get_receipts_matching_counts_prefer_peers(
-            hashes,
-            required_block,
-            expected_receipt_counts,
-            &[],
-        )
-        .await
-    }
-
-    /// Request receipts while trying body-proven peers before rotating through
+    /// Request receipts while trying preferred peers before rotating through
     /// the rest of the eligible peer set.
-    pub async fn get_receipts_matching_counts_prefer_peers(
+    pub async fn get_receipts_prefer_peers(
         &mut self,
         hashes: Vec<B256>,
         required_block: u64,
-        expected_receipt_counts: &[usize],
         preferred_peers: &[PeerId],
     ) -> Result<(
         PeerId,
@@ -2903,22 +2828,14 @@ impl PeerManager {
             >,
         >,
     )> {
-        self.get_receipts_inner(
-            hashes,
-            required_block,
-            Some(expected_receipt_counts),
-            preferred_peers,
-            None,
-            None,
-        )
-        .await
+        self.get_receipts_inner(hashes, required_block, preferred_peers, None, None)
+            .await
     }
 
-    pub async fn get_receipts_matching_counts_prefer_peers_with_limits(
+    pub async fn get_receipts_prefer_peers_with_limits(
         &mut self,
         hashes: Vec<B256>,
         required_block: u64,
-        expected_receipt_counts: &[usize],
         preferred_peers: &[PeerId],
         request_timeout: Duration,
         max_attempts: usize,
@@ -2935,7 +2852,6 @@ impl PeerManager {
         self.get_receipts_inner(
             hashes,
             required_block,
-            Some(expected_receipt_counts),
             preferred_peers,
             Some(request_timeout),
             Some(max_attempts),
@@ -2947,7 +2863,6 @@ impl PeerManager {
         &mut self,
         hashes: Vec<B256>,
         required_block: u64,
-        expected_receipt_counts: Option<&[usize]>,
         preferred_peers: &[PeerId],
         request_timeout: Option<Duration>,
         max_attempts: Option<usize>,
@@ -2965,15 +2880,6 @@ impl PeerManager {
         if hashes.is_empty() {
             return Ok((PeerId::ZERO, Vec::new()));
         }
-        if let Some(expected) = expected_receipt_counts
-            && expected.len() != hashes.len()
-        {
-            bail!(
-                "receipt count expectation length mismatch: expected {} entries for {} hashes",
-                expected.len(),
-                hashes.len()
-            );
-        }
 
         let mut peer_ids = self
             .peer_ids_for_receipt_requests(required_block, preferred_peers)
@@ -2983,7 +2889,7 @@ impl PeerManager {
         let mut dead_peers = HashSet::new();
 
         match self
-            .request_receipts_parallel_chunks(&peer_ids, hashes.clone(), expected_receipt_counts)
+            .request_receipts_parallel_chunks(&peer_ids, hashes.clone())
             .await
         {
             Ok(Some((peer_id, receipts, stats, failures))) => {
@@ -3052,13 +2958,10 @@ impl PeerManager {
                     .await
                 {
                     Ok(receipts) => {
-                        if let Err(error) = validate_receipt_response_counts(
-                            "receipts70",
-                            hashes.len(),
-                            &receipts,
-                            expected_receipt_counts,
-                        ) {
-                            if self.on_receipt_count_mismatch(peer_id, error) {
+                        if let Err(error) =
+                            validate_receipt_response_shape("receipts70", hashes.len(), &receipts)
+                        {
+                            if self.on_receipt_response_shape_mismatch(peer_id, error) {
                                 dead_peers.insert(peer_id);
                             }
                             continue;
@@ -3113,19 +3016,6 @@ impl PeerManager {
                     Ok(receipts) => {
                         match classify_response_progress(request_hashes.len(), receipts.len()) {
                             ResponseProgress::Complete => {
-                                if let Err(error) = validate_receipt_response_counts(
-                                    "receipts",
-                                    request_hashes.len(),
-                                    &receipts,
-                                    expected_receipt_counts.map(|expected| {
-                                        &expected[hashes.len() - remaining_hashes.len()..]
-                                    }),
-                                ) {
-                                    if self.on_receipt_count_mismatch(peer_id, error) {
-                                        dead_peers.insert(peer_id);
-                                    }
-                                    break;
-                                }
                                 let elapsed = started_at.elapsed();
                                 let payload_bytes = receipt_batch_payload_bytes(&receipts);
                                 self.record_peer_request_success(
@@ -3140,20 +3030,6 @@ impl PeerManager {
                                 return Ok((peer_id, collected));
                             }
                             ResponseProgress::Partial { returned } => {
-                                if let Err(error) = validate_receipt_response_counts(
-                                    "receipts",
-                                    returned,
-                                    &receipts,
-                                    expected_receipt_counts.map(|expected| {
-                                        let offset = hashes.len() - remaining_hashes.len();
-                                        &expected[offset..offset + returned]
-                                    }),
-                                ) {
-                                    if self.on_receipt_count_mismatch(peer_id, error) {
-                                        dead_peers.insert(peer_id);
-                                    }
-                                    break;
-                                }
                                 let elapsed = started_at.elapsed();
                                 let payload_bytes = receipt_batch_payload_bytes(&receipts);
                                 self.record_peer_request_success(
@@ -3532,10 +3408,9 @@ impl PeerManager {
         &self,
         peer_ids: &[PeerId],
         hashes: Vec<B256>,
-        expected_receipt_counts: Option<&[usize]>,
     ) -> std::result::Result<Option<ParallelReceipts>, ParallelChunkError> {
         match self
-            .request_sourced_receipts_parallel_chunks(peer_ids, hashes, expected_receipt_counts)
+            .request_sourced_receipts_parallel_chunks(peer_ids, hashes)
             .await
         {
             Ok(Some((sourced_receipts, stats, failures))) => {
@@ -3557,7 +3432,6 @@ impl PeerManager {
         &self,
         peer_ids: &[PeerId],
         hashes: Vec<B256>,
-        expected_receipt_counts: Option<&[usize]>,
     ) -> std::result::Result<Option<ParallelSourcedReceipts>, ParallelChunkError> {
         if hashes.len() < MIN_PARALLEL_RECEIPT_REQUEST_BLOCKS || peer_ids.is_empty() {
             return Ok(None);
@@ -3588,18 +3462,12 @@ impl PeerManager {
             let peer_id =
                 peer_ids[rotated_chunk_index(chunk_index, self.request_cursor) % peer_ids.len()];
             let request_hashes = hashes[range.clone()].to_vec();
-            let expected_receipt_counts =
-                expected_receipt_counts.map(|expected| expected[range.clone()].to_vec());
             attempts.push(
                 async move {
                     let started_at = Instant::now();
                     let requested = request_hashes.len();
                     let result = self
-                        .request_receipts_until_complete(
-                            peer_id,
-                            request_hashes,
-                            expected_receipt_counts,
-                        )
+                        .request_receipts_until_complete(peer_id, request_hashes)
                         .await;
                     (
                         chunk_index,
@@ -3670,18 +3538,12 @@ impl PeerManager {
             let peer_id =
                 peer_ids[rotated_chunk_index(chunk_index, self.request_cursor) % peer_ids.len()];
             let request_hashes = hashes[range.clone()].to_vec();
-            let expected_receipt_counts =
-                expected_receipt_counts.map(|expected| expected[range.clone()].to_vec());
             attempts.push(
                 async move {
                     let started_at = Instant::now();
                     let requested = request_hashes.len();
                     let result = self
-                        .request_receipts_until_complete(
-                            peer_id,
-                            request_hashes,
-                            expected_receipt_counts,
-                        )
+                        .request_receipts_until_complete(peer_id, request_hashes)
                         .await;
                     (
                         chunk_index,
@@ -3710,12 +3572,10 @@ impl PeerManager {
                 );
                 for peer_id in retry_peer_ids {
                     let request_hashes = hashes[range.clone()].to_vec();
-                    let expected_counts =
-                        expected_receipt_counts.map(|expected| expected[range.clone()].to_vec());
                     let started_at = Instant::now();
                     let requested = request_hashes.len();
                     match self
-                        .request_receipts_until_complete(peer_id, request_hashes, expected_counts)
+                        .request_receipts_until_complete(peer_id, request_hashes)
                         .await
                     {
                         Ok(receipts) => {
@@ -3807,39 +3667,23 @@ impl PeerManager {
         &self,
         peer_id: PeerId,
         hashes: Vec<B256>,
-        expected_receipt_counts: Option<Vec<usize>>,
     ) -> std::result::Result<ReceiptBatch, ChunkFailureKind> {
         let Some(version) = self.peers.get(&peer_id).map(|peer| peer.version) else {
             return Err(ChunkFailureKind::Request(RequestAttempt::Disconnected));
         };
-
-        if expected_receipt_counts
-            .as_ref()
-            .is_some_and(|expected| expected.len() != hashes.len())
-        {
-            return Err(ChunkFailureKind::Request(RequestAttempt::Request(
-                reth_network::p2p::error::RequestError::BadResponse,
-            )));
-        }
 
         if version >= EthVersion::Eth70 {
             let receipts = self
                 .request_receipts70(peer_id, hashes.clone(), None)
                 .await
                 .map_err(ChunkFailureKind::Request)?;
-            validate_receipt_response_counts(
-                "receipts70",
-                hashes.len(),
-                &receipts,
-                expected_receipt_counts.as_deref(),
-            )
-            .map_err(ChunkFailureKind::ReceiptCountMismatch)?;
+            validate_receipt_response_shape("receipts70", hashes.len(), &receipts)
+                .map_err(ChunkFailureKind::ReceiptResponseShapeMismatch)?;
             return Ok(receipts);
         }
 
         let mut remaining_hashes = hashes.clone();
         let mut receipts = Vec::with_capacity(hashes.len());
-        let mut offset = 0usize;
 
         while !remaining_hashes.is_empty() {
             let request_hashes = remaining_hashes.clone();
@@ -3853,31 +3697,11 @@ impl PeerManager {
 
             match classify_response_progress(request_hashes.len(), response.len()) {
                 ResponseProgress::Complete => {
-                    let returned = response.len();
-                    validate_receipt_response_counts(
-                        "receipts",
-                        returned,
-                        &response,
-                        expected_receipt_counts
-                            .as_deref()
-                            .map(|expected| &expected[offset..offset + returned]),
-                    )
-                    .map_err(ChunkFailureKind::ReceiptCountMismatch)?;
                     receipts.extend(response);
                     return Ok(receipts);
                 }
                 ResponseProgress::Partial { returned } => {
-                    validate_receipt_response_counts(
-                        "receipts",
-                        returned,
-                        &response,
-                        expected_receipt_counts
-                            .as_deref()
-                            .map(|expected| &expected[offset..offset + returned]),
-                    )
-                    .map_err(ChunkFailureKind::ReceiptCountMismatch)?;
                     receipts.extend(response);
-                    offset += returned;
                     remaining_hashes = request_hashes[returned..].to_vec();
                 }
                 ResponseProgress::Empty => {
@@ -3956,8 +3780,8 @@ impl PeerManager {
                         ResponseProgress::Complete => {}
                     }
                 }
-                ChunkFailureKind::ReceiptCountMismatch(error) => {
-                    if self.on_receipt_count_mismatch(failure.peer_id, error) {
+                ChunkFailureKind::ReceiptResponseShapeMismatch(error) => {
+                    if self.on_receipt_response_shape_mismatch(failure.peer_id, error) {
                         dead_peers.insert(failure.peer_id);
                     }
                 }
@@ -4195,8 +4019,12 @@ impl PeerManager {
         Ok(merged)
     }
 
-    fn on_receipt_count_mismatch(&mut self, peer_id: PeerId, error: ReceiptCountMismatch) -> bool {
-        if receipt_count_mismatch_is_protocol_breach(error) {
+    fn on_receipt_response_shape_mismatch(
+        &mut self,
+        peer_id: PeerId,
+        error: ReceiptResponseShapeMismatch,
+    ) -> bool {
+        if receipt_response_shape_mismatch_is_protocol_breach(error) {
             self.network
                 .reputation_change(peer_id, ReputationChangeKind::BadProtocol);
             warn!(
@@ -4204,9 +4032,6 @@ impl PeerManager {
                 response_kind = error.response_kind,
                 requested_blocks = error.requested_blocks,
                 returned_blocks = error.returned_blocks,
-                block_index = error.block_index,
-                expected_receipts = error.expected_receipts,
-                returned_receipts = error.returned_receipts,
                 "peer returned receipts inconsistent with requested blocks, disconnecting it"
             );
             return true;
@@ -4223,9 +4048,6 @@ impl PeerManager {
             response_kind = error.response_kind,
             requested_blocks = error.requested_blocks,
             returned_blocks = error.returned_blocks,
-            block_index = error.block_index,
-            expected_receipts = error.expected_receipts,
-            returned_receipts = error.returned_receipts,
             "peer could not serve complete receipts for requested blocks"
         );
         false
@@ -4336,8 +4158,8 @@ fn chunk_failure_disables_role_peer(failure: &ChunkRequestFailure) -> bool {
                 )
         ),
         ChunkFailureKind::Incomplete { .. } => true,
-        ChunkFailureKind::ReceiptCountMismatch(error) => {
-            receipt_count_mismatch_disables_receipt_peer(*error)
+        ChunkFailureKind::ReceiptResponseShapeMismatch(error) => {
+            receipt_response_shape_mismatch_disables_receipt_peer(*error)
         }
     }
 }
@@ -4596,7 +4418,6 @@ fn schedule_body_receipt_plan_chunk<'a>(
         },
         state: BodyReceiptChunkLiveState::default(),
         bodies: None,
-        expected_receipt_counts: None,
         cached_receipts: Vec::new(),
         completed: false,
         hedges: 0,
@@ -4618,7 +4439,6 @@ fn schedule_body_receipt_plan_chunk<'a>(
         range.start,
         &mut chunk,
         hashes,
-        None,
     );
     active_chunks.insert(range.start, chunk);
 }
@@ -4815,7 +4635,6 @@ fn schedule_body_receipt_plan_receipt_role<'a>(
     start: usize,
     chunk: &mut PlanLiveBodyReceiptChunk,
     hashes: &[B256],
-    expected_receipt_counts: Option<&[usize]>,
 ) -> bool {
     let Some(peer_id) = next_body_receipt_role_candidate(
         &chunk.candidates.receipts,
@@ -4826,7 +4645,6 @@ fn schedule_body_receipt_plan_receipt_role<'a>(
     };
 
     let request_hashes = hashes.to_vec();
-    let expected_receipt_counts = expected_receipt_counts.map(|counts| counts.to_vec());
     record_body_receipt_attempt_peer(&mut peer_state.receipt_in_flight_peers, Some(peer_id));
     chunk.state.receipts.in_flight += 1;
     chunk.state.receipts.last_scheduled_at = Some(Instant::now());
@@ -4840,7 +4658,7 @@ fn schedule_body_receipt_plan_receipt_role<'a>(
                 PeerRequestKind::Receipts,
             );
             let result = plan
-                .request_receipts_until_complete(peer_id, request_hashes, expected_receipt_counts)
+                .request_receipts_until_complete(peer_id, request_hashes)
                 .await;
             BodyReceiptPlanRoleAttempt::Receipts {
                 start,
@@ -4926,14 +4744,8 @@ fn apply_body_receipt_plan_role_attempt(
                         .into_iter()
                         .map(|body| (peer_id, body))
                         .collect::<Vec<_>>();
-                    chunk.expected_receipt_counts = Some(
-                        sourced_bodies
-                            .iter()
-                            .map(|(_, body)| body.transaction_count())
-                            .collect(),
-                    );
                     for (receipt_peer, receipts) in chunk.cached_receipts.drain(..) {
-                        match body_receipt_blocks_if_counts_match(
+                        match pair_body_receipt_blocks(
                             &sourced_bodies,
                             receipt_peer,
                             receipts,
@@ -4949,7 +4761,7 @@ fn apply_body_receipt_plan_role_attempt(
                                     role: ChunkRequestRole::Receipts,
                                     peer_id: receipt_peer,
                                     requested: chunk.range.len(),
-                                    kind: ChunkFailureKind::ReceiptCountMismatch(kind),
+                                    kind: ChunkFailureKind::ReceiptResponseShapeMismatch(kind),
                                 };
                                 if chunk_failure_disables_role_peer(&failure) {
                                     peer_state.receipt_bad_peers.insert(receipt_peer);
@@ -5013,12 +4825,8 @@ fn apply_body_receipt_plan_role_attempt(
                         payload_bytes,
                     );
                     if let Some(bodies) = chunk.bodies.as_ref() {
-                        match body_receipt_blocks_if_counts_match(
-                            bodies,
-                            peer_id,
-                            receipts,
-                            chunk.range.len(),
-                        ) {
+                        match pair_body_receipt_blocks(bodies, peer_id, receipts, chunk.range.len())
+                        {
                             Ok(blocks) => {
                                 completed_chunks.insert(start, blocks);
                                 chunk.completed = true;
@@ -5028,7 +4836,7 @@ fn apply_body_receipt_plan_role_attempt(
                                     role: ChunkRequestRole::Receipts,
                                     peer_id,
                                     requested,
-                                    kind: ChunkFailureKind::ReceiptCountMismatch(kind),
+                                    kind: ChunkFailureKind::ReceiptResponseShapeMismatch(kind),
                                 };
                                 if chunk_failure_disables_role_peer(&failure) {
                                     peer_state.receipt_bad_peers.insert(peer_id);
@@ -5075,7 +4883,6 @@ fn schedule_missing_body_receipt_plan_roles<'a>(
     }
 
     let hashes = &plan.hashes[chunk.range.clone()];
-    let expected_receipt_counts = chunk.expected_receipt_counts.clone();
     let mut scheduled = 0usize;
     let status = BodyReceiptChunkLiveStatus {
         has_bodies: chunk.bodies.is_some(),
@@ -5093,15 +4900,7 @@ fn schedule_missing_body_receipt_plan_roles<'a>(
     }
     if attempts.len() < max_role_attempts
         && should_schedule_receipts
-        && schedule_body_receipt_plan_receipt_role(
-            plan,
-            attempts,
-            peer_state,
-            start,
-            chunk,
-            hashes,
-            expected_receipt_counts.as_deref(),
-        )
+        && schedule_body_receipt_plan_receipt_role(plan, attempts, peer_state, start, chunk, hashes)
     {
         scheduled += 1;
     }
@@ -5738,22 +5537,16 @@ fn receipt_candidates_for_body_peer(
     candidates
 }
 
-fn body_receipt_blocks_if_counts_match(
+fn pair_body_receipt_blocks(
     bodies: &[SourcedBlockBody],
     receipt_peer: PeerId,
     receipts: ReceiptBatch,
     requested: usize,
-) -> std::result::Result<Vec<SourcedBodyReceipts>, ReceiptCountMismatch> {
-    let expected_receipt_counts: Vec<usize> = bodies
-        .iter()
-        .map(|(_, body)| body.transaction_count())
-        .collect();
-    validate_receipt_response_counts(
-        "receipts",
-        requested,
-        &receipts,
-        Some(&expected_receipt_counts),
-    )?;
+) -> std::result::Result<Vec<SourcedBodyReceipts>, ReceiptResponseShapeMismatch> {
+    // Body fetches establish this exact outer shape before assembly. A violation
+    // is an internal invariant failure, not evidence against the receipt peer.
+    assert_eq!(bodies.len(), requested, "body batch must match its request");
+    validate_receipt_response_shape("receipts", requested, &receipts)?;
     Ok(bodies
         .iter()
         .cloned()
@@ -5893,13 +5686,10 @@ pub(super) enum ResponseProgress {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ReceiptCountMismatch {
+struct ReceiptResponseShapeMismatch {
     response_kind: &'static str,
     requested_blocks: usize,
     returned_blocks: usize,
-    block_index: Option<usize>,
-    expected_receipts: Option<usize>,
-    returned_receipts: Option<usize>,
 }
 
 impl Receipts70MergeError {
@@ -5935,60 +5725,30 @@ pub(super) fn prioritize_preferred_peer_ids(
     prioritized
 }
 
-fn validate_receipt_response_counts<T>(
+fn validate_receipt_response_shape<T>(
     response_kind: &'static str,
     requested_blocks: usize,
     receipts: &[Vec<alloy_consensus::ReceiptWithBloom<T>>],
-    expected_receipt_counts: Option<&[usize]>,
-) -> std::result::Result<(), ReceiptCountMismatch> {
+) -> std::result::Result<(), ReceiptResponseShapeMismatch> {
     if receipts.len() != requested_blocks {
-        return Err(ReceiptCountMismatch {
+        return Err(ReceiptResponseShapeMismatch {
             response_kind,
             requested_blocks,
             returned_blocks: receipts.len(),
-            block_index: None,
-            expected_receipts: None,
-            returned_receipts: None,
         });
-    }
-
-    let Some(expected_receipt_counts) = expected_receipt_counts else {
-        return Ok(());
-    };
-
-    for (block_index, (block_receipts, expected_count)) in receipts
-        .iter()
-        .zip(expected_receipt_counts.iter().copied())
-        .enumerate()
-    {
-        if block_receipts.len() != expected_count {
-            return Err(ReceiptCountMismatch {
-                response_kind,
-                requested_blocks,
-                returned_blocks: receipts.len(),
-                block_index: Some(block_index),
-                expected_receipts: Some(expected_count),
-                returned_receipts: Some(block_receipts.len()),
-            });
-        }
     }
 
     Ok(())
 }
 
-fn receipt_count_mismatch_is_protocol_breach(error: ReceiptCountMismatch) -> bool {
-    if error.returned_blocks > error.requested_blocks {
-        return true;
-    }
-
-    match (error.expected_receipts, error.returned_receipts) {
-        (Some(expected), Some(returned)) => returned > expected,
-        _ => false,
-    }
+fn receipt_response_shape_mismatch_is_protocol_breach(error: ReceiptResponseShapeMismatch) -> bool {
+    error.returned_blocks > error.requested_blocks
 }
 
-fn receipt_count_mismatch_disables_receipt_peer(error: ReceiptCountMismatch) -> bool {
-    !receipt_count_mismatch_is_protocol_breach(error)
+fn receipt_response_shape_mismatch_disables_receipt_peer(
+    error: ReceiptResponseShapeMismatch,
+) -> bool {
+    !receipt_response_shape_mismatch_is_protocol_breach(error)
 }
 
 pub(super) fn merge_receipts70_response(
@@ -7417,7 +7177,6 @@ mod tests {
                 },
                 state: BodyReceiptChunkLiveState::default(),
                 bodies: None,
-                expected_receipt_counts: None,
                 cached_receipts: Vec::new(),
                 completed: true,
                 hedges: 0,
@@ -7439,7 +7198,6 @@ mod tests {
                     ..Default::default()
                 },
                 bodies: None,
-                expected_receipt_counts: None,
                 cached_receipts: Vec::new(),
                 completed: false,
                 hedges: 2,
@@ -7465,7 +7223,6 @@ mod tests {
                 },
                 state: BodyReceiptChunkLiveState::default(),
                 bodies: None,
-                expected_receipt_counts: None,
                 cached_receipts: Vec::new(),
                 completed: false,
                 hedges: 0,
@@ -7481,7 +7238,6 @@ mod tests {
                 },
                 state: BodyReceiptChunkLiveState::default(),
                 bodies: None,
-                expected_receipt_counts: None,
                 cached_receipts: Vec::new(),
                 completed: false,
                 hedges: 0,
@@ -7497,7 +7253,6 @@ mod tests {
                 },
                 state: BodyReceiptChunkLiveState::default(),
                 bodies: None,
-                expected_receipt_counts: None,
                 cached_receipts: Vec::new(),
                 completed: true,
                 hedges: 0,
@@ -7537,7 +7292,6 @@ mod tests {
                 },
                 state: BodyReceiptChunkLiveState::default(),
                 bodies: None,
-                expected_receipt_counts: None,
                 cached_receipts: Vec::new(),
                 completed: false,
                 hedges: PIPELINED_BODY_RECEIPT_MAX_HEDGES_PER_CHUNK,
@@ -7553,7 +7307,6 @@ mod tests {
                 },
                 state: BodyReceiptChunkLiveState::default(),
                 bodies: None,
-                expected_receipt_counts: None,
                 cached_receipts: Vec::new(),
                 completed: true,
                 hedges: 0,
@@ -7582,7 +7335,6 @@ mod tests {
                 },
                 state: BodyReceiptChunkLiveState::default(),
                 bodies: None,
-                expected_receipt_counts: None,
                 cached_receipts: Vec::new(),
                 completed: false,
                 hedges: 0,
@@ -7854,7 +7606,6 @@ mod tests {
                         },
                         state: BodyReceiptChunkLiveState::default(),
                         bodies: None,
-                        expected_receipt_counts: None,
                         cached_receipts: Vec::new(),
                         completed: false,
                         hedges: 0,
@@ -7958,7 +7709,6 @@ mod tests {
                     },
                 },
                 bodies: None,
-                expected_receipt_counts: None,
                 cached_receipts: Vec::new(),
                 completed: false,
                 hedges: 0,
@@ -7999,7 +7749,6 @@ mod tests {
                     },
                 },
                 bodies: None,
-                expected_receipt_counts: None,
                 cached_receipts: Vec::new(),
                 completed: false,
                 hedges: 0,
@@ -8040,7 +7789,6 @@ mod tests {
                     },
                 },
                 bodies: None,
-                expected_receipt_counts: None,
                 cached_receipts: Vec::new(),
                 completed: false,
                 hedges: 0,
@@ -8101,7 +7849,6 @@ mod tests {
                 },
             },
             bodies: None,
-            expected_receipt_counts: None,
             cached_receipts: Vec::new(),
             completed: false,
             hedges: 0,
@@ -8797,45 +8544,143 @@ mod tests {
     }
 
     #[test]
-    fn receipt_count_mismatch_only_treats_overflow_as_protocol_breach() {
-        assert!(!receipt_count_mismatch_is_protocol_breach(
-            ReceiptCountMismatch {
+    fn receipt_pairing_preserves_sources_and_inner_sets_in_both_arrival_orders() {
+        use alloy_consensus::{SignableTransaction, TxLegacy};
+        use alloy_primitives::{Signature, U256};
+
+        let body_peer = PeerId::repeat_byte(0x31);
+        let receipt_peer = PeerId::repeat_byte(0x32);
+        for body_count in 0..=1 {
+            for receipt_count in 0..=1 {
+                for receipts_first in [false, true] {
+                    let mut body = reth_ethereum_primitives::BlockBody::default();
+                    // Ordinary structural fixture; never executed or submitted.
+                    if body_count == 1 {
+                        body.transactions.push(
+                            TxLegacy::default()
+                                .into_signed(Signature::new(U256::from(1), U256::from(2), false))
+                                .into(),
+                        );
+                    }
+                    let receipts = vec![vec![
+                        alloy_consensus::ReceiptWithBloom {
+                            receipt: fake_receipt(21_000),
+                            logs_bloom: Default::default()
+                        };
+                        receipt_count
+                    ]];
+                    let expected = vec![(
+                        (body_peer, body.clone()),
+                        (receipt_peer, receipts[0].clone()),
+                    )];
+                    let mut active = HashMap::from([(
+                        0,
+                        PlanLiveBodyReceiptChunk {
+                            range: 0..1,
+                            candidates: BodyReceiptChunkLiveCandidates {
+                                bodies: vec![body_peer],
+                                receipts: vec![receipt_peer],
+                            },
+                            state: BodyReceiptChunkLiveState::default(),
+                            bodies: None,
+                            cached_receipts: Vec::new(),
+                            completed: false,
+                            hedges: 0,
+                        },
+                    )]);
+                    let bodies = BodyReceiptPlanRoleAttempt::Bodies {
+                        start: 0,
+                        peer_id: body_peer,
+                        requested: 1,
+                        elapsed: Duration::ZERO,
+                        result: Ok(vec![body]),
+                    };
+                    let receipts = BodyReceiptPlanRoleAttempt::Receipts {
+                        start: 0,
+                        peer_id: receipt_peer,
+                        requested: 1,
+                        elapsed: Duration::ZERO,
+                        result: Ok(receipts),
+                    };
+                    let attempts = if receipts_first {
+                        [receipts, bodies]
+                    } else {
+                        [bodies, receipts]
+                    };
+                    let mut peer_state = BodyReceiptPlanPeerState::default();
+                    let mut completed = BTreeMap::new();
+                    let mut failures = Vec::new();
+                    let mut stats = Vec::new();
+                    for attempt in attempts {
+                        apply_body_receipt_plan_role_attempt(
+                            &mut active,
+                            &mut peer_state,
+                            &mut completed,
+                            &mut failures,
+                            &mut stats,
+                            attempt,
+                            &None,
+                        );
+                    }
+                    assert_eq!(completed.remove(&0), Some(expected));
+                    assert!(active[&0].completed);
+                    assert!(failures.is_empty());
+                    assert!(peer_state.receipt_bad_peers.is_empty());
+                    assert_eq!(stats.len(), 2);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn receipt_pairing_requires_exact_outer_batches() {
+        let peer = PeerId::repeat_byte(0x31);
+        let body = (peer, reth_ethereum_primitives::BlockBody::default());
+        for returned in [0, 2] {
+            let error = pair_body_receipt_blocks(
+                std::slice::from_ref(&body),
+                peer,
+                vec![Vec::new(); returned],
+                1,
+            )
+            .unwrap_err();
+            assert_eq!(error.returned_blocks, returned);
+            assert_eq!(error.requested_blocks, 1);
+            assert_eq!(
+                receipt_response_shape_mismatch_is_protocol_breach(error),
+                returned > 1
+            );
+            assert!(
+                std::panic::catch_unwind(|| pair_body_receipt_blocks(
+                    &vec![body.clone(); returned],
+                    peer,
+                    vec![Vec::new()],
+                    1
+                ))
+                .is_err()
+            );
+        }
+        assert!(
+            pair_body_receipt_blocks(&[], peer, Vec::new(), 0)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn receipt_response_shape_mismatch_only_treats_overflow_as_protocol_breach() {
+        assert!(!receipt_response_shape_mismatch_is_protocol_breach(
+            ReceiptResponseShapeMismatch {
                 response_kind: "receipts",
                 requested_blocks: 16,
                 returned_blocks: 0,
-                block_index: None,
-                expected_receipts: None,
-                returned_receipts: None,
             }
         ));
-        assert!(!receipt_count_mismatch_is_protocol_breach(
-            ReceiptCountMismatch {
-                response_kind: "receipts",
-                requested_blocks: 16,
-                returned_blocks: 16,
-                block_index: Some(3),
-                expected_receipts: Some(12),
-                returned_receipts: Some(0),
-            }
-        ));
-        assert!(receipt_count_mismatch_is_protocol_breach(
-            ReceiptCountMismatch {
+        assert!(receipt_response_shape_mismatch_is_protocol_breach(
+            ReceiptResponseShapeMismatch {
                 response_kind: "receipts",
                 requested_blocks: 16,
                 returned_blocks: 17,
-                block_index: None,
-                expected_receipts: None,
-                returned_receipts: None,
-            }
-        ));
-        assert!(receipt_count_mismatch_is_protocol_breach(
-            ReceiptCountMismatch {
-                response_kind: "receipts",
-                requested_blocks: 16,
-                returned_blocks: 16,
-                block_index: Some(3),
-                expected_receipts: Some(12),
-                returned_receipts: Some(13),
             }
         ));
     }
