@@ -76,8 +76,9 @@ gates passed on source `2556fad6` (1,327 workspace tests passed, 23 ignored), an
 six Linux/macOS CI jobs passed at `c68a8829` before merge `6e1bb320`.
 The cleanup pass checks formatting, vendored-source integrity, JSON records,
 document links and unchanged non-documentation content. It does not rebuild the
-same locally validated code merely to recreate deleted outputs. The documentation
-PR must also pass the complete configured CI before merge.
+same locally validated code merely to recreate deleted outputs. [PR #163](https://github.com/tdenisenko/logex/pull/163) passed all six configured
+Linux/macOS CI jobs at head `04b09053` in run `34958538490` before merge
+`0d5bec37`; see the [CI and merge record](baselines/2026-09-15-artifact-cleanup-ci.json).
 
 This pass neither completes the offline audit nor establishes live-sync readiness.
 The remaining batch dispositions, volume supervision, offline repair and subsequent
