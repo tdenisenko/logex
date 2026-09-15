@@ -1,0 +1,248 @@
+{
+  "status": "All seven local gates and independent review pass; PR, CI and merge pending",
+  "branch": "audit/execution-cache-canonicality",
+  "base": "876921922d2ffbbcaafec5ef441971490c32d24e",
+  "source_sha256": {
+    "crates/logex-sync/src/p2p/serve_cache.rs": "311f3415238b673551594c90f2f7dbe84a4fbbce94aa3a6558af3e281a5546e3",
+    "crates/logex-sync/src/p2p/peer_manager/mod.rs": "003a4ff2e3340f7e1bdcd1026e559f4bade808e4cd8cb7dfdc67cd0d946aa8f1"
+  },
+  "findings": [
+    {
+      "id": "B4-16",
+      "severity": "medium",
+      "effect": "Header-only or body-evicted canonical headers survive actual reorg removal",
+      "correction": "Remove header/body owned hash mappings independently"
+    },
+    {
+      "id": "B4-17",
+      "severity": "medium",
+      "effect": "Header replacement retains conflicting body/receipts; sealed read misses restored headers or pairs inconsistent hash/header",
+      "correction": "Invalidate conflicting body state and resolve point identity/value under one guard",
+      "reachability_limit": "Generic provider contract; production header-only insertion currently startup; no current Reth sealed API use found"
+    },
+    {
+      "id": "B4-18",
+      "severity": "low",
+      "effect": "Excluded zero includes genesis; unbounded header ranges omit restored inventory; numeric-span traversal performs unnecessary misses",
+      "correction": "Checked bounds and merged retained map slices",
+      "reachability_limit": "Public provider range contract, no current direct network range call found"
+    }
+  ],
+  "evidence_directory": "/private/tmp/logex-execution-cache-canonicality-r2_3op1w",
+  "evidence": {
+    "original-controls.json": {
+      "sha256": "cfbdecdaf7f9a3de82c140a96faf31407a0f6cb13a5232d569474a5955e8e3d8",
+      "bytes": 298
+    },
+    "original-cache-tests.rs": {
+      "sha256": "f59ce0112469394335e6d57bfdb87ed4f956246f4929e3c1bd40bcd6eacd799d",
+      "bytes": 17239
+    },
+    "original-cache-diff.patch": {
+      "sha256": "d1cb2fb8a4ed24486eac215c636d88b5affd5f1273d5fcd2d689171e0d2ad1cf",
+      "bytes": 11539
+    },
+    "original-cache-controls.log": {
+      "sha256": "6a2897c73a3952bd5902919e44397818e7d9d89bdb9c4d3e87f911424d55eee8",
+      "bytes": 5846
+    },
+    "cache-tests-first.log": {
+      "sha256": "6ce26e743fdd750b0c56f2a5fe456d0e7be628995d09d974c15f4d31dd05c1b4",
+      "bytes": 2271
+    },
+    "cache-tests-final.log": {
+      "sha256": "7a3dd78d050e4d615b113c6ea4684bb15dd1b0b33ac6ff7a60238d90acbdffc1",
+      "bytes": 2766
+    },
+    "sync-tests-final.log": {
+      "sha256": "b26a10215785187841a8ef45c7af949b1cdfa92b336c1f975a34319b06e57bf1",
+      "bytes": 37683
+    },
+    "cleanup-review.json": {
+      "sha256": "259a8a83a4ef9da4669d70c3a58d968ec9e677495fbe6eec8bfd68f44a43eedd",
+      "bytes": 536
+    },
+    "implementation-review.json": {
+      "sha256": "fa8c0a5e7e674edd4ea98f3ba9389231e647ab64a3b1ed5e977389f82132490f",
+      "bytes": 5108
+    },
+    "final-review.json": {
+      "sha256": "726898e9478ba82998bcd5b23ce7dcc541ca9b1afe95aa5ab6de4548a589a478",
+      "bytes": 2282
+    },
+    "cache-canonicality-followup.json": {
+      "sha256": "aafa868e5f89f61a1fe81657af1a6220611259b975a2b809e05b3203a905976f",
+      "bytes": 10788
+    },
+    "gates/results.json": {
+      "sha256": "a5600ba0979c83b6132fa58400cbfc759fad969094a503bd82fc757177eb5fc9",
+      "bytes": 3814
+    },
+    "gates/test-summary.json": {
+      "sha256": "c32864fb873389d27e4a6a1d99eada8d65f2bc08af2cef86a3d031acf44dd3c5",
+      "bytes": 69
+    }
+  },
+  "original_controls": {
+    "production_unchanged": true,
+    "passed": 10,
+    "failed": 8,
+    "ignored": 0
+  },
+  "focused_cache_tests": {
+    "passed": 23,
+    "failed": 0,
+    "ignored": 0
+  },
+  "focused_sync_tests": {
+    "passed": 379,
+    "failed": 0,
+    "ignored": 1
+  },
+  "new_tests": 15,
+  "contract": {
+    "canonicality": "Independent header/body retention with coupled canonical identity; delayed removal cannot erase replacement",
+    "snapshot": "Single read guard per provider result, external predicate after release; separate calls may observe different cache versions",
+    "bounds": "Checked exclusive endpoints; retained map slices only; implicit genesis intentionally absent from canonical_hashes_range",
+    "cost": "No integer height scans, duplicate insert header hash, discarded bloom copy or whole-block clone for metadata/transactions",
+    "tradeoff": "Copy all requested header snapshot before early predicate; body range clones hold one read guard; inventory count bounds do not bound bytes or RSS",
+    "metrics": "Index metadata no longer reports full body uploaded; other approximate range totals recorded once; wire telemetry review remains open",
+    "persistence": "No storage format, writes, trust, validation or retry changes",
+    "benchmark": "None under user policy; no quantified speedup",
+    "remote": "None; mac-mini tests and obsolete audit cleanup complete"
+  },
+  "source_commit": "910f4a72322d41f8b2f19252ccd2c579cdc053d9",
+  "workspace_tests": {
+    "groups": 25,
+    "passed": 1483,
+    "failed": 0,
+    "ignored": 23
+  },
+  "gates": {
+    "commit": "910f4a72322d41f8b2f19252ccd2c579cdc053d9",
+    "rustc": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+    "gates": [
+      {
+        "name": "vendor",
+        "command": [
+          "python3",
+          "tools/verify_datafusion_vendor.py"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T20:38:28.199283+00:00",
+        "finished": "2026-09-15T20:38:28.266528+00:00",
+        "sha256": "d8d80949d6f3378c14456842b531f0cade514179e4c94781b95ff9abb6447675",
+        "log": "/private/tmp/logex-execution-cache-canonicality-r2_3op1w/gates/vendor.log"
+      },
+      {
+        "name": "format",
+        "command": [
+          "cargo",
+          "fmt",
+          "--all",
+          "--",
+          "--check"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T20:38:28.267006+00:00",
+        "finished": "2026-09-15T20:38:29.173636+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-execution-cache-canonicality-r2_3op1w/gates/format.log"
+      },
+      {
+        "name": "check",
+        "command": [
+          "cargo",
+          "check",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T20:38:29.174026+00:00",
+        "finished": "2026-09-15T20:38:36.945671+00:00",
+        "sha256": "ec6a12aa294d35a915fd30f796d416032c3dde31176f9ed7dbcbe5b0ce6b6b3f",
+        "log": "/private/tmp/logex-execution-cache-canonicality-r2_3op1w/gates/check.log"
+      },
+      {
+        "name": "clippy",
+        "command": [
+          "cargo",
+          "clippy",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T20:38:36.946253+00:00",
+        "finished": "2026-09-15T20:38:44.096485+00:00",
+        "sha256": "fbd3085b1379eedb68b39357c13121b5326b579fd453112fe0acb2365164619d",
+        "log": "/private/tmp/logex-execution-cache-canonicality-r2_3op1w/gates/clippy.log"
+      },
+      {
+        "name": "test",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T20:38:44.097341+00:00",
+        "finished": "2026-09-15T20:41:31.763303+00:00",
+        "sha256": "63728cc197826f46038e7dbcd7cbbffd2dbb17fd79c68f2a459b4d77d8c95f3a",
+        "log": "/private/tmp/logex-execution-cache-canonicality-r2_3op1w/gates/test.log"
+      },
+      {
+        "name": "doc",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--doc",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T20:41:31.764418+00:00",
+        "finished": "2026-09-15T20:41:42.484773+00:00",
+        "sha256": "aa0b1092f2d8be1995501ce4567872e7354948227b741efe5d2d47b4541d05a1",
+        "log": "/private/tmp/logex-execution-cache-canonicality-r2_3op1w/gates/doc.log"
+      },
+      {
+        "name": "release-build",
+        "command": [
+          "cargo",
+          "build",
+          "-p",
+          "logex-node",
+          "--release",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T20:41:42.485221+00:00",
+        "finished": "2026-09-15T20:42:29.228113+00:00",
+        "sha256": "2d10c5dee849f4e37987a71abac95ca3f6bc74c2f7b3a63b52aff39586650296",
+        "log": "/private/tmp/logex-execution-cache-canonicality-r2_3op1w/gates/release-build.log"
+      }
+    ]
+  }
+}

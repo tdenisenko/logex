@@ -128,9 +128,17 @@ fn receipts_payload_bytes(receipts: &[LogexReceipt]) -> u64 {
     })
 }
 
-fn insert_header_inner(state: &mut ServeCacheState, header: Header) {
-    let hash = header.hash_slow();
+// Returns whether replacing this header removed a cached body and its receipts.
+fn insert_header_inner(state: &mut ServeCacheState, hash: B256, header: Header) -> bool {
     let number = header.number;
+    let body_changed = state
+        .number_to_hash
+        .get(&number)
+        .is_some_and(|old| *old != hash);
+    if body_changed && let Some(old_hash) = state.number_to_hash.remove(&number) {
+        state.hash_to_number.remove(&old_hash);
+        state.blocks.remove(&old_hash);
+    }
     if let Some(old_hash) = state.header_number_to_hash.insert(number, hash)
         && old_hash != hash
     {
@@ -144,6 +152,64 @@ fn insert_header_inner(state: &mut ServeCacheState, header: Header) {
         };
         state.header_number_to_hash.remove(&evict_number);
         state.headers.remove(&evict_hash);
+    }
+    body_changed
+}
+
+fn number_range(range: impl RangeBounds<BlockNumber>) -> Option<RangeInclusive<BlockNumber>> {
+    let start = match range.start_bound() {
+        Bound::Included(value) => *value,
+        Bound::Excluded(value) => value.checked_add(1)?,
+        Bound::Unbounded => 0,
+    };
+    let end = match range.end_bound() {
+        Bound::Included(value) => *value,
+        Bound::Excluded(value) => value.checked_sub(1)?,
+        Bound::Unbounded => BlockNumber::MAX,
+    };
+    (start <= end).then_some(start..=end)
+}
+
+impl ServeCacheState {
+    fn header(&self, hash: &B256) -> Option<&Header> {
+        self.headers
+            .get(hash)
+            .or_else(|| self.blocks.get(hash).map(|cached| &cached.block.header))
+    }
+
+    fn header_hash(&self, number: u64) -> Option<B256> {
+        self.header_number_to_hash
+            .get(&number)
+            .or_else(|| self.number_to_hash.get(&number))
+            .copied()
+    }
+
+    // Both maps are ordered. Prefer the header inventory at an equal height and
+    // visit only retained entries, including bodies whose header entry was evicted.
+    fn header_hashes_range(
+        &self,
+        range: RangeInclusive<u64>,
+    ) -> impl Iterator<Item = (u64, B256)> + '_ {
+        let mut headers = self.header_number_to_hash.range(range.clone()).peekable();
+        let mut blocks = self.number_to_hash.range(range).peekable();
+        std::iter::from_fn(move || {
+            let entry = match (headers.peek(), blocks.peek()) {
+                (Some((header_number, _)), Some((block_number, _))) => {
+                    match header_number.cmp(block_number) {
+                        std::cmp::Ordering::Less => headers.next(),
+                        std::cmp::Ordering::Equal => {
+                            blocks.next();
+                            headers.next()
+                        }
+                        std::cmp::Ordering::Greater => blocks.next(),
+                    }
+                }
+                (Some(_), None) => headers.next(),
+                (None, Some(_)) => blocks.next(),
+                (None, None) => None,
+            };
+            entry.map(|(number, hash)| (*number, *hash))
+        })
     }
 }
 
@@ -184,19 +250,12 @@ impl ServeCacheProvider {
         let block = Block::new(header, body);
         let receipts = receipts
             .iter()
-            .cloned()
-            .map(|receipt| receipt.receipt)
+            .map(|receipt| receipt.receipt.clone())
             .collect();
 
         let mut state = self.inner.write().expect("serve cache poisoned");
-        insert_header_inner(&mut state, header_for_cache);
-        if let Some(old_hash) = state.number_to_hash.insert(number, hash)
-            && old_hash != hash
-        {
-            state.hash_to_number.remove(&old_hash);
-            state.blocks.remove(&old_hash);
-        }
-
+        insert_header_inner(&mut state, hash, header_for_cache);
+        state.number_to_hash.insert(number, hash);
         state.hash_to_number.insert(hash, number);
         state.blocks.insert(hash, CachedBlock { block, receipts });
 
@@ -210,11 +269,14 @@ impl ServeCacheProvider {
         }
     }
 
-    pub fn insert_headers(&self, headers: impl IntoIterator<Item = Header>) {
+    /// Returns whether canonical replacement removed any cached bodies.
+    pub fn insert_headers(&self, headers: impl IntoIterator<Item = Header>) -> bool {
         let mut state = self.inner.write().expect("serve cache poisoned");
+        let mut bodies_changed = false;
         for header in headers {
-            insert_header_inner(&mut state, header);
+            bodies_changed |= insert_header_inner(&mut state, header.hash_slow(), header);
         }
+        bodies_changed
     }
 
     pub fn remove_blocks(&self, reverted_hashes: &[B256]) {
@@ -224,16 +286,16 @@ impl ServeCacheProvider {
 
         let mut state = self.inner.write().expect("serve cache poisoned");
         for hash in reverted_hashes {
-            let Some(number) = state.hash_to_number.remove(hash) else {
-                continue;
-            };
-            if state.number_to_hash.get(&number).copied() == Some(*hash) {
+            if let Some(number) = state.hash_to_number.remove(hash)
+                && state.number_to_hash.get(&number) == Some(hash)
+            {
                 state.number_to_hash.remove(&number);
             }
-            if state.header_number_to_hash.get(&number).copied() == Some(*hash) {
-                state.header_number_to_hash.remove(&number);
+            if let Some(header) = state.headers.remove(hash)
+                && state.header_number_to_hash.get(&header.number) == Some(hash)
+            {
+                state.header_number_to_hash.remove(&header.number);
             }
-            state.headers.remove(hash);
             state.blocks.remove(hash);
         }
     }
@@ -264,96 +326,110 @@ impl ServeCacheProvider {
     }
 
     fn header_hash_for_number(&self, number: u64) -> Option<B256> {
-        let state = self.inner.read().expect("serve cache poisoned");
-        state
-            .header_number_to_hash
-            .get(&number)
-            .copied()
-            .or_else(|| state.number_to_hash.get(&number).copied())
-            .or_else(|| (number == 0).then(|| self.chain_spec.genesis_hash()))
-    }
-
-    fn block_hash_for_number(&self, number: u64) -> Option<B256> {
-        let state = self.inner.read().expect("serve cache poisoned");
-        state
-            .number_to_hash
-            .get(&number)
-            .copied()
+        self.inner
+            .read()
+            .expect("serve cache poisoned")
+            .header_hash(number)
             .or_else(|| (number == 0).then(|| self.chain_spec.genesis_hash()))
     }
 
     fn header_by_hash_inner(&self, hash: B256) -> Option<Header> {
         let state = self.inner.read().expect("serve cache poisoned");
-        state
-            .headers
-            .get(&hash)
-            .cloned()
-            .or_else(|| {
-                state
-                    .blocks
-                    .get(&hash)
-                    .map(|cached| cached.block.header.clone())
-            })
-            .or_else(|| {
-                (hash == self.chain_spec.genesis_hash())
-                    .then(|| self.chain_spec.genesis_header().clone())
-            })
+        state.header(&hash).cloned().or_else(|| {
+            (hash == self.chain_spec.genesis_hash())
+                .then(|| self.chain_spec.genesis_header().clone())
+        })
     }
 
-    fn block_by_hash_inner(
-        &self,
-        hash: B256,
-    ) -> Option<Block<reth_ethereum_primitives::TransactionSigned>> {
+    fn header_by_number_inner(&self, number: u64) -> Option<(B256, Header)> {
         let state = self.inner.read().expect("serve cache poisoned");
-        state
-            .blocks
-            .get(&hash)
-            .map(|cached| cached.block.clone())
-            .or_else(|| {
-                (hash == self.chain_spec.genesis_hash()).then(|| {
-                    Block::new(
-                        self.chain_spec.genesis_header().clone(),
-                        BlockBody::default(),
-                    )
-                })
-            })
+        if let Some(hash) = state.header_hash(number) {
+            return state.header(&hash).map(|header| (hash, header.clone()));
+        }
+        (number == 0).then(|| {
+            (
+                self.chain_spec.genesis_hash(),
+                self.chain_spec.genesis_header().clone(),
+            )
+        })
     }
 
-    fn header_by_number_inner(&self, number: u64) -> Option<Header> {
-        let hash = self.header_hash_for_number(number)?;
-        self.header_by_hash_inner(hash)
-    }
-
-    fn receipts_by_block_inner(&self, block: BlockHashOrNumber) -> Option<Vec<LogexReceipt>> {
-        let hash = match block {
-            BlockHashOrNumber::Hash(hash) => hash,
-            BlockHashOrNumber::Number(number) => self.block_hash_for_number(number)?,
-        };
-
-        let state = self.inner.read().expect("serve cache poisoned");
-        state
-            .blocks
-            .get(&hash)
-            .map(|cached| cached.receipts.clone())
-            .or_else(|| (hash == self.chain_spec.genesis_hash()).then(Vec::new))
-    }
-
-    fn number_range(
+    // These mapping closures are private field projections. External predicates
+    // run only after the owned snapshot has released the cache guard.
+    fn map_headers_range<T>(
         &self,
         range: impl RangeBounds<BlockNumber>,
-    ) -> Option<RangeInclusive<BlockNumber>> {
-        let best_number = self.chain_info_inner().best_number;
-        let start = match range.start_bound() {
-            Bound::Included(value) => *value,
-            Bound::Excluded(value) => value.saturating_add(1),
-            Bound::Unbounded => 0,
+        mut map: impl FnMut(B256, &Header) -> T,
+    ) -> Vec<T> {
+        let Some(range) = number_range(range) else {
+            return Vec::new();
         };
-        let end = match range.end_bound() {
-            Bound::Included(value) => *value,
-            Bound::Excluded(value) => value.saturating_sub(1),
-            Bound::Unbounded => best_number,
+        let state = self.inner.read().expect("serve cache poisoned");
+        let mut result = Vec::new();
+        if range.contains(&0) && state.header_hash(0).is_none() {
+            result.push(map(
+                self.chain_spec.genesis_hash(),
+                self.chain_spec.genesis_header(),
+            ));
+        }
+        result.extend(
+            state
+                .header_hashes_range(range)
+                .filter_map(|(_, hash)| state.header(&hash).map(|header| map(hash, header))),
+        );
+        result
+    }
+
+    fn genesis_block(&self) -> CachedBlock {
+        CachedBlock {
+            block: Block::new(
+                self.chain_spec.genesis_header().clone(),
+                BlockBody::default(),
+            ),
+            receipts: Vec::new(),
+        }
+    }
+
+    fn map_block<T>(
+        &self,
+        id: BlockHashOrNumber,
+        map: impl FnOnce(&CachedBlock) -> T,
+    ) -> Option<T> {
+        let state = self.inner.read().expect("serve cache poisoned");
+        let hash = match id {
+            BlockHashOrNumber::Hash(hash) => hash,
+            BlockHashOrNumber::Number(number) => state
+                .number_to_hash
+                .get(&number)
+                .copied()
+                .or_else(|| (number == 0).then(|| self.chain_spec.genesis_hash()))?,
         };
-        (start <= end).then_some(start..=end)
+        if let Some(cached) = state.blocks.get(&hash) {
+            return Some(map(cached));
+        }
+        (hash == self.chain_spec.genesis_hash()).then(|| map(&self.genesis_block()))
+    }
+
+    fn map_blocks_range<T>(
+        &self,
+        range: impl RangeBounds<BlockNumber>,
+        mut map: impl FnMut(&CachedBlock) -> T,
+    ) -> Vec<T> {
+        let Some(range) = number_range(range) else {
+            return Vec::new();
+        };
+        let state = self.inner.read().expect("serve cache poisoned");
+        let mut result = Vec::new();
+        if range.contains(&0) && !state.number_to_hash.contains_key(&0) {
+            result.push(map(&self.genesis_block()));
+        }
+        result.extend(
+            state
+                .number_to_hash
+                .range(range)
+                .filter_map(|(_, hash)| state.blocks.get(hash).map(&mut map)),
+        );
+        result
     }
 }
 
@@ -381,15 +457,13 @@ impl BlockHashReader for ServeCacheProvider {
         start: BlockNumber,
         end: BlockNumber,
     ) -> ProviderResult<Vec<B256>> {
+        let Some(range) = number_range(start..end) else {
+            return Ok(Vec::new());
+        };
         let state = self.inner.read().expect("serve cache poisoned");
-        Ok((start..end)
-            .filter_map(|number| {
-                state
-                    .header_number_to_hash
-                    .get(&number)
-                    .copied()
-                    .or_else(|| state.number_to_hash.get(&number).copied())
-            })
+        Ok(state
+            .header_hashes_range(range)
+            .map(|(_, hash)| hash)
             .collect())
     }
 }
@@ -413,12 +487,7 @@ impl BlockNumReader for ServeCacheProvider {
             .hash_to_number
             .get(&hash)
             .copied()
-            .or_else(|| {
-                state
-                    .header_number_to_hash
-                    .iter()
-                    .find_map(|(number, header_hash)| (*header_hash == hash).then_some(*number))
-            })
+            .or_else(|| state.headers.get(&hash).map(|header| header.number))
             .or_else(|| (hash == self.chain_spec.genesis_hash()).then_some(0)))
     }
 }
@@ -449,7 +518,7 @@ impl HeaderProvider for ServeCacheProvider {
     }
 
     fn header_by_number(&self, num: u64) -> ProviderResult<Option<Self::Header>> {
-        let header = self.header_by_number_inner(num);
+        let header = self.header_by_number_inner(num).map(|(_, header)| header);
         if let Some(header) = &header {
             self.record_p2p_upload_payload(header_payload_bytes(header));
         }
@@ -460,13 +529,7 @@ impl HeaderProvider for ServeCacheProvider {
         &self,
         range: impl RangeBounds<BlockNumber>,
     ) -> ProviderResult<Vec<Self::Header>> {
-        let Some(range) = self.number_range(range) else {
-            return Ok(Vec::new());
-        };
-
-        let headers = range
-            .filter_map(|number| self.header_by_number_inner(number))
-            .collect::<Vec<_>>();
+        let headers = self.map_headers_range(range, |_, header| header.clone());
         self.record_p2p_upload_payload(headers_payload_bytes(&headers));
         Ok(headers)
     }
@@ -475,14 +538,11 @@ impl HeaderProvider for ServeCacheProvider {
         &self,
         number: BlockNumber,
     ) -> ProviderResult<Option<SealedHeader<Self::Header>>> {
-        let Some(hash) = self.block_hash_for_number(number) else {
-            return Ok(None);
-        };
         let header = self.header_by_number_inner(number);
-        if let Some(header) = &header {
+        if let Some((_, header)) = &header {
             self.record_p2p_upload_payload(header_payload_bytes(header));
         }
-        Ok(header.map(|header| SealedHeader::new(header, hash)))
+        Ok(header.map(|(hash, header)| SealedHeader::new(header, hash)))
     }
 
     fn sealed_headers_while(
@@ -490,33 +550,24 @@ impl HeaderProvider for ServeCacheProvider {
         range: impl RangeBounds<BlockNumber>,
         mut predicate: impl FnMut(&SealedHeader<Self::Header>) -> bool,
     ) -> ProviderResult<Vec<SealedHeader<Self::Header>>> {
-        let Some(range) = self.number_range(range) else {
-            return Ok(Vec::new());
-        };
-
-        let mut headers = Vec::new();
-        for number in range {
-            let Some(sealed) = self.sealed_header(number)? else {
-                continue;
-            };
-            if !predicate(&sealed) {
-                break;
-            }
-            headers.push(sealed);
-        }
-
-        Ok(headers)
+        let snapshot = self.map_headers_range(range, |hash, header| {
+            SealedHeader::new(header.clone(), hash)
+        });
+        Ok(snapshot
+            .into_iter()
+            .take_while(|sealed| {
+                self.record_p2p_upload_payload(header_payload_bytes(sealed.header()));
+                predicate(sealed)
+            })
+            .collect())
     }
 }
 
 impl BlockBodyIndicesProvider for ServeCacheProvider {
     fn block_body_indices(&self, num: u64) -> ProviderResult<Option<StoredBlockBodyIndices>> {
-        let tx_count = self
-            .block_by_number(num)?
-            .map(|block| block.body.transactions.len() as u64);
-        Ok(tx_count.map(|tx_count| StoredBlockBodyIndices {
+        Ok(self.map_block(num.into(), |cached| StoredBlockBodyIndices {
             first_tx_num: 0,
-            tx_count,
+            tx_count: usize_to_u64(cached.block.body.transactions.len()),
         }))
     }
 
@@ -524,9 +575,12 @@ impl BlockBodyIndicesProvider for ServeCacheProvider {
         &self,
         range: RangeInclusive<BlockNumber>,
     ) -> ProviderResult<Vec<StoredBlockBodyIndices>> {
-        Ok(range
-            .filter_map(|number| self.block_body_indices(number).ok().flatten())
-            .collect())
+        Ok(
+            self.map_blocks_range(range, |cached| StoredBlockBodyIndices {
+                first_tx_num: 0,
+                tx_count: usize_to_u64(cached.block.body.transactions.len()),
+            }),
+        )
     }
 }
 
@@ -574,16 +628,7 @@ impl TransactionsProvider for ServeCacheProvider {
         &self,
         block: BlockHashOrNumber,
     ) -> ProviderResult<Option<Vec<Self::Transaction>>> {
-        let hash = match block {
-            BlockHashOrNumber::Hash(hash) => hash,
-            BlockHashOrNumber::Number(number) => match self.block_hash_for_number(number) {
-                Some(hash) => hash,
-                None => return Ok(None),
-            },
-        };
-        let transactions = self
-            .block_by_hash_inner(hash)
-            .map(|block| block.body.transactions);
+        let transactions = self.map_block(block, |cached| cached.block.body.transactions.clone());
         if let Some(transactions) = &transactions {
             let payload_bytes = transactions.iter().fold(0u64, |total, tx| {
                 total.saturating_add(usize_to_u64(tx.size()))
@@ -597,13 +642,13 @@ impl TransactionsProvider for ServeCacheProvider {
         &self,
         range: impl RangeBounds<BlockNumber>,
     ) -> ProviderResult<Vec<Vec<Self::Transaction>>> {
-        let Some(range) = self.number_range(range) else {
-            return Ok(Vec::new());
-        };
-
-        Ok(range
-            .filter_map(|number| self.transactions_by_block(number.into()).ok().flatten())
-            .collect())
+        let transactions =
+            self.map_blocks_range(range, |cached| cached.block.body.transactions.clone());
+        let payload_bytes = transactions.iter().flatten().fold(0u64, |total, tx| {
+            total.saturating_add(usize_to_u64(tx.size()))
+        });
+        self.record_p2p_upload_payload(payload_bytes);
+        Ok(transactions)
     }
 
     fn transactions_by_tx_range(
@@ -640,7 +685,7 @@ impl ReceiptProvider for ServeCacheProvider {
         &self,
         block: BlockHashOrNumber,
     ) -> ProviderResult<Option<Vec<Self::Receipt>>> {
-        let receipts = self.receipts_by_block_inner(block);
+        let receipts = self.map_block(block, |cached| cached.receipts.clone());
         if let Some(receipts) = &receipts {
             self.record_p2p_upload_payload(receipts_payload_bytes(receipts));
         }
@@ -658,9 +703,12 @@ impl ReceiptProvider for ServeCacheProvider {
         &self,
         block_range: RangeInclusive<BlockNumber>,
     ) -> ProviderResult<Vec<Vec<Self::Receipt>>> {
-        Ok(block_range
-            .filter_map(|number| self.receipts_by_block(number.into()).ok().flatten())
-            .collect())
+        let receipts = self.map_blocks_range(block_range, |cached| cached.receipts.clone());
+        let payload_bytes = receipts.iter().fold(0u64, |total, block| {
+            total.saturating_add(receipts_payload_bytes(block))
+        });
+        self.record_p2p_upload_payload(payload_bytes);
+        Ok(receipts)
     }
 }
 
@@ -677,19 +725,11 @@ impl BlockReader for ServeCacheProvider {
         if !source.is_canonical() {
             return Ok(None);
         }
-        Ok(self.block_by_hash_inner(hash))
+        Ok(self.map_block(hash.into(), |cached| cached.block.clone()))
     }
 
     fn block(&self, id: BlockHashOrNumber) -> ProviderResult<Option<Self::Block>> {
-        let hash = match id {
-            BlockHashOrNumber::Hash(hash) => hash,
-            BlockHashOrNumber::Number(number) => match self.block_hash_for_number(number) {
-                Some(hash) => hash,
-                None => return Ok(None),
-            },
-        };
-
-        let block = self.block_by_hash_inner(hash);
+        let block = self.map_block(id, |cached| cached.block.clone());
         if let Some(block) = &block {
             self.record_p2p_upload_payload(block_payload_bytes(block));
         }
@@ -723,9 +763,12 @@ impl BlockReader for ServeCacheProvider {
     }
 
     fn block_range(&self, range: RangeInclusive<BlockNumber>) -> ProviderResult<Vec<Self::Block>> {
-        Ok(range
-            .filter_map(|number| self.block_by_number(number).ok().flatten())
-            .collect())
+        let blocks = self.map_blocks_range(range, |cached| cached.block.clone());
+        let payload_bytes = blocks.iter().fold(0u64, |total, block| {
+            total.saturating_add(block_payload_bytes(block))
+        });
+        self.record_p2p_upload_payload(payload_bytes);
+        Ok(blocks)
     }
 
     fn block_with_senders_range(
@@ -934,6 +977,7 @@ mod tests {
         }
 
         let (historical_header, historical_body) = test_block(1_000);
+        let historical_hash = historical_header.hash_slow();
         provider.insert_block(historical_header, historical_body, &[test_receipt()]);
 
         assert!(provider.block_by_number(1_000).unwrap().is_none());
@@ -942,5 +986,456 @@ mod tests {
             provider.advertised_history_range(),
             Some((first_recent_block, last_recent_block, tip_hash))
         );
+        assert!(provider.header(historical_hash).unwrap().is_some());
+        provider.remove_blocks(&[historical_hash]);
+        assert!(provider.header(historical_hash).unwrap().is_none());
+        assert!(provider.block_hash(1_000).unwrap().is_none());
+        assert_eq!(
+            provider.advertised_history_range(),
+            Some((first_recent_block, last_recent_block, tip_hash))
+        );
+    }
+    #[test]
+    fn restored_header_reorg_removes_all_header_indexes() {
+        let provider = ServeCacheProvider::new();
+        let (header, _) = test_block(17);
+        let (neighbor, _) = test_block(18);
+        let hash = header.hash_slow();
+        provider.insert_headers([header, neighbor.clone()]);
+        provider.remove_blocks(&[hash]);
+        assert!(provider.header(hash).unwrap().is_none());
+        assert!(provider.header_by_number(17).unwrap().is_none());
+        assert!(provider.block_hash(17).unwrap().is_none());
+        assert!(provider.block_number(hash).unwrap().is_none());
+        assert_eq!(provider.header_by_number(18).unwrap(), Some(neighbor));
+        assert_eq!(provider.advertised_history_range(), None);
+    }
+
+    #[test]
+    fn header_replacement_invalidates_conflicting_body_and_receipts() {
+        let provider = ServeCacheProvider::new();
+        let (old, body) = test_block(17);
+        let old_hash = old.hash_slow();
+        provider.insert_block(old.clone(), body, &[test_receipt()]);
+        let mut replacement = old;
+        replacement.timestamp = 1;
+        let replacement_hash = replacement.hash_slow();
+        provider.insert_headers([replacement.clone()]);
+        assert_eq!(provider.block_hash(17).unwrap(), Some(replacement_hash));
+        assert_eq!(
+            provider.header_by_number(17).unwrap(),
+            Some(replacement.clone())
+        );
+        assert!(provider.block_by_number(17).unwrap().is_none());
+        assert!(provider.block_by_hash(old_hash).unwrap().is_none());
+        assert!(provider.receipts_by_block(17.into()).unwrap().is_none());
+        assert!(
+            provider
+                .receipts_by_block(old_hash.into())
+                .unwrap()
+                .is_none()
+        );
+        assert!(provider.header(old_hash).unwrap().is_none());
+        assert!(provider.block_number(old_hash).unwrap().is_none());
+        assert_eq!(provider.advertised_history_range(), None);
+        // A delayed invalidation of the old identity must not erase its successor.
+        provider.remove_blocks(&[old_hash]);
+        assert_eq!(provider.header_by_number(17).unwrap(), Some(replacement));
+    }
+
+    #[test]
+    fn same_header_reinsertion_preserves_body_availability() {
+        let provider = ServeCacheProvider::new();
+        let (header, body) = test_block(17);
+        let hash = header.hash_slow();
+        provider.insert_block(header.clone(), body.clone(), &[test_receipt()]);
+        provider.insert_headers([header.clone()]);
+        assert_eq!(
+            provider.block_by_number(17).unwrap(),
+            Some(Block::new(header, body))
+        );
+        assert_eq!(
+            provider.receipts_by_block(hash.into()).unwrap(),
+            Some(vec![test_receipt().receipt])
+        );
+        assert_eq!(provider.advertised_history_range(), Some((17, 17, hash)));
+    }
+
+    #[test]
+    fn sealed_header_supports_restored_header_only_entries() {
+        let provider = ServeCacheProvider::new();
+        let (header, _) = test_block(17);
+        provider.insert_headers([header.clone()]);
+        let sealed = provider
+            .sealed_header(17)
+            .unwrap()
+            .expect("restored header");
+        assert_eq!(sealed.hash(), header.hash_slow());
+        assert_eq!(sealed.header(), &header);
+    }
+
+    #[test]
+    fn sealed_header_hash_matches_replaced_header() {
+        let provider = ServeCacheProvider::new();
+        let (old, body) = test_block(17);
+        provider.insert_block(old.clone(), body, &[]);
+        let mut replacement = old;
+        replacement.timestamp = 1;
+        provider.insert_headers([replacement.clone()]);
+        let sealed = provider
+            .sealed_header(17)
+            .unwrap()
+            .expect("replacement header");
+        assert_eq!(sealed.header(), &replacement);
+        assert_eq!(sealed.hash(), replacement.hash_slow());
+    }
+
+    #[test]
+    fn exclusive_zero_header_range_is_empty_but_inclusive_genesis_is_present() {
+        let provider = ServeCacheProvider::new();
+        assert!(provider.headers_range(..0).unwrap().is_empty());
+        assert!(
+            provider
+                .sealed_headers_while(..0, |_| true)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            provider.headers_range(0..=0).unwrap(),
+            vec![provider.chain_spec.genesis_header().clone()]
+        );
+        assert!(provider.canonical_hashes_range(0, 1).unwrap().is_empty());
+    }
+
+    #[test]
+    fn unbounded_header_ranges_include_sparse_restored_inventory() {
+        let provider = ServeCacheProvider::new();
+        provider.insert_headers([test_block(17).0, test_block(4).0]);
+        assert_eq!(
+            provider
+                .headers_range(..)
+                .unwrap()
+                .iter()
+                .map(|h| h.number)
+                .collect::<Vec<_>>(),
+            vec![0, 4, 17]
+        );
+        assert_eq!(
+            provider
+                .headers_range(5..)
+                .unwrap()
+                .iter()
+                .map(|h| h.number)
+                .collect::<Vec<_>>(),
+            vec![17]
+        );
+        assert_eq!(
+            provider
+                .sealed_headers_while(.., |_| true)
+                .unwrap()
+                .iter()
+                .map(|h| h.number)
+                .collect::<Vec<_>>(),
+            vec![0, 4, 17]
+        );
+        // Header-only availability must not invent body/transaction availability.
+        assert!(
+            provider
+                .transactions_by_block_range(1..)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(provider.advertised_history_range(), None);
+    }
+
+    #[test]
+    fn header_and_transaction_ranges_match_independent_bound_filter() {
+        let provider = ServeCacheProvider::new();
+        for number in [2, 6] {
+            let (header, body) = test_block(number);
+            provider.insert_block(header, body, &[]);
+        }
+        provider.insert_headers([test_block(4).0]);
+        let bounds = [
+            (Bound::Unbounded, Bound::Unbounded),
+            (Bound::Included(2), Bound::Included(4)),
+            (Bound::Excluded(2), Bound::Excluded(6)),
+            (Bound::Unbounded, Bound::Excluded(0)),
+            (Bound::Excluded(u64::MAX), Bound::Included(u64::MAX)),
+            (Bound::Included(6), Bound::Included(2)),
+            (Bound::Included(0), Bound::Included(0)),
+        ];
+        for range in bounds {
+            let includes = |number: &u64| {
+                let lower = match range.0 {
+                    Bound::Unbounded => true,
+                    Bound::Included(n) => *number >= n,
+                    Bound::Excluded(n) => *number > n,
+                };
+                let upper = match range.1 {
+                    Bound::Unbounded => true,
+                    Bound::Included(n) => *number <= n,
+                    Bound::Excluded(n) => *number < n,
+                };
+                lower && upper
+            };
+            let expected_headers = [0, 2, 4, 6]
+                .into_iter()
+                .filter(includes)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                provider
+                    .headers_range(range)
+                    .unwrap()
+                    .iter()
+                    .map(|h| h.number)
+                    .collect::<Vec<_>>(),
+                expected_headers,
+                "header bounds {range:?}"
+            );
+            let expected_bodies = [0, 2, 6].into_iter().filter(includes).count();
+            assert_eq!(
+                provider.transactions_by_block_range(range).unwrap().len(),
+                expected_bodies,
+                "transaction bounds {range:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn sealed_header_predicate_runs_without_cache_read_guard() {
+        let provider = ServeCacheProvider::new();
+        let (header, body) = test_block(2);
+        provider.insert_block(header, body, &[]);
+        let mut calls = 0;
+        let result = provider
+            .sealed_headers_while(2..=2, |_| {
+                // try_write makes a regression fail immediately instead of deadlocking.
+                assert!(provider.inner.try_write().is_ok());
+                calls += 1;
+                true
+            })
+            .unwrap();
+        assert_eq!(calls, 1);
+        assert_eq!(result.len(), 1);
+    }
+    #[test]
+    fn sparse_provider_ranges_preserve_body_and_header_availability() {
+        let provider = ServeCacheProvider::new();
+        for number in [2, 6] {
+            let (header, body) = test_block(number);
+            provider.insert_block(header, body, &[test_receipt()]);
+        }
+        provider.insert_headers([test_block(4).0]);
+        let hashes = provider.canonical_hashes_range(0, 7).unwrap();
+        assert_eq!(
+            hashes,
+            [2, 4, 6].map(|number| test_block(number).0.hash_slow())
+        );
+        assert_eq!(
+            provider
+                .block_range(0..=6)
+                .unwrap()
+                .iter()
+                .map(|block| block.header.number)
+                .collect::<Vec<_>>(),
+            vec![0, 2, 6]
+        );
+        let indices = provider.block_body_indices_range(0..=6).unwrap();
+        assert_eq!(indices.len(), 3);
+        assert!(indices.iter().all(|index| index.tx_count == 0));
+        let receipts = provider.receipts_by_block_range(0..=6).unwrap();
+        assert_eq!(
+            receipts,
+            vec![
+                Vec::new(),
+                vec![test_receipt().receipt],
+                vec![test_receipt().receipt]
+            ]
+        );
+        assert_eq!(
+            provider.transactions_by_block_range(0..=6).unwrap(),
+            vec![Vec::new(); 3]
+        );
+        assert!(provider.canonical_hashes_range(4, 4).unwrap().is_empty());
+        assert!(provider.block_range(3..=5).unwrap().is_empty());
+        assert!(provider.receipts_by_block_range(3..=5).unwrap().is_empty());
+        assert!(provider.block_body_indices_range(3..=5).unwrap().is_empty());
+    }
+    #[test]
+    fn sparse_ranges_span_numeric_domain_without_height_iteration() {
+        let provider = ServeCacheProvider::new();
+        for number in [2, u64::MAX] {
+            let (header, body) = test_block(number);
+            provider.insert_block(header, body, &[test_receipt()]);
+        }
+        provider.insert_headers([test_block(u64::MAX - 1).0]);
+        let expected_headers = vec![0, 2, u64::MAX - 1, u64::MAX];
+        assert_eq!(
+            provider
+                .headers_range(..)
+                .unwrap()
+                .iter()
+                .map(|h| h.number)
+                .collect::<Vec<_>>(),
+            expected_headers
+        );
+        assert_eq!(
+            provider
+                .sealed_headers_while(.., |_| true)
+                .unwrap()
+                .iter()
+                .map(|h| h.number)
+                .collect::<Vec<_>>(),
+            expected_headers
+        );
+        // The canonical hash method has an exclusive end and no implicit genesis.
+        assert_eq!(
+            provider.canonical_hashes_range(0, u64::MAX).unwrap(),
+            [2, u64::MAX - 1].map(|number| test_block(number).0.hash_slow())
+        );
+        assert_eq!(
+            provider
+                .block_range(0..=u64::MAX)
+                .unwrap()
+                .iter()
+                .map(|b| b.header.number)
+                .collect::<Vec<_>>(),
+            vec![0, 2, u64::MAX]
+        );
+        assert_eq!(provider.transactions_by_block_range(..).unwrap().len(), 3);
+        assert_eq!(
+            provider
+                .receipts_by_block_range(0..=u64::MAX)
+                .unwrap()
+                .len(),
+            3
+        );
+        assert_eq!(
+            provider
+                .block_body_indices_range(0..=u64::MAX)
+                .unwrap()
+                .len(),
+            3
+        );
+        let exhausted = (Bound::Excluded(u64::MAX), Bound::Unbounded);
+        assert!(provider.headers_range(exhausted).unwrap().is_empty());
+        assert!(
+            provider
+                .transactions_by_block_range(exhausted)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            provider.headers_range(u64::MAX..).unwrap(),
+            vec![test_block(u64::MAX).0]
+        );
+        assert_eq!(
+            provider
+                .transactions_by_block_range(u64::MAX..)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(provider.headers_range(..0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn header_eviction_falls_back_to_body_and_replacement_reports_availability_change() {
+        let provider = ServeCacheProvider::new();
+        let (header, body) = test_block(1);
+        let hash = header.hash_slow();
+        provider.insert_block(header.clone(), body, &[test_receipt()]);
+        assert!(!provider.insert_headers(
+            (2..=SERVE_CACHE_HEADER_LIMIT as u64 + 1).map(|number| test_block(number).0)
+        ));
+        assert!(!provider.inner.read().unwrap().headers.contains_key(&hash));
+        assert_eq!(provider.header_by_number(1).unwrap(), Some(header.clone()));
+        assert_eq!(provider.sealed_header(1).unwrap().unwrap().hash(), hash);
+        assert_eq!(provider.headers_range(1..=1).unwrap(), vec![header.clone()]);
+        assert_eq!(provider.canonical_hashes_range(1, 2).unwrap(), vec![hash]);
+        let mut replacement = header;
+        replacement.timestamp = 1;
+        // Even with its header inventory entry evicted, the conflicting body is removed.
+        assert!(provider.insert_headers([replacement]));
+        assert!(provider.block_by_number(1).unwrap().is_none());
+        assert!(provider.receipts_by_block(hash.into()).unwrap().is_none());
+        assert!(provider.header(hash).unwrap().is_none());
+        assert_eq!(provider.advertised_history_range(), None);
+    }
+
+    #[test]
+    fn header_insert_change_flag_tracks_only_body_availability_changes() {
+        let provider = ServeCacheProvider::new();
+        let (header, body) = test_block(2);
+        assert!(!provider.insert_headers([header.clone()]));
+        assert!(!provider.insert_headers([header.clone()]));
+        provider.insert_block(header.clone(), body, &[]);
+        assert!(!provider.insert_headers([header.clone()]));
+        let mut replacement = header;
+        replacement.timestamp = 1;
+        // Aggregate flag remains true if a later independent insertion changes no body.
+        assert!(provider.insert_headers([replacement.clone(), test_block(4).0]));
+        assert!(!provider.insert_headers([replacement]));
+        assert!(!provider.insert_headers(std::iter::empty()));
+    }
+
+    #[test]
+    fn delayed_old_hash_removal_preserves_newer_full_block() {
+        let provider = ServeCacheProvider::new();
+        let (old, body) = test_block(2);
+        let old_hash = old.hash_slow();
+        provider.insert_block(old.clone(), body.clone(), &[test_receipt()]);
+        let mut replacement = old;
+        replacement.timestamp = 1;
+        let hash = replacement.hash_slow();
+        provider.insert_block(replacement.clone(), body.clone(), &[test_receipt()]);
+        provider.remove_blocks(&[old_hash]);
+        assert_eq!(provider.block_hash(2).unwrap(), Some(hash));
+        assert_eq!(
+            provider.block_by_number(2).unwrap(),
+            Some(Block::new(replacement.clone(), body))
+        );
+        assert_eq!(
+            provider.receipts_by_block(2.into()).unwrap(),
+            Some(vec![test_receipt().receipt])
+        );
+        assert_eq!(provider.header_by_number(2).unwrap(), Some(replacement));
+        assert_eq!(provider.advertised_history_range(), Some((2, 2, hash)));
+    }
+
+    #[test]
+    fn header_predicate_mutation_observes_pre_mutation_snapshot() {
+        let provider = ServeCacheProvider::new();
+        let first = test_block(2).0;
+        let second = test_block(4).0;
+        let second_hash = second.hash_slow();
+        provider.insert_headers([first.clone(), second.clone()]);
+        let mut replacement = second.clone();
+        replacement.timestamp = 1;
+        let mut calls = 0;
+        let snapshot = provider
+            .sealed_headers_while(2..=4, |_| {
+                assert!(
+                    provider.inner.try_write().is_ok(),
+                    "predicate must not run under the cache lock"
+                );
+                if calls == 0 {
+                    provider.insert_headers([replacement.clone()]);
+                }
+                calls += 1;
+                true
+            })
+            .unwrap();
+        assert_eq!(calls, 2);
+        assert_eq!(
+            snapshot
+                .iter()
+                .map(|h| h.header().clone())
+                .collect::<Vec<_>>(),
+            vec![first, second]
+        );
+        assert_eq!(snapshot[1].hash(), second_hash);
+        assert_eq!(provider.header_by_number(4).unwrap(), Some(replacement));
     }
 }
