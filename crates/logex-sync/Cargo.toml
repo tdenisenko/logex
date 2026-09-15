@@ -45,6 +45,8 @@ futures-util = { workspace = true }
 tracing = { workspace = true }
 eyre = { workspace = true }
 serde_json = { workspace = true }
+serde = { workspace = true }
+tempfile = "3"
 rustc-hash = { workspace = true }
 libc = "0.2"
 rand = "0.8"
@@ -53,4 +55,3 @@ snap = "1.1"
 
 [dev-dependencies]
 enr = { version = "0.13", features = ["rust-secp256k1"] }
-tempfile = "3"

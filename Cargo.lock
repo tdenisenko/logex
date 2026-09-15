@@ -5295,6 +5295,7 @@ dependencies = [
  "reth-storage-api",
  "rustc-hash",
  "secp256k1 0.30.0",
+ "serde",
  "serde_json",
  "snap",
  "tempfile",

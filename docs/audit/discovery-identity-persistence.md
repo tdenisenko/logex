@@ -99,8 +99,9 @@ parent initialization and the publication protocol.
 The focused consensus suite passes 342 tests with one existing ignored test.
 Source `b966f252` passes all seven local gates: vendor verification,
 formatting, workspace check, strict Clippy, 1,427 workspace tests
-(23 ignored), documentation tests and the release node build. CI and
-merge remain pending. See the accompanying
+(23 ignored), documentation tests and the release node build. All six CI jobs passed in run `34996540273` on head `b08f040e`.
+[PR #173](https://github.com/tdenisenko/logex/pull/173) merged as `558bef69`
+after exact head/base verification. See the accompanying
 [validation record](baselines/2026-09-15-discovery-identity-persistence.json).
 
 ## Remaining scope
