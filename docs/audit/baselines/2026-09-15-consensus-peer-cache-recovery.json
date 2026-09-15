@@ -188,11 +188,14 @@
       }
     ]
   },
-  "pr_status": "pending",
+  "pr_status": "merged",
   "workspace_test_totals": {
     "groups": 25,
     "passed": 1340,
     "failed": 0,
     "ignored": 23
-  }
+  },
+  "pull_request": "https://github.com/tdenisenko/logex/pull/165",
+  "merge_commit": "82c5dfce7308b179a2d5980894b0d0289c59af57",
+  "ci_run_id": 34963809892
 }

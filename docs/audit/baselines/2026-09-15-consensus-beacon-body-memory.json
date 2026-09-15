@@ -1,0 +1,285 @@
+{
+  "source_commit": "2b8dc746debdbaa3b42f79547c93dc16f7a0521e",
+  "base_commit": "82c5dfce7308b179a2d5980894b0d0289c59af57",
+  "branch": "audit/consensus-response-memory",
+  "scope": "Optional Beacon body retention and serving prerequisite; aggregate incoming memory remains open",
+  "evidence_root": "/private/tmp/logex-beacon-cache-memory-b1g8h4j2",
+  "findings": [
+    "B3-39",
+    "B3-40",
+    "B3-41",
+    "B3-42"
+  ],
+  "before_controls": {
+    "base": "82c5dfce7308b179a2d5980894b0d0289c59af57",
+    "method": "Exact original encoder and stream encoder, original write-response body with helper names mechanically changed, and original decoded maximum restored into candidate test harness; this is not a full baseline checkout.",
+    "candidate_sha256": "1438eac51953c355e9185fc449277a583c1536bee9d775cc975890659590821f",
+    "harness_sha256": "d37819c3d969941fbc8a78e859bd77765ecf8394e8170c500b7ca6c88170b0ca",
+    "runs": [
+      {
+        "command": [
+          "cargo",
+          "test",
+          "-p",
+          "logex-cl",
+          "--lib",
+          "response_memory_writer_emits_complete_chunks_incrementally",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 101,
+        "log": "/private/tmp/logex-beacon-cache-memory-b1g8h4j2/before-response_memory_writer_emits_complete_chunks_incrementally.log",
+        "sha256": "de6a308a4b284406db0101a31f00a815371a54f50b61d12acc67308055916adf"
+      },
+      {
+        "command": [
+          "cargo",
+          "test",
+          "-p",
+          "logex-cl",
+          "--lib",
+          "response_memory_ssz_bound_excludes_wire_overhead",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 101,
+        "log": "/private/tmp/logex-beacon-cache-memory-b1g8h4j2/before-response_memory_ssz_bound_excludes_wire_overhead.log",
+        "sha256": "87f825c26102742e9b7c63d152da644ddfcb6d08389c30872bc53679baac6e70"
+      }
+    ]
+  },
+  "independent_review": {
+    "status": "REVIEWED_NO_ACTIONABLE_FINDING_PENDING_COMMIT",
+    "source_hashes": {
+      "beacon_cache.rs": "cc57593caf411acce7b6e087a75f39f4705867c38862ad02e4412f60408b6515",
+      "network.rs": "8a263307d561d0fdde9669b12e46fb8d7726a7347b9b722ba94e7c391698d30d",
+      "rpc.rs": "99c6610bd43d7cafdab793bd619f34d31a57896e89bf23d394a5588acc5f75cc",
+      "lib.rs": "f20ad6fb0166714312c9b99f7315b4f945f8bcc01b501b1653894af11fb5c629"
+    },
+    "base": "82c5dfce",
+    "diff_sha256": "23bd9a975198bbe687962656965990f3bcd1370f5096e4becf295bf5b3fea891",
+    "findings": [],
+    "resolved": "V1 None context normalized from verified blockslot before optionalcache insertion; supplied verified context preserved. Actual V1-first thenV2duplicate fixture covers successfulV2 serving.",
+    "reviewed": [
+      "128MiB Vec capacity/4096 object reservation persists until finalArc drop, including evicted queued/inflight bodies.",
+      "Single admission owner andrelease-onlyotherthreads; FIFO/duplicate/quota paths preservemetadata.",
+      "Cancellation/writefailure drops remainingsharedbodies; strengthened refillbothslots control checks releases.",
+      "Stream cheapcount/type/context preflight beforewrites; oneheader-owned compressedVec perchunk, FrameEncoder directlyappends, cumulative256MiB before nextchunk.",
+      "Range stopsfirstmissingcanonicalbody while skipping empty slots; rootomissionspermitted.",
+      "Exact decoded10MiB bound; contextV1omission/V2requirement unchanged; no persistedshape/defaultchange."
+    ],
+    "limits": [
+      "Incoming full-response aggregate and concurrentdecoded budgets remain unresolved nexttask.",
+      "Residentbody budget excludes encodedchunktransients, metadata/maps and incomingresponse allocations.",
+      "Partial IO failure may leave partial lastchunk; errorpropagates andownedbuffersdrop, no success-close claim.",
+      "No Cargo/runtime/remote/benchmark executed byreviewer; root/agent ownchecks.",
+      "Not a performance acceptance claim; finalcommitbindingpending."
+    ],
+    "commit": "2b8dc746debdbaa3b42f79547c93dc16f7a0521e",
+    "review_path": "/private/tmp/logex-beacon-cache-review/final-1/review.json",
+    "review_sha256": "668089787047e1608b1f3cf111917d7b81e72e483470f7e8c046ca6c52a2d3c1"
+  },
+  "artifacts": [
+    {
+      "path": "/private/tmp/logex-beacon-cache-memory-b1g8h4j2/before-v1-context.log",
+      "sha256": "0f3b8acf00d39c28741294e02a06c203a059cde1cbff7f6056f05e5c6039c2f6",
+      "bytes": 1313
+    },
+    {
+      "path": "/private/tmp/logex-beacon-cache-memory-b1g8h4j2/implementation/before-range-hole.log",
+      "sha256": "12e3ee266b0d334174f7940b3f9427a1771f12d26f6eabeaddffc5dc6f528c9c",
+      "bytes": 1350
+    },
+    {
+      "path": "/private/tmp/logex-beacon-cache-memory-b1g8h4j2/implementation/notes.txt",
+      "sha256": "e55cb3c55d4f5fd6b7481854378b5ecfa96e6fbe92ed0dc5f2278f1e8b480cd6",
+      "bytes": 4212
+    },
+    {
+      "path": "/private/tmp/logex-beacon-cache-memory-b1g8h4j2/implementation/cache.log",
+      "sha256": "ee2711a399cf7d237bec8e62805ee52c30a33c2313c17bf8de2bf2875e87185f",
+      "bytes": 1133
+    },
+    {
+      "path": "/private/tmp/logex-beacon-cache-memory-b1g8h4j2/implementation/cache-final.log",
+      "sha256": "5740bc9d137df4c5e218a1b4df1c20acefafbf57097218c87d397411adaf6bb0",
+      "bytes": 1201
+    },
+    {
+      "path": "/private/tmp/logex-beacon-cache-memory-b1g8h4j2/implementation/network.log",
+      "sha256": "7d9ef9accfa84bd706311bbc560e083ff7838f5b1b6841e0011828a98be4cf10",
+      "bytes": 12441
+    },
+    {
+      "path": "/private/tmp/logex-beacon-cache-memory-b1g8h4j2/implementation/all-cl.log",
+      "sha256": "7d923e2fd815edd095247fe374d64631cfee14f46e0b1224823b4d23691ceadd",
+      "bytes": 23793
+    },
+    {
+      "path": "/private/tmp/logex-beacon-cache-memory-b1g8h4j2/implementation/clippy.log",
+      "sha256": "845db43a739b7b42d157b38f2d31de03fba7488d0628a67c4912a4ae7b617850",
+      "bytes": 453
+    },
+    {
+      "path": "/private/tmp/logex-beacon-cache-memory-b1g8h4j2/root-focused.log",
+      "sha256": "4f801eb85a7ade673fb7b834b8502b5424cb7f6bef59cfca7988b6d687fe997c",
+      "bytes": 1027
+    },
+    {
+      "path": "/private/tmp/logex-beacon-cache-memory-b1g8h4j2/gates/results-initial.json",
+      "sha256": "66fa1c53925684afe506b88dd7f829e286bcc4a2952358fad70585bdd0253f07",
+      "bytes": 2731
+    },
+    {
+      "path": "/private/tmp/logex-beacon-cache-memory-b1g8h4j2/gates/test-sandbox-rejected.log",
+      "sha256": "dc89818ce05dcafd7ed4bbfff5200c23c38bea82a6ba8589b604708e5b8427d5",
+      "bytes": 46310
+    }
+  ],
+  "validation_status": "all seven local gates passed",
+  "pr_status": "pending",
+  "limits": [
+    "128MiB Vec backing capacity and4096 resident body objects per network cache, including held evictions; map/queue/allocator overhead outside byte figure",
+    "Incoming wire, decoded chunks and typed decoding allocations not bounded by body-cache budget",
+    "One encoded chunk per active writer; aggregate concurrent writers remain separate",
+    "No benchmark, remote test or production-data operation"
+  ],
+  "gates": {
+    "commit": "2b8dc746debdbaa3b42f79547c93dc16f7a0521e",
+    "rustc": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+    "gates": [
+      {
+        "name": "vendor",
+        "command": [
+          "python3",
+          "tools/verify_datafusion_vendor.py"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T11:57:07.602052+00:00",
+        "finished": "2026-09-15T11:57:07.662937+00:00",
+        "sha256": "d8d80949d6f3378c14456842b531f0cade514179e4c94781b95ff9abb6447675",
+        "log": "/private/tmp/logex-beacon-cache-memory-b1g8h4j2/gates/vendor.log"
+      },
+      {
+        "name": "format",
+        "command": [
+          "cargo",
+          "fmt",
+          "--all",
+          "--",
+          "--check"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T11:57:07.663404+00:00",
+        "finished": "2026-09-15T11:57:08.540191+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-beacon-cache-memory-b1g8h4j2/gates/format.log"
+      },
+      {
+        "name": "check",
+        "command": [
+          "cargo",
+          "check",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T11:57:08.540562+00:00",
+        "finished": "2026-09-15T11:57:17.707012+00:00",
+        "sha256": "78c5570cd6d819f464a3a905ce689819e97d9f8734e0bdf3e70b34f4eb1d82ef",
+        "log": "/private/tmp/logex-beacon-cache-memory-b1g8h4j2/gates/check.log"
+      },
+      {
+        "name": "clippy",
+        "command": [
+          "cargo",
+          "clippy",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T11:57:17.707566+00:00",
+        "finished": "2026-09-15T11:57:26.536694+00:00",
+        "sha256": "7cd6b3b56b6dd11424365c11fc9a4f306c8ca235edff6beb6c5afac089a7cf59",
+        "log": "/private/tmp/logex-beacon-cache-memory-b1g8h4j2/gates/clippy.log"
+      },
+      {
+        "name": "test",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T11:59:08.073734+00:00",
+        "finished": "2026-09-15T12:01:33.021884+00:00",
+        "sha256": "895bb357f8329759b9c9f19138669072502f0d8cc91203a538ed57961c1a14ba",
+        "log": "/private/tmp/logex-beacon-cache-memory-b1g8h4j2/gates/test.log"
+      },
+      {
+        "name": "doc",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--doc",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T12:01:33.023135+00:00",
+        "finished": "2026-09-15T12:01:48.384250+00:00",
+        "sha256": "5146cc41f328f09678fdbf40b37aca35638016bcb057c60ad02997d9be5be10a",
+        "log": "/private/tmp/logex-beacon-cache-memory-b1g8h4j2/gates/doc.log"
+      },
+      {
+        "name": "release-build",
+        "command": [
+          "cargo",
+          "build",
+          "-p",
+          "logex-node",
+          "--release",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T12:01:48.384949+00:00",
+        "finished": "2026-09-15T12:02:50.257720+00:00",
+        "sha256": "adc80c60f776f67253877a494b3494281bc48a4ce335b6ba0ec4c6f3b7690c13",
+        "log": "/private/tmp/logex-beacon-cache-memory-b1g8h4j2/gates/release-build.log"
+      }
+    ],
+    "initial_attempt": "results-initial.json; test-sandbox-rejected.log (loopback binding permission denied)"
+  },
+  "workspace_test_totals": {
+    "passed": 1350,
+    "failed": 0,
+    "ignored": 23,
+    "groups": 25
+  }
+}
