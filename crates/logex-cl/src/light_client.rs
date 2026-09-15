@@ -572,7 +572,12 @@ pub(crate) fn validate_cached_light_client_payloads(
                 signature_slot: decoded.signature_slot(),
                 participants: participant_count(decoded.sync_aggregate()),
             };
-            validate_cached_update_structure(&update, Some(decoded.finality_branch()), None)?;
+            validate_cached_update_structure(
+                &update,
+                Some(decoded.finality_branch()),
+                None,
+                decoded.sync_aggregate(),
+            )?;
             Ok::<_, LightClientVerificationError>(update.attested_header.beacon.slot)
         })()
         .map_err(|error| format!("cached finality update: {error}"))?;
@@ -589,7 +594,7 @@ pub(crate) fn validate_cached_light_client_payloads(
                 signature_slot: decoded.signature_slot(),
                 participants: participant_count(decoded.sync_aggregate()),
             };
-            validate_cached_update_structure(&update, None, None)?;
+            validate_cached_update_structure(&update, None, None, decoded.sync_aggregate())?;
             Ok::<_, LightClientVerificationError>(update.attested_header.beacon.slot)
         })()
         .map_err(|error| format!("cached optimistic update: {error}"))?;
@@ -604,6 +609,7 @@ pub(crate) fn validate_cached_light_client_payloads(
                 &update,
                 decoded.finality_branch_for_verification(),
                 decoded.next_sync_committee_branch(),
+                decoded.sync_aggregate(),
             )?;
             Ok::<_, LightClientVerificationError>(update.attested_header.beacon.slot)
         })()
@@ -643,6 +649,7 @@ fn validate_cached_update_structure(
     update: &VerifiedLightClientUpdate,
     finality_branch: Option<Vec<B256>>,
     next_sync_committee_branch: Option<Vec<B256>>,
+    sync_aggregate: &SyncAggregateRaw,
 ) -> Result<(), LightClientVerificationError> {
     if update.participants < MIN_SYNC_COMMITTEE_PARTICIPANTS {
         return Err(LightClientVerificationError::NoSyncCommitteeParticipants);
@@ -656,7 +663,12 @@ fn validate_cached_update_structure(
         });
     }
     verify_update_finality_proof(update, finality_branch)?;
-    verify_update_next_committee_proof(update, next_sync_committee_branch)
+    verify_update_next_committee_proof(update, next_sync_committee_branch)?;
+    // Match normal verification's encoding/subgroup checks without verifying
+    // historical signatures against a potentially rotated current committee.
+    BlstSignature::sig_validate(sync_aggregate.sync_committee_signature.as_slice(), false)
+        .map_err(|error| LightClientVerificationError::InvalidSignature(format!("{error:?}")))?;
+    Ok(())
 }
 
 pub(crate) fn apply_light_client_update_payload(
@@ -2327,6 +2339,63 @@ mod tests {
     }
 
     const CACHE_TEST_SLOT: u64 = 419_072 * 32 + 16;
+
+    #[test]
+    fn cached_payload_validation_rejects_invalid_signature_encodings() {
+        let fixture = test_cached_light_client_fixture(CACHE_TEST_SLOT);
+        for family in 1..4 {
+            for byte in [0, 0xff] {
+                let mut cache = fixture.payloads.clone();
+                let raw = cache_payload_mut(&mut cache, family);
+                macro_rules! replace_signature {
+                    ($ty:ty) => {{
+                        let mut payload = <$ty>::from_ssz_bytes(&raw.bytes).unwrap();
+                        payload.sync_aggregate.sync_committee_signature =
+                            BlsSignature::repeat_byte(byte);
+                        payload.as_ssz_bytes()
+                    }};
+                }
+                raw.bytes = match family {
+                    1 => replace_signature!(LightClientFinalityUpdateElectra),
+                    2 => replace_signature!(LightClientOptimisticUpdateDeneb),
+                    3 => replace_signature!(LightClientUpdateElectra),
+                    _ => unreachable!(),
+                };
+                let result = validate_cached_light_client_payloads(&mut cache, fixture.checkpoint);
+                assert!(
+                    result.is_err(),
+                    "family {family} accepted signature byte {byte}"
+                );
+                assert!(
+                    result
+                        .unwrap_err()
+                        .contains("invalid sync committee signature")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn cached_payload_signature_structure_does_not_reauthenticate_old_updates() {
+        let fixture = test_cached_light_client_fixture(CACHE_TEST_SLOT);
+        let mut cache = fixture.payloads.clone();
+        let raw = cache.optimistic_update.as_mut().unwrap();
+        let mut payload = LightClientOptimisticUpdateDeneb::from_ssz_bytes(&raw.bytes).unwrap();
+        let other_key = SecretKey::key_gen(&[9u8; 32], &[]).unwrap();
+        payload.sync_aggregate = signed_sync_aggregate(
+            &other_key,
+            &payload.attested_header.beacon,
+            payload.signature_slot,
+        );
+        raw.bytes = payload.as_ssz_bytes();
+        // This is a valid signature point, but the signer is not a committee
+        // member. Only ordinary authentication, not cache structure, detects it.
+        assert!(matches!(
+            apply_optimistic_update_payload(&raw.bytes, &fixture.store),
+            Err(LightClientVerificationError::InvalidSyncCommitteeSignature)
+        ));
+        validate_cached_light_client_payloads(&mut cache, fixture.checkpoint).unwrap();
+    }
 
     #[test]
     fn cached_payload_validation_rejects_malformed_ssz_and_contexts_in_each_family() {
