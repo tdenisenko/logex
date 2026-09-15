@@ -73,8 +73,9 @@ check above, which was corrected in both loaders. The original CL loader also fa
 was restored exactly afterward. Final independent review passes, as do 11 execution
 persistence tests and all 343 consensus tests (one existing ignored test). Source `3dfd553a` passes all seven local gates: vendor verification,
 formatting, workspace check, strict Clippy, 1,435 workspace tests
-(23 ignored), documentation tests and release node linking. CI and
-merge remain pending.
+(23 ignored), documentation tests and release node linking. All six CI jobs passed in run `34999012759` on head `77bf70b6`.
+[PR #174](https://github.com/tdenisenko/logex/pull/174) merged as `556b988c`
+after exact head/base verification.
 
 [Validation record](baselines/2026-09-15-execution-peer-persistence.json).
 
