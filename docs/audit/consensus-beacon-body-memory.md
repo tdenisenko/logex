@@ -99,7 +99,9 @@ build. The first workspace test attempt encountered sandbox-denied loopback bind
 in 11 existing checkpoint fixtures; the authorized retry passed without source
 changes, and both logs are retained. See the
 [validation record](baselines/2026-09-15-consensus-beacon-body-memory.json).
-PR/CI completion remains pending before merge.
+PR [#166](https://github.com/tdenisenko/logex/pull/166) merged as
+`a4cb1085` after all six Linux/macOS CI jobs passed and exact head/base
+verification succeeded.
 
 This change removes unbounded optional body retention, deep serving copies and
 whole-stream output accumulation. It adds one shared allocation per admitted

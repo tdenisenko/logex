@@ -33,6 +33,7 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
 use crate::beacon_cache::{BeaconPayloadCache, CachedBeaconPayload};
+use crate::rpc_memory::{RESPONSE_DECODED_BYTES, RpcMemoryError, RpcResponseBudgets, from_io};
 
 use crate::light_client::{
     GossipUpdateMetadata, apply_finality_update_payload_at_slot,
@@ -42,17 +43,18 @@ use crate::light_client::{
 use crate::rpc::{
     BEACON_BLOCKS_BY_RANGE_V1_PROTOCOL_ID, BEACON_BLOCKS_BY_RANGE_V2_PROTOCOL_ID,
     BEACON_BLOCKS_BY_ROOT_V1_PROTOCOL_ID, BEACON_BLOCKS_BY_ROOT_V2_PROTOCOL_ID,
-    BeaconBlocksByRangeRequest, Eth2OutboundRequestId, Eth2RpcBehaviour, Eth2RpcEvent,
-    Eth2RpcRequest, Eth2RpcResponse, GOODBYE_V1_PROTOCOL_ID, LIGHT_CLIENT_BOOTSTRAP_PROTOCOL_ID,
-    LIGHT_CLIENT_FINALITY_UPDATE_PROTOCOL_ID, LIGHT_CLIENT_OPTIMISTIC_UPDATE_PROTOCOL_ID,
-    LIGHT_CLIENT_UPDATES_BY_RANGE_PROTOCOL_ID, LightClientUpdatesByRangeRequest,
-    METADATA_V1_PROTOCOL_ID, METADATA_V2_PROTOCOL_ID, METADATA_V3_PROTOCOL_ID, MetaData,
-    PING_PROTOCOL_ID, RawRpcResponse, STATUS_V1_PROTOCOL_ID, STATUS_V2_PROTOCOL_ID, StatusMessage,
-    build_beacon_blocks_by_range_behaviour, build_beacon_blocks_by_root_behaviour,
-    build_goodbye_behaviour, build_light_client_bootstrap_behaviour,
-    build_light_client_finality_update_behaviour, build_light_client_optimistic_update_behaviour,
-    build_light_client_updates_by_range_behaviour, build_metadata_behaviour, build_ping_behaviour,
-    build_status_behaviour, invalid_request, rate_limited, resource_unavailable,
+    BeaconBlocksByRangeRequest, BudgetedRpcResponse, Eth2OutboundRequestId, Eth2RpcBehaviour,
+    Eth2RpcEvent, Eth2RpcRequest, Eth2RpcResponse, GOODBYE_V1_PROTOCOL_ID,
+    LIGHT_CLIENT_BOOTSTRAP_PROTOCOL_ID, LIGHT_CLIENT_FINALITY_UPDATE_PROTOCOL_ID,
+    LIGHT_CLIENT_OPTIMISTIC_UPDATE_PROTOCOL_ID, LIGHT_CLIENT_UPDATES_BY_RANGE_PROTOCOL_ID,
+    LightClientUpdatesByRangeRequest, METADATA_V1_PROTOCOL_ID, METADATA_V2_PROTOCOL_ID,
+    METADATA_V3_PROTOCOL_ID, MetaData, PING_PROTOCOL_ID, RawRpcResponse, STATUS_V1_PROTOCOL_ID,
+    STATUS_V2_PROTOCOL_ID, StatusMessage, build_beacon_blocks_by_range_behaviour,
+    build_beacon_blocks_by_root_behaviour, build_goodbye_behaviour,
+    build_light_client_bootstrap_behaviour, build_light_client_finality_update_behaviour,
+    build_light_client_optimistic_update_behaviour, build_light_client_updates_by_range_behaviour,
+    build_metadata_behaviour, build_ping_behaviour, build_status_behaviour, invalid_request,
+    rate_limited, resource_unavailable,
 };
 use crate::{
     ConsensusStore, LightClientVerificationError, MAINNET_CONSENSUS_CHAIN_SPEC,
@@ -618,6 +620,9 @@ struct ConsensusNetwork {
     beacon_blocks_by_range_peers: HashSet<PeerId>,
     beacon_blocks_by_root_peers: HashSet<PeerId>,
     pending_requests: HashMap<PendingRequestKey, PeerId>,
+    history_range_batch_limit: u64,
+    history_root_batch_limit: usize,
+    local_rpc_retry_after: HashMap<RpcRequestKind, Instant>,
     pending_light_client_range_requests:
         HashMap<PendingRequestKey, LightClientUpdatesByRangeRequest>,
     pending_history_root_requests: HashMap<PendingRequestKey, Vec<B256>>,
@@ -859,6 +864,25 @@ const fn max_concurrent_requests_for_kind(kind: RpcRequestKind) -> usize {
         | RpcRequestKind::LightClientFinalityUpdate
         | RpcRequestKind::LightClientOptimisticUpdate => MAX_CONCURRENT_DEFAULT_RPC_REQUESTS,
     }
+}
+
+fn recovered_history_batch_limit(
+    current: u64,
+    requested: u64,
+    received: usize,
+    largest_body: usize,
+    useful: bool,
+) -> u64 {
+    if !useful || received == 0 || received as u64 != requested || largest_body == 0 {
+        return current;
+    }
+    let safe_count = (RESPONSE_DECODED_BYTES / largest_body) as u64;
+    current.max(
+        current
+            .saturating_mul(2)
+            .min(MAX_BEACON_BLOCKS_BY_RANGE_REQUEST)
+            .min(safe_count),
+    )
 }
 
 fn next_forward_history_range_request_for_progress(
@@ -2157,6 +2181,9 @@ impl ConsensusNetwork {
             beacon_blocks_by_range_peers: HashSet::new(),
             beacon_blocks_by_root_peers: HashSet::new(),
             pending_requests: HashMap::new(),
+            history_range_batch_limit: MAX_BEACON_BLOCKS_BY_RANGE_REQUEST,
+            history_root_batch_limit: MAX_BEACON_BLOCKS_BY_ROOT_REQUEST,
+            local_rpc_retry_after: HashMap::new(),
             pending_light_client_range_requests: HashMap::new(),
             pending_history_root_requests: HashMap::new(),
             pending_history_range_requests: HashMap::new(),
@@ -3093,7 +3120,10 @@ impl ConsensusNetwork {
                 request_response::Message::Response {
                     request_id,
                     response,
-                } => self.handle_rpc_response(kind, peer, request_id, response),
+                } => {
+                    let (response, _reservation) = response.into_parts();
+                    self.handle_rpc_response(kind, peer, request_id, response);
+                }
             },
             request_response::Event::OutboundFailure {
                 peer,
@@ -3106,11 +3136,17 @@ impl ConsensusNetwork {
                 }
                 self.pending_light_client_range_requests
                     .remove(&PendingRequestKey { kind, request_id });
-                if kind == RpcRequestKind::BeaconBlocksByRoot {
-                    self.take_pending_history_root_request(request_id);
-                }
-                if kind == RpcRequestKind::BeaconBlocksByRange {
-                    self.take_pending_history_range_request(request_id);
+                let failed_count = match kind {
+                    RpcRequestKind::BeaconBlocksByRoot => {
+                        Some(self.take_pending_history_root_request(request_id).len() as u64)
+                    }
+                    RpcRequestKind::BeaconBlocksByRange => self
+                        .take_pending_history_range_request(request_id)
+                        .map(|request| request.count),
+                    _ => None,
+                };
+                if self.handle_local_rpc_failure(kind, &error, failed_count, Instant::now()) {
+                    return;
                 }
                 self.request_failures.increment(kind);
                 let peer_failures = self.record_peer_failure(peer, kind);
@@ -3230,6 +3266,7 @@ impl ConsensusNetwork {
                         tracing::warn!(%peer, ?request_id, "received consensus goodbye response for an unknown request");
                         return;
                     };
+                    let (response, _reservation) = response.into_parts();
                     self.record_p2p_download_payload(consensus_response_payload_bytes(&response));
                     match response {
                         Eth2RpcResponse::Goodbye(reason) => {
@@ -3264,6 +3301,15 @@ impl ConsensusNetwork {
                     .take_pending_request(RpcRequestKind::Goodbye, request_id)
                     .is_none()
                 {
+                    return;
+                }
+                if self.handle_local_rpc_failure(
+                    RpcRequestKind::Goodbye,
+                    &error,
+                    None,
+                    Instant::now(),
+                ) {
+                    self.disconnect_now(peer);
                     return;
                 }
                 let expected_no_response =
@@ -3338,7 +3384,7 @@ impl ConsensusNetwork {
                         .behaviour_mut()
                         .metadata_rpc
                         .inner
-                        .send_response(channel, response);
+                        .send_response(channel, response.into());
                     if result.is_ok() {
                         self.record_p2p_upload_payload(payload_bytes);
                     }
@@ -3357,7 +3403,10 @@ impl ConsensusNetwork {
                 request_response::Message::Response {
                     request_id,
                     response,
-                } => self.handle_rpc_response(RpcRequestKind::MetaData, peer, request_id, response),
+                } => {
+                    let (response, _reservation) = response.into_parts();
+                    self.handle_rpc_response(RpcRequestKind::MetaData, peer, request_id, response);
+                }
             },
             request_response::Event::OutboundFailure {
                 peer,
@@ -3369,6 +3418,14 @@ impl ConsensusNetwork {
                     .take_pending_request(RpcRequestKind::MetaData, request_id)
                     .is_none()
                 {
+                    return;
+                }
+                if self.handle_local_rpc_failure(
+                    RpcRequestKind::MetaData,
+                    &error,
+                    None,
+                    Instant::now(),
+                ) {
                     return;
                 }
                 self.request_failures.increment(RpcRequestKind::MetaData);
@@ -3884,6 +3941,11 @@ impl ConsensusNetwork {
                     return;
                 }
 
+                let largest_body = decoded_blocks
+                    .iter()
+                    .map(|(_, payload)| payload.bytes.len())
+                    .max()
+                    .unwrap_or(0);
                 self.record_peer_success(peer, RpcRequestKind::BeaconBlocksByRange);
                 self.beacon_blocks_by_range_peers.insert(peer);
                 let mut inserted = 0usize;
@@ -3892,6 +3954,13 @@ impl ConsensusNetwork {
                         inserted += 1;
                     }
                 }
+                self.history_range_batch_limit = recovered_history_batch_limit(
+                    self.history_range_batch_limit,
+                    request.count,
+                    chunk_count,
+                    largest_body,
+                    inserted > 0,
+                );
                 if inserted > 0 {
                     self.seed_verified_light_client_headers();
                     self.materialize_verified_anchor_segments();
@@ -3986,6 +4055,11 @@ impl ConsensusNetwork {
                     return;
                 }
 
+                let largest_body = decoded_blocks
+                    .iter()
+                    .map(|(_, payload)| payload.bytes.len())
+                    .max()
+                    .unwrap_or(0);
                 self.record_peer_success(peer, RpcRequestKind::BeaconBlocksByRoot);
                 self.beacon_blocks_by_root_peers.insert(peer);
                 let mut inserted = 0usize;
@@ -3994,6 +4068,13 @@ impl ConsensusNetwork {
                         inserted += 1;
                     }
                 }
+                self.history_root_batch_limit = recovered_history_batch_limit(
+                    self.history_root_batch_limit as u64,
+                    requested_history_roots.len() as u64,
+                    chunk_count,
+                    largest_body,
+                    inserted > 0,
+                ) as usize;
                 if inserted > 0 {
                     self.seed_verified_light_client_headers();
                     self.materialize_verified_anchor_segments();
@@ -4335,7 +4416,7 @@ impl ConsensusNetwork {
     fn send_rpc_response(
         &mut self,
         kind: RpcRequestKind,
-        channel: request_response::ResponseChannel<Eth2RpcResponse>,
+        channel: request_response::ResponseChannel<BudgetedRpcResponse>,
         response: Eth2RpcResponse,
     ) -> Result<(), Eth2RpcResponse> {
         let payload_bytes = consensus_response_payload_bytes(&response);
@@ -4345,66 +4426,66 @@ impl ConsensusNetwork {
                 .behaviour_mut()
                 .status_rpc
                 .inner
-                .send_response(channel, response),
+                .send_response(channel, response.into()),
             RpcRequestKind::Goodbye => self
                 .swarm
                 .behaviour_mut()
                 .goodbye_rpc
                 .inner
-                .send_response(channel, response),
+                .send_response(channel, response.into()),
             RpcRequestKind::MetaData => self
                 .swarm
                 .behaviour_mut()
                 .metadata_rpc
                 .inner
-                .send_response(channel, response),
+                .send_response(channel, response.into()),
             RpcRequestKind::Ping => self
                 .swarm
                 .behaviour_mut()
                 .ping_rpc
                 .inner
-                .send_response(channel, response),
+                .send_response(channel, response.into()),
             RpcRequestKind::LightClientBootstrap => self
                 .swarm
                 .behaviour_mut()
                 .light_client_bootstrap_rpc
                 .inner
-                .send_response(channel, response),
+                .send_response(channel, response.into()),
             RpcRequestKind::LightClientUpdatesByRange => self
                 .swarm
                 .behaviour_mut()
                 .light_client_updates_by_range_rpc
                 .inner
-                .send_response(channel, response),
+                .send_response(channel, response.into()),
             RpcRequestKind::LightClientFinalityUpdate => self
                 .swarm
                 .behaviour_mut()
                 .light_client_finality_update_rpc
                 .inner
-                .send_response(channel, response),
+                .send_response(channel, response.into()),
             RpcRequestKind::LightClientOptimisticUpdate => self
                 .swarm
                 .behaviour_mut()
                 .light_client_optimistic_update_rpc
                 .inner
-                .send_response(channel, response),
+                .send_response(channel, response.into()),
             RpcRequestKind::BeaconBlocksByRange => self
                 .swarm
                 .behaviour_mut()
                 .beacon_blocks_by_range_rpc
                 .inner
-                .send_response(channel, response),
+                .send_response(channel, response.into()),
             RpcRequestKind::BeaconBlocksByRoot => self
                 .swarm
                 .behaviour_mut()
                 .beacon_blocks_by_root_rpc
                 .inner
-                .send_response(channel, response),
+                .send_response(channel, response.into()),
         };
         if result.is_ok() {
             self.record_p2p_upload_payload(payload_bytes);
         }
-        result
+        result.map_err(|response| response.into_parts().0)
     }
 
     fn record_p2p_download_payload(&mut self, payload_bytes: u64) {
@@ -4470,7 +4551,10 @@ impl ConsensusNetwork {
     }
 
     fn ensure_request(&mut self, peer: PeerId, kind: RpcRequestKind) {
-        if self.is_request_satisfied(peer, kind) || self.is_request_pending(peer, kind) {
+        if !self.local_rpc_retry_ready(kind, Instant::now())
+            || self.is_request_satisfied(peer, kind)
+            || self.is_request_pending(peer, kind)
+        {
             return;
         }
 
@@ -4798,6 +4882,10 @@ impl ConsensusNetwork {
             &self.verified_beacon_blocks,
             pending_roots,
         )
+        .map(|mut roots| {
+            roots.truncate(self.history_root_batch_limit);
+            roots
+        })
     }
 
     fn next_history_range_request(&self) -> Option<BeaconBlocksByRangeRequest> {
@@ -4818,7 +4906,10 @@ impl ConsensusNetwork {
         }
         let progress = self.cached_forward_path_progress(target)?;
         let progress = forward_progress_with_pending_ranges(progress, pending_ranges);
-        next_forward_history_range_request_for_progress(progress)
+        next_forward_history_range_request_for_progress(progress).map(|mut request| {
+            request.count = request.count.min(self.history_range_batch_limit);
+            request
+        })
     }
 
     fn cached_forward_path_progress(
@@ -5504,8 +5595,71 @@ impl ConsensusNetwork {
         }
     }
 
+    fn local_rpc_retry_ready(&self, kind: RpcRequestKind, now: Instant) -> bool {
+        self.local_rpc_retry_after
+            .get(&kind)
+            .is_none_or(|deadline| now >= *deadline)
+    }
+
+    fn handle_local_rpc_failure(
+        &mut self,
+        kind: RpcRequestKind,
+        error: &request_response::OutboundFailure,
+        failed_count: Option<u64>,
+        now: Instant,
+    ) -> bool {
+        let request_response::OutboundFailure::Io(error) = error else {
+            return false;
+        };
+        let Some(local) = from_io(error) else {
+            return false;
+        };
+        let history = matches!(
+            kind,
+            RpcRequestKind::BeaconBlocksByRange | RpcRequestKind::BeaconBlocksByRoot
+        );
+        let deadline = now + Duration::from_secs(1);
+        match local {
+            RpcMemoryError::ResponseLimit { .. } => {
+                if let Some(count) = failed_count.filter(|count| *count > 0) {
+                    let reduced = (count / 2).max(1);
+                    match kind {
+                        RpcRequestKind::BeaconBlocksByRange => {
+                            self.history_range_batch_limit =
+                                self.history_range_batch_limit.min(reduced)
+                        }
+                        RpcRequestKind::BeaconBlocksByRoot => {
+                            self.history_root_batch_limit = self
+                                .history_root_batch_limit
+                                .min(usize::try_from(reduced).unwrap_or(usize::MAX))
+                        }
+                        _ => {}
+                    }
+                }
+                self.local_rpc_retry_after.insert(kind, deadline);
+            }
+            RpcMemoryError::Capacity { .. } | RpcMemoryError::Allocation { .. } => {
+                if history {
+                    self.local_rpc_retry_after
+                        .insert(RpcRequestKind::BeaconBlocksByRange, deadline);
+                    self.local_rpc_retry_after
+                        .insert(RpcRequestKind::BeaconBlocksByRoot, deadline);
+                } else {
+                    self.local_rpc_retry_after.insert(kind, deadline);
+                }
+            }
+        }
+        self.last_rpc_failure = Some(format!(
+            "local response resource limit request={} error={local}",
+            kind.as_str()
+        ));
+        tracing::debug!(request = kind.as_str(), %local, "deferring consensus RPC after local resource limit");
+        true
+    }
+
     fn can_issue_request(&self, kind: RpcRequestKind) -> bool {
-        self.pending_requests_for_kind(kind) < max_concurrent_requests_for_kind(kind)
+        self.local_rpc_retry_ready(kind, Instant::now())
+            && self.pending_requests_for_kind(kind) < max_concurrent_requests_for_kind(kind)
     }
 
     fn refresh_status(&mut self) {
@@ -5877,6 +6031,7 @@ fn build_rpc_swarm(
         .map_err(|error| ConsensusNetworkError::ConstructRpcTransport(error.to_string()))?
         .with_behaviour(move |_| {
             let gossip = build_gossip_behaviour()?;
+            let response_budgets = RpcResponseBudgets::default();
             let identify = identify::Behaviour::new(
                 identify::Config::new(IDENTIFY_PROTOCOL_VERSION.into(), public_key.clone())
                     .with_agent_version(IDENTIFY_AGENT_VERSION.to_owned())
@@ -5887,34 +6042,34 @@ fn build_rpc_swarm(
                 identify,
                 gossip,
                 status_rpc: StatusRpcBehaviour {
-                    inner: build_status_behaviour(),
+                    inner: build_status_behaviour(response_budgets.clone()),
                 },
                 goodbye_rpc: GoodbyeRpcBehaviour {
-                    inner: build_goodbye_behaviour(),
+                    inner: build_goodbye_behaviour(response_budgets.clone()),
                 },
                 metadata_rpc: MetadataRpcBehaviour {
-                    inner: build_metadata_behaviour(),
+                    inner: build_metadata_behaviour(response_budgets.clone()),
                 },
                 ping_rpc: PingRpcBehaviour {
-                    inner: build_ping_behaviour(),
+                    inner: build_ping_behaviour(response_budgets.clone()),
                 },
                 light_client_bootstrap_rpc: LightClientBootstrapRpcBehaviour {
-                    inner: build_light_client_bootstrap_behaviour(),
+                    inner: build_light_client_bootstrap_behaviour(response_budgets.clone()),
                 },
                 light_client_updates_by_range_rpc: LightClientUpdatesByRangeRpcBehaviour {
-                    inner: build_light_client_updates_by_range_behaviour(),
+                    inner: build_light_client_updates_by_range_behaviour(response_budgets.clone()),
                 },
                 light_client_finality_update_rpc: LightClientFinalityUpdateRpcBehaviour {
-                    inner: build_light_client_finality_update_behaviour(),
+                    inner: build_light_client_finality_update_behaviour(response_budgets.clone()),
                 },
                 light_client_optimistic_update_rpc: LightClientOptimisticUpdateRpcBehaviour {
-                    inner: build_light_client_optimistic_update_behaviour(),
+                    inner: build_light_client_optimistic_update_behaviour(response_budgets.clone()),
                 },
                 beacon_blocks_by_range_rpc: BeaconBlocksByRangeRpcBehaviour {
-                    inner: build_beacon_blocks_by_range_behaviour(),
+                    inner: build_beacon_blocks_by_range_behaviour(response_budgets.clone()),
                 },
                 beacon_blocks_by_root_rpc: BeaconBlocksByRootRpcBehaviour {
-                    inner: build_beacon_blocks_by_root_behaviour(),
+                    inner: build_beacon_blocks_by_root_behaviour(response_budgets.clone()),
                 },
             })
         })
@@ -8078,6 +8233,397 @@ mod tests {
         );
         assert_eq!(network.consensus.light_client_store().unwrap(), original);
         assert_eq!(network.peer_lifecycle[&peer].rpc_failures, 1);
+    }
+
+    fn memory_failure_request(
+        network: &mut ConsensusNetwork,
+        peer: PeerId,
+        range: bool,
+        count: usize,
+    ) -> PendingRequestKey {
+        let (kind, request_id) = if range {
+            let request = BeaconBlocksByRangeRequest {
+                start_slot: 100,
+                count: count as u64,
+                step: 1,
+            };
+            let id = network
+                .swarm
+                .behaviour_mut()
+                .beacon_blocks_by_range_rpc
+                .inner
+                .send_request(&peer, Eth2RpcRequest::BeaconBlocksByRange(request));
+            let key = PendingRequestKey {
+                kind: RpcRequestKind::BeaconBlocksByRange,
+                request_id: id,
+            };
+            network.pending_history_range_requests.insert(key, request);
+            (key.kind, id)
+        } else {
+            let roots = (0..count)
+                .map(|value| B256::repeat_byte(value as u8))
+                .collect::<Vec<_>>();
+            let id = network
+                .swarm
+                .behaviour_mut()
+                .beacon_blocks_by_root_rpc
+                .inner
+                .send_request(&peer, Eth2RpcRequest::BeaconBlocksByRoot(roots.clone()));
+            let key = PendingRequestKey {
+                kind: RpcRequestKind::BeaconBlocksByRoot,
+                request_id: id,
+            };
+            network.pending_history_root_requests.insert(key, roots);
+            (key.kind, id)
+        };
+        let key = PendingRequestKey { kind, request_id };
+        network.pending_requests.insert(key, peer);
+        network.pending_peer_kinds.insert((peer, kind));
+        key
+    }
+
+    fn memory_failure_event(
+        peer: PeerId,
+        key: PendingRequestKey,
+        error: RpcMemoryError,
+    ) -> Eth2RpcEvent {
+        request_response::Event::OutboundFailure {
+            peer,
+            connection_id: libp2p::swarm::ConnectionId::new_unchecked(1),
+            request_id: key.request_id,
+            error: request_response::OutboundFailure::Io(io::Error::other(error)),
+        }
+    }
+
+    fn memory_root_request(
+        network: &mut ConsensusNetwork,
+        peer: PeerId,
+        roots: Vec<B256>,
+    ) -> PendingRequestKey {
+        let id = network
+            .swarm
+            .behaviour_mut()
+            .beacon_blocks_by_root_rpc
+            .inner
+            .send_request(&peer, Eth2RpcRequest::BeaconBlocksByRoot(roots.clone()));
+        let key = PendingRequestKey {
+            kind: RpcRequestKind::BeaconBlocksByRoot,
+            request_id: id,
+        };
+        network.pending_history_root_requests.insert(key, roots);
+        network.pending_requests.insert(key, peer);
+        network.pending_peer_kinds.insert((peer, key.kind));
+        key
+    }
+
+    #[tokio::test]
+    async fn incoming_memory_actual_codec_limit_retries_valid_blocks_and_releases_queue_charge() {
+        let first = RawRpcResponse {
+            bytes: include_bytes!("../tests/fixtures/beacon_block_14132042.ssz").to_vec(),
+            context_bytes: Some(MAINNET_CONSENSUS_CHAIN_SPEC.fork_digest_for_epoch(14132042 / 32)),
+        };
+        let mut second = first.clone();
+        // Synthetic root-membership fixture, not a canonical-chain/proposer-signature claim.
+        // SignedBeaconBlock fixed section = message offset (4) + signature (96).
+        // BeaconBlock starts with slot (8), then proposer_index (8).
+        let message_offset = u32::from_le_bytes(second.bytes[..4].try_into().unwrap()) as usize;
+        assert_eq!(message_offset, 100);
+        let proposer = message_offset + 8;
+        second.bytes[proposer] ^= 1;
+        let bodies = vec![first, second];
+        let blocks = bodies
+            .iter()
+            .map(|raw| decode_verified_beacon_block(raw).unwrap())
+            .collect::<Vec<_>>();
+        assert_ne!(blocks[0].beacon_root, blocks[1].beacon_root);
+        let roots = blocks
+            .iter()
+            .map(|block| block.beacon_root)
+            .collect::<Vec<_>>();
+        for limited in [false, true] {
+            let temp = TempDir::new().unwrap();
+            let (mut network, _) = request_lifecycle_fixture(&temp);
+            let peer = PeerId::random();
+            let max_decoded = if limited {
+                bodies[0].bytes.len() + 1
+            } else {
+                bodies.iter().map(|raw| raw.bytes.len()).sum()
+            };
+            let budgets = RpcResponseBudgets::with_limits(1024 * 1024, 1024, max_decoded);
+            let pool = budgets.pool(true);
+            let mut codec = crate::rpc::Eth2RpcCodec::new(budgets);
+            let protocol = crate::rpc::Eth2RpcProtocol::BeaconBlocksByRootV2;
+            let key = memory_root_request(&mut network, peer, roots.clone());
+            let mut wire = futures::io::Cursor::new(Vec::new());
+            request_response::Codec::write_response(
+                &mut codec,
+                &protocol,
+                &mut wire,
+                Eth2RpcResponse::BeaconBlocksByRoot(bodies.clone()).into(),
+            )
+            .await
+            .unwrap();
+            wire.set_position(0);
+            let result =
+                request_response::Codec::read_response(&mut codec, &protocol, &mut wire).await;
+            if limited {
+                let error = result.unwrap_err();
+                assert!(matches!(
+                    from_io(&error),
+                    Some(RpcMemoryError::ResponseLimit { .. })
+                ));
+                assert_eq!(pool.used(), 0);
+                network.handle_rpc_event(
+                    key.kind,
+                    request_response::Event::OutboundFailure {
+                        peer,
+                        connection_id: libp2p::swarm::ConnectionId::new_unchecked(1),
+                        request_id: key.request_id,
+                        error: request_response::OutboundFailure::Io(error),
+                    },
+                );
+                assert_eq!(network.history_root_batch_limit, 1);
+                assert!(network.peer_failures.is_empty());
+                assert!(
+                    roots
+                        .iter()
+                        .all(|root| !network.verified_beacon_blocks.contains_key(root))
+                );
+                for (raw, root) in bodies.iter().zip(&roots) {
+                    network
+                        .local_rpc_retry_after
+                        .insert(key.kind, Instant::now());
+                    let retry = memory_root_request(&mut network, peer, vec![*root]);
+                    assert!(
+                        network.pending_history_root_requests[&retry].len()
+                            <= network.history_root_batch_limit
+                    );
+                    let mut wire = futures::io::Cursor::new(Vec::new());
+                    request_response::Codec::write_response(
+                        &mut codec,
+                        &protocol,
+                        &mut wire,
+                        Eth2RpcResponse::BeaconBlocksByRoot(vec![raw.clone()]).into(),
+                    )
+                    .await
+                    .unwrap();
+                    wire.set_position(0);
+                    let response =
+                        request_response::Codec::read_response(&mut codec, &protocol, &mut wire)
+                            .await
+                            .unwrap();
+                    assert!(pool.used() > 0);
+                    let event = request_response::Event::Message {
+                        peer,
+                        connection_id: libp2p::swarm::ConnectionId::new_unchecked(1),
+                        message: request_response::Message::Response {
+                            request_id: retry.request_id,
+                            response,
+                        },
+                    };
+                    assert!(pool.used() > 0);
+                    network.handle_rpc_event(retry.kind, event);
+                    assert_eq!(pool.used(), 0);
+                }
+            } else {
+                let response = result.unwrap();
+                assert!(pool.used() > 0);
+                network.handle_rpc_event(
+                    key.kind,
+                    request_response::Event::Message {
+                        peer,
+                        connection_id: libp2p::swarm::ConnectionId::new_unchecked(1),
+                        message: request_response::Message::Response {
+                            request_id: key.request_id,
+                            response,
+                        },
+                    },
+                );
+                assert_eq!(pool.used(), 0);
+            }
+            for block in &blocks {
+                assert_eq!(
+                    network.verified_beacon_blocks.get(&block.beacon_root),
+                    Some(block)
+                );
+            }
+            assert_eq!(
+                network.history_root_batch_limit,
+                if limited { 4 } else { 128 }
+            );
+            assert_eq!(network.history_range_batch_limit, 128);
+
+            assert!(
+                network
+                    .peer_failures
+                    .get(&peer)
+                    .is_none_or(|failures| failures.beacon_blocks_by_root == 0)
+            );
+            assert_eq!(network.request_failures.beacon_blocks_by_root, 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn incoming_memory_response_limit_halves_actual_batch_without_peer_fault() {
+        for range in [false, true] {
+            let temp = TempDir::new().unwrap();
+            let (mut network, _) = request_lifecycle_fixture(&temp);
+            let peer = PeerId::random();
+            for (count, expected) in [(16, 8), (8, 4), (1, 1)] {
+                let key = memory_failure_request(&mut network, peer, range, count);
+                network.handle_rpc_event(
+                    key.kind,
+                    memory_failure_event(peer, key, RpcMemoryError::ResponseLimit { limit: 64 }),
+                );
+                assert!(network.pending_requests.is_empty());
+                assert!(network.pending_peer_kinds.is_empty());
+                assert!(network.pending_history_range_requests.is_empty());
+                assert!(network.pending_history_root_requests.is_empty());
+                assert!(network.peer_failures.is_empty());
+                assert!(!network.peer_lifecycle.contains_key(&peer));
+                assert_eq!(network.request_failures.beacon_blocks_by_range, 0);
+                assert_eq!(network.request_failures.beacon_blocks_by_root, 0);
+                assert_eq!(
+                    if range {
+                        network.history_range_batch_limit as usize
+                    } else {
+                        network.history_root_batch_limit
+                    },
+                    expected
+                );
+            }
+            let deadline = network.local_rpc_retry_after.clone();
+            let key = memory_failure_request(&mut network, peer, range, 1);
+            network.clear_pending_requests_for_peer(peer);
+            network.handle_rpc_event(
+                key.kind,
+                memory_failure_event(
+                    peer,
+                    key,
+                    RpcMemoryError::Capacity {
+                        requested: 2,
+                        used: 1,
+                        limit: 1,
+                    },
+                ),
+            );
+            assert_eq!(network.local_rpc_retry_after, deadline);
+        }
+    }
+
+    #[test]
+    fn incoming_memory_batch_recovery_is_bounded_and_requires_complete_useful_batches() {
+        let large = 10 * 1024 * 1024;
+        let mut limit = 1;
+        for expected in [2, 4, 6, 6] {
+            limit = recovered_history_batch_limit(limit, limit, limit as usize, large, true);
+            assert_eq!(limit, expected);
+        }
+        // Smaller later bodies recover from a previous outlier without removing the ceiling.
+        for expected in [12, 24, 48, 96, 128, 128] {
+            limit = recovered_history_batch_limit(limit, limit, limit as usize, 1024, true);
+            assert_eq!(limit, expected);
+        }
+        for (requested, received, largest, useful) in [
+            (8, 4, 1, true),
+            (0, 0, 0, true),
+            (8, 8, 1, false),
+            (8, 8, 0, true),
+        ] {
+            assert_eq!(
+                recovered_history_batch_limit(8, requested, received, largest, useful),
+                8
+            );
+        }
+        // Success never lowers an already larger cap.
+        assert_eq!(recovered_history_batch_limit(8, 1, 1, large, true), 8);
+    }
+
+    #[tokio::test]
+    async fn incoming_memory_capacity_backoff_is_local_bounded_and_family_scoped() {
+        let temp = TempDir::new().unwrap();
+        let (mut network, _) = request_lifecycle_fixture(&temp);
+        let now = Instant::now();
+        let error =
+            request_response::OutboundFailure::Io(io::Error::other(RpcMemoryError::Capacity {
+                requested: 2,
+                used: 1,
+                limit: 1,
+            }));
+        assert!(network.handle_local_rpc_failure(
+            RpcRequestKind::BeaconBlocksByRange,
+            &error,
+            Some(16),
+            now
+        ));
+        for kind in [
+            RpcRequestKind::BeaconBlocksByRange,
+            RpcRequestKind::BeaconBlocksByRoot,
+        ] {
+            assert!(!network.local_rpc_retry_ready(kind, now));
+            assert!(network.local_rpc_retry_ready(kind, now + Duration::from_secs(1)));
+            assert!(!network.can_issue_request(kind));
+            network.ensure_request(PeerId::random(), kind);
+        }
+        assert!(network.pending_requests.is_empty());
+        assert!(network.local_rpc_retry_ready(RpcRequestKind::LightClientOptimisticUpdate, now));
+        assert_eq!(network.history_range_batch_limit, 128);
+        let allocation =
+            request_response::OutboundFailure::Io(io::Error::other(RpcMemoryError::Allocation {
+                message: "fixture".to_owned(),
+            }));
+        assert!(network.handle_local_rpc_failure(RpcRequestKind::MetaData, &allocation, None, now));
+        assert!(!network.local_rpc_retry_ready(RpcRequestKind::MetaData, now));
+        assert!(network.local_rpc_retry_ready(RpcRequestKind::Status, now));
+        assert!(!network.handle_local_rpc_failure(
+            RpcRequestKind::Status,
+            &request_response::OutboundFailure::Timeout,
+            None,
+            now
+        ));
+    }
+
+    #[tokio::test]
+    async fn incoming_memory_builders_use_capped_actual_pending_windows() {
+        let temp = TempDir::new().unwrap();
+        let (mut network, _) = request_lifecycle_fixture(&temp);
+        let store = network.consensus.light_client_store().unwrap();
+        let target = HistorySyncTarget {
+            checkpoint_root: store.checkpoint_root,
+            checkpoint_slot: store.bootstrap_slot(),
+            finalized_root: B256::repeat_byte(0xaa),
+            optimistic_root: B256::repeat_byte(0xbb),
+            optimistic_slot: store.bootstrap_slot() + 64,
+        };
+        network.active_history_target = Some(target);
+        network.history_range_batch_limit = 8;
+        let first = network
+            .next_forward_history_range_request_with_pending(target, &[])
+            .unwrap();
+        assert_eq!(first.count, 8);
+        let second = network
+            .next_forward_history_range_request_with_pending(target, &[first])
+            .unwrap();
+        assert_eq!(second.start_slot, first.start_slot + 8);
+        assert_eq!(second.count, 8);
+        assert!(network.next_history_root_request().unwrap().len() >= 2);
+        network.history_root_batch_limit = 1;
+        assert_eq!(network.next_history_root_request().unwrap().len(), 1);
+        assert_eq!(
+            network.next_priority_history_root_request().unwrap().len(),
+            1
+        );
+        let peer = PeerId::random();
+        network.ensure_request(peer, RpcRequestKind::BeaconBlocksByRoot);
+        assert_eq!(
+            network
+                .pending_history_root_requests
+                .values()
+                .next()
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[tokio::test]
@@ -11265,12 +11811,12 @@ mod tests {
         assert!(std::ptr::eq(first.as_raw(), cached[0].as_raw()));
         let mut wire = futures::io::Cursor::new(Vec::new());
         let protocol = crate::rpc::Eth2RpcProtocol::BeaconBlocksByRootV2;
-        let mut codec = crate::rpc::Eth2RpcCodec;
+        let mut codec = crate::rpc::Eth2RpcCodec::default();
         request_response::Codec::write_response(
             &mut codec,
             &protocol,
             &mut wire,
-            Eth2RpcResponse::CachedBeaconBlocksByRoot(cached),
+            Eth2RpcResponse::CachedBeaconBlocksByRoot(cached).into(),
         )
         .await
         .unwrap();
@@ -11279,7 +11825,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            response,
+            response.into_parts().0,
             Eth2RpcResponse::BeaconBlocksByRoot(vec![first.as_raw().clone()])
         );
         let mut wrong = first.as_raw().clone();

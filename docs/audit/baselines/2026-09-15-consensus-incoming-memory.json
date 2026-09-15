@@ -1,0 +1,328 @@
+{
+  "source_commit": "bb69d1b042917461a9a54ec69323f8e0ad7c773f",
+  "base_commit": "a4cb10857a1eab982b58e3190dd07375df4add91",
+  "branch": "audit/consensus-incoming-memory",
+  "evidence_root": "/private/tmp/logex-incoming-memory-hl6xlb89",
+  "findings": [
+    "B3-43",
+    "B3-44"
+  ],
+  "before_reader": {
+    "base": "a4cb10857a1eab982b58e3190dd07375df4add91",
+    "method": "Original read_response body in candidate harness, mechanically wrapping successful responses in the new ownership type; only multi-chunk cases exercised. Not a full baseline checkout.",
+    "candidate_sha256": "ccbef8a499d51718ab32e7c0567b2f92ab026f45e083605998786b4de236f33b",
+    "harness_sha256": "9d2fd7c1617dcaf1f4df9a01fd907868b107aaed52295aa5aa875f49ce803f7e",
+    "runs": [
+      {
+        "command": [
+          "cargo",
+          "test",
+          "-p",
+          "logex-cl",
+          "--lib",
+          "incoming_memory_queued_responses_share_pools_and_release_on_drop",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 101,
+        "log": "/private/tmp/logex-incoming-memory-hl6xlb89/before-incoming_memory_queued_responses_share_pools_and_release_on_drop.log",
+        "sha256": "38da6180001e5b227969c466ad1b433b5e62019fb2a320a4a16ecdc79e974660"
+      },
+      {
+        "command": [
+          "cargo",
+          "test",
+          "-p",
+          "logex-cl",
+          "--lib",
+          "incoming_memory_decoded_limit_discards_prefix_and_smaller_retry_succeeds",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 101,
+        "log": "/private/tmp/logex-incoming-memory-hl6xlb89/before-incoming_memory_decoded_limit_discards_prefix_and_smaller_retry_succeeds.log",
+        "sha256": "5b6a774861028a9fd836532fa8e148688d59213cf90a0003eb6c902645adbd02"
+      },
+      {
+        "command": [
+          "cargo",
+          "test",
+          "-p",
+          "logex-cl",
+          "--lib",
+          "incoming_memory_request_count_is_checked_before_surplus_body",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 101,
+        "log": "/private/tmp/logex-incoming-memory-hl6xlb89/before-incoming_memory_request_count_is_checked_before_surplus_body.log",
+        "sha256": "6fa98bedc541525bcb0921e48b9a6616ceacdedb979d976ebe577899b1bb6b0a"
+      }
+    ],
+    "restored_sha256": "ccbef8a499d51718ab32e7c0567b2f92ab026f45e083605998786b4de236f33b"
+  },
+  "unconfirmed_capacity_lead": {
+    "disposition": "Not reproduced on pinned toolchain. Both original-decoder controls passed; retained decoder change provides explicit fallible exact-capacity accounting, not a confirmed bug or measured allocation reduction.",
+    "runs": [
+      {
+        "base": "a4cb10857a1eab982b58e3190dd07375df4add91",
+        "method": "Exact original prefix-decoder function restored into candidate harness; only capacity regression run, not a full baseline checkout.",
+        "candidate_sha256": "d4fb77cc08662c2727e67996a11adfc08d1f7a791e9f952b7ba0e309a92366f8",
+        "harness_sha256": "f9c167501fc26fc56c4acbf3bf482af808ae8883c578c984da8d8dadc4679ccd",
+        "command": [
+          "cargo",
+          "test",
+          "-p",
+          "logex-cl",
+          "--lib",
+          "incoming_memory_decoded_capacity_matches_the_declared_payload",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "log_sha256": "63be1ce435d175dfd96e406446fb24a811053eed0fe161497f94e25eea8f72d3",
+        "restored_sha256": "d4fb77cc08662c2727e67996a11adfc08d1f7a791e9f952b7ba0e309a92366f8"
+      },
+      {
+        "base": "a4cb10857a1eab982b58e3190dd07375df4add91",
+        "method": "Exact original prefix-decoder function restored into candidate harness; only capacity regression run, not a full baseline checkout.",
+        "candidate_sha256": "9bff5a30ec175b7b44f4307662615cd92bda9dffc18880874e507c0b644446e4",
+        "harness_sha256": "64d1ef0de33d30947c7f88dde53892920590d89ba0aff326c7a76e206439a169",
+        "command": [
+          "cargo",
+          "test",
+          "-p",
+          "logex-cl",
+          "--lib",
+          "incoming_memory_decoded_capacity_matches_the_declared_payload",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "log_sha256": "0de8ff2b59e9b56c87591dc71eeb8dda6d345e5eed3caf4244a5b3e52ecda112",
+        "restored_sha256": "9bff5a30ec175b7b44f4307662615cd92bda9dffc18880874e507c0b644446e4"
+      }
+    ]
+  },
+  "validation_status": "All seven local gates passed: 1366 workspace tests, 23 ignored; 288 consensus tests, 1 ignored.",
+  "publication_status": "pending",
+  "limits": [
+    "Payload Vec capacities only; fixed synchronous Snappy decoder scratch, typed Beacon decoding, transport/event metadata, allocator overhead and outgoing encoded concurrency excluded.",
+    "Batch reduction can add historical requests; useful complete success restores caps gradually, future larger bodies may require another reduction.",
+    "No new storage barriers, benchmark, remote operation or production-data changes."
+  ],
+  "independent_review": {
+    "report": {
+      "status": "FINAL_SOURCE_RECONCILIATION_NO_ACTIONABLE_FINDING",
+      "source_sha256": {
+        "rpc.rs": "78c8cfa504261c26f880708314d3556c48843d9e3a98264f512c26f8c1f0707e",
+        "rpc_memory.rs": "99f50c0bad8bd2e9e73681b18fac91f4c89cb77ab9220c0f573ea85701473d11",
+        "network.rs": "b21b7454f2dc4564591c475338ed7f6c9b7f096d168d779803b2fc82567ab825",
+        "lib.rs": "d5304088bff9281a51390bf78c0b93f8f5fd4c078ec39e8cfb5cffe6c7f2fe07"
+      },
+      "prior_reviews": {
+        "review.json": "a00cb984c7d69f694f96f721158c252da4447b8c37f56206ee4ae1a7344a929e",
+        "network-review.json": "d6cedf45c2a22502082305c73b51125119523d7b876820191da68e811a59e6e6"
+      },
+      "reconciliation": [
+        "Network, rpc_memory and lib bytes match previous reviewed hashes exactly.",
+        "RPC terminal response remains wrapper-owned before EOF await; cancellation control now explicitly pauses at terminal EOF then drops and checks charge release.",
+        "Actual-request count control now supplies two complete valid chunks for a one-root request, requiring rejection immediately after surplus success byte, before surplus body.",
+        "Decoded-capacity control expanded through65535/65536/65537 and2097152 bytes. Exact fallible read decoder restored and inspected. No further production logic change identified on reread against earlier tool-visible source; earlier full RPC bytes were hash-recorded but not copied, so this is a source reconciliation rather than a bytewise prior-snapshot diff."
+      ],
+      "evidence_corrections": [
+        "Original decoder capacity controls passed at all tested sizes, per retained root results. Original EOF overgrowth concern is UNCONFIRMED; no pinned Rust contrary experimental evidence from this review, and no allocation-reduction claim. Exact fallible decoding supplies an explicit allocation/read contract.",
+        "Previous network review phrase authenticated complete batch means only complete response passing existing SSZ/context/root/range checks. It does NOT establish proposer signature authentication or canonical membership. Test bodies are intentionally structurally/root-valid synthetic candidates. Canonical ancestry remains governed by verified-anchor materialization."
+      ],
+      "reported_validation": {
+        "source": "Root-reported actual retained runs; not independently executed here",
+        "cl": "288 passed,1 ignored",
+        "original_response_reader_controls": "Three expected failures: absent shared charge, absent12-byte aggregate ceiling, absent actual one-request chunk bound",
+        "original_decoder_capacity": "Both restored-original runs passed, including2MiB/frame boundaries"
+      },
+      "remaining_limits": [
+        "No total RSS bound, no measured performance/allocation reduction.",
+        "Fixed Snappy decoder scratch and verification/transport metadata outside payload quotas.",
+        "Existing trust and singleton framing semantics unchanged; no broader protocol validation claim."
+      ],
+      "actions": "Read-only source review and evidence file only; no Cargo, source edit, commit or remote work."
+    },
+    "path": "/private/tmp/logex-incoming-memory-hl6xlb89/rpc-integration-review/final-review.json",
+    "sha256": "2b986037b3bd1ca18ec3596a4d2d19fa3eaf6d75899ee750660a779a26ff3b65"
+  },
+  "source_sha256": {
+    "lib.rs": "d5304088bff9281a51390bf78c0b93f8f5fd4c078ec39e8cfb5cffe6c7f2fe07",
+    "network.rs": "b21b7454f2dc4564591c475338ed7f6c9b7f096d168d779803b2fc82567ab825",
+    "rpc.rs": "78c8cfa504261c26f880708314d3556c48843d9e3a98264f512c26f8c1f0707e",
+    "rpc_memory.rs": "99f50c0bad8bd2e9e73681b18fac91f4c89cb77ab9220c0f573ea85701473d11"
+  },
+  "artifacts": [
+    {
+      "path": "/private/tmp/logex-incoming-memory-hl6xlb89/final-cl.log",
+      "bytes": 25272,
+      "sha256": "6ade341b74dd0ddf0bf120f3d11f8f53f0f9aec83a117d4af686cdc96bb8cff1"
+    },
+    {
+      "path": "/private/tmp/logex-incoming-memory-hl6xlb89/rpc-integration-review/review.json",
+      "bytes": 4329,
+      "sha256": "a00cb984c7d69f694f96f721158c252da4447b8c37f56206ee4ae1a7344a929e"
+    },
+    {
+      "path": "/private/tmp/logex-incoming-memory-hl6xlb89/rpc-integration-review/network-review.json",
+      "bytes": 3062,
+      "sha256": "d6cedf45c2a22502082305c73b51125119523d7b876820191da68e811a59e6e6"
+    },
+    {
+      "path": "/private/tmp/logex-incoming-memory-network/notes.txt",
+      "bytes": 5729,
+      "sha256": "c101b9b14195a9813bb2c0140b35d2fd305ff11dd47022af323672762d7f0cd9"
+    },
+    {
+      "path": "/private/tmp/logex-incoming-memory-network/network.log",
+      "bytes": 13015,
+      "sha256": "245b47a2f2a79342aed8ddabb46358d38482d4afcac95c37ea2fffe3a66c9251"
+    },
+    {
+      "path": "/private/tmp/logex-incoming-memory-network/clippy.log",
+      "bytes": 453,
+      "sha256": "dbef208b60232a61e448572938a6a56e0c9a18830fa77a34e32dabc495ae302e"
+    }
+  ],
+  "gates": {
+    "commit": "bb69d1b042917461a9a54ec69323f8e0ad7c773f",
+    "rustc": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+    "gates": [
+      {
+        "name": "vendor",
+        "command": [
+          "python3",
+          "tools/verify_datafusion_vendor.py"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T12:40:23.756165+00:00",
+        "finished": "2026-09-15T12:40:23.810518+00:00",
+        "sha256": "d8d80949d6f3378c14456842b531f0cade514179e4c94781b95ff9abb6447675",
+        "log": "/private/tmp/logex-incoming-memory-hl6xlb89/gates/vendor.log"
+      },
+      {
+        "name": "format",
+        "command": [
+          "cargo",
+          "fmt",
+          "--all",
+          "--",
+          "--check"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T12:40:23.810828+00:00",
+        "finished": "2026-09-15T12:40:24.634614+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-incoming-memory-hl6xlb89/gates/format.log"
+      },
+      {
+        "name": "check",
+        "command": [
+          "cargo",
+          "check",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T12:40:24.634963+00:00",
+        "finished": "2026-09-15T12:40:34.239696+00:00",
+        "sha256": "604af1f9f0070059647e5603a6d353a93afe24bf1fc5b0b964d873b9177597aa",
+        "log": "/private/tmp/logex-incoming-memory-hl6xlb89/gates/check.log"
+      },
+      {
+        "name": "clippy",
+        "command": [
+          "cargo",
+          "clippy",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T12:40:34.240477+00:00",
+        "finished": "2026-09-15T12:40:43.264276+00:00",
+        "sha256": "00a1571d34970cf3b9df7dfb65058d5d1f0837ec85c9083a3ab8c1357add73de",
+        "log": "/private/tmp/logex-incoming-memory-hl6xlb89/gates/clippy.log"
+      },
+      {
+        "name": "test",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T12:40:43.264688+00:00",
+        "finished": "2026-09-15T12:43:36.707994+00:00",
+        "sha256": "a02ee074f52d20dba414aeca8aa4341b8fcd9f45a9c8a408753f86dd9e89a049",
+        "log": "/private/tmp/logex-incoming-memory-hl6xlb89/gates/test.log"
+      },
+      {
+        "name": "doc",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--doc",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T12:43:36.708961+00:00",
+        "finished": "2026-09-15T12:43:52.418057+00:00",
+        "sha256": "7c28b132e6a22c7d6ca957f36c54d31b8ab5c21751bfe62052a01e715e7a91ff",
+        "log": "/private/tmp/logex-incoming-memory-hl6xlb89/gates/doc.log"
+      },
+      {
+        "name": "release-build",
+        "command": [
+          "cargo",
+          "build",
+          "-p",
+          "logex-node",
+          "--release",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T12:43:52.418605+00:00",
+        "finished": "2026-09-15T12:44:55.673548+00:00",
+        "sha256": "0d1c3d71cbf2ca1942e87117841299e1723c64df7a1d3ec431dfda9fc0876d7a",
+        "log": "/private/tmp/logex-incoming-memory-hl6xlb89/gates/release-build.log"
+      }
+    ]
+  }
+}

@@ -18,6 +18,7 @@ mod chain;
 mod light_client;
 mod network;
 mod rpc;
+mod rpc_memory;
 
 pub(crate) use beacon_block::{VerifiedBeaconBlock, decode_verified_beacon_block};
 pub use chain::{
