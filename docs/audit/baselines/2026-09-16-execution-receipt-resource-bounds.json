@@ -1,0 +1,358 @@
+{
+  "status": "All seven local gates pass; PR/CI/merge pending",
+  "branch": "audit/execution-receipt-resource-bounds",
+  "base": "1dac15e21f4db6d01da5ce08da6fe8e89416a644",
+  "finding": {
+    "id": "B4-23",
+    "severity": "medium",
+    "effect": "No header-derived cumulative receipt/log allowance across ETH70 fragments or before legacy collection",
+    "correction": "Mandatory hash-bound context, weight<=2headergas, incremental unfinished-block counter, all-block preflight before bloom/retention, neutral policy rejection"
+  },
+  "source_sha256": {
+    "crates/logex-sync/src/engine/historical.rs": "7f8ba648283b1187f1a5654cdb75cb774d27e23f0bf3ca693c12e4068bfc534e",
+    "crates/logex-sync/src/engine/anchored.rs": "28eaa040239f644d5c341b8b7a780919e2da73b67819efe0a5abb7b97989497b",
+    "crates/logex-sync/src/engine/live.rs": "e6df2d702e0ca42e263d313e33018e911fa3d6eb12665789f4f199aa0e01c837",
+    "crates/logex-sync/src/p2p/peer_manager/mod.rs": "d8ef47c82fa2a57935220716d815fffbbdae31b316cfb05623a7ccdb642aad89",
+    "crates/logex-sync/src/p2p/peer_manager/state.rs": "6facede8c6d15ddba44f54f26b24daed149a02d2b6613855be8d20fa0e4aa9d4",
+    "crates/logex-sync/src/p2p/peer_manager/requests.rs": "8f77033afae3e4f18369557ec7a44636395a5aa28dcef9eb279c11bb07e61a54",
+    "crates/logex-sync/src/p2p/peer_manager/requests/source_tests.rs": "38d65681b51b696bf7135e7a247801678d880fb8a64a6f91f67183bd6b54b76d",
+    "crates/logex-sync/src/p2p/peer_manager/requests/ownership_tests.rs": "ad0c71d41e346bf6a324b4c09411dc217c4d366bba261869d9e9b0ce5c9d5e7f",
+    "crates/logex-sync/src/p2p/peer_manager/requests/salvage_tests.rs": "673e1ba4a5bf74053ba1ad14c6da50a25362621c409b1e5dcf8fb85f29d02471",
+    "crates/logex-sync/src/p2p/peer_manager/requests/limit_tests.rs": "19e6a5f1cede2ab9e3ce8b66b5b71cefb9f049a418f0988df1c540cc9a3fa30c",
+    "crates/logex-sync/src/p2p/peer_manager/requests/continuation_tests.rs": "72f61b83e7f34f4f9cd9aa4edfa02c2dff9a893f1afdc70e6cf5caa948a51eb8",
+    "crates/logex-sync/src/p2p/peer_manager/requests/receipt_resources.rs": "c4ca954bf61fc62b6f06a3c6403ab28ba16c80ff7875d626bca1837ed2d5f69e",
+    "crates/logex-sync/src/p2p/peer_manager/requests/resource_tests.rs": "e6bdf5710bf8e8751a47b3aa9e8df7a9d0b6f9aa27d18ed3de3d95f9473e81cd"
+  },
+  "evidence_directory": "/private/tmp/logex-execution-receipt-resource-bounds-7zjdzouo",
+  "evidence": {
+    "caller-provenance-review.json": {
+      "sha256": "8284d6d23e62297b1b83d169ced4d3c324520ab62a4c42f8041441616cad3818",
+      "bytes": 8068
+    },
+    "resource-test-design.json": {
+      "sha256": "42b4370197d26be42542b10421069f3da0dde025c17d128a714b55b7995b96a4",
+      "bytes": 6636
+    },
+    "engine-patch-metadata.json": {
+      "sha256": "d54d96176a38a75c2c6fdd6acae7c632c2a7a4e54c0f3010f1f462ed6211111e",
+      "bytes": 703
+    },
+    "original-production-proof.json": {
+      "sha256": "12305624dd5d39135dd912dc869922ec746149fa6cb197eb272e0800055cabae",
+      "bytes": 388
+    },
+    "original-tests.rs": {
+      "sha256": "4d8e4652adc1b3fe816069a843aaec511b40f3385c5bc32bc6db8ae13227fb40",
+      "bytes": 3766
+    },
+    "original-controls.log": {
+      "sha256": "3de043620dc5f1f7df173a8b2669ffafe60743d4b6517a79cf3bc98fc4a58e42",
+      "bytes": 1699
+    },
+    "fixed-resource-tests.log": {
+      "sha256": "9553bbf9cbe73b592ff91da117887b7c3d500e49f8e52d5e62c2d1c281c245ae",
+      "bytes": 1987
+    },
+    "peer-manager-tests.log": {
+      "sha256": "32f970ce8023d131a9a8d5806010ae6183697521b5af9691edf902cefd897093",
+      "bytes": 23775
+    },
+    "final-peer-manager-tests.log": {
+      "sha256": "67a3b122e55a738fe2df167c27d49143a7104b87605003878739415d596f4f0b",
+      "bytes": 24223
+    },
+    "implementation-review.json": {
+      "sha256": "05c4d11371e187880c98b3e2f5d3161295f75062c1d2892a0b473691c5c881a9",
+      "bytes": 3782
+    },
+    "overflow-correction-review.json": {
+      "sha256": "62d9c02eee6a3f7b1f568da9e5553ac8c59b45d09b9612e1cf317c207b72afbe",
+      "bytes": 1719
+    },
+    "final-review.json": {
+      "sha256": "539829fb0e2fe4f049d272ed41c532a1ad1ccd6717e781378c04d92b8ee8ea9a",
+      "bytes": 3068
+    },
+    "cleanup-review.json": {
+      "sha256": "158dc7706062c5091ad7fd55838eac70970a3ae992487527419dfbd4951a30ee",
+      "bytes": 644
+    },
+    "gates/results.json": {
+      "sha256": "1f9cf3c9d042ee5b5ad16eb6814dcd819bb0fcf679f243bb1c3cfce48811dd92",
+      "bytes": 3849
+    },
+    "gates/test-summary.json": {
+      "sha256": "e057a02593970a794dd2680744d899149b7fe85b3a17b0360fdddf5c45e7034d",
+      "bytes": 69
+    }
+  },
+  "proof": {
+    "path": "/private/tmp/logex-execution-continuation-bounds-ds46fkay/gas-resource-proof.json",
+    "sha256": "7bd90951ece0bc35dc7f09cb6005307d7cdb4d3510e6ab91f0234257e296903c",
+    "review": {
+      "status": "Source-backed conservative inequality supported for pinned mainnet schedule Frontier through Osaka/BPO2; no counterexample found. This is review evidence for B4-23, not implemented enforcement or EVM conformance test certification.",
+      "formula": {
+        "weight": "W=21000*Nreceipts+375*Nlogs+375*Ntopics+8*sum(log.data.len)",
+        "inequality": "W<=sum(pre-refund transaction gas)<=2*header.gas_used<=2*header.gas_limit",
+        "consequence": "Nreceipts<=floor(2gas_used/21000), Nlogs and Ntopics each<=floor(2gas_used/375), data_bytes<=floor(2gas_used/8). These are component bounds, not additive allocations or RLP lengths. Every accepted nonempty receipt fragment increases W, giving finite continuation count."
+      },
+      "official_pin": {
+        "repository": "https://github.com/ethereum/execution-specs",
+        "revision": "f7847b76bac6113cce6a94e8d62c734609b7ec32",
+        "lookup": "Official GitHub commits API returned default branch revision; default branch currently forks/amsterdam, but only historical frontier/osaka source directories were read. Initial master/old Osaka branch attempts unavailable; final full revision pinned.",
+        "files": {
+          "src/ethereum/forks/osaka/fork.py": {
+            "url": "https://github.com/ethereum/execution-specs/blob/f7847b76bac6113cce6a94e8d62c734609b7ec32/src/ethereum/forks/osaka/fork.py",
+            "sha256": "bbfe923688046178d544942326590c814e3676f8efe6786aa4fdcce4f6d674cf",
+            "bytes": 32229
+          },
+          "src/ethereum/forks/frontier/fork.py": {
+            "url": "https://github.com/ethereum/execution-specs/blob/f7847b76bac6113cce6a94e8d62c734609b7ec32/src/ethereum/forks/frontier/fork.py",
+            "sha256": "636a8111fa4a60bf793faaadc620715a75ec39ca4c9434db42bedf4236f6d138",
+            "bytes": 24995
+          },
+          "src/ethereum/forks/frontier/vm/instructions/log.py": {
+            "url": "https://github.com/ethereum/execution-specs/blob/f7847b76bac6113cce6a94e8d62c734609b7ec32/src/ethereum/forks/frontier/vm/instructions/log.py",
+            "sha256": "455e1949366dc6736ed3939c899d26e5e29905952812ecb9d2e2ec06686766fa",
+            "bytes": 2063
+          },
+          "src/ethereum/forks/frontier/vm/gas.py": {
+            "url": "https://github.com/ethereum/execution-specs/blob/f7847b76bac6113cce6a94e8d62c734609b7ec32/src/ethereum/forks/frontier/vm/gas.py",
+            "sha256": "9086d29c61c3e705aa4f34e4fab78169844b1172491c137862165aadf4ce5363",
+            "bytes": 8655
+          },
+          "src/ethereum/forks/osaka/transactions.py": {
+            "url": "https://github.com/ethereum/execution-specs/blob/f7847b76bac6113cce6a94e8d62c734609b7ec32/src/ethereum/forks/osaka/transactions.py",
+            "sha256": "2882624f57a22e03039268fb545f0d7a0cde07f4d02d949370fd0f86ef18e4a9",
+            "bytes": 25600
+          }
+        }
+      },
+      "proof_steps": [
+        {
+          "claim": "All mainnet receipt-bearing transaction kinds0..4 pay intrinsic>=21000.",
+          "evidence": [
+            "EELS frontier/vm/gas.py:74 TX_BASE21000; frontier/fork.py:627,638 deduct validated intrinsic before execution.",
+            "Pinned revm-context-interface14.0.0 cfg/gas_params.rs:240 sets base21000; initial_tx_gas:710-743 adds only nonnegative calldata/access/create/initcode/authorization charges. No fork override lowers tx_base_stipend.",
+            "EELS Osaka transactions.py defines legacy,accesslist,feemarket,blob,setcode and common intrinsic calculation. EIP7702 authorization costs are positive; its refund is handled after execution by common capped-refund path."
+          ],
+          "inference": "A failed transaction still contributes one receipt and pays intrinsic; no mainnet deposit/system transaction receipt exemption exists in supported type set."
+        },
+        {
+          "claim": "Each retained LOG contributes at least375+375topics+8data gas.",
+          "evidence": [
+            "Pinned EELS frontier/vm/instructions/log.py:58-76 charges fixed/dynamic cost before appending log; gas.py:140-142 constants375,8,375.",
+            "Pinned revm-interpreter32.0.0 instructions.rs:282-286 assigns gas::LOG toLOG0..4. host.rs:316-325 charges dynamic log_cost; context-interface gas_params.rs:508 counts topics/data.",
+            "Inspected entire new_spec_inner fork override section: no LOGbase/topic/data reduction through Osaka; gas constants remain375/375/8. Memory-expansion and other execution charges are nonnegative."
+          ],
+          "caveat": "Value-call stipend accounting is not additional free transaction gas: its2300 allowance is covered by9000value-call charge. The inequality concerns retained logs only, a subset of executed charges."
+        },
+        {
+          "claim": "Refund cannot reduce net charged gas below half gross consumption.",
+          "evidence": [
+            "Pinned EELS frontier/fork.py:658-677 caps refund at gross//2 then accumulates net in block gasUsed.",
+            "Pinned revm-interpreter32.0.0 gas.rs:117 uses divisor2beforeLondon/5fromLondon.",
+            "revm-handler15.0.0 post_execution.rs:23-28 adds EIP7702refund BEFORE set_final_refund, so authorizations do not bypass cap.",
+            "Osaka EELS fork.py:931-940 uses divisor5 and then raises net charge to calldata floor. revm post_execution.rs:12-18 corroborates floor cannot weaken bound."
+          ],
+          "inference": "Pertransaction W<=gross and gross<=2net imply aggregate inequality. Smaller historical transaction gas limits or active7825cap not required."
+        },
+        {
+          "claim": "Failed/reverted logs and system operations do not create extra receipt weight.",
+          "evidence": [
+            "revm-handler15.0.0 post_execution.rs:98-129 exposes logs only on ExecutionResult::Success; Revert/Halt variants have no logs.",
+            "revm-context13.0.0 journal/inner.rs:468-473 checkpoint reversion truncates logs, preserving subset property for nested failure.",
+            "alloy-evm0.27.3 eth/block.rs:127-138 performs pre-system calls separately; receipts.push at188 only follows committed normal transaction result and cumulative gas addition at178-181. finish post-system calls at~214 produce requests, not receipts. Withdrawals and consensus/system requests are not extra tx receipts."
+          ],
+          "limits": "Inspected pinned implementation structure and EELS endpoint accounting, not execution of every historical block."
+        },
+        {
+          "claim": "Header gas fields are bounded and authenticated where existing anchor ancestry is established.",
+          "evidence": [
+            "Pinned reth d6324d6 consensus/common/src/validation.rs:22 rejects gas_used>gas_limit.",
+            "Own validation.rs validates headers and anchor/reverse ancestry; cryptographic ancestry is necessary before treating gas as peer-fault authority.",
+            "Pinned mainnet ChainSpec schedule ends Osaka/BPO1/BPO2; BPO changes blob parameters, not transaction/log gas. Amsterdam code exists upstream/inRevM but is not active in this pinned mainnet schedule."
+          ],
+          "limits": "A syntactically valid unanchored header is not authenticated. Existing hashes-only APIs and scheduling gas hints do not yet carry proof provenance."
+        }
+      ],
+      "pinned_dependencies": {
+        "reth": "d6324d63e27ef6b7c49cdc9b1977c1b808234c7b",
+        "revm-context-interface14.0.0": "57f61cc6d23678c4840af895b19f8acfbbd546142ec8028b6526c53cc1c16c98",
+        "revm-handler15.0.0": "0cd0e43e815a85eded249df886c4badec869195e70cdd808a13cfca2794622d2",
+        "revm-interpreter32.0.0": "11406408597bc249392d39295831c4b641b3a6f5c471a7c41104a7a1e3564c07",
+        "alloy-evm0.27.3": "b991c370ce44e70a3a9e474087e3d65e42e66f967644ad729dc4cec09a21fd09"
+      },
+      "scope_limits": [
+        "Not a receipt RLP bytes<=gas/8 claim. PreByzantium poststate, bloom restoration and typed envelopes change encoded widths but fixed object counts are bounded byNreceipts.",
+        "No whole-process/RSS guarantee: decoded response exists before checks, sharedBytes backing, sparecapacity, concurrent requests and engine retained completed batches are separate.",
+        "This bound follows valid execution under authenticated mainnet headers, not a replacement for final root/count validation; implementation must retain B4-12 attribution guarantees.",
+        "Use checked/u128 arithmetic; proof2*u64gas can exceedu64. Overflow must not silently turn into an unlimited bound.",
+        "Future fork changing intrinsic/LOG/refund/systemreceipt rules requires review; do not infer universal future safety."
+      ],
+      "suggested_reference_tests": [
+        "Pin fixtures for legacy poststate, legacy status and typed1..4 with identical logstructures: W depends only receipt/log/topic/data counts.",
+        "Small fixture with fullhalfrefund arithmetic accepts W=2netgas boundary; postLondon onefifth and7702refund remain belowsameconservative threshold. These are arithmetic implementation tests, not EVMproof.",
+        "If adding EVMreference coverage later, use tiny signed transactions thatLOG0/LOG4, nestedrevert, top-levelrevert, storage refund,7702authorization refund across Frontier/London/Prague/Osaka. Assert emitted receipt W<=2actualchargedgas. No benchmark/large fixtures needed.",
+        "Emptyreceipt repeatedcontinuation, boundedfragment counter, hash/budget alignment and premerge resource rejection tests are needed for actual B4-23 code."
+      ],
+      "work_performed": "Read-only pinned local source and5small official files (~94KiB total), no repository edits,Cargo,EVM tests,benchmarks or peers. Source reasoning is distinguished from suggested future tests."
+    }
+  },
+  "original_controls": {
+    "production_unchanged": true,
+    "passed": 1,
+    "failed": 1,
+    "caveat": "Typed absent-policy fixture, not an EVM execution or receipt-root-valid block"
+  },
+  "focused_tests": {
+    "peer_manager_passed": 221,
+    "new_tests": 14,
+    "failed": 0,
+    "ignored": 0
+  },
+  "performance": "Linear incomingreceipt/log metadata walk; no oldfragment rescans/encoding/payloadhashing/storagewrites. Contextmetadata retained/copied and extra smallheaderhash in8enginepaths; live reuseshashes. Two ETH70clones removed. No benchmark.",
+  "review_correction": "Initial early outeroverflow error changed role candidate disabling. Preserve typed returned count and map to existingIncomplete in both collectors; sequential protocol handling unchanged. Three added controls verify this and metadata alignment.",
+  "limits": [
+    "Necessary condition for valid mainnet execution through pinned Osaka/BPO2; future gas rules require review",
+    "Header binding does not authenticate or establish canonicality",
+    "Per-block logical bound, not global/RSS limit; unanchored gas can be large",
+    "Wire decode allocations, capacity/sharedbacking, concurrentrequest/completedbatch/outgoingcopies separate",
+    "Final root/count/anchor validation remains essential"
+  ],
+  "remote": "None; mac-mini testing and obsolete-artifact cleanup complete",
+  "source_commit": "641d5a2eaeb1a1c08c247bc9b9a06fa263dbe023",
+  "gates": {
+    "commit": "641d5a2eaeb1a1c08c247bc9b9a06fa263dbe023",
+    "rustc": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+    "gates": [
+      {
+        "name": "vendor",
+        "command": [
+          "python3",
+          "tools/verify_datafusion_vendor.py"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T23:04:03.504463+00:00",
+        "finished": "2026-09-15T23:04:03.569607+00:00",
+        "sha256": "d8d80949d6f3378c14456842b531f0cade514179e4c94781b95ff9abb6447675",
+        "log": "/private/tmp/logex-execution-receipt-resource-bounds-7zjdzouo/gates/vendor.log"
+      },
+      {
+        "name": "format",
+        "command": [
+          "cargo",
+          "fmt",
+          "--all",
+          "--",
+          "--check"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T23:04:03.570104+00:00",
+        "finished": "2026-09-15T23:04:04.523102+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-execution-receipt-resource-bounds-7zjdzouo/gates/format.log"
+      },
+      {
+        "name": "check",
+        "command": [
+          "cargo",
+          "check",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T23:04:04.523567+00:00",
+        "finished": "2026-09-15T23:04:13.892245+00:00",
+        "sha256": "07ef8fa8d3d288a63b4fbd61ed4308e71b4fc4d3e1af9e2c4f780f5c2c22207e",
+        "log": "/private/tmp/logex-execution-receipt-resource-bounds-7zjdzouo/gates/check.log"
+      },
+      {
+        "name": "clippy",
+        "command": [
+          "cargo",
+          "clippy",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T23:04:13.892882+00:00",
+        "finished": "2026-09-15T23:04:22.817929+00:00",
+        "sha256": "12ea6c88ff4d4e5c66c92713b89c97f454121a897643dff1623644ee610764db",
+        "log": "/private/tmp/logex-execution-receipt-resource-bounds-7zjdzouo/gates/clippy.log"
+      },
+      {
+        "name": "test",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T23:04:22.818922+00:00",
+        "finished": "2026-09-15T23:07:19.848111+00:00",
+        "sha256": "c61e658c28635f0d3a4b9422059f08b1ae0177942aaa6faac3591945e08b9352",
+        "log": "/private/tmp/logex-execution-receipt-resource-bounds-7zjdzouo/gates/test.log"
+      },
+      {
+        "name": "doc",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--doc",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T23:07:19.849687+00:00",
+        "finished": "2026-09-15T23:07:30.493074+00:00",
+        "sha256": "aa0b1092f2d8be1995501ce4567872e7354948227b741efe5d2d47b4541d05a1",
+        "log": "/private/tmp/logex-execution-receipt-resource-bounds-7zjdzouo/gates/doc.log"
+      },
+      {
+        "name": "release-build",
+        "command": [
+          "cargo",
+          "build",
+          "-p",
+          "logex-node",
+          "--release",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T23:07:30.493648+00:00",
+        "finished": "2026-09-15T23:08:14.049784+00:00",
+        "sha256": "9e4fabe9e5b5e74b4eeab1e08562d62af3f39051778faa899ce88bb12c7e455c",
+        "log": "/private/tmp/logex-execution-receipt-resource-bounds-7zjdzouo/gates/release-build.log"
+      }
+    ]
+  },
+  "workspace_tests": {
+    "groups": 25,
+    "passed": 1532,
+    "failed": 0,
+    "ignored": 23
+  }
+}

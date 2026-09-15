@@ -1,4 +1,5 @@
 use super::*;
+use crate::p2p::peer_manager::ReceiptRequestContext;
 
 impl SyncEngine {
     /// Run the sync loop: historical catch-up, then live following.
@@ -266,7 +267,10 @@ impl SyncEngine {
                 let receipts = match cancelable(
                     &mut self.shutdown,
                     self.peers.get_receipts_prefer_peers(
-                        chunk_hashes.clone(),
+                        chunk_headers
+                            .iter()
+                            .map(ReceiptRequestContext::from_header)
+                            .collect(),
                         required_block,
                         &receipt_peer_preference,
                     ),

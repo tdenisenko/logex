@@ -81,7 +81,11 @@ baseline prerequisite. `PartitionManager` is the current public storage facade.
 | Runtime | Clap/TOML precedence, node lifecycle and task supervision, background indexing/compaction, filesystem identity and platform probes. |
 
 The [standalone execution continuation review](execution-continuation-bounds.md)
-records B4-22 elapsed limits and the separate, still-open B4-23 resource follow-up.
+records merged PR #185 (`1dac15e2`) for B4-22 elapsed limits
+and the separate, still-open B4-23 resource follow-up.
+
+The [receipt resource review](execution-receipt-resource-bounds.md) records B4-23
+mandatory header contexts and cumulative logical resource checks.
 
 ## Baseline findings
 

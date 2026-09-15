@@ -1,4 +1,5 @@
 use super::*;
+use crate::p2p::peer_manager::ReceiptRequestContext;
 
 impl SyncEngine {
     /// Follow the chain head, ingesting new blocks as they arrive.
@@ -91,7 +92,14 @@ impl SyncEngine {
                 continue;
             }
 
-            let hashes: Vec<B256> = headers.iter().map(|h| h.hash_slow()).collect();
+            let receipt_blocks: Vec<_> = headers
+                .iter()
+                .map(ReceiptRequestContext::from_header)
+                .collect();
+            let hashes: Vec<B256> = receipt_blocks
+                .iter()
+                .map(|block| block.block_hash())
+                .collect();
             let required_block = headers
                 .last()
                 .map(|header| header.number())
@@ -113,7 +121,7 @@ impl SyncEngine {
             let receipts = match cancelable(
                 &mut self.shutdown,
                 self.peers.get_receipts_prefer_peers(
-                    hashes.clone(),
+                    receipt_blocks,
                     required_block,
                     &receipt_peer_preference,
                 ),

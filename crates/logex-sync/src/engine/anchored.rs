@@ -1,7 +1,7 @@
 use super::*;
 use crate::EXECUTION_HISTORY_TARGET_BLOCK;
 use crate::extract;
-use crate::p2p::peer_manager::SourcedBodyReceipts;
+use crate::p2p::peer_manager::{ReceiptRequestContext, SourcedBodyReceipts};
 use crate::primitives::LogexNetworkPrimitives;
 use crate::validation::validate_header_matches_anchor;
 use alloy_consensus::{EMPTY_OMMER_ROOT_HASH, EMPTY_ROOT_HASH, ReceiptWithBloom};
@@ -2719,13 +2719,15 @@ impl SyncEngine {
         let Some(required_block) = headers.last().map(|header| header.number()) else {
             return Ok(false);
         };
-        let gas_used = headers.iter().map(|header| header.gas_used()).collect();
+        let receipt_blocks = headers
+            .iter()
+            .map(ReceiptRequestContext::from_header)
+            .collect();
         self.drain_historical_request_accounting();
         let Some(plan) = self
             .peers
-            .prepare_bodies_and_receipts_request_for_hashes_and_gas(
-                hashes.clone(),
-                gas_used,
+            .prepare_bodies_and_receipts_request_for_blocks(
+                receipt_blocks,
                 self.historical_rows_per_block_ewma,
                 required_block,
                 &[header_peer],
@@ -2873,7 +2875,10 @@ impl SyncEngine {
             let receipt_result = cancelable(
                 &mut self.shutdown,
                 self.peers.get_receipts_prefer_peers_with_limits(
-                    chunk_hashes.clone(),
+                    chunk_headers
+                        .iter()
+                        .map(ReceiptRequestContext::from_header)
+                        .collect(),
                     required_block,
                     &receipt_peer_preference,
                     request_timeout,
@@ -3276,7 +3281,10 @@ impl SyncEngine {
             let receipt_result = cancelable(
                 &mut self.shutdown,
                 self.peers.get_receipts_prefer_peers_with_limits(
-                    chunk_hashes.clone(),
+                    chunk_headers
+                        .iter()
+                        .map(ReceiptRequestContext::from_header)
+                        .collect(),
                     required_block,
                     &receipt_peer_preference,
                     payload_timeout,
@@ -5245,18 +5253,16 @@ impl SyncEngine {
             return Ok(None);
         }
 
-        let body_receipt_hashes = header_batch.hashes.clone();
-        let body_receipt_gas_used = header_batch
+        let receipt_blocks = header_batch
             .headers
             .iter()
-            .map(|header| header.gas_used())
+            .map(ReceiptRequestContext::from_header)
             .collect();
         self.drain_historical_request_accounting();
         let body_receipt_plan = self
             .peers
-            .prepare_bodies_and_receipts_request_for_hashes_and_gas(
-                body_receipt_hashes,
-                body_receipt_gas_used,
+            .prepare_bodies_and_receipts_request_for_blocks(
+                receipt_blocks,
                 self.historical_rows_per_block_ewma,
                 header_batch.required_block,
                 &[header_batch.header_peer],
@@ -6188,15 +6194,14 @@ impl SyncEngine {
                 residual_prefetched_chunks,
             ) = loop {
                 let body_receipt_started = std::time::Instant::now();
-                let body_receipt_gas_used = remaining_headers
+                let receipt_blocks = remaining_headers
                     .iter()
-                    .map(|header| header.gas_used())
+                    .map(ReceiptRequestContext::from_header)
                     .collect();
                 let completion = match self
                     .peers
-                    .prepare_bodies_and_receipts_request_for_hashes_and_gas_excluding(
-                        remaining_hashes.clone(),
-                        body_receipt_gas_used,
+                    .prepare_bodies_and_receipts_request_for_blocks_excluding(
+                        receipt_blocks,
                         self.historical_rows_per_block_ewma,
                         required_block,
                         &[header_peer],
@@ -6402,7 +6407,10 @@ impl SyncEngine {
         let receipts = match cancelable(
             &mut self.shutdown,
             self.peers.get_receipts_prefer_peers(
-                hashes.to_vec(),
+                headers
+                    .iter()
+                    .map(ReceiptRequestContext::from_header)
+                    .collect(),
                 required_block,
                 &receipt_peer_preference,
             ),
@@ -6611,7 +6619,10 @@ impl SyncEngine {
             let receipts = match cancelable(
                 &mut self.shutdown,
                 self.peers.get_receipts_prefer_peers(
-                    chunk_hashes.clone(),
+                    chunk_headers
+                        .iter()
+                        .map(ReceiptRequestContext::from_header)
+                        .collect(),
                     required_block,
                     &receipt_peer_preference,
                 ),

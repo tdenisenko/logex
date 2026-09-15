@@ -47,6 +47,7 @@ pub(super) fn test_plan(peer: &ActivePeer) -> BodyReceiptRequestPlan {
     let id = peer.sender.peer_id;
     BodyReceiptRequestPlan {
         hashes: vec![B256::ZERO],
+        receipt_contexts: limit_tests::receipt_contexts(&[B256::ZERO]),
         ranges: std::iter::once(0..1).collect(),
         range_indices_by_start: HashMap::from([(0, 0)]),
         return_blocks: 1,

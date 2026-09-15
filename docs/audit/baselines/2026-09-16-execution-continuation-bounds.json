@@ -1,5 +1,5 @@
 {
-  "status": "All seven local gates pass on corrected source; PR/CI/merge pending",
+  "status": "Merged after all seven local gates and six exact-head CI jobs passed",
   "branch": "audit/execution-continuation-bounds",
   "base": "d73fd32a5ae67498c5086af69b793dd0645fff20",
   "finding": {
@@ -78,6 +78,18 @@
     "gates/test-summary.json": {
       "sha256": "8b1a4610563220aa0bb71d041a90224d04aaf2e49c40bacc9c60a17eb45543c1",
       "bytes": 69
+    },
+    "premerge.json": {
+      "sha256": "da684850a820fcaf382bb5e6a3a3976bb596a2e919d279fb6f90a280ac82d9a3",
+      "bytes": 1894
+    },
+    "merged.json": {
+      "sha256": "87a21a568a6f5294e1d06c7073d6e5b619d1a3e4ac9393a8a8c8c186a31e24c4",
+      "bytes": 240
+    },
+    "ci-watch.log": {
+      "sha256": "51f85129d8be7140d979efc4de9180fbdb8a29c7d62f4ee3bd790e041ec92b23",
+      "bytes": 14130
     }
   },
   "original_controls": {
@@ -237,5 +249,51 @@
     "passed": 1518,
     "failed": 0,
     "ignored": 23
+  },
+  "pull_request": {
+    "headRefOid": "11098ade9b39701bc77cca7f7d9212e9a662f4d5",
+    "mergeCommit": {
+      "oid": "1dac15e21f4db6d01da5ce08da6fe8e89416a644"
+    },
+    "mergedAt": "2026-09-15T22:47:37Z",
+    "number": 185,
+    "state": "MERGED",
+    "url": "https://github.com/tdenisenko/logex/pull/185"
+  },
+  "ci": {
+    "run": 35032091317,
+    "head": "11098ade9b39701bc77cca7f7d9212e9a662f4d5",
+    "checks": [
+      {
+        "name": "Check",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS"
+      },
+      {
+        "name": "Format",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS"
+      },
+      {
+        "name": "Clippy",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS"
+      },
+      {
+        "name": "Test",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS"
+      },
+      {
+        "name": "macOS Test",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS"
+      },
+      {
+        "name": "Release Build",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS"
+      }
+    ]
   }
 }

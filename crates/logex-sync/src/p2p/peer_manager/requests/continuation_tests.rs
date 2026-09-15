@@ -1,6 +1,6 @@
 //! Paused-clock policy controls. Fixture's loopback listener is never polled;
 //! no discovery, service task, peer connection or real request is started.
-use super::limit_tests::{Fixture, take_requests};
+use super::limit_tests::{Fixture, receipt_contexts, take_requests};
 use super::*;
 use std::task::Poll;
 
@@ -29,7 +29,7 @@ async fn fetch(
     } else {
         manager
             .get_receipts_prefer_peers_with_limits(
-                hashes(),
+                receipt_contexts(&hashes()),
                 1,
                 &[],
                 Duration::from_secs(seconds),
@@ -258,7 +258,7 @@ async fn continuation_parallel_helpers_have_whole_attempt_deadline() {
             } else {
                 fixture
                     .manager
-                    .request_receipts_until_complete(peer, hashes())
+                    .request_receipts_until_complete(peer, receipt_contexts(&hashes()))
                     .await
                     .map(|v| v.len())
             }
@@ -442,7 +442,10 @@ async fn continuation_parallel_collector_preserves_completed_chunk_and_stats() {
             } else {
                 let (items, stats, failures) = fixture
                     .manager
-                    .request_sourced_receipts_parallel_chunks(&peers, limit_tests::hashes())
+                    .request_sourced_receipts_parallel_chunks(
+                        &peers,
+                        receipt_contexts(&limit_tests::hashes()),
+                    )
                     .await
                     .unwrap()
                     .unwrap();
