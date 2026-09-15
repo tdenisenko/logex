@@ -1,0 +1,444 @@
+{
+  "source_commit": "e19a15e5cd82feaa4a925ba9bb4b4277739b1376",
+  "base_commit": "16b69ec975f4853448d8c7c56ed2ff6c076b29eb",
+  "branch": "audit/consensus-serving-memory",
+  "findings": [
+    "B3-45",
+    "B3-46",
+    "B3-47",
+    "B3-48"
+  ],
+  "evidence_root": "/private/tmp/logex-serving-memory-0_hnmwvr",
+  "before_codec": {
+    "base": "16b69ec975f4853448d8c7c56ed2ff6c076b29eb",
+    "candidate_sha256": "e4a91e013eea35ab709cfdbfb3fc699ee6353f36dfe11660326203327c449dde",
+    "method": "Exact original named function restored into candidate harness for one focused control at a time. Not a full baseline checkout.",
+    "runs": [
+      {
+        "function": "    async fn write_response<T>(",
+        "test": "serving_memory_concurrent_writers_reject_before_prefix_and_release_on_cancel",
+        "command": [
+          "cargo",
+          "test",
+          "-p",
+          "logex-cl",
+          "--lib",
+          "serving_memory_concurrent_writers_reject_before_prefix_and_release_on_cancel",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 101,
+        "harness_sha256": "e62b041e7a201d3fbb3403f6aaa892c8a7ae6d92d7d5093bb43b0387f1d6db62",
+        "log": "/private/tmp/logex-serving-memory-0_hnmwvr/before-serving_memory_concurrent_writers_reject_before_prefix_and_release_on_cancel.log",
+        "sha256": "028fdad449d6dd5d59e95d2e50552426da6d8746f4d93783e010a46e66ba9deb"
+      },
+      {
+        "function": "fn encode_single_response(",
+        "test": "serving_memory_singleton_protocol_limits_reject_before_writing",
+        "command": [
+          "cargo",
+          "test",
+          "-p",
+          "logex-cl",
+          "--lib",
+          "serving_memory_singleton_protocol_limits_reject_before_writing",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 101,
+        "harness_sha256": "3d5c327a3d0599482e90365ebf45e9e628d84a5e833423c1a083667f85ad0503",
+        "log": "/private/tmp/logex-serving-memory-0_hnmwvr/before-serving_memory_singleton_protocol_limits_reject_before_writing.log",
+        "sha256": "cc5f1b25b316967636f6cb7dd2330a6650aff2b4a1edf3f1428d07eb3567b38d"
+      },
+      {
+        "function": "fn encode_ssz_snappy_payload_into(",
+        "test": "serving_memory_encoding_capacity_and_wire_bytes_match_the_reference",
+        "command": [
+          "cargo",
+          "test",
+          "-p",
+          "logex-cl",
+          "--lib",
+          "serving_memory_encoding_capacity_and_wire_bytes_match_the_reference",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 101,
+        "harness_sha256": "11fcdcc7407098bf93e35880705b4279c19346dc7da2b8e58943fbc845abdf12",
+        "log": "/private/tmp/logex-serving-memory-0_hnmwvr/before-serving_memory_encoding_capacity_and_wire_bytes_match_the_reference.log",
+        "sha256": "9fa9d489adec881c257f5324fa3e8af8638baff453c0f120ced2525980c0cc2b"
+      }
+    ],
+    "restored_sha256": "e4a91e013eea35ab709cfdbfb3fc699ee6353f36dfe11660326203327c449dde"
+  },
+  "independent_review": {
+    "report": {
+      "status": "FINAL_RECONCILIATION_NO_ACTIONABLE_FINDING",
+      "source_sha256": {
+        "rpc.rs": "c47953f179f25fd165b4c7972fe3a0cbc71f26f33f1a13ad8c31e8e17cdc4c09",
+        "rpc_memory.rs": "3254393f109b91ae0a884d7f7bc1d8473555f2937005851a81ec18d98083aa71",
+        "network.rs": "ceef94e91c4a0d05db762844c276e5fb54803b62702110ad3463814dbf2a1b01"
+      },
+      "prior_review_sha256": {
+        "codec-review.json": "3d81a0e6db3c9fc22a392821a8dad4d4fca18525d881b055481f298366879fb8",
+        "network-final-review.json": "99720c743d6cccb949925119b2a850d23db4ce8dd028e7b55dbd73e49f0e49d5"
+      },
+      "reconciliation": [
+        "Final encoder error mapping uses IntoInnerError::into_error, resolving prior typed-allocation identity finding.",
+        "Network hash identical to reviewed snapshot. Prequeue admission covers all10 paths including metadata; failure wrappers remain intact through summary diagnostics.",
+        "Read final Ready/idempotence, concurrent pending writes/Busy fallback/control independence, failed-write release, cache-held body accounting, Busy dropping incoming charge, singleton type-limit and reference-byte/capacity controls.",
+        "Cache ownership control verifies old held cache body prevents replacement until queued wrapper drops; separate serving guard accounts only encoding for shared cached body.",
+        "Busy conversion of an incoming wrapper releases its existing incoming quota before writing fixed fallback.",
+        "Serving pool defaults remain128MiB Beacon and8MiB control, independent from incoming budgets; no further ownership/range/scheduling changes identified."
+      ],
+      "before_controls": {
+        "provenance": "Root reports actual restored-original function runs; not executed by this review",
+        "confirmed": [
+          "Original outgoing writer has no retained serving guard",
+          "Original singleton encoder accepts oversized protocol-specific LC payload",
+          "Original encoded Vec growth exceeds proposed capacity bound"
+        ],
+        "distinction": "These serving encoder capacity failures are distinct from prior incoming decoder EOF-overgrowth concern, which remained unconfirmed after original decoder controls passed."
+      },
+      "limits": [
+        "No throughput or measured allocation-speed claim.",
+        "Bounded queued owned payload capacities plus largest encoded buffer are not total RSS. Fixed compressor scratch, allocator transient reallocations and synchronous pre-admission construction remain outside quota.",
+        "Current reviewed source is uncommitted and root validation still running; this report is not a claim that final gates or merge completed."
+      ],
+      "execution": "Read-only reconciliation; no Cargo, source edits, commit, benchmark or remote operation."
+    },
+    "path": "/private/tmp/logex-serving-memory-0_hnmwvr/final-review.json",
+    "sha256": "228d7958bbf2e05a99032fd8b75512562df90a111f0bc1bc3ce36ce80070e8ab"
+  },
+  "source_sha256": {
+    "rpc.rs": "c47953f179f25fd165b4c7972fe3a0cbc71f26f33f1a13ad8c31e8e17cdc4c09",
+    "rpc_memory.rs": "3254393f109b91ae0a884d7f7bc1d8473555f2937005851a81ec18d98083aa71",
+    "network.rs": "ceef94e91c4a0d05db762844c276e5fb54803b62702110ad3463814dbf2a1b01"
+  },
+  "network_implementation": [
+    {
+      "scope": "Only network.rs bounded diagnostic summary correction; no queue selection, is_open shortcut, reservation, schema or peer-policy change. No commit/remote/benchmark/workspace gates.",
+      "source_sha256": "2a3910629baabab9ae9c9d285a793c50fa2a3a23673b51f497eeeffbcce14eb0",
+      "changes": [
+        "Generic outgoing failure, metadata outgoing failure and unexpected-response fallback format a bounded RpcResponseSummary, reused by retained strings and tracing.",
+        "Summary retains variant, chunk count, existing payload byte metric and error code only; no raw payload or error-message contents. Existing payload-byte metric includes context bytes.",
+        "Two small controls:8 versus4096 bytes retain metadata-only formatting below180 characters; actual unexpected-response handler retains a bounded diagnostic."
+      ],
+      "commands": [
+        {
+          "command": "rustfmt --edition 2024 crates/logex-cl/src/network.rs",
+          "exit": 0
+        },
+        {
+          "command": "cargo test -p logex-cl --lib --locked --offline -j2 serving_memory_",
+          "log": "network-focused.log",
+          "exit": 0,
+          "passed": 2
+        },
+        {
+          "command": "cargo test -p logex-cl --lib --locked --offline -j2 serving_memory_unexpected_response_retains_only_summary",
+          "log": "network-old-debug.log",
+          "exit": 101,
+          "method": "Temporarily remove only candidate unexpected-response summary conversion, restoring original raw Debug formatting. Test fails retained diagnostic length bound. Exact candidate bytes restored in Python finally. This is isolated old-path evidence, not full baseline checkout."
+        },
+        {
+          "command": "cargo test -p logex-cl --lib --locked --offline -j2 serving_memory_",
+          "log": "network-focused-final.log",
+          "exit": 0,
+          "passed": 2
+        },
+        {
+          "command": "cargo clippy -p logex-cl --lib --tests --locked --offline -j2 -- -D warnings",
+          "log": "network-clippy.log",
+          "exit": 0
+        }
+      ],
+      "cleanup": "Three requested full response formatting paths now use bounded summary. Cached Beacon Debug was already compact. Incoming unexpected-variant fallback is defensive; normal protocol routing ordinarily prevents such mismatch. LC queued clone ownership remains a separate explicitly recorded lead for root design. Source and Cargo released.",
+      "limits": "No command environment overrides. Only existing dependency future-incompatibility notices remain."
+    },
+    {
+      "scope": "network.rs only; source-only handoff, no commit/remote/benchmark/workspace gates",
+      "source_sha256": "4fb5e3874e466cf748695e9c0d1f959467e3e093731de35ce4285c0620625968",
+      "changes": [
+        "ConsensusNetwork retains RpcResponseBudgets and supplies the same clone to build_rpc_swarm and all ten codec behaviours.",
+        "send_rpc_response prepares ownership before oneshot sending and computes upload metrics from prepared response (empty Busy error has0payloadbytes). Metadata now uses this same helper.",
+        "Failed sends retain the intact budgeted wrapper through bounded diagnostic formatting; Err wrapper is boxed on failure only to satisfy result_large_err without raw payload copy or early reservation release.",
+        "Small test uses128-byte control serving pool and24-byte LC body, charging99 bytes including maximum encoded scratch. Queued first response retains charge, second becomes empty Busy; metadata shares the same pool and is Busy while constrained, then succeeds after release. Beacon serving and incoming control pools stay separate."
+      ],
+      "commands": [
+        {
+          "command": "rustfmt --edition 2024 crates/logex-cl/src/network.rs",
+          "exit": 0,
+          "note": "Repeated after each owned edit; no other file formatted."
+        },
+        {
+          "command": "cargo test -p logex-cl --lib --locked --offline -j2 serving_memory_",
+          "log": "network-queue-focused.log",
+          "exit": 0,
+          "passed": 3
+        },
+        {
+          "command": "cargo test -p logex-cl --lib --locked --offline -j2 network::tests",
+          "log": "network-queue-all.log",
+          "exit": 0,
+          "passed": 142
+        },
+        {
+          "command": "cargo test -p logex-cl --lib --locked --offline -j2 network::tests",
+          "log": "network-queue-final.log",
+          "exit": 0,
+          "passed": 142,
+          "note": "After intact failed-send wrapper correction; before failure-only Box adjustment."
+        },
+        {
+          "command": "cargo clippy -p logex-cl --lib --tests --locked --offline -j2 -- -D warnings",
+          "log": "network-queue-clippy.log",
+          "exit": 101,
+          "note": "result_large_err for intact wrapper Err. Corrected with failure-only Box."
+        },
+        {
+          "command": "cargo clippy -p logex-cl --lib --tests --locked --offline -j2 -- -D warnings",
+          "log": "network-queue-clippy-final.log",
+          "exit": 0
+        }
+      ],
+      "limits": "No Cargo environment overrides. Test exercises the exact preparation helper immediately used before all ten sends; it does not construct the private libp2p ResponseChannel. Full post-box integrated gates are parent-owned. Existing raw application response handler remains unchanged. No is_open shortcut or LC cache selection changes. No claim queue selection allocation is pre-reserved before cloning: preparation happens directly after existing selection and before queue ownership transfer.",
+      "cleanup": "Removed duplicate metadata send/metric path; removed failed-send into_parts raw escape. Bounded summary correction preserved. Cargo/source released."
+    },
+    {
+      "scope": "Exact RATE_LIMITED139 disposition in network.rs only. Root exposes shared code constant in rpc.rs. No commit, remote operations, benchmark or workspace gates.",
+      "source_sha256": "ceef94e91c4a0d05db762844c276e5fb54803b62702110ad3463814dbf2a1b01",
+      "behavior": "Owned139 response records a bounded temporary-unavailability diagnostic and sets private per-peer remote_busy_until to now+1second. No peer/request fault counters, cooldown, ignore or disconnection. Scheduler and directensure skip only that peer. Checking at/past deadline clears it; successful RPC response and disconnect clear it too; persisted peers start None. Existing scheduled polling determines next actual dispatch after expiry. Other error codes unchanged. Unknown/stale responses exit before modifying deadline. Intentional Goodbye lifecycle remains its existing separate protocol handling.",
+      "commands": [
+        {
+          "command": "rustfmt --edition 2024 crates/logex-cl/src/network.rs",
+          "exit": 0
+        },
+        {
+          "command": "cargo test -p logex-cl --lib --locked --offline -j2 serving_memory_remote_busy_defers_only_that_peer_without_fault",
+          "log": "network-busy-before.log",
+          "exit": 101,
+          "method": "Removed only new139 match arm in candidate harness, restoring previous generic error handling; actual owned-response test fails because peer_failures becomes nonempty. Restored exact candidate bytes in Python finally. Isolated original-path control, not full baseline checkout."
+        },
+        {
+          "command": "cargo test -p logex-cl --lib --locked --offline -j2 serving_memory_",
+          "log": "network-busy-focused.log",
+          "exit": 0,
+          "passed": 10
+        },
+        {
+          "command": "cargo test -p logex-cl --lib --locked --offline -j2 network::tests",
+          "log": "network-busy-all.log",
+          "exit": 0,
+          "passed": 144
+        },
+        {
+          "command": "cargo clippy -p logex-cl --lib --tests --locked --offline -j2 -- -D warnings",
+          "log": "network-busy-clippy.log",
+          "exit": 0
+        }
+      ],
+      "controls": [
+        "Owned Status/Bootstrap/Root139 clears pending state without fault counters; no immediate direct request; another peer remains usable.",
+        "Stale139 does not extend deadline; controlledInstant just-before/exact-deadline checks demonstrate expiry and direct retry.",
+        "Scheduler skips busy peer without closing it, sends to another peer; successful response resets deadline.",
+        "ResourceUnavailable non139 still increments useful RPC fault/cooldown as before."
+      ],
+      "cleanup": "No new maps or timers, no persisted schema change. Existing lifecycle ownership retains one bounded optional deadline. Original generic Error arm now excludes exactly139 through a preceding match guard. Other policies and bounded diagnostics preserved.",
+      "limits": "All commands sequential, no environment overrides; only existing dependency future-incompatibility notices. Source and Cargo released for parent full gates."
+    }
+  ],
+  "validation_status": "All seven local gates passed; 1376 workspace tests, 23 ignored; 298 consensus tests, 1 ignored.",
+  "publication_status": "pending",
+  "limits": [
+    "Serving payload capacities only; no total RSS bound. Fixed synchronous compressor scratch, allocator/reallocation transients and transport/collection metadata remain outside quota.",
+    "One synchronous LC response construction before admission remains bounded by128 requests and26936-byte validated cached update bodies, about3.29MiB plus metadata.",
+    "Busy uses existing empty code139 frame; exact139 briefly defers that peer without fault, with reset on successful response/disconnect or expiry. Other codes retain existing policy.",
+    "No benchmark, throughput percentage, remote operation, live-sync or production-data changes."
+  ],
+  "artifacts": [
+    {
+      "path": "/private/tmp/logex-serving-memory-0_hnmwvr/final-cl.log",
+      "bytes": 26218,
+      "sha256": "c8f029015c5365d5f5de94b1555f22ca152ba0c3ac6eb844544d1c7e010e8d87"
+    },
+    {
+      "path": "/private/tmp/logex-serving-memory-0_hnmwvr/network-busy-before.log",
+      "bytes": 1788,
+      "sha256": "90e6ca3171250df7d94c0f8f3e5b91b9ab8891b727a47e718dbf19b6c8e046ed"
+    },
+    {
+      "path": "/private/tmp/logex-serving-memory-0_hnmwvr/network-review.json",
+      "bytes": 6818,
+      "sha256": "144cda01f817b6107be710ad9f785879608114ad76096f611af640162df29652"
+    },
+    {
+      "path": "/private/tmp/logex-serving-memory-0_hnmwvr/network-final-review.json",
+      "bytes": 2271,
+      "sha256": "99720c743d6cccb949925119b2a850d23db4ce8dd028e7b55dbd73e49f0e49d5"
+    },
+    {
+      "path": "/private/tmp/logex-serving-memory-0_hnmwvr/codec-review.json",
+      "bytes": 2372,
+      "sha256": "3d81a0e6db3c9fc22a392821a8dad4d4fca18525d881b055481f298366879fb8"
+    },
+    {
+      "path": "/private/tmp/logex-serving-memory-0_hnmwvr/writer-design-review.json",
+      "bytes": 5179,
+      "sha256": "03662eff99a742b4d282ae5b56772145b42b6d691d7894a10d5909ed4d31db91"
+    },
+    {
+      "path": "/private/tmp/logex-serving-memory-0_hnmwvr/queued-writer-design-review.json",
+      "bytes": 2243,
+      "sha256": "0bb88aa8203bed118b83aebb971224357b5124bf87d8d6d85db97ab02d0a8ef2"
+    },
+    {
+      "path": "/private/tmp/logex-serving-memory-0_hnmwvr/network-busy-all.log",
+      "bytes": 13394,
+      "sha256": "0af29b4e6d374ccabb491023fa91b3c9f7e1e225c57fd66561274c89e49a9f27"
+    },
+    {
+      "path": "/private/tmp/logex-serving-memory-0_hnmwvr/network-busy-clippy.log",
+      "bytes": 453,
+      "sha256": "df85894f8c04a774cebcd40d2dbf1e9f132cf374bf74f8e65e0507b057c30aac"
+    },
+    {
+      "path": "/private/tmp/logex-serving-memory-0_hnmwvr/network-queue-clippy.log",
+      "bytes": 961,
+      "sha256": "1ab09c57b1b9eae31fdd6017d453dabcc45f9e617fb9e78c027384e10d94d713"
+    }
+  ],
+  "gates": {
+    "commit": "e19a15e5cd82feaa4a925ba9bb4b4277739b1376",
+    "rustc": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+    "gates": [
+      {
+        "name": "vendor",
+        "command": [
+          "python3",
+          "tools/verify_datafusion_vendor.py"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T13:13:09.178572+00:00",
+        "finished": "2026-09-15T13:13:09.232517+00:00",
+        "sha256": "d8d80949d6f3378c14456842b531f0cade514179e4c94781b95ff9abb6447675",
+        "log": "/private/tmp/logex-serving-memory-0_hnmwvr/gates/vendor.log"
+      },
+      {
+        "name": "format",
+        "command": [
+          "cargo",
+          "fmt",
+          "--all",
+          "--",
+          "--check"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T13:13:09.232885+00:00",
+        "finished": "2026-09-15T13:13:10.069303+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-serving-memory-0_hnmwvr/gates/format.log"
+      },
+      {
+        "name": "check",
+        "command": [
+          "cargo",
+          "check",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T13:13:10.069663+00:00",
+        "finished": "2026-09-15T13:13:19.628014+00:00",
+        "sha256": "8eaa5fba46fed821bd2d06616b21879370cdb531590c64f1045a24289407489c",
+        "log": "/private/tmp/logex-serving-memory-0_hnmwvr/gates/check.log"
+      },
+      {
+        "name": "clippy",
+        "command": [
+          "cargo",
+          "clippy",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T13:13:19.628568+00:00",
+        "finished": "2026-09-15T13:13:28.741206+00:00",
+        "sha256": "adf2d4ce3192c57d97f91373a41db2302018dc82934ff997811a924fd9999cd8",
+        "log": "/private/tmp/logex-serving-memory-0_hnmwvr/gates/clippy.log"
+      },
+      {
+        "name": "test",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T13:13:28.741965+00:00",
+        "finished": "2026-09-15T13:16:24.456133+00:00",
+        "sha256": "d0e0d49bcb4132cd5d1be12bbae6c405c6803dfb1c45db24948152ae373ed977",
+        "log": "/private/tmp/logex-serving-memory-0_hnmwvr/gates/test.log"
+      },
+      {
+        "name": "doc",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--doc",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T13:16:24.457350+00:00",
+        "finished": "2026-09-15T13:16:40.699966+00:00",
+        "sha256": "4541d8794aaf42308223466c4482b0ba3cfb16e6b555a436f061af95f5028f01",
+        "log": "/private/tmp/logex-serving-memory-0_hnmwvr/gates/doc.log"
+      },
+      {
+        "name": "release-build",
+        "command": [
+          "cargo",
+          "build",
+          "-p",
+          "logex-node",
+          "--release",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T13:16:40.700643+00:00",
+        "finished": "2026-09-15T13:17:43.051585+00:00",
+        "sha256": "8b4542f150e5f47e25fc0bef697c5be1ba898149c2804bc366012eb86ec51d7c",
+        "log": "/private/tmp/logex-serving-memory-0_hnmwvr/gates/release-build.log"
+      }
+    ]
+  }
+}

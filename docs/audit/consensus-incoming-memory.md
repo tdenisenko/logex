@@ -84,7 +84,8 @@ Validation results and immutable source bindings are recorded in the accompanyin
 [validation record](baselines/2026-09-15-consensus-incoming-memory.json). All seven local
 gates passed on source `bb69d1b0`: vendor integrity, formatting, workspace check,
 strict workspace Clippy, 1,366 workspace tests (23 ignored), doc tests and release
-build. PR/CI and merge remain pending at this writing.
+build. PR [#167](https://github.com/tdenisenko/logex/pull/167) merged as `16b69ec9`
+after all six Linux/macOS CI jobs passed and exact head/base verification.
 
 The pool figures cover payload Vec capacity, not allocator rounding, collection
 metadata, libp2p transport buffers or total RSS. Snappy's fixed synchronous decoder
