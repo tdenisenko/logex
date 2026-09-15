@@ -124,8 +124,6 @@ pub enum LightClientVerificationError {
     },
     #[error("invalid next sync committee proof for attested slot {attested_slot}")]
     InvalidNextSyncCommitteeProof { attested_slot: u64 },
-    #[error("finality update did not include a finalized header")]
-    MissingFinalizedHeader,
     #[error("invalid sync committee length: expected {SYNC_COMMITTEE_PUBKEYS}, got {actual}")]
     InvalidCommitteeLength { actual: usize },
     #[error("invalid sync committee public key at index {index}: {details}")]

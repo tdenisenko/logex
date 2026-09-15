@@ -16,7 +16,8 @@ retention or stored-state integrity audit.
 Finality status reports the attested update's fork, including when the finalized
 header is genesis or from an earlier fork. A before-fix control reproduced a
 Deneb update labeled Capella. Shared summary construction now uses the attested
-header; the standalone finalized-header metadata override is removed.
+header; the standalone finalized-header metadata override and unused
+`MissingFinalizedHeader` error variant are removed.
 
 ## Authoritative rules and schedule
 
