@@ -153,6 +153,8 @@ pub struct PeerManager {
     receipt_quarantined_peers: HashMap<PeerId, Instant>,
     productive: VecDeque<NodeRecord>,
     known_peers: Vec<NodeRecord>,
+    configured_peer_ids: HashSet<PeerId>,
+    known_scan_cursor: usize,
     known_peers_path: PathBuf,
     persisted_known_peers: Vec<NodeRecord>,
     serve_cache: Arc<ServeCacheProvider>,
@@ -378,20 +380,22 @@ impl PeerManager {
         } = config;
         let dns_discovery = mainnet_dns_discovery_config(bind_ip);
         let advertised_nat_resolver = resolve_startup_nat(nat_resolver.clone()).await;
-        let mut known_peers = known_peers
-            .into_iter()
-            .filter(|node| node_matches_dial_families(dial_families, node))
-            .collect::<Vec<_>>();
+        let mut known_peers =
+            state::bounded_initial_known_peers(known_peers, dial_families, MAX_PERSISTED_PEERS);
         let persisted_known_peers = known_peers.clone();
         let productive = seed_productive_peers(&known_peers);
         let execution_bootnodes = parse_execution_bootnodes(&execution_bootnodes).await?;
+        let mut configured_peer_ids = HashSet::new();
         let mut filtered_execution_bootnodes = Vec::new();
         let mut filtered_execution_bootnode_enrs = Vec::new();
         let mut skipped_execution_bootnodes = 0usize;
         let mut skipped_execution_bootnode_enrs = 0usize;
         for node in execution_bootnodes.node_records {
             if node_matches_dial_families(dial_families, &node) {
-                upsert_known_peer(&mut known_peers, node);
+                if state::retry_hint_is_eligible(dial_families, &node) {
+                    configured_peer_ids.insert(node.id);
+                    upsert_known_peer(&mut known_peers, node);
+                }
                 filtered_execution_bootnodes.push(node);
             } else {
                 skipped_execution_bootnodes += 1;
@@ -400,7 +404,10 @@ impl PeerManager {
         for enr in execution_bootnodes.signed_enrs {
             let mut accepted = false;
             if let Some(node) = signed_enr_node_record_for_dial_families(dial_families, &enr) {
-                upsert_known_peer(&mut known_peers, node);
+                if state::retry_hint_is_eligible(dial_families, &node) {
+                    configured_peer_ids.insert(node.id);
+                    upsert_known_peer(&mut known_peers, node);
+                }
                 filtered_execution_bootnodes.push(node);
                 accepted = true;
             }
@@ -627,6 +634,8 @@ impl PeerManager {
             receipt_quarantined_peers: HashMap::new(),
             productive,
             known_peers,
+            configured_peer_ids,
+            known_scan_cursor: 0,
             known_peers_path,
             persisted_known_peers,
             serve_cache,
@@ -684,9 +693,7 @@ impl PeerManager {
                 .session_metrics
                 .dns_discovered_candidates
                 .saturating_add(1);
-            let before = self.pending.len();
-            self.remember_pending(node);
-            if self.pending.len() > before {
+            if self.remember_pending(node) {
                 queued = queued.saturating_add(1);
             }
         }
@@ -772,9 +779,7 @@ impl PeerManager {
             {
                 continue;
             }
-            let before = self.pending.len();
-            self.remember_pending(node);
-            if self.pending.len() > before {
+            if self.remember_pending(node) {
                 requeued = requeued.saturating_add(1);
             }
         }

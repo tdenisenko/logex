@@ -67,21 +67,25 @@ impl PeerManager {
         let now = Instant::now();
         self.prune_saturated_peers(now);
         self.prune_receipt_quarantined_peers(now);
-        let mut queued = 0usize;
-        for peer in self.known_peers.clone() {
-            if is_bootstrap_node(peer.id)
-                || peer.tcp_port == 0
-                || self.peers.contains_key(&peer.id)
-                || self.pending.contains_key(&peer.id)
-                || self.recently_saturated(peer.id, now)
-                || self.recently_submitted(peer.id, now)
-            {
-                continue;
-            }
-
-            self.remember_pending(peer);
-            queued += 1;
-        }
+        let (queued, cursor) = state::scan_known_hint_indices(
+            self.known_peers.len(),
+            self.known_scan_cursor,
+            |index| {
+                // Pending admission does not mutate the indexed retry inventory.
+                let peer = self.known_peers[index];
+                if is_bootstrap_node(peer.id)
+                    || peer.tcp_port == 0
+                    || self.peers.contains_key(&peer.id)
+                    || self.pending.contains_key(&peer.id)
+                    || self.recently_saturated(peer.id, now)
+                    || self.recently_submitted(peer.id, now)
+                {
+                    return false;
+                }
+                self.remember_pending(peer)
+            },
+        );
+        self.known_scan_cursor = cursor;
 
         queued
     }
@@ -499,8 +503,7 @@ impl PeerManager {
         self.peers.insert(info.peer_id, peer);
         self.session_metrics.accepted_sessions =
             self.session_metrics.accepted_sessions.saturating_add(1);
-        let known_changed =
-            should_remember_reachable && upsert_known_peer(&mut self.known_peers, record);
+        let known_changed = should_remember_reachable && self.remember_known_peer(record);
         let should_persist_reachable = should_persist_reachable_peer(
             should_remember_reachable,
             known_changed,
@@ -527,14 +530,14 @@ impl PeerManager {
         );
     }
 
-    pub(super) fn remember_pending(&mut self, node: NodeRecord) {
+    pub(super) fn remember_pending(&mut self, node: NodeRecord) -> bool {
         let now = Instant::now();
         self.prune_saturated_peers(now);
         if is_bootstrap_node(node.id) {
-            return;
+            return false;
         }
         if node.tcp_port == 0 {
-            return;
+            return false;
         }
         if !node_matches_dial_families(self.dial_families, &node) {
             trace!(
@@ -544,18 +547,22 @@ impl PeerManager {
                 ?self.dial_families,
                 "ignoring execution peer outside configured outbound p2p address families"
             );
-            return;
+            return false;
         }
         if self.peers.contains_key(&node.id) {
-            return;
+            return false;
         }
         if self.recently_saturated(node.id, now) {
-            return;
+            return false;
         }
-        if self.pending.len() >= MAX_TRACKED_PENDING && !self.pending.contains_key(&node.id) {
-            return;
-        }
-        self.pending.insert(node.id, node);
+        state::admit_pending_hint(
+            &mut self.pending,
+            node,
+            &self.configured_peer_ids,
+            &self.productive,
+            &self.known_peers,
+            MAX_TRACKED_PENDING,
+        )
     }
 
     pub(super) fn remove_dead_peers(&mut self, dead_peers: &HashSet<PeerId>) {

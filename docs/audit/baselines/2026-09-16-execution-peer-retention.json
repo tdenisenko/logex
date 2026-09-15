@@ -1,0 +1,90 @@
+{
+  "status": "Final independent review and focused validation pass; full gates, CI and merge pending",
+  "branch": "audit/execution-peer-retention",
+  "base": "556b988c11542e9d385f9fc3041b7afe15cb05e7",
+  "source_sha256": {
+    "crates/logex-sync/src/p2p/peer_manager/mod.rs": "c811f43e4bbd1b68a1adb39b8dcd25fba9501c413c19d5010ef6560100feb4bc",
+    "crates/logex-sync/src/p2p/peer_manager/state.rs": "82331cb6fead4bf80025aa1c387887ac3875e4d9a186f468b0dca9bf1a0c7a58",
+    "crates/logex-sync/src/p2p/peer_manager/lifecycle.rs": "b131e4ee85607a8a60deb4ab7cfdaf4aded87d1398afa6d6630e9c565262262d"
+  },
+  "findings": {
+    "B4-06": "Unbounded live learned retry inventory and whole-list reseeding copy",
+    "B4-07": "Full pending queue rejects valuable retry candidates before selection",
+    "B4-08": "Reseed counts attempts instead of admissions"
+  },
+  "evidence_directory": "/private/tmp/logex-execution-peer-retention-_thsqidq",
+  "evidence": {
+    "churn-tests.log": {
+      "sha256": "a939cce2e2e26e37bed9cfc5611e18818fe29f7d85ff551fd115507f88029841",
+      "bytes": 920
+    },
+    "final-review-before-startup-eligibility-fix.json": {
+      "sha256": "1a3ecf6a9926ae2bd7e6923656cd02f22752bacf3c2d056613fe6fabc611795f",
+      "bytes": 2909
+    },
+    "final-review.json": {
+      "sha256": "424d7d8c58d9aa5cd420fc75e5c76bec3add948da2a7af9c2727d60ce5fd39c3",
+      "bytes": 4188
+    },
+    "original-policy-controls-run.log": {
+      "sha256": "c713385338bbfa8821b98fb50936fe937c5a67fb9cedf9b60f105e5f1035ff4c",
+      "bytes": 110
+    },
+    "original-policy-controls.json": {
+      "sha256": "910f32354851ba70f313bb74ded23323531d76f146f9c401beb086e210e244d8",
+      "bytes": 1464
+    },
+    "original-policy-pending.log": {
+      "sha256": "287b7aa5445cb4424540c9a33bda21987eebebd8b9f3747bed0ee33b58d795d8",
+      "bytes": 2377
+    },
+    "original-policy-retention.log": {
+      "sha256": "38cbfb611ceeda686a2d74a960ad88dfff15c3515b3efc31984b20fc8b7506ec",
+      "bytes": 2606
+    },
+    "policy-review.json": {
+      "sha256": "dbe10bb77c53469434e9b67ef6d2caf328f63dcc0cae1c50445ead637b41872b",
+      "bytes": 3345
+    },
+    "retention-design.json": {
+      "sha256": "00c849206964be4623fd47aac0b811820c88091b57db527297186215e134ace6",
+      "bytes": 7521
+    },
+    "retention-implementation.json": {
+      "sha256": "1bfea14a468697d6156a44d3fb4069305669319f9d4b1b69f94e9469467adaaa",
+      "bytes": 2233
+    },
+    "scheduling-review.json": {
+      "sha256": "c4d4241539501fa56cd01b0b09698f150b6f7397410841b3a8283a8607a74718",
+      "bytes": 4795
+    },
+    "sync-tests-final.log": {
+      "sha256": "906f03cc85813483034c9ecaf76e8588d6046302139e11bc53c02865ff6288c1",
+      "bytes": 33121
+    },
+    "sync-tests-first.log": {
+      "sha256": "7a9d8dec725c2c9608d20d339cbb680d8f79f403120a503987194b6880de1446",
+      "bytes": 32976
+    }
+  },
+  "focused_sync_tests": {
+    "passed": 336,
+    "failed": 0,
+    "ignored": 1
+  },
+  "policy": {
+    "learned_records_max": 512,
+    "configured_records": "Separate explicit user-sized term; forgotten configured IDs do not add learned capacity",
+    "pending_records_max": 4096,
+    "priority": "productive > configured > known > fresh; strictly lower replacement only",
+    "ownership": "Pressure eviction touches retry hints only; active/session/submitted/backoff ownership and explicit forgetting unchanged",
+    "startup": "First eligible unique records; filter before limit, configured discovery lists separately retained",
+    "cursor": "Rotate after new admission, preserve after failed full pass; not strict service fairness"
+  },
+  "limits": {
+    "control_scope": "Prior policies modeled in candidate helpers; not exact original methods or full baseline checkout",
+    "performance": "No benchmark or throughput percentage. No extra disk writes, fsync, dependency or format change. Bounded learned-list work and removed reseed clone.",
+    "remaining": "Other networking structures and user configuration not covered by a global fixed memory cap; broader offline audit, volume supervision and verified repair remain open",
+    "remote": "No remote work; mac-mini cleanup complete"
+  }
+}

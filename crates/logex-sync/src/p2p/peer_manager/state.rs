@@ -879,8 +879,19 @@ impl PeerManager {
             self.productive.pop_back();
         }
 
-        let known_changed = upsert_known_peer(&mut self.known_peers, node);
+        let known_changed = self.remember_known_peer(node);
         should_persist_productive_update(existing_index, known_changed)
+    }
+
+    pub(super) fn remember_known_peer(&mut self, node: NodeRecord) -> bool {
+        let changed = upsert_known_peer(&mut self.known_peers, node);
+        prune_known_hints(
+            &mut self.known_peers,
+            &self.configured_peer_ids,
+            &self.productive,
+            MAX_PERSISTED_PEERS,
+        );
+        changed && self.known_peers.iter().any(|peer| peer.id == node.id)
     }
 
     pub(super) fn remove_productive_peer(&mut self, peer_id: PeerId) -> bool {
@@ -1189,6 +1200,131 @@ pub(super) fn disconnect_note(
     }
 }
 
+pub(super) fn scan_known_hint_indices(
+    len: usize,
+    cursor: usize,
+    mut admit: impl FnMut(usize) -> bool,
+) -> (usize, usize) {
+    if len == 0 {
+        return (0, 0);
+    }
+    let start = cursor % len;
+    let mut index = start;
+    let mut next_cursor = start;
+    let mut admitted = 0;
+    for _ in 0..len {
+        let next = if index + 1 == len { 0 } else { index + 1 };
+        if admit(index) {
+            admitted += 1;
+            next_cursor = next;
+        }
+        index = next;
+    }
+    (admitted, next_cursor)
+}
+
+pub(super) fn retry_hint_is_eligible(families: DialAddressFamilies, node: &NodeRecord) -> bool {
+    node.tcp_port != 0 && !is_bootstrap_node(node.id) && node_matches_dial_families(families, node)
+}
+
+pub(super) fn bounded_initial_known_peers(
+    peers: impl IntoIterator<Item = NodeRecord>,
+    families: DialAddressFamilies,
+    limit: usize,
+) -> Vec<NodeRecord> {
+    let mut retained = Vec::new();
+    let mut ids = HashSet::new();
+    for peer in peers {
+        if retained.len() == limit {
+            break;
+        }
+        if retry_hint_is_eligible(families, &peer) && ids.insert(peer.id) {
+            retained.push(peer);
+        }
+    }
+    retained
+}
+
+pub(super) fn prune_known_hints(
+    known: &mut Vec<NodeRecord>,
+    configured: &HashSet<PeerId>,
+    productive: &VecDeque<NodeRecord>,
+    learned_limit: usize,
+) {
+    if known.len() <= learned_limit {
+        return;
+    }
+    let mut excess = known
+        .iter()
+        .filter(|node| !configured.contains(&node.id))
+        .count()
+        .saturating_sub(learned_limit);
+    if excess == 0 {
+        return;
+    }
+    let productive_ids: HashSet<_> = productive.iter().map(|node| node.id).collect();
+    known.retain(|node| {
+        if excess > 0 && !configured.contains(&node.id) && !productive_ids.contains(&node.id) {
+            excess -= 1;
+            false
+        } else {
+            true
+        }
+    });
+}
+
+pub(super) fn admit_pending_hint(
+    pending: &mut HashMap<PeerId, NodeRecord>,
+    node: NodeRecord,
+    configured: &HashSet<PeerId>,
+    productive: &VecDeque<NodeRecord>,
+    known: &[NodeRecord],
+    limit: usize,
+) -> bool {
+    if let Some(existing) = pending.get_mut(&node.id) {
+        *existing = node;
+        return false;
+    }
+    if pending.len() < limit {
+        pending.insert(node.id, node);
+        return true;
+    }
+    let priority = if productive.iter().any(|peer| peer.id == node.id) {
+        3
+    } else if configured.contains(&node.id) {
+        2
+    } else if known.iter().any(|peer| peer.id == node.id) {
+        1
+    } else {
+        return false;
+    };
+    // Build bounded lookup sets only for a full queue and a retry candidate.
+    // Each victim comparison is O(1), rather than scanning all retry lists.
+    let productive_ids: HashSet<_> = productive.iter().map(|peer| peer.id).collect();
+    let known_ids: HashSet<_> = known.iter().map(|peer| peer.id).collect();
+    let victim = pending
+        .keys()
+        .filter_map(|peer| {
+            let rank = if productive_ids.contains(peer) {
+                3
+            } else if configured.contains(peer) {
+                2
+            } else if known_ids.contains(peer) {
+                1
+            } else {
+                0
+            };
+            (rank < priority).then_some((rank, *peer))
+        })
+        .min();
+    let Some((_, victim)) = victim else {
+        return false;
+    };
+    pending.remove(&victim);
+    pending.insert(node.id, node);
+    true
+}
+
 pub(super) fn upsert_known_peer(known_peers: &mut Vec<NodeRecord>, node: NodeRecord) -> bool {
     if let Some(existing) = known_peers.iter_mut().find(|peer| peer.id == node.id) {
         if *existing == node {
@@ -1421,6 +1557,227 @@ fn apply_body_receipt_active_request_delta_counts(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn retention_node(id: u16) -> NodeRecord {
+        let mut bytes = [0; 64];
+        bytes[..2].copy_from_slice(&id.to_be_bytes());
+        NodeRecord::new_with_ports(
+            "127.0.0.1".parse().unwrap(),
+            30303,
+            None,
+            PeerId::from_slice(&bytes),
+        )
+    }
+
+    #[test]
+    fn initial_retry_limit_applies_after_eligibility_and_deduplication() {
+        let first = retention_node(1);
+        let second = retention_node(2);
+        let mut no_tcp = first;
+        no_tcp.tcp_port = 0;
+        let mut ipv6 = second;
+        ipv6.address = "::1".parse().unwrap();
+        let builtin = mainnet_nodes().into_iter().next().unwrap();
+        let inputs = [no_tcp, builtin, ipv6, no_tcp, first, first, second];
+        assert_eq!(
+            bounded_initial_known_peers(inputs, DialAddressFamilies::IPV4, 2),
+            vec![first, second]
+        );
+        assert_eq!(
+            bounded_initial_known_peers(inputs, DialAddressFamilies::IPV6, 2),
+            vec![ipv6]
+        );
+        assert_eq!(
+            bounded_initial_known_peers(inputs, DialAddressFamilies::BOTH, 2),
+            vec![ipv6, first]
+        );
+        assert!(!retry_hint_is_eligible(DialAddressFamilies::BOTH, &no_tcp));
+        assert!(!retry_hint_is_eligible(DialAddressFamilies::BOTH, &builtin));
+    }
+
+    #[test]
+    fn retry_hint_retention_preserves_productive_configured_and_first_seed_order() {
+        let nodes: Vec<_> = (1..=6).map(retention_node).collect();
+        assert_eq!(
+            bounded_initial_known_peers(
+                [nodes[0], nodes[0], nodes[1], nodes[2]],
+                DialAddressFamilies::BOTH,
+                2
+            ),
+            nodes[..2]
+        );
+        let mut duplicate = nodes[0];
+        duplicate.tcp_port = 30304;
+        assert_eq!(
+            bounded_initial_known_peers(
+                [nodes[0], duplicate, nodes[1]],
+                DialAddressFamilies::BOTH,
+                2
+            ),
+            nodes[..2]
+        );
+        assert!(
+            bounded_initial_known_peers(nodes.clone(), DialAddressFamilies::BOTH, 0).is_empty()
+        );
+        let mut known = nodes.clone();
+        let configured = HashSet::from([nodes[0].id, nodes[1].id]);
+        let productive = VecDeque::from([nodes[4], nodes[5]]);
+        prune_known_hints(&mut known, &configured, &productive, 2);
+        assert_eq!(known, vec![nodes[0], nodes[1], nodes[4], nodes[5]]);
+        prune_known_hints(&mut known, &configured, &productive, 2);
+        assert_eq!(known.len(), 4);
+        // Pressure protection does not recreate explicitly removed records.
+        known.retain(|node| node.id != nodes[0].id);
+        prune_known_hints(&mut known, &configured, &productive, 2);
+        assert!(!known.contains(&nodes[0]));
+        known.push(nodes[2]);
+        prune_known_hints(&mut known, &configured, &productive, 2);
+        assert!(
+            !known.contains(&nodes[2]),
+            "absent configured entries do not add learned capacity"
+        );
+    }
+
+    #[test]
+    fn retry_hint_retention_bounds_churn_and_releases_old_productive_hints() {
+        let ipv4 = retention_node(2000);
+        let mut ipv6 = retention_node(2001);
+        ipv6.address = "::1".parse().unwrap();
+        let configured = HashSet::from([ipv4.id, ipv6.id]);
+        let mut productive = VecDeque::from([retention_node(1), retention_node(2)]);
+        let mut known = vec![ipv4, ipv6, productive[0], productive[1]];
+        for id in 3..=1024 {
+            let node = retention_node(id);
+            assert!(upsert_known_peer(&mut known, node));
+            prune_known_hints(&mut known, &configured, &productive, 4);
+            assert!(known.len() <= 6);
+            assert!(known.contains(&ipv4) && known.contains(&ipv6));
+            assert!(productive.iter().all(|peer| known.contains(peer)));
+        }
+        assert_eq!(
+            known,
+            vec![
+                ipv4,
+                ipv6,
+                retention_node(1),
+                retention_node(2),
+                retention_node(1023),
+                retention_node(1024)
+            ]
+        );
+        productive.pop_front();
+        productive.push_back(retention_node(1025));
+        upsert_known_peer(&mut known, retention_node(1025));
+        prune_known_hints(&mut known, &configured, &productive, 4);
+        assert_eq!(known.len(), 6);
+        assert!(!known.contains(&retention_node(1)));
+        assert!(productive.iter().all(|peer| known.contains(peer)));
+    }
+
+    #[test]
+    fn pending_retry_priority_replaces_only_strictly_lower_hints() {
+        let nodes: Vec<_> = (1..=6).map(retention_node).collect();
+        let configured = HashSet::from([nodes[3].id]);
+        let productive = VecDeque::from([nodes[4]]);
+        let known = vec![nodes[2], nodes[3], nodes[4]];
+        let mut pending = HashMap::from([(nodes[0].id, nodes[0]), (nodes[1].id, nodes[1])]);
+        assert!(!admit_pending_hint(
+            &mut pending,
+            nodes[5],
+            &configured,
+            &productive,
+            &known,
+            2
+        ));
+        assert!(admit_pending_hint(
+            &mut pending,
+            nodes[2],
+            &configured,
+            &productive,
+            &known,
+            2
+        ));
+        assert!(admit_pending_hint(
+            &mut pending,
+            nodes[3],
+            &configured,
+            &productive,
+            &known,
+            2
+        ));
+        assert!(admit_pending_hint(
+            &mut pending,
+            nodes[4],
+            &configured,
+            &productive,
+            &known,
+            2
+        ));
+        assert_eq!(pending.len(), 2);
+        assert!(pending.contains_key(&nodes[3].id));
+        assert!(pending.contains_key(&nodes[4].id));
+        assert!(!admit_pending_hint(
+            &mut pending,
+            nodes[2],
+            &configured,
+            &productive,
+            &known,
+            2
+        ));
+        let mut updated = nodes[3];
+        updated.tcp_port = 30304;
+        assert!(!admit_pending_hint(
+            &mut pending,
+            updated,
+            &configured,
+            &productive,
+            &known,
+            2
+        ));
+        assert_eq!(pending[&updated.id], updated);
+    }
+
+    #[test]
+    fn indexed_retry_scan_rotates_after_admissions_not_failed_full_passes() {
+        let nodes: Vec<_> = (1..=4).map(retention_node).collect();
+        let configured: HashSet<_> = nodes.iter().map(|node| node.id).collect();
+        let mut pending = HashMap::new();
+        let productive = VecDeque::new();
+        let mut scan = |cursor| {
+            scan_known_hint_indices(nodes.len(), cursor, |index| {
+                admit_pending_hint(
+                    &mut pending,
+                    nodes[index],
+                    &configured,
+                    &productive,
+                    &nodes,
+                    2,
+                )
+            })
+        };
+        let (count, cursor) = scan(0);
+        assert_eq!((count, cursor), (2, 2));
+        assert_eq!(scan(cursor), (0, cursor));
+        pending.remove(&nodes[0].id);
+        let (count, cursor) = scan_known_hint_indices(nodes.len(), cursor, |index| {
+            admit_pending_hint(
+                &mut pending,
+                nodes[index],
+                &configured,
+                &productive,
+                &nodes,
+                2,
+            )
+        });
+        assert_eq!((count, cursor), (1, 3));
+        assert!(pending.contains_key(&nodes[2].id));
+        assert_eq!(nodes.len(), 4);
+        assert_eq!(
+            scan_known_hint_indices(0, usize::MAX, |_| panic!("empty")),
+            (0, 0)
+        );
+        assert_eq!(scan_known_hint_indices(2, 9, |_| false), (0, 1));
+    }
 
     #[test]
     fn mainnet_bootnodes_are_recognized() {
