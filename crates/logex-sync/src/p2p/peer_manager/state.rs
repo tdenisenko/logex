@@ -11,6 +11,7 @@ const RECEIPT_REQUEST_FAILURE_QUARANTINE_DURATION: Duration = Duration::from_sec
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RequestErrorDisposition {
+    Ignore,
     Pause,
     Timeout,
     DropBadProtocol,
@@ -632,6 +633,7 @@ impl PeerManager {
         error: &RequestAttempt,
     ) -> bool {
         match request_error_disposition(error) {
+            RequestErrorDisposition::Ignore => false,
             RequestErrorDisposition::Pause => {
                 self.pause_peer_requests(peer_id, kind, REQUEST_KIND_PAUSE_DURATION);
                 self.record_soft_failure(peer_id);
@@ -1422,6 +1424,7 @@ fn peer_request_is_paused(peer: &ActivePeer, kind: PeerRequestKind) -> bool {
 
 fn request_error_disposition(error: &RequestAttempt) -> RequestErrorDisposition {
     match error {
+        RequestAttempt::ContinuationDeadline => RequestErrorDisposition::Ignore,
         RequestAttempt::Disconnected => RequestErrorDisposition::Pause,
         RequestAttempt::Request(request_error) => match request_error {
             reth_network::p2p::error::RequestError::Timeout => RequestErrorDisposition::Timeout,

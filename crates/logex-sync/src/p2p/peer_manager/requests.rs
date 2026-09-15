@@ -64,6 +64,26 @@ const MIN_PARALLEL_BODY_REQUEST_BLOCKS: usize = 64;
 const MAX_PARALLEL_RECEIPT_REQUESTS: usize = 64;
 const MIN_PARALLEL_RECEIPT_REQUEST_BLOCKS: usize = 64;
 const REVERSE_HEADER_PAGE_PARALLEL_CANDIDATES: usize = 3;
+// One selected peer cannot renew its role attempt indefinitely with partial replies.
+const STANDALONE_CONTINUATION_TIMEOUT: Duration = Duration::from_secs(45);
+
+fn continuation_budget(request_timeout: Option<Duration>) -> tokio::time::Sleep {
+    tokio::time::sleep(
+        STANDALONE_CONTINUATION_TIMEOUT.max(request_timeout.unwrap_or(REQUEST_TIMEOUT)),
+    )
+}
+
+async fn request_with_continuation_budget<T>(
+    mut budget: std::pin::Pin<&mut tokio::time::Sleep>,
+    request: impl std::future::Future<Output = std::result::Result<T, RequestAttempt>>,
+) -> std::result::Result<T, RequestAttempt> {
+    tokio::select! {
+        // Local expiry must not be attributed to a simultaneous wire timeout.
+        biased;
+        _ = &mut budget => Err(RequestAttempt::ContinuationDeadline),
+        result = request => result,
+    }
+}
 
 type ReceiptBatch = Vec<
     Vec<alloy_consensus::ReceiptWithBloom<<LogexNetworkPrimitives as NetworkPrimitives>::Receipt>>,
@@ -907,8 +927,9 @@ impl PeerManager {
     }
 
     /// Request with a per-exchange timeout and a peer-selection limit (at least one).
-    /// Positive partial responses may continue on the selected peer; these limits
-    /// do not establish a whole-batch deadline or a cap on wire exchanges.
+    /// Positive partial responses share a per-peer continuation window of 45 seconds
+    /// or the explicit exchange timeout, whichever is longer. Peer retries can add
+    /// time; this is not a whole-batch deadline or a cap on wire exchanges.
     pub async fn get_bodies_prefer_peers_with_limits(
         &mut self,
         hashes: Vec<B256>,
@@ -1000,12 +1021,20 @@ impl PeerManager {
             if max_attempts.is_some_and(|limit| attempt_index >= limit.max(1)) {
                 break;
             }
+            let budget = continuation_budget(request_timeout);
+            tokio::pin!(budget);
             while !remaining_hashes.is_empty() {
                 let request_hashes = remaining_hashes.clone();
                 let started_at = Instant::now();
-                let bodies = match self
-                    .request_bodies_with_timeout(peer_id, request_hashes.clone(), request_timeout)
-                    .await
+                let bodies = match request_with_continuation_budget(
+                    budget.as_mut(),
+                    self.request_bodies_with_timeout(
+                        peer_id,
+                        request_hashes.clone(),
+                        request_timeout,
+                    ),
+                )
+                .await
                 {
                     Ok(bodies) => bodies,
                     Err(error) => {
@@ -2770,8 +2799,9 @@ impl PeerManager {
     }
 
     /// Request with a per-exchange timeout and a peer-selection limit (at least one).
-    /// Positive partial responses may continue on the selected peer; these limits
-    /// do not establish a whole-batch deadline or a cap on wire exchanges.
+    /// Positive partial responses share a per-peer continuation window of 45 seconds
+    /// or the explicit exchange timeout, whichever is longer. Peer retries can add
+    /// time; this is not a whole-batch deadline or a cap on wire exchanges.
     pub async fn get_receipts_prefer_peers_with_limits(
         &mut self,
         hashes: Vec<B256>,
@@ -2928,21 +2958,26 @@ impl PeerManager {
 
             let mut remaining_hashes = hashes.clone();
             let mut collected = Vec::with_capacity(hashes.len());
+            let budget = continuation_budget(request_timeout);
+            tokio::pin!(budget);
 
             while !remaining_hashes.is_empty() {
                 let request_hashes = remaining_hashes.clone();
                 let started_at = Instant::now();
-                let attempt = if version >= EthVersion::Eth69 {
-                    self.request_receipts69(peer_id, request_hashes.clone(), request_timeout)
+                let attempt = request_with_continuation_budget(budget.as_mut(), async {
+                    if version >= EthVersion::Eth69 {
+                        self.request_receipts69(peer_id, request_hashes.clone(), request_timeout)
+                            .await
+                    } else {
+                        self.request_receipts_with_timeout(
+                            peer_id,
+                            request_hashes.clone(),
+                            request_timeout,
+                        )
                         .await
-                } else {
-                    self.request_receipts_with_timeout(
-                        peer_id,
-                        request_hashes.clone(),
-                        request_timeout,
-                    )
-                    .await
-                };
+                    }
+                })
+                .await;
 
                 match attempt {
                     Ok(receipts) => {
@@ -3546,13 +3581,17 @@ impl PeerManager {
     > {
         let mut remaining_hashes = hashes;
         let mut bodies = Vec::with_capacity(remaining_hashes.len());
+        let budget = continuation_budget(None);
+        tokio::pin!(budget);
 
         while !remaining_hashes.is_empty() {
             let request_hashes = remaining_hashes.clone();
-            let response = self
-                .request_bodies(peer_id, request_hashes.clone())
-                .await
-                .map_err(ChunkFailureKind::Request)?;
+            let response = request_with_continuation_budget(
+                budget.as_mut(),
+                self.request_bodies(peer_id, request_hashes.clone()),
+            )
+            .await
+            .map_err(ChunkFailureKind::Request)?;
 
             match classify_response_progress(request_hashes.len(), response.len()) {
                 ResponseProgress::Complete => {
@@ -3596,15 +3635,20 @@ impl PeerManager {
 
         let mut remaining_hashes = hashes.clone();
         let mut receipts = Vec::with_capacity(hashes.len());
+        let budget = continuation_budget(None);
+        tokio::pin!(budget);
 
         while !remaining_hashes.is_empty() {
             let request_hashes = remaining_hashes.clone();
-            let response = if version >= EthVersion::Eth69 {
-                self.request_receipts69(peer_id, request_hashes.clone(), None)
-                    .await
-            } else {
-                self.request_receipts(peer_id, request_hashes.clone()).await
-            }
+            let response = request_with_continuation_budget(budget.as_mut(), async {
+                if version >= EthVersion::Eth69 {
+                    self.request_receipts69(peer_id, request_hashes.clone(), None)
+                        .await
+                } else {
+                    self.request_receipts(peer_id, request_hashes.clone()).await
+                }
+            })
+            .await
             .map_err(ChunkFailureKind::Request)?;
 
             match classify_response_progress(request_hashes.len(), response.len()) {
@@ -3885,22 +3929,27 @@ impl PeerManager {
         let mut next_block_index = 0usize;
         let mut first_block_receipt_index = 0u64;
         let mut bloom_cache = ReceiptBloomCache::default();
+        let budget = continuation_budget(request_timeout);
+        tokio::pin!(budget);
 
         while next_block_index < hashes.len() {
             let request_hashes = hashes[next_block_index..].to_vec();
             self.serve_cache
                 .record_p2p_upload_payload(receipts70_request_payload_bytes(request_hashes.len()));
-            let response: Receipts70<<LogexNetworkPrimitives as NetworkPrimitives>::Receipt> = self
-                .request_with_channel(
-                    peer_id,
-                    &move |response| PeerRequest::GetReceipts70 {
-                        request: GetReceipts70 {
-                            first_block_receipt_index,
-                            block_hashes: request_hashes.clone(),
+            let response: Receipts70<<LogexNetworkPrimitives as NetworkPrimitives>::Receipt> =
+                request_with_continuation_budget(
+                    budget.as_mut(),
+                    self.request_with_channel(
+                        peer_id,
+                        &move |response| PeerRequest::GetReceipts70 {
+                            request: GetReceipts70 {
+                                first_block_receipt_index,
+                                block_hashes: request_hashes.clone(),
+                            },
+                            response,
                         },
-                        response,
-                    },
-                    request_timeout,
+                        request_timeout,
+                    ),
                 )
                 .await?;
 
@@ -3962,6 +4011,7 @@ fn chunk_request_failure_severity(failure: &ChunkRequestFailure) -> u8 {
     };
 
     match error {
+        RequestAttempt::ContinuationDeadline => 0,
         RequestAttempt::Request(reth_network::p2p::error::RequestError::BadResponse)
         | RequestAttempt::Request(reth_network::p2p::error::RequestError::UnsupportedCapability) => {
             3
@@ -5594,6 +5644,8 @@ fn split_contiguous_prefix<T>(
 
 #[derive(Debug, Clone)]
 pub(super) enum RequestAttempt {
+    /// A local role window elapsed; this does not indicate peer misbehavior.
+    ContinuationDeadline,
     Disconnected,
     Request(reth_network::p2p::error::RequestError),
 }
@@ -8708,3 +8760,6 @@ mod payload_tests;
 
 #[cfg(test)]
 mod salvage_tests;
+
+#[cfg(test)]
+mod continuation_tests;

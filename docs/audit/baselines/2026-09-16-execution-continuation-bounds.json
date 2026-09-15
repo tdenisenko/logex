@@ -1,0 +1,241 @@
+{
+  "status": "All seven local gates pass on corrected source; PR/CI/merge pending",
+  "branch": "audit/execution-continuation-bounds",
+  "base": "d73fd32a5ae67498c5086af69b793dd0645fff20",
+  "finding": {
+    "id": "B4-22",
+    "severity": "medium",
+    "effect": "Fresh per-exchange deadlines allow prolonged positive partial-response continuation, including indefinite nonempty ETH70 fragments absent other interruption",
+    "correction": "One per-peer/role max(45 seconds, explicit wire timeout) continuation timer; neutral local expiry with finite existing retries"
+  },
+  "source_sha256": {
+    "crates/logex-sync/src/p2p/peer_manager/requests.rs": "a4a3b7fb6963be592eef3795856f1aee4b440b0198fadccb9c5ca8dd5a98bf25",
+    "crates/logex-sync/src/p2p/peer_manager/state.rs": "c41ec64eea826891bc8295af1219a1b4f89773579b7699f6bccb9972c1748927",
+    "crates/logex-sync/src/p2p/peer_manager/requests/continuation_tests.rs": "809f5aa58067432a129ce1f005b8d1494c675ee5d5a3f41e57620aa005ea6782"
+  },
+  "evidence_directory": "/private/tmp/logex-execution-continuation-bounds-ds46fkay",
+  "evidence": {
+    "continuation-review.json": {
+      "sha256": "dabb872b4d36f7116c520f8e24cc2574bae0576b47cb0fd0dc814d70af253450",
+      "bytes": 7169
+    },
+    "standalone-callers-review.json": {
+      "sha256": "37eed86119ecf8d4b996fa1f631d8a6c24b0e2f94da1a58789cc7913b5f1c300",
+      "bytes": 6574
+    },
+    "planner-trust-context-review.json": {
+      "sha256": "accf52e5b07691aeefafe6a28d94f2afb34f3f3d5f3ed88dee6ef41d6c31d8c1",
+      "bytes": 4461
+    },
+    "original-result.json": {
+      "sha256": "d9d521b374bbc925a89a3bdc28559962df1bb224289268763efe583879710166",
+      "bytes": 454
+    },
+    "original-tests.rs": {
+      "sha256": "fe7a9a4bfdcd5db70991cdd1cb15f85d7a38ed66ec1258f86e02d3c61f8c9af8",
+      "bytes": 10188
+    },
+    "original-controls.log": {
+      "sha256": "aeaa495fea8041542519bae92232405fc77707cff9f091b7f4922187e6044901",
+      "bytes": 5065
+    },
+    "fixed-controls.log": {
+      "sha256": "472ec3d4d91aca4f9d9680220a4a6764d37659b6e09e367617c90ad9f6486038",
+      "bytes": 2176
+    },
+    "implementation-review.json": {
+      "sha256": "6646c9fa370920563f08d37f5a38478e6dc066053f4fc7c7e4a8adfb479f63c0",
+      "bytes": 4237
+    },
+    "cleanup-review.json": {
+      "sha256": "4d0522ffad64043a7334b280e13cea46b7a43ce6646aecdf21ba1ca4a2cf8dfe",
+      "bytes": 544
+    },
+    "gas-resource-proof.json": {
+      "sha256": "7bd90951ece0bc35dc7f09cb6005307d7cdb4d3510e6ab91f0234257e296903c",
+      "bytes": 9334
+    },
+    "final-review.json": {
+      "sha256": "77f0c54e9aca3a79672b7a62b431ebe2f13e157c473bea0bbbdbf2a522433ea7",
+      "bytes": 5754
+    },
+    "clippy-correction.json": {
+      "sha256": "8381474a1921af82d65da41d347c9d7ae1bad9c4a57444386228ecd4f293b951",
+      "bytes": 392
+    },
+    "gates-first-attempt/results.json": {
+      "sha256": "44a5f819611f466bdabe3bf0f500b646070681efbd322549f20364915a3b6ce9",
+      "bytes": 2269
+    },
+    "gates-first-attempt/clippy.log": {
+      "sha256": "308544bd016c730aa26f35fc976e2d0af7c4b0353286096f6a69f6a34ebc5fb8",
+      "bytes": 868
+    },
+    "gates/results.json": {
+      "sha256": "24a04a9cac843351f05ff8d28e418a1c45a56d90181f43fa490faf1914efb05f",
+      "bytes": 3821
+    },
+    "gates/test-summary.json": {
+      "sha256": "8b1a4610563220aa0bb71d041a90224d04aaf2e49c40bacc9c60a17eb45543c1",
+      "bytes": 69
+    }
+  },
+  "original_controls": {
+    "base": "d73fd32a5ae67498c5086af69b793dd0645fff20",
+    "production_unchanged": true,
+    "passed": 1,
+    "failed": 7,
+    "test_sha256": "fe7a9a4bfdcd5db70991cdd1cb15f85d7a38ed66ec1258f86e02d3c61f8c9af8",
+    "log_sha256": "aeaa495fea8041542519bae92232405fc77707cff9f091b7f4922187e6044901",
+    "interpretation": "Seven controls reproduce absence of the selected aggregate per-peer policy; finite body and ETH68/69 hash progress is not unbounded iteration."
+  },
+  "focused_tests": {
+    "passed": 13,
+    "failed": 0,
+    "ignored": 0
+  },
+  "performance": "One pinned timer and unboxed select per standalone role attempt; no payload copies, storage writes or spawned tasks added. No benchmark.",
+  "limits": [
+    "Not a whole-public-call time bound",
+    "Does not bound cumulative retained receipt bytes; B4-23 remains open",
+    "Cooperative cancellation cannot preempt synchronous processing or retract admitted transport requests",
+    "Existing positive partial scoring remains; only local expiry is neutral"
+  ],
+  "remote": "None; mac-mini work and obsolete-artifact cleanup complete",
+  "validation_correction": "First gates passed vendor, format, check, then strict Clippy rejected a test-only cloned single-item slice. Replaced with std::slice::from_ref; first-attempt evidence retained. Full gates rerun on corrected commit.",
+  "source_commit": "8a34ef6b1f6246053d48992a838445a4a29f6d39",
+  "initial_source_commit": "aa1f684e736912e0b92551e5cba67ff5d12fd592",
+  "gates": {
+    "commit": "8a34ef6b1f6246053d48992a838445a4a29f6d39",
+    "rustc": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+    "gates": [
+      {
+        "name": "vendor",
+        "command": [
+          "python3",
+          "tools/verify_datafusion_vendor.py"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T22:35:27.605452+00:00",
+        "finished": "2026-09-15T22:35:27.659544+00:00",
+        "sha256": "d8d80949d6f3378c14456842b531f0cade514179e4c94781b95ff9abb6447675",
+        "log": "/private/tmp/logex-execution-continuation-bounds-ds46fkay/gates/vendor.log"
+      },
+      {
+        "name": "format",
+        "command": [
+          "cargo",
+          "fmt",
+          "--all",
+          "--",
+          "--check"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T22:35:27.659882+00:00",
+        "finished": "2026-09-15T22:35:28.544366+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-execution-continuation-bounds-ds46fkay/gates/format.log"
+      },
+      {
+        "name": "check",
+        "command": [
+          "cargo",
+          "check",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T22:35:28.544737+00:00",
+        "finished": "2026-09-15T22:35:31.905197+00:00",
+        "sha256": "4f2d6c080a522a27ad645e1083e27235cc0a60a0a7e0073b92d4b8ed785d0c54",
+        "log": "/private/tmp/logex-execution-continuation-bounds-ds46fkay/gates/check.log"
+      },
+      {
+        "name": "clippy",
+        "command": [
+          "cargo",
+          "clippy",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T22:35:31.905665+00:00",
+        "finished": "2026-09-15T22:35:36.756196+00:00",
+        "sha256": "efd6c925d81522488ff0a44f3827c15801e93129b30239a18fd75ac072139266",
+        "log": "/private/tmp/logex-execution-continuation-bounds-ds46fkay/gates/clippy.log"
+      },
+      {
+        "name": "test",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T22:35:36.756932+00:00",
+        "finished": "2026-09-15T22:38:25.853018+00:00",
+        "sha256": "60703564dfe26049605fb1c9d402e708a27a7db0252a8cc58274a1b012d2c5a2",
+        "log": "/private/tmp/logex-execution-continuation-bounds-ds46fkay/gates/test.log"
+      },
+      {
+        "name": "doc",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--doc",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T22:38:25.854279+00:00",
+        "finished": "2026-09-15T22:38:35.594408+00:00",
+        "sha256": "7fc99ccf58eb47747795d568f9f603b3684eb8f24141f3d2eb2f493932ca67db",
+        "log": "/private/tmp/logex-execution-continuation-bounds-ds46fkay/gates/doc.log"
+      },
+      {
+        "name": "release-build",
+        "command": [
+          "cargo",
+          "build",
+          "-p",
+          "logex-node",
+          "--release",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T22:38:35.595076+00:00",
+        "finished": "2026-09-15T22:39:21.182973+00:00",
+        "sha256": "87af6337c0a18ee627389529eaf1035f504accb3bb8960163646198008a96bbe",
+        "log": "/private/tmp/logex-execution-continuation-bounds-ds46fkay/gates/release-build.log"
+      }
+    ]
+  },
+  "workspace_tests": {
+    "groups": 25,
+    "passed": 1518,
+    "failed": 0,
+    "ignored": 23
+  }
+}
