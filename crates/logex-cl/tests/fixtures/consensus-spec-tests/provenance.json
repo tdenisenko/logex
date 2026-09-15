@@ -1,0 +1,261 @@
+{
+  "repository": "https://github.com/ethereum/consensus-spec-tests",
+  "revision": "bc5c1a7fb2a8871aaffd4b16ee4dd9c72bb81908",
+  "cases": [
+    {
+      "fork": "capella",
+      "family": "LightClientBootstrap",
+      "upstream_path": "tests/mainnet/capella/ssz_static/LightClientBootstrap/ssz_random/case_0",
+      "files": {
+        "serialized.ssz_snappy": {
+          "sha256": "868423e201df14bba1692067b88367e31544f60983d226b50be143ff69a79d44",
+          "bytes": 25621
+        },
+        "value.yaml": {
+          "sha256": "ff75396c4f55540025596986707e2685bc3ca486a88168890232519d816053de",
+          "bytes": 56476
+        },
+        "roots.yaml": {
+          "sha256": "a0da8f369504061df726a74dd367d1a8b7be74991b39802c2a06156aad1df783",
+          "bytes": 75
+        }
+      }
+    },
+    {
+      "fork": "capella",
+      "family": "LightClientFinalityUpdate",
+      "upstream_path": "tests/mainnet/capella/ssz_static/LightClientFinalityUpdate/ssz_random/case_0",
+      "files": {
+        "serialized.ssz_snappy": {
+          "sha256": "7212a6cc828ccf5726021401696d9cb5f5dee97cde4883afe60cb81292f46be8",
+          "bytes": 2035
+        },
+        "value.yaml": {
+          "sha256": "a40e2cb0bf47215918385764f44591521354854ffff48f876ab613097e4543e2",
+          "bytes": 5263
+        },
+        "roots.yaml": {
+          "sha256": "55b1f65c049ffb7e74bc4a25bb1658b049d472a99137010f368fe07c3f502268",
+          "bytes": 75
+        }
+      }
+    },
+    {
+      "fork": "capella",
+      "family": "LightClientOptimisticUpdate",
+      "upstream_path": "tests/mainnet/capella/ssz_static/LightClientOptimisticUpdate/ssz_random/case_0",
+      "files": {
+        "serialized.ssz_snappy": {
+          "sha256": "69d89eb95cac20851685c859039cec141d7ac963d3c47890d6388edfca90fdf8",
+          "bytes": 997
+        },
+        "value.yaml": {
+          "sha256": "a70c63e233cd2b7578bc78676b5059ee2b9398968043e99b3305dadb2da3cd92",
+          "bytes": 2606
+        },
+        "roots.yaml": {
+          "sha256": "7afdbdd90a999969ed73f93851110693e3b5e82b4a769bb109e93232a70082ff",
+          "bytes": 75
+        }
+      }
+    },
+    {
+      "fork": "capella",
+      "family": "LightClientUpdate",
+      "upstream_path": "tests/mainnet/capella/ssz_static/LightClientUpdate/ssz_random/case_0",
+      "files": {
+        "serialized.ssz_snappy": {
+          "sha256": "11c99f49d9a44806afa05c1724da5eeca1b50945d0500c449e47bd012a47575e",
+          "bytes": 26789
+        },
+        "value.yaml": {
+          "sha256": "6dca045b4d7796b2a8b1bbb345b5a8256b6abaa465422e67dbc13d3b59ef3f3d",
+          "bytes": 59497
+        },
+        "roots.yaml": {
+          "sha256": "cb931f6b959356866be8813cf5c1c13467210d3367a918f61a49de2bc25a4bd8",
+          "bytes": 75
+        }
+      }
+    },
+    {
+      "fork": "deneb",
+      "family": "LightClientBootstrap",
+      "upstream_path": "tests/mainnet/deneb/ssz_static/LightClientBootstrap/ssz_random/case_0",
+      "files": {
+        "serialized.ssz_snappy": {
+          "sha256": "fef709334ca003e36b71b7b6bb3dce6b5022174a0c3039e1ef07b29cdddc827e",
+          "bytes": 25637
+        },
+        "value.yaml": {
+          "sha256": "87550582e7de6335ac015bb4a68c250e879799d5b218e3fdee476fdfecb8b613",
+          "bytes": 56555
+        },
+        "roots.yaml": {
+          "sha256": "eb0518b6d8391b441669189a346dcc2826ee8603fb1113572fd6c2ad4f0cb5d7",
+          "bytes": 75
+        }
+      }
+    },
+    {
+      "fork": "deneb",
+      "family": "LightClientFinalityUpdate",
+      "upstream_path": "tests/mainnet/deneb/ssz_static/LightClientFinalityUpdate/ssz_random/case_0",
+      "files": {
+        "serialized.ssz_snappy": {
+          "sha256": "e4b57c0da15910306c63671d0e92fa4604acf92ae84709b61520f1a043decded",
+          "bytes": 2039
+        },
+        "value.yaml": {
+          "sha256": "c9d3a7d409495134ad2a12847c7e85c615aa774abe9308a7493f96816b813dd5",
+          "bytes": 5370
+        },
+        "roots.yaml": {
+          "sha256": "7aad7a6411d1b36cdc252aa2dcec0e92f8076242ad8adb94c30fb98459e219d0",
+          "bytes": 75
+        }
+      }
+    },
+    {
+      "fork": "deneb",
+      "family": "LightClientOptimisticUpdate",
+      "upstream_path": "tests/mainnet/deneb/ssz_static/LightClientOptimisticUpdate/ssz_random/case_0",
+      "files": {
+        "serialized.ssz_snappy": {
+          "sha256": "cee0ce9d58a2e2209fdedaef2e5a290f57fe9fa22d470c6ee20cf97332a6c975",
+          "bytes": 1013
+        },
+        "value.yaml": {
+          "sha256": "a902ce93a9b66cc367a83d0926c70ff0c1e3622e33a9138362c672e3a26c56d9",
+          "bytes": 2686
+        },
+        "roots.yaml": {
+          "sha256": "d0034020c221f25ec04062a90bef3ca4bf00ef252371f3b461869d793c623cca",
+          "bytes": 75
+        }
+      }
+    },
+    {
+      "fork": "deneb",
+      "family": "LightClientUpdate",
+      "upstream_path": "tests/mainnet/deneb/ssz_static/LightClientUpdate/ssz_random/case_0",
+      "files": {
+        "serialized.ssz_snappy": {
+          "sha256": "f19c8fbf53d237712785accbdd062ebb5062639846ddd3263a084aa94e41c813",
+          "bytes": 26823
+        },
+        "value.yaml": {
+          "sha256": "b248f85c8994fe0958b73cd8dd2decea0c9ec7a0b9578c324a2f1a549e46f8f1",
+          "bytes": 59659
+        },
+        "roots.yaml": {
+          "sha256": "7fa9024bec249da54e601a7537a6ba8cbc9651eb1157e00693852d29a0ca764d",
+          "bytes": 75
+        }
+      }
+    },
+    {
+      "fork": "electra",
+      "family": "LightClientBootstrap",
+      "upstream_path": "tests/mainnet/electra/ssz_static/LightClientBootstrap/ssz_random/case_0",
+      "files": {
+        "serialized.ssz_snappy": {
+          "sha256": "20fa61e05e1703edc7b92d5e1030d8ba8b5abd767eae95356ec651e9f8c5f52d",
+          "bytes": 25669
+        },
+        "value.yaml": {
+          "sha256": "b4322acc4af40c8e8c648c3b72c7fa13d7edec1fcfe77da2449c9ed46ffd78b9",
+          "bytes": 56626
+        },
+        "roots.yaml": {
+          "sha256": "c68d528993b02b8ef15e34c7033399ad16ff5de7efe9af62b38ba5732c91dcd6",
+          "bytes": 75
+        }
+      }
+    },
+    {
+      "fork": "electra",
+      "family": "LightClientFinalityUpdate",
+      "upstream_path": "tests/mainnet/electra/ssz_static/LightClientFinalityUpdate/ssz_random/case_0",
+      "files": {
+        "serialized.ssz_snappy": {
+          "sha256": "62a4120c20206c065a030807af0b07f5dd873fcabccf4f6c96cfe49a962f8969",
+          "bytes": 2071
+        },
+        "value.yaml": {
+          "sha256": "1ebebea02780d3bbf1692e34b12789cdad7e6bd5b84ead17ce3f1d91844d913e",
+          "bytes": 5441
+        },
+        "roots.yaml": {
+          "sha256": "04799a75e7ae95e1199b4f59314897d7f2007cdc57c12fb60d7a3ae5df11a67d",
+          "bytes": 75
+        }
+      }
+    },
+    {
+      "fork": "electra",
+      "family": "LightClientOptimisticUpdate",
+      "upstream_path": "tests/mainnet/electra/ssz_static/LightClientOptimisticUpdate/ssz_random/case_0",
+      "files": {
+        "serialized.ssz_snappy": {
+          "sha256": "cee0ce9d58a2e2209fdedaef2e5a290f57fe9fa22d470c6ee20cf97332a6c975",
+          "bytes": 1013
+        },
+        "value.yaml": {
+          "sha256": "a902ce93a9b66cc367a83d0926c70ff0c1e3622e33a9138362c672e3a26c56d9",
+          "bytes": 2686
+        },
+        "roots.yaml": {
+          "sha256": "d0034020c221f25ec04062a90bef3ca4bf00ef252371f3b461869d793c623cca",
+          "bytes": 75
+        }
+      }
+    },
+    {
+      "fork": "electra",
+      "family": "LightClientUpdate",
+      "upstream_path": "tests/mainnet/electra/ssz_static/LightClientUpdate/ssz_random/case_0",
+      "files": {
+        "serialized.ssz_snappy": {
+          "sha256": "e77eec6696dc3c9c9c6c7d4d93550b64416f5c8aa061dacd4e81432bf119d655",
+          "bytes": 26891
+        },
+        "value.yaml": {
+          "sha256": "ae7b212c784cef3d41aee40a102ce964cb97af82714dcfaa6e0707834d509986",
+          "bytes": 59809
+        },
+        "roots.yaml": {
+          "sha256": "d4190d1f25247e3aa234eb485d86d047d43b138a0461a788775d431fc87c320d",
+          "bytes": 75
+        }
+      }
+    },
+    {
+      "fork": "fulu",
+      "family": "LightClientUpdate",
+      "upstream_path": "tests/mainnet/fulu/ssz_static/LightClientUpdate/ssz_random/case_0",
+      "files": {
+        "serialized.ssz_snappy": {
+          "sha256": "e77eec6696dc3c9c9c6c7d4d93550b64416f5c8aa061dacd4e81432bf119d655",
+          "bytes": 26891
+        },
+        "value.yaml": {
+          "sha256": "ae7b212c784cef3d41aee40a102ce964cb97af82714dcfaa6e0707834d509986",
+          "bytes": 59809
+        },
+        "roots.yaml": {
+          "sha256": "d4190d1f25247e3aa234eb485d86d047d43b138a0461a788775d431fc87c320d",
+          "bytes": 75
+        }
+      }
+    }
+  ],
+  "license": {
+    "path": "LICENSE",
+    "sha256": "da3ece2d2daf5c812c8606d2922094f51818258d4ce0e041b4ee8409ba3b381f",
+    "bytes": 1056,
+    "upstream_sha256": "feb87a2e0c305de3464cc44077da5393c52d8ca6362d37427157d04ec6f4510d",
+    "normalization": "Removed trailing ASCII space from the copyright line; license wording unchanged."
+  },
+  "expected_fields": "expected.json: extracted from unchanged value.yaml; beacon_root independently derived using Python hashlib and SSZ BeaconBlockHeader merkleization; see README.md"
+}
