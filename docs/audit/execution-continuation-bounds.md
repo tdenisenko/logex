@@ -103,6 +103,7 @@ paired-plan and merge helpers; both explicit-limit API comments were updated.
 The first gates passed vendor verification, formatting and workspace checking;
 strict Clippy identified a test-only cloned one-item slice. It now borrows via
 `std::slice::from_ref`; the failed log is retained. Full gates are rerun on the
-corrected commit. CI and merge remain pending. Evidence hashes and commands are
+corrected commit `8a34ef6b`: all seven gates pass, including 1,518
+workspace tests (23 ignored), doc tests and release linking. CI and merge remain pending. Evidence hashes and commands are
 recorded in [the validation record](baselines/2026-09-16-execution-continuation-bounds.json).
 No mac-mini work is planned.
