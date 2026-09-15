@@ -106,9 +106,13 @@ order or historical cache acceptance. An obsolete BTreeMap import found by
 focused strict Clippy was removed; the corrected focused check passes.
 
 No benchmark, remote host or external volume was used. The production cache map
-and retention policy are unchanged. Remove the whole-map getter, redundant
+and retention policy are unchanged. Removed the whole-map getter, redundant
 network selector/wrapper and synthetic persistence payload scaffolding. Shared
 proof helpers preserve existing normal verification order and avoid duplicated
 commitment-checking code. The completed integrated consensus-crate suite passes
-171 tests with one explicit benchmark ignored. Full workspace gates, CI and merge
+171 tests with one explicit benchmark ignored. Source `7a2734a8` passed all seven
+local gates: vendor verification, formatting, workspace check, strict Clippy,
+1,249 workspace tests (23 ignored), documentation tests and release build.
+[Gate records](baselines/2026-09-15-consensus-payload-cache-gates.json) retain
+commands, toolchain, log hashes and focused evidence. Linux/macOS CI and merge
 remain pending.
