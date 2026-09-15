@@ -64,7 +64,7 @@ fn request_payload_limit(protocol: &Eth2RpcProtocol) -> usize {
     }
 }
 
-fn response_payload_limit(protocol: &Eth2RpcProtocol, result_code: u8) -> usize {
+pub(crate) fn response_payload_limit(protocol: &Eth2RpcProtocol, result_code: u8) -> usize {
     if result_code != SUCCESS_CODE {
         return ERROR_MESSAGE_LIMIT;
     }

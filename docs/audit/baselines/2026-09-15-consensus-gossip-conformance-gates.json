@@ -1,0 +1,302 @@
+{
+  "commit": "d297b77b315012f8e41e87042868bee6e9eaac43",
+  "rustc": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+  "gates": [
+    {
+      "name": "vendor",
+      "command": [
+        "python3",
+        "tools/verify_datafusion_vendor.py"
+      ],
+      "exit_code": 0,
+      "started": "2026-09-15T03:04:21.433186+00:00",
+      "finished": "2026-09-15T03:04:21.495595+00:00",
+      "sha256": "d8d80949d6f3378c14456842b531f0cade514179e4c94781b95ff9abb6447675",
+      "log": "/private/tmp/logex-gossip-conformance.bo486kd7/gates/vendor.log"
+    },
+    {
+      "name": "format",
+      "command": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "exit_code": 0,
+      "started": "2026-09-15T03:04:21.495933+00:00",
+      "finished": "2026-09-15T03:04:22.366642+00:00",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "log": "/private/tmp/logex-gossip-conformance.bo486kd7/gates/format.log"
+    },
+    {
+      "name": "check",
+      "command": [
+        "cargo",
+        "check",
+        "--workspace",
+        "--all-targets",
+        "--locked",
+        "--offline",
+        "-j",
+        "2"
+      ],
+      "exit_code": 0,
+      "started": "2026-09-15T03:04:22.367280+00:00",
+      "finished": "2026-09-15T03:04:32.863422+00:00",
+      "sha256": "4e951dd33e38f4e969956460df8910616bc4b7ef270e745c5b55b282e8405b41",
+      "log": "/private/tmp/logex-gossip-conformance.bo486kd7/gates/check.log"
+    },
+    {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--locked",
+        "--offline",
+        "-j",
+        "2",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit_code": 0,
+      "started": "2026-09-15T03:04:32.864512+00:00",
+      "finished": "2026-09-15T03:04:43.111005+00:00",
+      "sha256": "dbf0d721cfba972ee67dee426467e6693631c926fbdbee40870a0ba3983a23aa",
+      "log": "/private/tmp/logex-gossip-conformance.bo486kd7/gates/clippy.log"
+    },
+    {
+      "name": "test",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace",
+        "--all-targets",
+        "--locked",
+        "--offline",
+        "-j",
+        "2"
+      ],
+      "exit_code": 0,
+      "started": "2026-09-15T03:04:43.116620+00:00",
+      "finished": "2026-09-15T03:08:04.013378+00:00",
+      "sha256": "02790f2a7dd611554519d7d38ec8022489fdd0bb0947fe61543667b27cd803da",
+      "log": "/private/tmp/logex-gossip-conformance.bo486kd7/gates/test.log"
+    },
+    {
+      "name": "doc",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace",
+        "--doc",
+        "--locked",
+        "--offline",
+        "-j",
+        "2"
+      ],
+      "exit_code": 0,
+      "started": "2026-09-15T03:08:04.015425+00:00",
+      "finished": "2026-09-15T03:08:30.547894+00:00",
+      "sha256": "dc14487c153035eac7d97edd7f1afa01a4fc498b7fe33c08bbdcf8550a9bf109",
+      "log": "/private/tmp/logex-gossip-conformance.bo486kd7/gates/doc.log"
+    },
+    {
+      "name": "release-build",
+      "command": [
+        "cargo",
+        "build",
+        "-p",
+        "logex-node",
+        "--release",
+        "--locked",
+        "--offline",
+        "-j",
+        "2"
+      ],
+      "exit_code": 0,
+      "started": "2026-09-15T03:08:30.548977+00:00",
+      "finished": "2026-09-15T03:10:02.547841+00:00",
+      "sha256": "88c960a35b497806cbf13290e52ffca5656b54c56b443bb1e583e3caf61f7577",
+      "log": "/private/tmp/logex-gossip-conformance.bo486kd7/gates/release-build.log"
+    }
+  ],
+  "workspace_test_summary": {
+    "groups": 25,
+    "passed": 1299,
+    "failed": 0,
+    "ignored": 23
+  },
+  "base": "0d5104e61009b228cf7d63c205ba2b749170ba08",
+  "branch": "audit/consensus-gossip-conformance",
+  "source_sha256": {
+    "crates/logex-cl/src/network.rs": "6a839e554d4b2d7c4ed52f2d19ad7b9f7aee5b3c6ca015ee4cee158cc4e997a9",
+    "crates/logex-cl/src/rpc.rs": "6a6d5ac11fa00d229ac20c8580bdf511b72d225d47b2d4bca63d0e6353b0fd45"
+  },
+  "focused_evidence": {
+    "files": [
+      {
+        "path": "/private/tmp/logex-consensus-gossip-conformance-independent-review-1/draft-inputs.json",
+        "bytes": 1026,
+        "sha256": "9a10aaecbe607f361256e35670a368b4877aadda9319848eaafcf8f12d0ecd9e"
+      },
+      {
+        "path": "/private/tmp/logex-consensus-gossip-conformance-independent-review-1/draft-review.json",
+        "bytes": 1951,
+        "sha256": "7c1008736cb4d34c0b1d0e3c5f3f3f4efada0c3fd0430c181f484fd860fd36c0"
+      },
+      {
+        "path": "/private/tmp/logex-consensus-gossip-conformance-independent-review-1/final-reconciliation-1/commit-binding.json",
+        "bytes": 676,
+        "sha256": "f96ee0fb8eed368525168826c641e3ba71d0b2df68179acaa6222dbeada01d45"
+      },
+      {
+        "path": "/private/tmp/logex-consensus-gossip-conformance-independent-review-1/final-reconciliation-1/review.json",
+        "bytes": 3922,
+        "sha256": "f407f3c7b6f718ff8b63396dce08d248ae95723325036515afa6a7d582fe6f4f"
+      },
+      {
+        "path": "/private/tmp/logex-consensus-gossip-conformance-independent-review-1/final-reconciliation-1/reviewed.diff",
+        "bytes": 16712,
+        "sha256": "f80568749340c319799f0757b9ddbd4e5d553b6eaa7614f4864b1237a5a327c9"
+      },
+      {
+        "path": "/private/tmp/logex-consensus-gossip-conformance-independent-review-1/id-oracle.json",
+        "bytes": 989,
+        "sha256": "2a2198bbd5e9121a5645d4fcdbcbf4c63c69a4ddced6136670d8b29ceebfe188"
+      },
+      {
+        "path": "/private/tmp/logex-gossip-conformance-OULgRl/after-focused.log",
+        "bytes": 904,
+        "sha256": "5f146a36c8568718e81e4a07f906da190dfce1db875c306466a902b65c45a0d4"
+      },
+      {
+        "path": "/private/tmp/logex-gossip-conformance-OULgRl/after-network.log",
+        "bytes": 9091,
+        "sha256": "0a62d36483e544f00d75104ece765da526360ad66eb0f921dadc8c54fa4156e5"
+      },
+      {
+        "path": "/private/tmp/logex-gossip-conformance-OULgRl/before.log",
+        "bytes": 1918,
+        "sha256": "6d9251b1c0d4567dc2b12895bc0d8a8874669dde10db34d46b37218f9094accf"
+      },
+      {
+        "path": "/private/tmp/logex-gossip-conformance-OULgRl/clippy.log",
+        "bytes": 453,
+        "sha256": "902f4265654925b95b728993fe7c0ff28f3f1883f636336ee4e7ec14b5d0337f"
+      },
+      {
+        "path": "/private/tmp/logex-gossip-conformance-OULgRl/derive_ids.py",
+        "bytes": 894,
+        "sha256": "b314ee29e6c31594999866ca82c61e9b896c37b9be7788cb0a7a22a2a51a5bf8"
+      },
+      {
+        "path": "/private/tmp/logex-gossip-conformance-OULgRl/notes.txt",
+        "bytes": 3114,
+        "sha256": "989e5124e5053d3cfb85ac17d64761cb4e9ae9a7cf812bd0b7e3dadf0a214254"
+      },
+      {
+        "path": "/private/tmp/logex-gossip-conformance.bo486kd7/phase0-p2p-v1.6.0.md",
+        "bytes": 108667,
+        "sha256": "0ec2bdf6d0e07fe8e8bdd7590a3b105d3457f69d3722321d2052ff907553868f"
+      },
+      {
+        "path": "/private/tmp/logex-gossip-conformance.bo486kd7/mainnet-v1.6.0.yaml",
+        "bytes": 7223,
+        "sha256": "5b19524c7ce889478f682f77cc15778f3ec6b1f61dbbff404574336495993c95"
+      },
+      {
+        "path": "/private/tmp/logex-peer-retention.lbvJM5/altair-p2p-v1.6.0.md",
+        "bytes": 17705,
+        "sha256": "65296bcfe51223d3e1d72e0d0dbffc72f96ebb1a6157f29c6e8a616cc47959e3"
+      }
+    ],
+    "observed_log_test_summaries": {
+      "clippy.log": [],
+      "after-focused.log": [],
+      "after-network.log": [
+        "test result: ok. 96 passed; 0 failed; 0 ignored; 0 measured; 126 filtered out; finished in 2.33s"
+      ],
+      "before.log": [
+        "test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 216 filtered out; finished in 0.00s"
+      ]
+    },
+    "review": {
+      "status": "REVIEWED_NO_ACTIONABLE_FINDING_PENDING_COMMIT_BINDING",
+      "base": "0d5104e6",
+      "source_hashes": {
+        "crates/logex-cl/src/network.rs": "6a839e554d4b2d7c4ed52f2d19ad7b9f7aee5b3c6ca015ee4cee158cc4e997a9",
+        "crates/logex-cl/src/rpc.rs": "6a6d5ac11fa00d229ac20c8580bdf511b72d225d47b2d4bca63d0e6353b0fd45"
+      },
+      "diff_sha256": "f80568749340c319799f0757b9ddbd4e5d553b6eaa7614f4864b1237a5a327c9",
+      "dependency_and_spec_inputs": {
+        "crates/logex-cl/src/network.rs": "862a3b3ad713d8b6c5f6077716ce9a0c180c58b53ce663477722ef9a2cddec45",
+        "crates/logex-cl/src/rpc.rs": "6a6d5ac11fa00d229ac20c8580bdf511b72d225d47b2d4bca63d0e6353b0fd45",
+        "/private/tmp/logex-gossip-conformance.bo486kd7/phase0-p2p-v1.6.0.md": "0ec2bdf6d0e07fe8e8bdd7590a3b105d3457f69d3722321d2052ff907553868f",
+        "/private/tmp/logex-peer-retention.lbvJM5/altair-p2p-v1.6.0.md": "65296bcfe51223d3e1d72e0d0dbffc72f96ebb1a6157f29c6e8a616cc47959e3",
+        "/Users/tdenisenko/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/libp2p-gossipsub-0.49.4/src/behaviour.rs": "0e2f66afdec47cc6013f64cd4335424f4fb510b25c8ffd7ee9059669911d5209",
+        "/Users/tdenisenko/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/libp2p-gossipsub-0.49.4/src/transform.rs": "43cd9ffcb62adee8d868bb7c972da8f8b0fd944b876dab7558850ee0ade6e8b9",
+        "/Users/tdenisenko/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snap-1.1.1/src/decompress.rs": "c14030717031757b3ff66044bb70543669f619c580db2a69b1873cb980fcfda3"
+      },
+      "findings": [],
+      "reviewed": [
+        "Pinned gossipsub inbound transform failure returns before message ID and duplicate cache, preventing declared oversize decompression at ID stage.",
+        "Identity bytes are preserved inbound/outbound; outbound ID uses original data, matching inbound raw compressed data interpretation.",
+        "Bounded valid Snappy uses decoded content; malformed header/body including empty wire uses invalid domain and raw bytes.",
+        "Application finality/optimistic bounds reuse supported RPC SSZ maxima 2120/1032 before second allocation/decode.",
+        "Frame ceiling max_compress_len(10MiB)+1024 matches pinned Phase0 bound for current mainnet maximum.",
+        "D8/low6/high12/lazy6/700ms/fanout60s/history6/gossip3/seen768s match pinned parameter values."
+      ],
+      "limits": [
+        "Message ID decode precedes duplicate lookup, so duplicate valid wire variants still pay bounded decode cost.",
+        "Accepted small messages decode again at application boundary; no shared cache or envelope introduced.",
+        "768-second duplicate ID retention has no entry-count bound; unique-ID memory grows with admitted rate.",
+        "Library clones raw message before transform; frame decoding/cloning occurs before guard, so this is bounded decompression admission, not total-memory or traffic admission.",
+        "Altair topic-aware ID applies modern subscribed light-client topics; Phase0-topic legacy algorithm and unknown/retired-topic policy remain separate.",
+        "Global transform failures do not reach application bandwidth/decode-failure counters.",
+        "No Cargo or runtime checks by reviewer; reported96 network tests/strictClippy belong to implementer.",
+        "Final commit binding pending."
+      ],
+      "final_controls_read": [
+        "Inbound/outbound transform preserves valid/malformed/empty wire, rejects excessive declared size; injected small compressed-size boundary checks.",
+        "Topic bounds1032/2120 and valid-domain ID for valid1033-byte Snappy exceeding optimistic type limit.",
+        "Exact config getters including12234442-byte frame limit.",
+        "Actual application event records compressed size, increments decode failure, retains trusted light-client store for oversized type."
+      ],
+      "additional_independent_oracle": {
+        "decoded_bytes": 1033,
+        "byte": "x",
+        "message_id": "dc816b31a7b43c062e43b6441746e7a27529c160"
+      },
+      "rpc_change": "Only response_payload_limit visibility widened to pub(crate)."
+    },
+    "binding": {
+      "status": "REVIEW_BOUND_TO_COMMITTED_SOURCE",
+      "commit": "d297b77b315012f8e41e87042868bee6e9eaac43",
+      "source_hashes": {
+        "crates/logex-cl/src/network.rs": "6a839e554d4b2d7c4ed52f2d19ad7b9f7aee5b3c6ca015ee4cee158cc4e997a9",
+        "crates/logex-cl/src/rpc.rs": "6a6d5ac11fa00d229ac20c8580bdf511b72d225d47b2d4bca63d0e6353b0fd45"
+      },
+      "review_sha256": "f407f3c7b6f718ff8b63396dce08d248ae95723325036515afa6a7d582fe6f4f",
+      "independent_oracles": 6,
+      "sixth_oracle": {
+        "decoded_bytes": 1033,
+        "byte": "x",
+        "message_id": "dc816b31a7b43c062e43b6441746e7a27529c160"
+      },
+      "limits": "Read-only binding; root gates separate, no additional source or Cargo work."
+    },
+    "pinned_spec": "ethereum/consensus-specs v1.6.0"
+  },
+  "scope": [
+    "Temporary fixtures and scripted objects only; no live discovery, swarm polling, peers or user data.",
+    "No benchmark or remote-host work.",
+    "Modern light-client gossip IDs only; Phase0-topic IDs and unknown/retired-topic application semantics remain follow-ups.",
+    "Globally oversized messages rejected before application events do not update application bandwidth/decode-failure counters.",
+    "Accepted light-client application decoding repeats at most 2120 bytes; unknown-topic fallback still uses global cap.",
+    "Duplicate-ID TTL is 768 seconds with no aggregate entry/memory cap; ID decompression precedes duplicate lookup."
+  ]
+}

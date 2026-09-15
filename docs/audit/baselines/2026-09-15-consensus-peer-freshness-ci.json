@@ -1,0 +1,84 @@
+{
+  "pull_request": 159,
+  "ci_run": 34922179443,
+  "ci": {
+    "baseRefName": "master",
+    "headRefOid": "c30c7bd1e8bf0b57e6dc080b28ab86d9b937b209",
+    "mergeStateStatus": "CLEAN",
+    "number": 159,
+    "state": "OPEN",
+    "statusCheckRollup": [
+      {
+        "__typename": "CheckRun",
+        "completedAt": "2026-09-15T02:42:54Z",
+        "conclusion": "SUCCESS",
+        "detailsUrl": "https://github.com/tdenisenko/logex/actions/runs/34922179443/job/104232537001",
+        "name": "Check",
+        "startedAt": "2026-09-15T02:42:08Z",
+        "status": "COMPLETED",
+        "workflowName": "CI"
+      },
+      {
+        "__typename": "CheckRun",
+        "completedAt": "2026-09-15T02:42:25Z",
+        "conclusion": "SUCCESS",
+        "detailsUrl": "https://github.com/tdenisenko/logex/actions/runs/34922179443/job/104232537094",
+        "name": "Format",
+        "startedAt": "2026-09-15T02:42:08Z",
+        "status": "COMPLETED",
+        "workflowName": "CI"
+      },
+      {
+        "__typename": "CheckRun",
+        "completedAt": "2026-09-15T02:42:56Z",
+        "conclusion": "SUCCESS",
+        "detailsUrl": "https://github.com/tdenisenko/logex/actions/runs/34922179443/job/104232537139",
+        "name": "Clippy",
+        "startedAt": "2026-09-15T02:42:08Z",
+        "status": "COMPLETED",
+        "workflowName": "CI"
+      },
+      {
+        "__typename": "CheckRun",
+        "completedAt": "2026-09-15T02:46:32Z",
+        "conclusion": "SUCCESS",
+        "detailsUrl": "https://github.com/tdenisenko/logex/actions/runs/34922179443/job/104232537180",
+        "name": "Test",
+        "startedAt": "2026-09-15T02:42:09Z",
+        "status": "COMPLETED",
+        "workflowName": "CI"
+      },
+      {
+        "__typename": "CheckRun",
+        "completedAt": "2026-09-15T02:50:15Z",
+        "conclusion": "SUCCESS",
+        "detailsUrl": "https://github.com/tdenisenko/logex/actions/runs/34922179443/job/104232537185",
+        "name": "macOS Test",
+        "startedAt": "2026-09-15T02:42:15Z",
+        "status": "COMPLETED",
+        "workflowName": "CI"
+      },
+      {
+        "__typename": "CheckRun",
+        "completedAt": "2026-09-15T02:46:23Z",
+        "conclusion": "SUCCESS",
+        "detailsUrl": "https://github.com/tdenisenko/logex/actions/runs/34922179443/job/104232537074",
+        "name": "Release Build",
+        "startedAt": "2026-09-15T02:42:11Z",
+        "status": "COMPLETED",
+        "workflowName": "CI"
+      }
+    ],
+    "url": "https://github.com/tdenisenko/logex/pull/159"
+  },
+  "merge": {
+    "headRefOid": "c30c7bd1e8bf0b57e6dc080b28ab86d9b937b209",
+    "mergeCommit": {
+      "oid": "0d5104e61009b228cf7d63c205ba2b749170ba08"
+    },
+    "mergedAt": "2026-09-15T02:51:16Z",
+    "number": 159,
+    "state": "MERGED",
+    "url": "https://github.com/tdenisenko/logex/pull/159"
+  }
+}

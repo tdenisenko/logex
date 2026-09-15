@@ -1,7 +1,7 @@
 # Consensus peer record freshness
 
 Base: `c7ef4411`, after merged PR #158. Final functional source: `57c36f760100662fe94eb88464cffee0bb5d5ae7`.
-All seven local gates passed; PR/CI and merge remain pending. This pass follows peer records from startup and discovery through
+All seven local gates passed. PR #159 merged after all six CI jobs passed. This pass follows peer records from startup and discovery through
 address selection, status, pruning and the saved reconnection cache.
 
 ## Confirmed findings
@@ -50,7 +50,10 @@ actionable issue in this bounded patch. All seven local gates passed on this sou
 (23 ignored), documentation tests and the release build. The
 [gate record](baselines/2026-09-15-consensus-peer-freshness-gates.json)
 contains toolchain, commands, log hashes, focused evidence and immutable review
-binding. PR/CI and merge remain pending. Fixtures use temporary directories and scripted
+binding. All six Linux/macOS CI jobs passed on head `c30c7bd1` in run
+`34922179443`. [PR #159](https://github.com/tdenisenko/logex/pull/159)
+merged as `0d5104e6` on September 15 at 02:51:16 UTC. See the
+[CI and merge record](baselines/2026-09-15-consensus-peer-freshness-ci.json). Fixtures use temporary directories and scripted
 objects without starting discovery, polling a swarm or contacting peers.
 No timing benchmark or Mac mini work is planned for this change.
 
