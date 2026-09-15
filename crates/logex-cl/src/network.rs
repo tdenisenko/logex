@@ -32,6 +32,11 @@ use thiserror::Error;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
+use crate::light_client::{
+    GossipUpdateMetadata, apply_finality_update_payload_at_slot,
+    apply_optimistic_update_payload_at_slot, gossip_update_metadata,
+};
+
 use crate::rpc::{
     BEACON_BLOCKS_BY_RANGE_V1_PROTOCOL_ID, BEACON_BLOCKS_BY_RANGE_V2_PROTOCOL_ID,
     BEACON_BLOCKS_BY_ROOT_V1_PROTOCOL_ID, BEACON_BLOCKS_BY_ROOT_V2_PROTOCOL_ID,
@@ -618,6 +623,8 @@ struct ConsensusNetwork {
     last_light_client_request_at: HashMap<RpcRequestKind, Instant>,
     request_failures: RpcFailureCounts,
     gossip_topics: ConsensusGossipTopics,
+    gossip_forwarded: GossipForwarded,
+    pending_gossip_forward: Option<GossipUpdateMetadata>,
     pre_subscribed_fork_digest: Option<[u8; 4]>,
     retiring_gossip_topics: Vec<RetiringGossipTopics>,
     gossip_counts: GossipMessageCounts,
@@ -1204,6 +1211,47 @@ where
         only_child
     } else {
         None
+    }
+}
+
+#[derive(Debug, Default)]
+struct GossipForwarded {
+    finality: Option<GossipUpdateMetadata>,
+    optimistic_slot: Option<u64>,
+}
+
+impl GossipForwarded {
+    fn permits(
+        &self,
+        metadata: &GossipUpdateMetadata,
+        before: &VerifiedLightClientStore,
+        after: &VerifiedLightClientStore,
+    ) -> bool {
+        if let Some(finalized) = metadata.finalized_slot {
+            let newer = self.finality.as_ref().is_none_or(|old| {
+                finalized > old.finalized_slot.unwrap_or(0)
+                    || (Some(finalized) == old.finalized_slot
+                        && metadata.participants * 3 > 512 * 2
+                        && old.participants * 3 <= 512 * 2)
+            });
+            newer && after.finalized_header.beacon.slot > before.finalized_header.beacon.slot
+        } else {
+            self.optimistic_slot
+                .is_none_or(|slot| metadata.attested_slot > slot)
+                && (after.optimistic_header.beacon.slot > before.optimistic_header.beacon.slot
+                    || self
+                        .finality
+                        .as_ref()
+                        .is_some_and(|old| old.optimistic_bytes == metadata.optimistic_bytes))
+        }
+    }
+
+    fn record(&mut self, metadata: GossipUpdateMetadata) {
+        if metadata.finalized_slot.is_some() {
+            self.finality = Some(metadata);
+        } else {
+            self.optimistic_slot = Some(metadata.attested_slot);
+        }
     }
 }
 
@@ -2118,6 +2166,8 @@ impl ConsensusNetwork {
             last_light_client_request_at: HashMap::new(),
             request_failures: RpcFailureCounts::default(),
             gossip_topics,
+            gossip_forwarded: GossipForwarded::default(),
+            pending_gossip_forward: None,
             pre_subscribed_fork_digest: None,
             retiring_gossip_topics: Vec::new(),
             gossip_counts: GossipMessageCounts::default(),
@@ -2665,7 +2715,10 @@ impl ConsensusNetwork {
     }
 
     fn maintain_fork_subscriptions(&mut self) {
-        let current_slot = current_wall_clock_slot();
+        self.maintain_fork_subscriptions_at_slot(current_wall_clock_slot());
+    }
+
+    fn maintain_fork_subscriptions_at_slot(&mut self, current_slot: u64) {
         let current_epoch = MAINNET_CONSENSUS_CHAIN_SPEC.epoch_for_slot(current_slot);
         let expected_digest = MAINNET_CONSENSUS_CHAIN_SPEC.fork_digest_for_epoch(current_epoch);
 
@@ -2745,12 +2798,13 @@ impl ConsensusNetwork {
             } => {
                 self.record_p2p_download_payload(usize_to_u64(message.data.len()));
                 let acceptance = self.handle_gossip_message(propagation_source, &message);
-                if !self
+                let reported = self
                     .swarm
                     .behaviour_mut()
                     .gossip
-                    .report_message_validation_result(&message_id, &propagation_source, acceptance)
-                {
+                    .report_message_validation_result(&message_id, &propagation_source, acceptance);
+                self.complete_gossip_validation(reported);
+                if !reported {
                     tracing::debug!(
                         %propagation_source,
                         %message_id,
@@ -2768,148 +2822,153 @@ impl ConsensusNetwork {
         }
     }
 
+    fn complete_gossip_validation(&mut self, reported: bool) {
+        if let Some(metadata) = self.pending_gossip_forward.take()
+            && reported
+        {
+            self.gossip_forwarded.record(metadata);
+        }
+    }
+
     fn handle_gossip_message(
         &mut self,
         propagation_source: PeerId,
         message: &gossipsub::Message,
     ) -> gossipsub::MessageAcceptance {
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        self.handle_gossip_message_at(propagation_source, message, now_ms)
+    }
+
+    fn handle_gossip_message_at(
+        &mut self,
+        propagation_source: PeerId,
+        message: &gossipsub::Message,
+        now_ms: u128,
+    ) -> gossipsub::MessageAcceptance {
+        use gossipsub::MessageAcceptance::{Accept, Ignore, Reject};
+        self.pending_gossip_forward = None;
+        let Some((finality, digest)) = parse_light_client_topic(&message.topic) else {
+            return Reject;
+        };
+        let current_slot = gossip_slot_at(now_ms);
+        let active = message.topic == self.gossip_topics.finality_update.hash()
+            || message.topic == self.gossip_topics.optimistic_update.hash()
+            || self.pre_subscribed_fork_digest == Some(digest)
+            || self.retiring_gossip_topics.iter().any(|old| {
+                old.unsubscribe_at_epoch > current_slot / 32
+                    && (message.topic == old.topics.finality_update.hash()
+                        || message.topic == old.topics.optimistic_update.hash())
+            });
+        if !active {
+            return Ignore;
+        }
         let Some(decoded) =
             decode_gossip_payload(&message.data, gossip_payload_limit(&message.topic))
         else {
             self.gossip_counts.decode_failures += 1;
-            tracing::debug!(
-                %propagation_source,
-                topic = %message.topic,
-                bytes = message.data.len(),
-                "failed to decompress consensus gossip payload"
-            );
-            return gossipsub::MessageAcceptance::Reject;
+            return Reject;
         };
-
-        if message.topic == self.gossip_topics.finality_update.hash() {
-            let Some(store) = self.consensus.light_client_store() else {
-                tracing::debug!(
-                    %propagation_source,
-                    bytes = decoded.len(),
-                    "ignoring consensus finality-update gossip until a verified bootstrap exists"
-                );
-                return gossipsub::MessageAcceptance::Ignore;
-            };
-            if finality_update_is_stale(&decoded, &store) {
-                tracing::trace!(
-                    %propagation_source,
-                    bytes = decoded.len(),
-                    "ignoring stale consensus finality-update gossip"
-                );
-                return gossipsub::MessageAcceptance::Ignore;
+        let metadata = match gossip_update_metadata(&decoded, finality) {
+            Ok(metadata) => metadata,
+            Err(_) => {
+                self.gossip_counts.decode_failures += 1;
+                return Reject;
             }
-
-            match apply_finality_update_payload(&decoded, &store) {
-                Ok((summary, next_store, _, _)) => {
+        };
+        if digest != MAINNET_CONSENSUS_CHAIN_SPEC.fork_digest_for_epoch(metadata.attested_slot / 32)
+        {
+            return Reject;
+        }
+        if !gossip_update_is_due(metadata.signature_slot, now_ms) {
+            return Ignore;
+        }
+        let Some(store) = self.consensus.light_client_store() else {
+            return Ignore;
+        };
+        // The store no longer retains committees from older periods. Such
+        // updates cannot advance it and must not be blamed for their age.
+        if metadata.signature_slot / 8192 < store.finalized_header.beacon.slot / 8192 {
+            return Ignore;
+        }
+        let result = if finality {
+            apply_finality_update_payload_at_slot(&decoded, &store, current_slot).map(
+                |(summary, next_store, _, _)| {
+                    let forward = self
+                        .gossip_forwarded
+                        .permits(&metadata, &store, &next_store);
+                    let headers_changed = next_store.finalized_header != store.finalized_header
+                        || next_store.optimistic_header != store.optimistic_header;
+                    let persisted = self.consensus.record_gossip_finality_update(
+                        summary,
+                        RawRpcResponse {
+                            context_bytes: None,
+                            bytes: decoded,
+                        },
+                        next_store,
+                    );
+                    (forward, headers_changed, persisted)
+                },
+            )
+        } else {
+            apply_optimistic_update_payload_at_slot(&decoded, &store, current_slot).map(
+                |(summary, next_store, _)| {
+                    let forward = self
+                        .gossip_forwarded
+                        .permits(&metadata, &store, &next_store);
+                    let headers_changed = next_store.finalized_header != store.finalized_header
+                        || next_store.optimistic_header != store.optimistic_header;
+                    let persisted = self.consensus.record_gossip_optimistic_update(
+                        summary,
+                        RawRpcResponse {
+                            context_bytes: None,
+                            bytes: decoded,
+                        },
+                        next_store,
+                    );
+                    (forward, headers_changed, persisted)
+                },
+            )
+        };
+        match result {
+            Ok((forward, headers_changed, Ok(changed))) => {
+                if finality {
                     self.gossip_counts.finality_update += 1;
-                    tracing::debug!(
-                        %propagation_source,
-                        bytes = decoded.len(),
-                        fork = ?summary.fork,
-                        attested_slot = summary.attested_header.beacon_slot,
-                        finalized_slot = summary.finalized_header.beacon_slot,
-                        "received consensus light-client finality-update gossip"
-                    );
-                    if let Err(error) = self.consensus.record_verified_finality_update(
-                        summary,
-                        crate::rpc::RawRpcResponse {
-                            context_bytes: None,
-                            bytes: decoded,
-                        },
-                        next_store,
-                    ) {
-                        tracing::warn!(
-                            %propagation_source,
-                            %error,
-                            "failed to persist verified finality update learned from gossip"
-                        );
-                        return gossipsub::MessageAcceptance::Ignore;
-                    }
-                    self.seed_verified_light_client_headers();
-                    self.materialize_verified_anchor_segments();
-                    self.drive_rpc_requests();
-                    return gossipsub::MessageAcceptance::Accept;
-                }
-                Err(error) => {
-                    self.gossip_counts.decode_failures += 1;
-                    tracing::debug!(
-                        %propagation_source,
-                        bytes = decoded.len(),
-                        %error,
-                        "failed to verify consensus finality-update gossip payload"
-                    );
-                    return gossipsub::MessageAcceptance::Reject;
-                }
-            }
-        }
-
-        if message.topic == self.gossip_topics.optimistic_update.hash() {
-            let Some(store) = self.consensus.light_client_store() else {
-                tracing::debug!(
-                    %propagation_source,
-                    bytes = decoded.len(),
-                    "ignoring consensus optimistic-update gossip until a verified bootstrap exists"
-                );
-                return gossipsub::MessageAcceptance::Ignore;
-            };
-            if optimistic_update_is_stale(&decoded, &store) {
-                tracing::trace!(
-                    %propagation_source,
-                    bytes = decoded.len(),
-                    "ignoring stale consensus optimistic-update gossip"
-                );
-                return gossipsub::MessageAcceptance::Ignore;
-            }
-
-            match apply_optimistic_update_payload(&decoded, &store) {
-                Ok((summary, next_store, _)) => {
+                } else {
                     self.gossip_counts.optimistic_update += 1;
-                    tracing::debug!(
-                        %propagation_source,
-                        bytes = decoded.len(),
-                        fork = ?summary.fork,
-                        attested_slot = summary.attested_header.beacon_slot,
-                        "received consensus light-client optimistic-update gossip"
-                    );
-                    if let Err(error) = self.consensus.record_verified_optimistic_update(
-                        summary,
-                        crate::rpc::RawRpcResponse {
-                            context_bytes: None,
-                            bytes: decoded,
-                        },
-                        next_store,
-                    ) {
-                        tracing::warn!(
-                            %propagation_source,
-                            %error,
-                            "failed to persist verified optimistic update learned from gossip"
-                        );
-                        return gossipsub::MessageAcceptance::Ignore;
-                    }
+                }
+                if headers_changed {
                     self.seed_verified_light_client_headers();
                     self.materialize_verified_anchor_segments();
-                    self.drive_rpc_requests();
-                    return gossipsub::MessageAcceptance::Accept;
                 }
-                Err(error) => {
-                    self.gossip_counts.decode_failures += 1;
-                    tracing::debug!(
-                        %propagation_source,
-                        bytes = decoded.len(),
-                        %error,
-                        "failed to verify consensus optimistic-update gossip payload"
-                    );
-                    return gossipsub::MessageAcceptance::Reject;
+                if changed {
+                    self.drive_rpc_requests();
+                }
+                if forward {
+                    self.pending_gossip_forward = Some(metadata);
+                    Accept
+                } else {
+                    Ignore
                 }
             }
+            Ok((_, _, Err(error))) => {
+                tracing::warn!(%propagation_source, %error, "failed to persist verified gossip update");
+                Ignore
+            }
+            // Missing committees are a local catch-up condition, not evidence
+            // that the sender supplied an invalid proof or signature.
+            Err(
+                LightClientVerificationError::IrrelevantUpdate { .. }
+                | LightClientVerificationError::UnknownSyncCommitteePeriod { .. },
+            ) => Ignore,
+            Err(error) => {
+                self.gossip_counts.decode_failures += 1;
+                tracing::debug!(%propagation_source, %error, "failed to verify consensus gossip update");
+                Reject
+            }
         }
-
-        gossipsub::MessageAcceptance::Ignore
     }
 
     fn handle_rpc_event(&mut self, kind: RpcRequestKind, event: Eth2RpcEvent) {
@@ -6020,6 +6079,58 @@ fn eth2_message_id(message: &gossipsub::Message) -> gossipsub::MessageId {
     gossipsub::MessageId::from(digest[..20].to_vec())
 }
 
+// Admit only canonical, supported LC topic names. Recognized old/future topics
+// are classified separately from malformed or unknown topics by the caller.
+fn parse_light_client_topic(topic: &gossipsub::TopicHash) -> Option<(bool, [u8; 4])> {
+    let mut parts = topic.as_str().split('/');
+    if parts.next() != Some("") || parts.next() != Some("eth2") {
+        return None;
+    }
+    let encoded_digest = parts.next()?;
+    let finality = match parts.next()? {
+        LIGHT_CLIENT_FINALITY_UPDATE_TOPIC_NAME => true,
+        LIGHT_CLIENT_OPTIMISTIC_UPDATE_TOPIC_NAME => false,
+        _ => return None,
+    };
+    if parts.next() != Some(GOSSIP_ENCODING_NAME)
+        || parts.next().is_some()
+        || encoded_digest.len() != 8
+    {
+        return None;
+    }
+    let mut digest = [0u8; 4];
+    hex::decode_to_slice(encoded_digest, &mut digest).ok()?;
+    if !encoded_digest
+        .bytes()
+        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return None;
+    }
+    let spec = MAINNET_CONSENSUS_CHAIN_SPEC;
+    let known = spec
+        .fork_schedule
+        .iter()
+        .any(|fork| fork.version[0] >= 3 && spec.fork_digest_for_epoch(fork.epoch) == digest)
+        || spec
+            .blob_schedule
+            .iter()
+            .any(|fork| spec.fork_digest_for_epoch(fork.epoch) == digest);
+    known.then_some((finality, digest))
+}
+
+fn gossip_slot_at(now_ms: u128) -> u64 {
+    let elapsed =
+        now_ms.saturating_sub(u128::from(MAINNET_CONSENSUS_CHAIN_SPEC.genesis_time) * 1000);
+    u64::try_from(elapsed / 12_000).unwrap_or(u64::MAX)
+}
+
+fn gossip_update_is_due(signature_slot: u64, now_ms: u128) -> bool {
+    let start = u128::from(MAINNET_CONSENSUS_CHAIN_SPEC.genesis_time) * 1000
+        + u128::from(signature_slot) * 12_000;
+    // Mainnet through Fulu: 12000 * 3333 // 10000, with 500 ms clock allowance.
+    now_ms.saturating_add(500) >= start + 3_999
+}
+
 fn gossip_payload_limit(topic: &gossipsub::TopicHash) -> usize {
     let mut components = topic.as_str().rsplit('/');
     if components.next() != Some(GOSSIP_ENCODING_NAME) {
@@ -7200,7 +7311,14 @@ mod tests {
     }
 
     fn request_lifecycle_fixture(temp: &TempDir) -> (ConsensusNetwork, RawRpcResponse) {
-        let fixture = crate::light_client::test_cached_light_client_fixture(419_072 * 32 + 16);
+        request_lifecycle_fixture_at_slot(temp, 419_072 * 32 + 16)
+    }
+
+    fn request_lifecycle_fixture_at_slot(
+        temp: &TempDir,
+        slot: u64,
+    ) -> (ConsensusNetwork, RawRpcResponse) {
+        let fixture = crate::light_client::test_cached_light_client_fixture(slot);
         let consensus = Arc::new(
             ConsensusStore::open(
                 temp.path(),
@@ -8113,6 +8231,565 @@ mod tests {
             hex::encode(eth2_message_id(&message).0),
             "dc816b31a7b43c062e43b6441746e7a27529c160"
         );
+    }
+
+    #[tokio::test]
+    async fn gossip_admission_unknown_topic_rejected_before_decode() {
+        let temp = TempDir::new().unwrap();
+        let (mut network, _) = request_lifecycle_fixture(&temp);
+        let message = gossip_test_message(HELLO_SNAPPY, "/eth2/8c9f62fe/unknown/ssz_snappy");
+        assert!(matches!(
+            network.handle_gossip_message(PeerId::random(), &message),
+            gossipsub::MessageAcceptance::Reject
+        ));
+        assert_eq!(network.gossip_counts.decode_failures, 0);
+    }
+
+    #[tokio::test]
+    async fn gossip_admission_finality_without_advance_is_processed_not_forwarded() {
+        let temp = TempDir::new().unwrap();
+        let (mut network, _) = request_lifecycle_fixture(&temp);
+        let fixture = crate::light_client::test_cached_light_client_fixture(419_072 * 32 + 16);
+        let before = network.consensus.light_client_store().unwrap();
+        let bytes = snap::raw::Encoder::new()
+            .compress_vec(&fixture.payloads.finality_update.unwrap().bytes)
+            .unwrap();
+        let message = gossip_test_message(
+            &bytes,
+            network.gossip_topics.finality_update.hash().as_str(),
+        );
+        assert!(matches!(
+            network.handle_gossip_message(PeerId::random(), &message),
+            gossipsub::MessageAcceptance::Ignore
+        ));
+        let after = network.consensus.light_client_store().unwrap();
+        assert_eq!(after.finalized_header, before.finalized_header);
+        assert!(after.optimistic_header.beacon.slot > before.optimistic_header.beacon.slot);
+    }
+
+    fn gossip_test_time(slot: u64, offset_ms: u128) -> u128 {
+        u128::from(MAINNET_CONSENSUS_CHAIN_SPEC.genesis_time) * 1000
+            + u128::from(slot) * 12000
+            + offset_ms
+    }
+
+    fn compressed_gossip(bytes: &[u8], topic: &gossipsub::TopicHash) -> gossipsub::Message {
+        gossip_test_message(
+            &snap::raw::Encoder::new().compress_vec(bytes).unwrap(),
+            topic.as_str(),
+        )
+    }
+
+    #[test]
+    fn gossip_admission_timing_uses_floor_basis_points_and_disparity() {
+        let slot = 419_072 * 32 + 19;
+        assert!(!gossip_update_is_due(slot, gossip_test_time(slot, 3498)));
+        assert!(gossip_update_is_due(slot, gossip_test_time(slot, 3499)));
+        assert!(gossip_update_is_due(slot, gossip_test_time(slot, 3500)));
+        assert!(!gossip_update_is_due(
+            u64::MAX,
+            gossip_test_time(slot, 3499)
+        ));
+    }
+
+    #[tokio::test]
+    async fn gossip_admission_future_ignored_then_due_update_accepted() {
+        let temp = TempDir::new().unwrap();
+        let (mut network, _) = request_lifecycle_fixture(&temp);
+        let slot = 419_072 * 32 + 16;
+        let (_, bytes) = crate::light_client::test_gossip_payloads(slot, 1);
+        let message = compressed_gossip(&bytes, &network.gossip_topics.optimistic_update.hash());
+        let before = network.consensus.light_client_store();
+        for now in [gossip_test_time(slot, 0), gossip_test_time(slot + 3, 3498)] {
+            assert!(matches!(
+                network.handle_gossip_message_at(PeerId::random(), &message, now),
+                gossipsub::MessageAcceptance::Ignore
+            ));
+            assert_eq!(network.consensus.light_client_store(), before);
+        }
+        assert!(matches!(
+            network.handle_gossip_message_at(
+                PeerId::random(),
+                &message,
+                gossip_test_time(slot + 3, 3499)
+            ),
+            gossipsub::MessageAcceptance::Accept
+        ));
+    }
+
+    #[tokio::test]
+    async fn gossip_admission_forward_history_requires_report_and_exact_finality_match() {
+        let slot = 419_072 * 32 + 16;
+        for reported in [false, true] {
+            let temp = TempDir::new().unwrap();
+            let (mut network, _) = request_lifecycle_fixture(&temp);
+            let (finality, optimistic) = crate::light_client::test_gossip_payloads(slot, 342);
+            let message =
+                compressed_gossip(&finality, &network.gossip_topics.finality_update.hash());
+            assert!(matches!(
+                network.handle_gossip_message_at(
+                    PeerId::random(),
+                    &message,
+                    gossip_test_time(slot + 3, 3499)
+                ),
+                gossipsub::MessageAcceptance::Accept
+            ));
+            assert!(network.gossip_forwarded.finality.is_none());
+            network.complete_gossip_validation(reported);
+            assert_eq!(network.gossip_forwarded.finality.is_some(), reported);
+            let message =
+                compressed_gossip(&optimistic, &network.gossip_topics.optimistic_update.hash());
+            let result = network.handle_gossip_message_at(
+                PeerId::random(),
+                &message,
+                gossip_test_time(slot + 3, 3499),
+            );
+            assert_eq!(
+                matches!(result, gossipsub::MessageAcceptance::Accept),
+                reported
+            );
+            network.complete_gossip_validation(true);
+            assert!(matches!(
+                network.handle_gossip_message_at(
+                    PeerId::random(),
+                    &message,
+                    gossip_test_time(slot + 3, 3499)
+                ),
+                gossipsub::MessageAcceptance::Ignore
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn gossip_admission_same_slot_participation_updates_store_without_forwarding() {
+        let temp = TempDir::new().unwrap();
+        let (mut network, _) = request_lifecycle_fixture(&temp);
+        let slot = 419_072 * 32 + 16;
+        let (_, low) = crate::light_client::test_gossip_payloads(slot, 1);
+        let (_, higher) = crate::light_client::test_gossip_payloads(slot, 2);
+        let topic = network.gossip_topics.optimistic_update.hash();
+        let now = gossip_test_time(slot + 3, 3499);
+        assert!(matches!(
+            network.handle_gossip_message_at(
+                PeerId::random(),
+                &compressed_gossip(&low, &topic),
+                now
+            ),
+            gossipsub::MessageAcceptance::Accept
+        ));
+        network.complete_gossip_validation(true);
+        assert!(matches!(
+            network.handle_gossip_message_at(
+                PeerId::random(),
+                &compressed_gossip(&higher, &topic),
+                now
+            ),
+            gossipsub::MessageAcceptance::Ignore
+        ));
+        assert_eq!(
+            network
+                .consensus
+                .light_client_store()
+                .unwrap()
+                .current_max_active_participants,
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn gossip_admission_low_participation_does_not_forward_newer_header() {
+        let temp = TempDir::new().unwrap();
+        let (mut network, _) = request_lifecycle_fixture(&temp);
+        let slot = 419_072 * 32 + 16;
+        let (_, strong) = crate::light_client::test_gossip_payloads(slot, 342);
+        let (_, weak) = crate::light_client::test_gossip_payloads(slot + 1, 1);
+        let topic = network.gossip_topics.optimistic_update.hash();
+        let now = gossip_test_time(slot + 4, 3499);
+        assert!(matches!(
+            network.handle_gossip_message_at(
+                PeerId::random(),
+                &compressed_gossip(&strong, &topic),
+                now
+            ),
+            gossipsub::MessageAcceptance::Accept
+        ));
+        network.complete_gossip_validation(true);
+        let before = network.consensus.light_client_store().unwrap();
+        assert!(matches!(
+            network.handle_gossip_message_at(
+                PeerId::random(),
+                &compressed_gossip(&weak, &topic),
+                now
+            ),
+            gossipsub::MessageAcceptance::Ignore
+        ));
+        assert_eq!(
+            network
+                .consensus
+                .light_client_store()
+                .unwrap()
+                .optimistic_header,
+            before.optimistic_header
+        );
+        let mismatching = gossip_update_metadata(&weak, false).unwrap();
+        let mut forwarded = GossipForwarded {
+            finality: Some(
+                gossip_update_metadata(
+                    &crate::light_client::test_gossip_payloads(slot, 342).0,
+                    true,
+                )
+                .unwrap(),
+            ),
+            optimistic_slot: None,
+        };
+        assert!(!forwarded.permits(&mismatching, &before, &before));
+        forwarded.finality.as_mut().unwrap().optimistic_bytes =
+            mismatching.optimistic_bytes.clone();
+        assert!(forwarded.permits(&mismatching, &before, &before));
+    }
+
+    fn assert_gossip_unavailable_committee_ignored(periods_ahead: u64, finality: bool) {
+        let temp = TempDir::new().unwrap();
+        let (mut network, _) = request_lifecycle_fixture(&temp);
+        let target_slot = 419_072 * 32 + 16 + periods_ahead * 8192;
+        let (finality_bytes, optimistic_bytes) =
+            crate::light_client::test_gossip_payloads(target_slot, 342);
+        let bytes = if finality {
+            finality_bytes
+        } else {
+            optimistic_bytes
+        };
+        let metadata = gossip_update_metadata(&bytes, finality).unwrap();
+        assert_eq!(metadata.attested_slot, target_slot + 2);
+        assert_eq!(metadata.signature_slot, target_slot + 3);
+        assert_eq!(metadata.participants, 342);
+        let before = network.consensus.light_client_store().unwrap();
+        assert!(before.next_sync_committee.is_none());
+        let verify = |store: &VerifiedLightClientStore| {
+            if finality {
+                apply_finality_update_payload_at_slot(&bytes, store, target_slot + 3).map(|_| ())
+            } else {
+                apply_optimistic_update_payload_at_slot(&bytes, store, target_slot + 3).map(|_| ())
+            }
+        };
+        assert!(
+            matches!(verify(&before), Err(LightClientVerificationError::UnknownSyncCommitteePeriod { signature_period, store_period }) if signature_period == store_period + periods_ahead)
+        );
+        // The same bytes authenticate when a bootstrap supplies their committee.
+        let target = crate::light_client::test_cached_light_client_fixture(target_slot);
+        let (_, target_store) =
+            verify_bootstrap_payload(&target.payloads.bootstrap.unwrap().bytes, target.checkpoint)
+                .unwrap();
+        assert!(verify(&target_store).is_ok());
+        let topic = if finality {
+            network.gossip_topics.finality_update.hash()
+        } else {
+            network.gossip_topics.optimistic_update.hash()
+        };
+        let message = compressed_gossip(&bytes, &topic);
+        assert_eq!(
+            parse_light_client_topic(&topic).unwrap().1,
+            MAINNET_CONSENSUS_CHAIN_SPEC.fork_digest_for_epoch(metadata.attested_slot / 32)
+        );
+        let now = gossip_test_time(target_slot + 3, 3499);
+        assert!(gossip_update_is_due(metadata.signature_slot, now));
+        assert!(matches!(
+            network.handle_gossip_message_at(PeerId::random(), &message, now),
+            gossipsub::MessageAcceptance::Ignore
+        ));
+        assert_eq!(network.consensus.light_client_store().unwrap(), before);
+        assert_eq!(network.gossip_counts.decode_failures, 0);
+        assert_eq!(network.gossip_counts.finality_update, 0);
+        assert_eq!(network.gossip_counts.optimistic_update, 0);
+        assert!(network.pending_gossip_forward.is_none());
+        network.complete_gossip_validation(true);
+        assert!(network.gossip_forwarded.finality.is_none());
+        assert!(network.gossip_forwarded.optimistic_slot.is_none());
+        assert!(
+            network
+                .consensus
+                .light_client_finality_update_payload()
+                .is_none()
+        );
+        assert!(
+            network
+                .consensus
+                .light_client_optimistic_update_payload()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn gossip_topic_parser_requires_exact_components_and_lowercase_digest() {
+        let canonical = "/eth2/8c9f62fe/light_client_optimistic_update/ssz_snappy";
+        assert!(parse_light_client_topic(&gossipsub::TopicHash::from_raw(canonical)).is_some());
+        for topic in [
+            format!("{canonical}/extra"),
+            canonical.replace("8c9f62fe", "8C9F62FE"),
+            canonical.replace("8c9f62fe", "8c9f62fe00"),
+            canonical.replace("/eth2/", "/eth2//"),
+        ] {
+            assert!(parse_light_client_topic(&gossipsub::TopicHash::from_raw(topic)).is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn gossip_unavailable_committee_classification_keeps_invalid_payloads_rejected() {
+        let temp = TempDir::new().unwrap();
+        let (mut network, _) = request_lifecycle_fixture(&temp);
+        let slot = 419_072 * 32 + 16;
+        let (_, bytes) = crate::light_client::test_gossip_payloads(slot, 342);
+        let mut malformed = bytes.clone();
+        malformed.truncate(5);
+        let mut bad_signature = bytes.clone();
+        // Optimistic fixed section: header offset (4), bits (64), signature (96).
+        bad_signature[68..164].fill(0);
+        let mut bad_proof = bytes.clone();
+        let header_offset = u32::from_le_bytes(bytes[..4].try_into().unwrap()) as usize;
+        bad_proof[header_offset + 80] ^= 1; // Beacon body root, outside execution proof.
+        let store = network.consensus.light_client_store().unwrap();
+        assert!(matches!(
+            apply_optimistic_update_payload_at_slot(&bad_signature, &store, slot + 3),
+            Err(LightClientVerificationError::InvalidSignature(_))
+        ));
+        assert!(matches!(
+            apply_optimistic_update_payload_at_slot(&bad_proof, &store, slot + 3),
+            Err(LightClientVerificationError::InvalidExecutionProof { .. })
+        ));
+        let topic = network.gossip_topics.optimistic_update.hash();
+        for bytes in [malformed, bad_signature, bad_proof] {
+            assert!(matches!(
+                network.handle_gossip_message_at(
+                    PeerId::random(),
+                    &compressed_gossip(&bytes, &topic),
+                    gossip_test_time(slot + 3, 3499)
+                ),
+                gossipsub::MessageAcceptance::Reject
+            ));
+            assert_eq!(network.consensus.light_client_store().unwrap(), store);
+            assert!(network.pending_gossip_forward.is_none());
+        }
+        assert_eq!(network.gossip_counts.decode_failures, 3);
+    }
+
+    #[tokio::test]
+    async fn gossip_unavailable_committee_missing_next_is_ignored() {
+        assert_gossip_unavailable_committee_ignored(1, false);
+    }
+
+    #[tokio::test]
+    async fn gossip_unavailable_committee_farther_catchup_is_ignored() {
+        assert_gossip_unavailable_committee_ignored(2, true);
+    }
+
+    #[tokio::test]
+    async fn gossip_admission_old_signature_period_is_not_peer_fault() {
+        let temp = TempDir::new().unwrap();
+        let slot = 419_328 * 32 + 16;
+        let (mut network, _) = request_lifecycle_fixture_at_slot(&temp, slot);
+        let (_, old) = crate::light_client::test_gossip_payloads(slot - 8192, 1);
+        let message = compressed_gossip(&old, &network.gossip_topics.optimistic_update.hash());
+        let before = network.consensus.light_client_store();
+        assert!(matches!(
+            network.handle_gossip_message_at(
+                PeerId::random(),
+                &message,
+                gossip_test_time(slot + 3, 3499)
+            ),
+            gossipsub::MessageAcceptance::Ignore
+        ));
+        assert_eq!(network.consensus.light_client_store(), before);
+        assert_eq!(network.gossip_counts.decode_failures, 0);
+    }
+
+    #[tokio::test]
+    async fn gossip_admission_real_bpo_transition_processes_retiring_topic_until_expiry() {
+        let boundary = 419_072 * 32;
+        let slot = boundary - 4;
+        let temp = TempDir::new().unwrap();
+        let (mut network, _) = request_lifecycle_fixture_at_slot(&temp, slot);
+        let fixture = crate::light_client::test_cached_light_client_fixture(slot);
+        let bootstrap = fixture.payloads.bootstrap.unwrap();
+        let (status, mut store) =
+            verify_bootstrap_payload(&bootstrap.bytes, fixture.checkpoint).unwrap();
+        // Model a previously proven next committee; all local fixture members use the same key.
+        store.next_sync_committee = Some(store.current_sync_committee.clone());
+        network
+            .consensus
+            .record_verified_bootstrap(status, bootstrap, store)
+            .unwrap();
+        let old_digest = MAINNET_CONSENSUS_CHAIN_SPEC.fork_digest_for_epoch((boundary - 1) / 32);
+        let new_digest = MAINNET_CONSENSUS_CHAIN_SPEC.fork_digest_for_epoch(boundary / 32);
+        network.fork_digest = old_digest;
+        network.gossip_topics = build_gossip_topics(old_digest);
+        network.maintain_fork_subscriptions_at_slot(boundary - 2);
+        assert_eq!(network.pre_subscribed_fork_digest, Some(new_digest));
+        let bytes =
+            crate::light_client::test_gossip_boundary_optimistic(slot, boundary - 1, boundary);
+        let old_message = compressed_gossip(
+            &bytes,
+            &build_gossip_topics(old_digest).optimistic_update.hash(),
+        );
+        assert!(matches!(
+            network.handle_gossip_message_at(
+                PeerId::random(),
+                &old_message,
+                gossip_test_time(boundary - 1, 0)
+            ),
+            gossipsub::MessageAcceptance::Ignore
+        ));
+        let future_bytes =
+            crate::light_client::test_gossip_boundary_optimistic(slot, boundary, boundary + 1);
+        let future_message = compressed_gossip(
+            &future_bytes,
+            &build_gossip_topics(new_digest).optimistic_update.hash(),
+        );
+        assert!(matches!(
+            network.handle_gossip_message_at(
+                PeerId::random(),
+                &future_message,
+                gossip_test_time(boundary - 1, 0)
+            ),
+            gossipsub::MessageAcceptance::Ignore
+        ));
+        network.maintain_fork_subscriptions_at_slot(boundary);
+        assert_eq!(network.fork_digest, new_digest);
+        assert_eq!(network.retiring_gossip_topics.len(), 1);
+        assert!(matches!(
+            network.handle_gossip_message_at(
+                PeerId::random(),
+                &old_message,
+                gossip_test_time(boundary, 3499)
+            ),
+            gossipsub::MessageAcceptance::Accept
+        ));
+        assert_eq!(
+            network
+                .consensus
+                .light_client_store()
+                .unwrap()
+                .optimistic_header
+                .beacon
+                .slot,
+            boundary - 1
+        );
+        assert!(matches!(
+            network.handle_gossip_message_at(
+                PeerId::random(),
+                &future_message,
+                gossip_test_time(boundary + 1, 3499)
+            ),
+            gossipsub::MessageAcceptance::Accept
+        ));
+        network.maintain_fork_subscriptions_at_slot(boundary + 64);
+        assert!(network.retiring_gossip_topics.is_empty());
+        assert!(matches!(
+            network.handle_gossip_message_at(
+                PeerId::random(),
+                &gossip_test_message(&[], old_message.topic.as_str()),
+                gossip_test_time(boundary + 64, 0)
+            ),
+            gossipsub::MessageAcceptance::Ignore
+        ));
+    }
+
+    #[tokio::test]
+    async fn gossip_admission_finality_exception_requires_identical_aggregate_at_same_slot() {
+        let temp = TempDir::new().unwrap();
+        let (mut network, _) = request_lifecycle_fixture(&temp);
+        let slot = 419_072 * 32 + 16;
+        let (finality, _) = crate::light_client::test_gossip_payloads(slot, 342);
+        let (_, other_aggregate) = crate::light_client::test_gossip_payloads(slot, 343);
+        let now = gossip_test_time(slot + 3, 3499);
+        assert!(matches!(
+            network.handle_gossip_message_at(
+                PeerId::random(),
+                &compressed_gossip(&finality, &network.gossip_topics.finality_update.hash()),
+                now
+            ),
+            gossipsub::MessageAcceptance::Accept
+        ));
+        network.complete_gossip_validation(true);
+        assert_eq!(
+            gossip_update_metadata(&other_aggregate, false)
+                .unwrap()
+                .attested_slot,
+            network
+                .gossip_forwarded
+                .finality
+                .as_ref()
+                .unwrap()
+                .attested_slot
+        );
+        assert!(matches!(
+            network.handle_gossip_message_at(
+                PeerId::random(),
+                &compressed_gossip(
+                    &other_aggregate,
+                    &network.gossip_topics.optimistic_update.hash()
+                ),
+                now
+            ),
+            gossipsub::MessageAcceptance::Ignore
+        ));
+        assert_eq!(
+            network
+                .consensus
+                .light_client_store()
+                .unwrap()
+                .current_max_active_participants,
+            343
+        );
+    }
+
+    #[tokio::test]
+    async fn gossip_admission_lifecycle_topics_bind_attested_slot() {
+        let slot = 412_672 * 32 + 16;
+        let temp = TempDir::new().unwrap();
+        let (mut network, _) = request_lifecycle_fixture_at_slot(&temp, slot);
+        let (_, bytes) = crate::light_client::test_gossip_payloads(slot, 1);
+        let old_digest = MAINNET_CONSENSUS_CHAIN_SPEC.fork_digest_for_epoch(slot / 32);
+        let old_topics = build_gossip_topics(old_digest);
+        let message = compressed_gossip(&bytes, &old_topics.optimistic_update.hash());
+        let now = gossip_test_time(slot + 3, 3499);
+        // A recognized but inactive topic is ignored before malformed Snappy decoding.
+        assert!(matches!(
+            network.handle_gossip_message_at(
+                PeerId::random(),
+                &gossip_test_message(&[], message.topic.as_str()),
+                now
+            ),
+            gossipsub::MessageAcceptance::Ignore
+        ));
+        assert_eq!(network.gossip_counts.decode_failures, 0);
+        network.pre_subscribed_fork_digest = Some(old_digest);
+        assert!(matches!(
+            network.handle_gossip_message_at(PeerId::random(), &message, now),
+            gossipsub::MessageAcceptance::Accept
+        ));
+        // Valid old-fork data on the currently configured topic must not be relabeled.
+        let wrong = compressed_gossip(&bytes, &network.gossip_topics.optimistic_update.hash());
+        assert!(matches!(
+            network.handle_gossip_message_at(PeerId::random(), &wrong, now),
+            gossipsub::MessageAcceptance::Reject
+        ));
+        network.pre_subscribed_fork_digest = None;
+        network.retiring_gossip_topics.push(RetiringGossipTopics {
+            unsubscribe_at_epoch: slot / 32 + 2,
+            topics: old_topics,
+        });
+        assert!(!matches!(
+            network.handle_gossip_message_at(PeerId::random(), &message, now),
+            gossipsub::MessageAcceptance::Reject
+        ));
+        assert!(matches!(
+            network.handle_gossip_message_at(
+                PeerId::random(),
+                &gossip_test_message(&[], message.topic.as_str()),
+                gossip_test_time((slot / 32 + 2) * 32, 0)
+            ),
+            gossipsub::MessageAcceptance::Ignore
+        ));
     }
 
     #[test]

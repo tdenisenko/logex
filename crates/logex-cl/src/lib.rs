@@ -397,6 +397,86 @@ impl ConsensusStore {
         })
     }
 
+    /// Gossip can improve participation state without providing a newer
+    /// response to serve. Keep those decisions atomic and avoid rewriting the
+    /// entire historical snapshot when neither decision changes anything.
+    pub(crate) fn record_gossip_finality_update(
+        &self,
+        status: LightClientFinalityUpdateStatus,
+        mut payload: RawRpcResponse,
+        store: VerifiedLightClientStore,
+    ) -> Result<bool, ConsensusStateError> {
+        light_client::normalize_cached_context(&mut payload, status.attested_header.beacon_slot)
+            .map_err(ConsensusStateError::InvalidCachedPayload)?;
+        self.update_if_with_writer(
+            |current| {
+                let replace_payload = current.light_client_payloads.finality_update.is_none()
+                    || current
+                        .light_client
+                        .finality_update
+                        .as_ref()
+                        .is_none_or(|previous| {
+                            gossip_finality_cache_priority(&status)
+                                > gossip_finality_cache_priority(previous)
+                        });
+                if !replace_payload && current.verified_light_client_store.as_ref() == Some(&store)
+                {
+                    return None;
+                }
+                Some(move |snapshot: &mut ConsensusSnapshot| {
+                    if replace_payload {
+                        snapshot.light_client.finality_update = Some(status);
+                        snapshot.light_client_payloads.finality_update = Some(payload);
+                    }
+                    snapshot.verified_light_client_store = Some(store);
+                    apply_verified_store(snapshot);
+                })
+            },
+            write_snapshot,
+        )
+    }
+
+    pub(crate) fn record_gossip_optimistic_update(
+        &self,
+        status: LightClientOptimisticUpdateStatus,
+        mut payload: RawRpcResponse,
+        store: VerifiedLightClientStore,
+    ) -> Result<bool, ConsensusStateError> {
+        light_client::normalize_cached_context(&mut payload, status.attested_header.beacon_slot)
+            .map_err(ConsensusStateError::InvalidCachedPayload)?;
+        self.update_if_with_writer(
+            |current| {
+                let replace_payload = current.light_client_payloads.optimistic_update.is_none()
+                    || current
+                        .light_client
+                        .optimistic_update
+                        .as_ref()
+                        .is_none_or(|previous| {
+                            (
+                                status.attested_header.beacon_slot,
+                                status.sync_committee_participants,
+                            ) > (
+                                previous.attested_header.beacon_slot,
+                                previous.sync_committee_participants,
+                            )
+                        });
+                if !replace_payload && current.verified_light_client_store.as_ref() == Some(&store)
+                {
+                    return None;
+                }
+                Some(move |snapshot: &mut ConsensusSnapshot| {
+                    if replace_payload {
+                        snapshot.light_client.optimistic_update = Some(status);
+                        snapshot.light_client_payloads.optimistic_update = Some(payload);
+                    }
+                    snapshot.verified_light_client_store = Some(store);
+                    apply_verified_store(snapshot);
+                })
+            },
+            write_snapshot,
+        )
+    }
+
     pub(crate) fn record_verified_applied_update(
         &self,
         applied: AppliedLightClientUpdate,
@@ -450,11 +530,26 @@ impl ConsensusStore {
         mutate: impl FnOnce(&mut ConsensusSnapshot),
         write: impl FnOnce(&Path, &ConsensusSnapshot) -> io::Result<()>,
     ) -> Result<(), ConsensusStateError> {
+        self.update_if_with_writer(|_| Some(mutate), write)
+            .map(|_| ())
+    }
+
+    fn update_if_with_writer<M: FnOnce(&mut ConsensusSnapshot)>(
+        &self,
+        prepare: impl FnOnce(&ConsensusSnapshot) -> Option<M>,
+        write: impl FnOnce(&Path, &ConsensusSnapshot) -> io::Result<()>,
+    ) -> Result<bool, ConsensusStateError> {
         let _writer = self.writer.lock().unwrap();
         if let Some(message) = self.storage_failure.borrow().clone() {
             return Err(ConsensusStateError::StorageFailed(message));
         }
-        let mut candidate = self.inner.lock().unwrap().clone();
+        let (mut candidate, mutate) = {
+            let current = self.inner.lock().unwrap();
+            let Some(mutate) = prepare(&current) else {
+                return Ok(false);
+            };
+            (current.clone(), mutate)
+        };
         mutate(&mut candidate);
         if let Err(source) = write(&self.path, &candidate) {
             let error = ConsensusStateError::PersistState {
@@ -469,12 +564,24 @@ impl ConsensusStore {
             return Err(error);
         }
         *self.inner.lock().unwrap() = candidate;
-        Ok(())
+        Ok(true)
     }
 
     pub fn state_path(&self) -> &Path {
         &self.path
     }
+}
+
+fn gossip_finality_cache_priority(
+    status: &LightClientFinalityUpdateStatus,
+) -> (u64, bool, u64, usize) {
+    (
+        status.finalized_header.beacon_slot,
+        // 342 is the minimum supermajority in the 512-member mainnet committee.
+        status.sync_committee_participants >= 342,
+        status.attested_header.beacon_slot,
+        status.sync_committee_participants,
+    )
 }
 
 fn cached_light_client_update_payloads_by_range(
@@ -1908,6 +2015,131 @@ mod tests {
         let payload = reopened.light_client_optimistic_update_payload().unwrap();
         assert_eq!(payload.bytes, expected_bytes);
         assert!(payload.context_bytes.is_some());
+    }
+
+    #[test]
+    fn gossip_cache_preserves_newer_responses_and_skips_unchanged_writes() {
+        let temp = TempDir::new().unwrap();
+        let slot = recent_cache_fixture_slot();
+        let fixture = crate::light_client::test_cached_light_client_fixture(slot);
+        let older = crate::light_client::test_cached_light_client_fixture(slot - 4);
+        let (store, _) = initialized_fixture_store(&temp, &fixture);
+        store
+            .record_gossip_finality_update(
+                fixture.status.finality_update.clone().unwrap(),
+                fixture.payloads.finality_update.clone().unwrap(),
+                fixture.store.clone(),
+            )
+            .unwrap();
+        store
+            .record_gossip_optimistic_update(
+                fixture.status.optimistic_update.clone().unwrap(),
+                fixture.payloads.optimistic_update.clone().unwrap(),
+                fixture.store.clone(),
+            )
+            .unwrap();
+        let expected = store.inner.lock().unwrap().clone();
+        // Moving only this fixture's snapshot establishes that duplicate/older
+        // cache candidates cause no file write, without relying on timestamps.
+        let saved = temp.path().join("saved-snapshot.json");
+        fs::rename(store.state_path(), &saved).unwrap();
+        for candidate in [&fixture, &older] {
+            store
+                .record_gossip_finality_update(
+                    candidate.status.finality_update.clone().unwrap(),
+                    candidate.payloads.finality_update.clone().unwrap(),
+                    fixture.store.clone(),
+                )
+                .unwrap();
+            store
+                .record_gossip_optimistic_update(
+                    candidate.status.optimistic_update.clone().unwrap(),
+                    candidate.payloads.optimistic_update.clone().unwrap(),
+                    fixture.store.clone(),
+                )
+                .unwrap();
+        }
+        assert!(!store.state_path().exists());
+        assert_eq!(store.inner.lock().unwrap().clone(), expected);
+        fs::rename(&saved, store.state_path()).unwrap();
+        let reopened = ConsensusStore::open(temp.path(), None).unwrap();
+        assert_eq!(reopened.inner.lock().unwrap().clone(), expected);
+    }
+
+    #[test]
+    fn gossip_cache_persists_store_changes_without_replacing_newer_payloads() {
+        let temp = TempDir::new().unwrap();
+        let slot = recent_cache_fixture_slot();
+        let fixture = crate::light_client::test_cached_light_client_fixture(slot);
+        let older = crate::light_client::test_cached_light_client_fixture(slot - 4);
+        let (store, _) = initialized_fixture_store(&temp, &fixture);
+        store
+            .record_gossip_finality_update(
+                fixture.status.finality_update.clone().unwrap(),
+                fixture.payloads.finality_update.clone().unwrap(),
+                fixture.store.clone(),
+            )
+            .unwrap();
+        store
+            .record_gossip_optimistic_update(
+                fixture.status.optimistic_update.clone().unwrap(),
+                fixture.payloads.optimistic_update.clone().unwrap(),
+                fixture.store.clone(),
+            )
+            .unwrap();
+        let payloads = store.inner.lock().unwrap().clone().light_client_payloads;
+        // The recorder receives an already verified store from its caller.
+        // Exercise a participation-only change independently of gossip policy.
+        let mut next = fixture.store.clone();
+        next.previous_max_active_participants = 1;
+        store
+            .record_gossip_finality_update(
+                older.status.finality_update.clone().unwrap(),
+                older.payloads.finality_update.clone().unwrap(),
+                next.clone(),
+            )
+            .unwrap();
+        assert_eq!(store.light_client_store(), Some(next.clone()));
+        next.previous_max_active_participants = 2;
+        store
+            .record_gossip_optimistic_update(
+                older.status.optimistic_update.clone().unwrap(),
+                older.payloads.optimistic_update.clone().unwrap(),
+                next.clone(),
+            )
+            .unwrap();
+        let reopened = ConsensusStore::open(temp.path(), None).unwrap();
+        assert_eq!(reopened.light_client_store(), Some(next));
+        assert_eq!(
+            reopened.inner.lock().unwrap().clone().light_client_payloads,
+            payloads
+        );
+        assert_eq!(reopened.light_client_status(), fixture.status);
+    }
+
+    #[test]
+    fn gossip_cache_priority_keeps_supermajority_and_prefers_newer_headers() {
+        let fixture =
+            crate::light_client::test_cached_light_client_fixture(recent_cache_fixture_slot());
+        let mut stronger = fixture.status.finality_update.unwrap();
+        stronger.sync_committee_participants = 342;
+        let mut later_weaker = stronger.clone();
+        later_weaker.attested_header.beacon_slot += 1;
+        later_weaker.sync_committee_participants = 341;
+        assert!(
+            gossip_finality_cache_priority(&stronger)
+                > gossip_finality_cache_priority(&later_weaker)
+        );
+        later_weaker.sync_committee_participants = 342;
+        assert!(
+            gossip_finality_cache_priority(&later_weaker)
+                > gossip_finality_cache_priority(&stronger)
+        );
+        stronger.finalized_header.beacon_slot += 1;
+        assert!(
+            gossip_finality_cache_priority(&stronger)
+                > gossip_finality_cache_priority(&later_weaker)
+        );
     }
 
     #[test]
