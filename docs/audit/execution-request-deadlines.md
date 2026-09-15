@@ -50,7 +50,7 @@ assert receiver closure and usable subsequent requests, not wire cancellation.
 All 350 sync tests pass (one ignored), including six added tests covering both
 original failures, custom plan deadlines, successful values, response errors,
 closed channels, cancellation and reverse-header rotation past three full queues.
-Final independent review passes. Full local gates and CI/merge remain pending.
+Final independent review passes. Source `a5180319` passes all seven local gates: vendor verification, formatting, workspace check, strict Clippy, 1,454 workspace tests (23 ignored), documentation tests and release node linking. CI and merge remain pending.
 
 Per-request timeouts do not establish a whole-batch bound. Positive partial
 responses and ETH70 continuations can issue multiple exchanges. The salvage
