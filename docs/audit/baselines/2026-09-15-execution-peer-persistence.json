@@ -1,0 +1,230 @@
+{
+  "status": "All seven local gates and final independent review pass; PR/CI/merge pending",
+  "branch": "audit/execution-peer-persistence",
+  "base": "558bef698377392791a93bd7bb78d0de18aa2af4",
+  "source_sha256": {
+    "crates/logex-sync/src/p2p/persistence.rs": "66ac1cf5479da722c3ef0bee8774f00841ef1f5109f6ec9950c8b8664dfbf067",
+    "crates/logex-sync/src/p2p/peer_manager/mod.rs": "a8dd0dc01132393cba85120821965c1d4a65ff0c007a2a31f194d70b23bc69f3",
+    "crates/logex-node/src/runtime.rs": "0e901828a0230cc3f161ed73e0ae876c21b3319f483895080e0d1450ffe7f8ed",
+    "crates/logex-sync/Cargo.toml": "9a5879b1f96a3c589a9dd49455446aaeb181460d432b2243c3c887cbe9945ccb",
+    "Cargo.lock": "7de04e3f6c49fa5609b2c741aa93bc708b3536efb7c41410028383a9b90768dc",
+    "crates/logex-cl/src/network.rs": "1309b5c4c19e6722e02b94889e035b504568d1dcbcb5240d1af730376b813f76"
+  },
+  "findings": {
+    "B4-01": "Unbounded EL peer-cache input and record materialization",
+    "B4-02": "Path existence and runtime fallback hide filesystem failures",
+    "B4-03": "Damaged derived hints not preserved before replacement",
+    "B4-04": "Fixed temporary filename and automatic missing parent recreation",
+    "B4-05": "CL/EL nonregular cache entries opened before type validation"
+  },
+  "evidence_directory": "/private/tmp/logex-execution-peer-cache-x8nai65l",
+  "evidence": {
+    "persistence-design.json": {
+      "sha256": "64b985749769437f2ef3447ed451485555d70c6e2e16627a4fdca73f5e061756",
+      "bytes": 2819
+    },
+    "caller-review.json": {
+      "sha256": "6086d5d023154f840446add42318160218472395f2e0b1f2b93879715d22b8fd",
+      "bytes": 818
+    },
+    "final-review.json": {
+      "sha256": "83f9de072a7178701e24418133f06b53c7420c06ff1e3a9773439f71e3a15de7",
+      "bytes": 4811
+    },
+    "final-review-before-entry-type-fix.json": {
+      "sha256": "11be0494d1712fe334be2b18be8026acac460dd9474f0b3668c54bbbe43b534b",
+      "bytes": 3322
+    },
+    "original-controls.json": {
+      "sha256": "73adb0c8b2165d040d1f510637cc923b128cfbeb27633ccab5fe6a06d391b281",
+      "bytes": 1235
+    },
+    "original-reader.log": {
+      "sha256": "1f97708e2cde3fc0745e49415e930de74c98cf4509dab31779763f1379c3766d",
+      "bytes": 2061
+    },
+    "original-writer.log": {
+      "sha256": "73854569e5abf990363fb33fc47f760332aa3cfeda3dfaea6e847f8f41df913e",
+      "bytes": 1715
+    },
+    "original-cl-entry.json": {
+      "sha256": "eb7bf915da7044af486249d0a177c96efbd49e11f29f55c6f73ef103587f1648",
+      "bytes": 517
+    },
+    "original-cl-entry.log": {
+      "sha256": "9e1e23f81799388db42aa9159a95a2d4e2e99f7c46055c886eda6fa50543cb27",
+      "bytes": 1415
+    },
+    "persistence-tests.log": {
+      "sha256": "2d21b7f5135a0296298d615bad6f7d37c83852b734e9e0dd21e3138df3654a8f",
+      "bytes": 1600
+    },
+    "persistence-tests-final.log": {
+      "sha256": "9ff45c8abce24e460ba53c7ae23322a602cd846be4056c8e6e3a993b02b3d0a3",
+      "bytes": 1778
+    },
+    "cl-tests-final.log": {
+      "sha256": "d37a5bab1c3cdd1e7c9f316327a683fec5ac398e2d54cfefe7bbd25fb68a2787",
+      "bytes": 30424
+    },
+    "gates/results.json": {
+      "sha256": "fbf6aa45198d2867fe447e53b810249afa6a169288a56788ca4162954d7da18f",
+      "bytes": 3758
+    }
+  },
+  "focused_execution_persistence_tests": {
+    "passed": 11,
+    "failed": 0,
+    "ignored": 0
+  },
+  "focused_consensus_tests": {
+    "passed": 343,
+    "failed": 0,
+    "ignored": 1
+  },
+  "limits": {
+    "execution_cache_bytes": 1048576,
+    "read_bytes_maximum": 1048577,
+    "execution_cache_records": 512,
+    "durability": "Derived hints retain best-effort power-loss contract; atomic visibility without additional periodic fsync",
+    "paths": "Only regular final entries accepted for reads; initialized trusted parent, no concurrent path-swap guarantee",
+    "performance": "Existing no-op save path preserved; no benchmark or claimed throughput percentage",
+    "dependencies": "Existing locked serde direct edge and tempfile promoted from dev only; no new package version",
+    "remote": "No remote work; prior mac-mini cleanup complete",
+    "remaining": "Unbounded live known_peers inventory is a separate recorded EL lead; broader offline audit, supervision and verified repair remain open"
+  },
+  "source_commit": "3dfd553a6dc6c33188c11cd723abeb02dce1541d",
+  "workspace_tests": {
+    "groups": 25,
+    "passed": 1435,
+    "failed": 0,
+    "ignored": 23
+  },
+  "gates": {
+    "commit": "3dfd553a6dc6c33188c11cd723abeb02dce1541d",
+    "rustc": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+    "gates": [
+      {
+        "name": "vendor",
+        "command": [
+          "python3",
+          "tools/verify_datafusion_vendor.py"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T17:00:00.832308+00:00",
+        "finished": "2026-09-15T17:00:00.905554+00:00",
+        "sha256": "d8d80949d6f3378c14456842b531f0cade514179e4c94781b95ff9abb6447675",
+        "log": "/private/tmp/logex-execution-peer-cache-x8nai65l/gates/vendor.log"
+      },
+      {
+        "name": "format",
+        "command": [
+          "cargo",
+          "fmt",
+          "--all",
+          "--",
+          "--check"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T17:00:00.906850+00:00",
+        "finished": "2026-09-15T17:00:01.925144+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-execution-peer-cache-x8nai65l/gates/format.log"
+      },
+      {
+        "name": "check",
+        "command": [
+          "cargo",
+          "check",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T17:00:01.925683+00:00",
+        "finished": "2026-09-15T17:00:07.855063+00:00",
+        "sha256": "22af09584cf8504c43d7e43a7147292b38a3190d22d53b0853296a176fbf916e",
+        "log": "/private/tmp/logex-execution-peer-cache-x8nai65l/gates/check.log"
+      },
+      {
+        "name": "clippy",
+        "command": [
+          "cargo",
+          "clippy",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T17:00:07.856085+00:00",
+        "finished": "2026-09-15T17:00:16.405661+00:00",
+        "sha256": "43be17dcfb07eaf4a27d3b89cf741e3ade245f4cc87fb62fae50719cd17d1396",
+        "log": "/private/tmp/logex-execution-peer-cache-x8nai65l/gates/clippy.log"
+      },
+      {
+        "name": "test",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T17:00:16.406299+00:00",
+        "finished": "2026-09-15T17:03:08.374838+00:00",
+        "sha256": "afe3d8d68a545b7c71d05a504f70f64f7161f72ee3f532e0fa973fd587e584ab",
+        "log": "/private/tmp/logex-execution-peer-cache-x8nai65l/gates/test.log"
+      },
+      {
+        "name": "doc",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--doc",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T17:03:08.376084+00:00",
+        "finished": "2026-09-15T17:03:20.257819+00:00",
+        "sha256": "00157b0ac25c14056388fa5da11b59be7b409591df39e72fced1822fec9c852c",
+        "log": "/private/tmp/logex-execution-peer-cache-x8nai65l/gates/doc.log"
+      },
+      {
+        "name": "release-build",
+        "command": [
+          "cargo",
+          "build",
+          "-p",
+          "logex-node",
+          "--release",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T17:03:20.258635+00:00",
+        "finished": "2026-09-15T17:04:24.774234+00:00",
+        "sha256": "39b86993675e4ac8ad5c56870c84711e827930e97150cc7f07793a25b24ab3be",
+        "log": "/private/tmp/logex-execution-peer-cache-x8nai65l/gates/release-build.log"
+      }
+    ]
+  }
+}

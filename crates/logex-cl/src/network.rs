@@ -6894,8 +6894,17 @@ fn load_or_create_secret_key(secret_key_path: &Path) -> Result<CombinedKey, Cons
 }
 
 fn load_known_peers(path: &Path) -> Result<Vec<PersistedPeer>, ConsensusNetworkError> {
-    let file = match fs::File::open(path) {
-        Ok(file) => file,
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => {}
+        Ok(_) => {
+            return Err(ConsensusNetworkError::ReadKnownPeers {
+                path: path.to_path_buf(),
+                source: io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "known-peer cache must be a regular file",
+                ),
+            });
+        }
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(source) => {
             return Err(ConsensusNetworkError::ReadKnownPeers {
@@ -6903,7 +6912,23 @@ fn load_known_peers(path: &Path) -> Result<Vec<PersistedPeer>, ConsensusNetworkE
                 source,
             });
         }
-    };
+    }
+    // The initialized directory is trusted against unrelated concurrent path
+    // replacement. Reject existing special entries before opening them.
+    let file = fs::File::open(path)
+        .and_then(|file| {
+            if !file.metadata()?.is_file() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "opened known-peer cache is not a regular file",
+                ));
+            }
+            Ok(file)
+        })
+        .map_err(|source| ConsensusNetworkError::ReadKnownPeers {
+            path: path.to_path_buf(),
+            source,
+        })?;
     let mut contents = Vec::new();
     file.take((MAX_KNOWN_PEERS_BYTES + 1) as u64)
         .read_to_end(&mut contents)
@@ -9400,6 +9425,30 @@ mod tests {
         let path = discovery_secret_path(temp.path());
         assert!(load_or_create_secret_key(&path).is_err());
         assert!(!path.parent().unwrap().exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn known_peer_links_are_preserved_and_rejected_before_opening() {
+        use std::os::unix::fs::symlink;
+        let temp = TempDir::new().unwrap();
+        let target = temp.path().join("target");
+        fs::write(&target, b"[]").unwrap();
+        for (name, destination) in [
+            ("link", target.clone()),
+            ("dangling", temp.path().join("absent")),
+        ] {
+            let path = temp.path().join(name);
+            symlink(destination, &path).unwrap();
+            assert!(matches!(
+                load_known_peers(&path),
+                Err(ConsensusNetworkError::ReadKnownPeers { source, .. })
+                    if source.kind() == io::ErrorKind::InvalidData
+            ));
+            assert!(fs::symlink_metadata(path).unwrap().file_type().is_symlink());
+        }
+        assert_eq!(fs::read(target).unwrap(), b"[]");
+        assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 3);
     }
 
     #[test]

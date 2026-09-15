@@ -414,12 +414,12 @@ pub async fn run_sync(options: RunSyncOptions) {
     let known_peers = match load_known_peers(&known_peers_file) {
         Ok(peers) => peers,
         Err(e) => {
-            tracing::warn!(
+            tracing::error!(
                 error = %e,
                 path = %known_peers_file.display(),
-                "failed to load known peers, starting with an empty peer cache"
+                "failed to read or preserve known peers; check storage access before restarting"
             );
-            Vec::new()
+            std::process::exit(1);
         }
     };
     tracing::info!(

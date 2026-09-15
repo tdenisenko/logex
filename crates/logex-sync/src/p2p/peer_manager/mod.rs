@@ -66,6 +66,8 @@ use self::state::{
     seed_productive_peers, should_retry_disconnected_peer, upsert_known_peer,
 };
 
+use super::persistence::MAX_PERSISTED_PEERS;
+
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const DISCOVERY_WAIT: Duration = Duration::from_secs(2);
 const FILL_BUDGET: Duration = Duration::from_secs(2);
@@ -89,7 +91,6 @@ const EARLY_SESSION_DROP_THRESHOLD: Duration = Duration::from_secs(30);
 const SATURATED_PEER_RETRY_DELAY: Duration = Duration::from_secs(60);
 const USELESS_PEER_GRACE_PERIOD: Duration = Duration::from_secs(5);
 const SUBMITTED_DIAL_SUPPRESSION_INTERVAL: Duration = Duration::from_secs(15);
-const MAX_PERSISTED_PEERS: usize = 512;
 const MAX_TRACKED_PENDING: usize = 4096;
 const MAX_CONSECUTIVE_TIMEOUTS: u32 = 8;
 const OUTBOUND_DIAL_RATIO: usize = 3;
