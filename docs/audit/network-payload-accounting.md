@@ -86,7 +86,8 @@ references and unchanged JavaScript calculations; no browser-rendering claim.
 See [the validation record](baselines/2026-09-16-network-payload-accounting.json).
 All seven local gates pass on source `72c5a022`: vendor verification, formatting,
 workspace check, strict Clippy, 1,489 workspace tests (23 ignored), documentation
-tests and release node linking. PR, exact-head CI and merge remain pending.
+tests and release node linking. All six CI jobs passed on head `e32fda5e` (run
+`35024210393`); PR #182 merged as `76ecd184` after fresh exact-head/base checks.
 Cache payload admission, aggregate continuation budgets, the broader offline
 audit, volume supervision and verified repair remain open. Live sync and staging
 acceptance follow offline completion. Mac-mini audit testing and obsolete artifact

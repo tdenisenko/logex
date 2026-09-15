@@ -2201,12 +2201,10 @@ impl BodyReceiptRequestPlan {
         stats: &mut TypedRequestStats,
         min_return_blocks: usize,
     ) -> usize {
-        let started_at = Instant::now();
+        let budget = tokio::time::sleep(PIPELINED_BODY_RECEIPT_PREFIX_SALVAGE_TIMEOUT);
+        tokio::pin!(budget);
         let mut salvaged_chunks = 0usize;
         for salvage_round in 0..PIPELINED_BODY_RECEIPT_PREFIX_SALVAGE_CHUNKS {
-            if started_at.elapsed() >= PIPELINED_BODY_RECEIPT_PREFIX_SALVAGE_TIMEOUT {
-                break;
-            }
             let Some(range) =
                 body_receipt_missing_prefix_salvage_range(&self.ranges, chunks, min_return_blocks)
             else {
@@ -2218,16 +2216,20 @@ impl BodyReceiptRequestPlan {
                 .copied()
                 .unwrap_or_default();
             let chunk_index = base_chunk_index + ((salvage_round + 1) * self.ranges.len().max(1));
-            let Some(blocks) = self
-                .salvage_live_body_receipt_prefix_range(
+            // One budget covers both roles, all continuation exchanges and both
+            // rounds. Local expiry must not be recorded as a peer timeout when
+            // a per-exchange timer becomes ready at the same boundary.
+            let blocks = tokio::select! {
+                biased;
+                _ = &mut budget => break,
+                blocks = self.salvage_live_body_receipt_prefix_range(
                     range.clone(),
                     chunk_index,
-                    started_at,
                     failures,
                     stats,
-                )
-                .await
-            else {
+                ) => blocks,
+            };
+            let Some(blocks) = blocks else {
                 break;
             };
             chunks.insert(range.start, blocks);
@@ -2244,7 +2246,6 @@ impl BodyReceiptRequestPlan {
         &self,
         range: std::ops::Range<usize>,
         chunk_index: usize,
-        salvage_started_at: Instant,
         failures: &mut ParallelChunkFailures,
         stats: &mut TypedRequestStats,
     ) -> Option<Vec<SourcedBodyReceipts>> {
@@ -2265,10 +2266,6 @@ impl BodyReceiptRequestPlan {
             .into_iter()
             .take(PIPELINED_BODY_RECEIPT_PREFIX_SALVAGE_PEER_LIMIT)
         {
-            if salvage_started_at.elapsed() >= PIPELINED_BODY_RECEIPT_PREFIX_SALVAGE_TIMEOUT {
-                break;
-            }
-
             let body_started_at = Instant::now();
             let body_result = {
                 let _active = BodyReceiptActiveRequestGuard::new(
@@ -2334,10 +2331,6 @@ impl BodyReceiptRequestPlan {
                 PIPELINED_BODY_RECEIPT_PREFIX_SALVAGE_PEER_LIMIT,
             );
             for receipt_peer in receipt_candidates {
-                if salvage_started_at.elapsed() >= PIPELINED_BODY_RECEIPT_PREFIX_SALVAGE_TIMEOUT {
-                    break;
-                }
-
                 let receipt_started_at = Instant::now();
                 let receipt_result = {
                     let _active = BodyReceiptActiveRequestGuard::new(
@@ -8712,3 +8705,6 @@ mod source_tests;
 
 #[cfg(test)]
 mod payload_tests;
+
+#[cfg(test)]
+mod salvage_tests;
