@@ -62,7 +62,9 @@ all six fixed digest oracles and reconciled the final source files. All seven
 local gates passed on this commit, including 1,299 workspace tests (23 ignored),
 documentation tests and release build. See the [gate and review record](baselines/2026-09-15-consensus-gossip-conformance-gates.json)
 for toolchain, commands, log/specification hashes and immutable source binding.
-Linux/macOS CI and merge remain pending. All fixtures are bounded and
+All six Linux/macOS CI jobs passed in run `34924077952` at head `cccf6190`.
+[PR #160](https://github.com/tdenisenko/logex/pull/160) merged as `10d05727`
+on September 15 at 03:18:28 UTC; see the [CI and merge record](baselines/2026-09-15-consensus-gossip-conformance-ci.json). All fixtures are bounded and
 offline. No live peer, production
 data or Mac mini work is part of this change.
 

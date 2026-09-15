@@ -1,0 +1,451 @@
+{
+  "commit": "d3aeb891875dbb52756f556be381845176b71376",
+  "rustc": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+  "gates": [
+    {
+      "name": "vendor",
+      "command": [
+        "python3",
+        "tools/verify_datafusion_vendor.py"
+      ],
+      "exit_code": 0,
+      "started": "2026-09-15T03:48:12.567060+00:00",
+      "finished": "2026-09-15T03:48:12.632686+00:00",
+      "sha256": "d8d80949d6f3378c14456842b531f0cade514179e4c94781b95ff9abb6447675",
+      "log": "/private/tmp/logex-gossip-admission.ytg0v60d/gates/vendor.log"
+    },
+    {
+      "name": "format",
+      "command": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "exit_code": 0,
+      "started": "2026-09-15T03:48:12.633074+00:00",
+      "finished": "2026-09-15T03:48:13.504825+00:00",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "log": "/private/tmp/logex-gossip-admission.ytg0v60d/gates/format.log"
+    },
+    {
+      "name": "check",
+      "command": [
+        "cargo",
+        "check",
+        "--workspace",
+        "--all-targets",
+        "--locked",
+        "--offline",
+        "-j",
+        "2"
+      ],
+      "exit_code": 0,
+      "started": "2026-09-15T03:48:13.505256+00:00",
+      "finished": "2026-09-15T03:48:19.523485+00:00",
+      "sha256": "7d1e144c8d2fafd549e1a7f289dd396155006ae7298699fabaf6a7789c8ed871",
+      "log": "/private/tmp/logex-gossip-admission.ytg0v60d/gates/check.log"
+    },
+    {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--locked",
+        "--offline",
+        "-j",
+        "2",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit_code": 0,
+      "started": "2026-09-15T03:48:19.524368+00:00",
+      "finished": "2026-09-15T03:48:25.923362+00:00",
+      "sha256": "f2dad0d77a668ac83b953400d1e52e10f955324f0569956f88301f5306c10c15",
+      "log": "/private/tmp/logex-gossip-admission.ytg0v60d/gates/clippy.log"
+    },
+    {
+      "name": "test",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace",
+        "--all-targets",
+        "--locked",
+        "--offline",
+        "-j",
+        "2"
+      ],
+      "exit_code": 0,
+      "started": "2026-09-15T03:48:25.923945+00:00",
+      "finished": "2026-09-15T03:51:47.246344+00:00",
+      "sha256": "6e22d2709469b2cbd7a8329c3019f01a15a5a9ac64baee41eba815150b3e37a9",
+      "log": "/private/tmp/logex-gossip-admission.ytg0v60d/gates/test.log"
+    },
+    {
+      "name": "doc",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace",
+        "--doc",
+        "--locked",
+        "--offline",
+        "-j",
+        "2"
+      ],
+      "exit_code": 0,
+      "started": "2026-09-15T03:51:47.248617+00:00",
+      "finished": "2026-09-15T03:52:14.904159+00:00",
+      "sha256": "6bb0357e47d960e34d6a225e5780c2e86b8ce359262c7567d2b91622bf843256",
+      "log": "/private/tmp/logex-gossip-admission.ytg0v60d/gates/doc.log"
+    },
+    {
+      "name": "release-build",
+      "command": [
+        "cargo",
+        "build",
+        "-p",
+        "logex-node",
+        "--release",
+        "--locked",
+        "--offline",
+        "-j",
+        "2"
+      ],
+      "exit_code": 0,
+      "started": "2026-09-15T03:55:33.656581+00:00",
+      "finished": "2026-09-15T03:56:20.460075+00:00",
+      "sha256": "64ab8ce117e72703e58acfb24a1e779da9e598b482d978791a037265f36d6824",
+      "log": "/private/tmp/logex-gossip-admission.ytg0v60d/gates/release-build.log",
+      "prior_attempt": {
+        "name": "release-build",
+        "command": [
+          "cargo",
+          "build",
+          "-p",
+          "logex-node",
+          "--release",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 101,
+        "started": "2026-09-15T03:52:14.905114+00:00",
+        "finished": "2026-09-15T03:53:51.442347+00:00",
+        "sha256": "0317ac1523716eb0ea9c97c42510dcbe4035f0609241b544e303c594f58045b0",
+        "log": "/private/tmp/logex-gossip-admission.ytg0v60d/gates/release-build-no-space.log"
+      }
+    }
+  ],
+  "release_retry_reason": "Initial linker failed errno28; removed only regenerable Cargo debug incremental cache under Cargo build lock. Source and build flags unchanged.",
+  "cache_cleanup": {
+    "path": "/Users/tdenisenko/code/logex/target/debug/incremental",
+    "contents": "Regenerable Cargo debug incremental cache only",
+    "source_or_data_changed": false,
+    "free_bytes_before": 154722304,
+    "free_bytes_after": 11899265024,
+    "finished": "2026-09-15T03:55:09.310338+00:00"
+  },
+  "workspace_test_summary": {
+    "groups": 25,
+    "passed": 1318,
+    "failed": 0,
+    "ignored": 23
+  },
+  "base": "10d0572722e512f292c2bff8096a9c5fd3a01ec4",
+  "branch": "audit/consensus-gossip-admission",
+  "source_sha256": {
+    "crates/logex-cl/src/network.rs": "2f70d09db57600f8830ec3e48f2a1ea7071b2cef5c88afb4fece297830f42b93",
+    "crates/logex-cl/src/light_client.rs": "8fb1603c5ccba1b54a48dc612ff1db2366b3d72d75e7ef5a99611df789072f9f",
+    "crates/logex-cl/src/lib.rs": "75add22a0957e215edb6a2d6a9cc8e100abfc502e09edfeeb81e7836a9d7aca8"
+  },
+  "focused_evidence": {
+    "base": "10d0572722e512f292c2bff8096a9c5fd3a01ec4",
+    "source_sha256": {
+      "crates/logex-cl/src/network.rs": "2f70d09db57600f8830ec3e48f2a1ea7071b2cef5c88afb4fece297830f42b93",
+      "crates/logex-cl/src/light_client.rs": "8fb1603c5ccba1b54a48dc612ff1db2366b3d72d75e7ef5a99611df789072f9f",
+      "crates/logex-cl/src/lib.rs": "75add22a0957e215edb6a2d6a9cc8e100abfc502e09edfeeb81e7836a9d7aca8"
+    },
+    "logs": {
+      "/private/tmp/logex-gossip-admission-cl/before.log": "07c701119c93b6b24d51ce8e660a6fc8d94837721c925e3c21f9676a33184cd4",
+      "/private/tmp/logex-gossip-admission-cl/after-focused.log": "19d9035458392fc27b1d597adb0f006c600067ae5702e8979e9a12061fea4fe8",
+      "/private/tmp/logex-gossip-admission-cl/after-focused-2.log": "3be3b593068f35deb6d23aed2a33fd80e796d509a2bef900731a16ea7dac3d4f",
+      "/private/tmp/logex-gossip-admission-cl/after-focused-3.log": "1e2e384f8e3e48fe61ad11ea93a29c5ae027ec90b28fcd50974b084b191a5364",
+      "/private/tmp/logex-gossip-admission-cl/after-all-cl.log": "91fa64c2af58e54474da4afe066f15b7a266b63d67a6f6e4f5954f30649d5100",
+      "/private/tmp/logex-gossip-admission-cl/after-all-cl-final.log": "65a55c40b3517c38c6187493f7528fbfeb23c20f047ffc7651c473dc6751d9d0",
+      "/private/tmp/logex-gossip-admission-cl/clippy.log": "902f4265654925b95b728993fe7c0ff28f3f1883f636336ee4e7ec14b5d0337f",
+      "/private/tmp/logex-gossip-admission-cl/notes.txt": "fa57c63f7416d06c11dc93c1812b66eba2b7184a2fc8b5a38d8127f4edff5aba",
+      "/private/tmp/logex-gossip-admission-cl/committee-before.log": "a7bceb3c6c589ebb89dcb62a05183693158c591a1d7622f9c36b970dc34f94c8",
+      "/private/tmp/logex-gossip-admission-cl/committee-after.log": "775e301ba3fa1d148f5ceee539e3a386b6fe537cc1450b2f570356f6d962407e",
+      "/private/tmp/logex-gossip-admission-cl/committee-all-cl.log": "60ff90f956c37695a81cbb9a9eea9b3e2cc6a4b32a93a0261f2fadd12af0986f",
+      "/private/tmp/logex-gossip-admission-cl/committee-clippy.log": "7e2f85460431004fc9e6f8c515551b2e54e8d9ccad46f55f92e651f18607de99",
+      "/private/tmp/logex-gossip-admission-cl/pre-committee-correction-sha256.txt": "6b57d05e73bf2e0dd0ce7be9d741fd51994ed3e630aec3290232a0b91460ef07"
+    },
+    "pinned_specification_sha256": {
+      "/private/tmp/logex-gossip-admission.ytg0v60d/altair-lc-p2p-v1.6.0.md": "25cb678e5e37c0f3dfa815a1cc978670442b05f3b1241a3550e8b89c6f59a4ff",
+      "/private/tmp/logex-gossip-admission.ytg0v60d/capella-lc-p2p-v1.6.0.md": "81c8797611454a05b2d4d49c1c8c35186817b11d03c82f3a67020b8607bb5fe4",
+      "/private/tmp/logex-gossip-admission.ytg0v60d/deneb-lc-p2p-v1.6.0.md": "c177a3ec954918488f358800ad6638b538ac3d1aa56adfdc100a23d2b0a825a3",
+      "/private/tmp/logex-gossip-admission.ytg0v60d/electra-lc-p2p-v1.6.0.md": "46eedd6db5817444b153e83a2301b16a48cd8157afb3271e88073e8a88f88c8e",
+      "/private/tmp/logex-gossip-admission.ytg0v60d/configs-mainnet.yaml-v1.6.0": "5b19524c7ce889478f682f77cc15778f3ec6b1f61dbbff404574336495993c95",
+      "/private/tmp/logex-gossip-admission.ytg0v60d/specs-altair-fork-choice.md-v1.6.0": "03b05af6f693f09a1c07b788c24881cf3d72b1697f9fed3cfc79e56f1af8b604",
+      "/private/tmp/logex-gossip-admission.ytg0v60d/specs-phase0-fork-choice.md-v1.6.0": "ce7751ae539b666ec1d01f733d6a017d8824fdb61bc9d34e56350ebbff226b60",
+      "/private/tmp/logex-gossip-admission.ytg0v60d/specs-fulu-p2p-interface.md-v1.6.0": "640cd3e7996bc1badad5c5845e7bacd918d86091631309506bf4b275a6f02da2",
+      "/private/tmp/logex-peer-retention.lbvJM5/altair-p2p-v1.6.0.md": "65296bcfe51223d3e1d72e0d0dbffc72f96ebb1a6157f29c6e8a616cc47959e3",
+      "/private/tmp/logex-gossip-conformance.bo486kd7/phase0-p2p-v1.6.0.md": "0ec2bdf6d0e07fe8e8bdd7590a3b105d3457f69d3722321d2052ff907553868f",
+      "/private/tmp/logex-gossip-admission.ytg0v60d/altair-lc-sync-v1.6.0.md": "6a89faf4f02731b54772f5efa1b7492215ef8fb5b12c35f1f5d493237ae8c268"
+    },
+    "results": {
+      "baseline_behavioral_failures": 2,
+      "first_after_fixture_failures": 2,
+      "intermediate_integration_compile_failure": "Result<bool> caller still matched unit; corrected",
+      "final_consensus_tests_passed": 240,
+      "final_consensus_tests_ignored": 1,
+      "strict_cl_clippy": "passed",
+      "committee_baseline_behavioral_failures": 2
+    },
+    "commands_by_log": {
+      "before.log": [
+        "cargo",
+        "test",
+        "-p",
+        "logex-cl",
+        "--lib",
+        "--locked",
+        "--offline",
+        "gossip_admission_"
+      ],
+      "after-focused.log": [
+        "cargo",
+        "test",
+        "-p",
+        "logex-cl",
+        "--lib",
+        "--locked",
+        "--offline",
+        "gossip_"
+      ],
+      "after-focused-2.log": [
+        "cargo",
+        "test",
+        "-p",
+        "logex-cl",
+        "--lib",
+        "--locked",
+        "--offline",
+        "gossip_"
+      ],
+      "after-focused-3.log": [
+        "cargo",
+        "test",
+        "-p",
+        "logex-cl",
+        "--lib",
+        "--locked",
+        "--offline",
+        "gossip_"
+      ],
+      "after-all-cl.log": [
+        "cargo",
+        "test",
+        "-p",
+        "logex-cl",
+        "--lib",
+        "--locked",
+        "--offline"
+      ],
+      "after-all-cl-final.log": [
+        "cargo",
+        "test",
+        "-p",
+        "logex-cl",
+        "--lib",
+        "--locked",
+        "--offline"
+      ],
+      "clippy.log": [
+        "cargo",
+        "clippy",
+        "-p",
+        "logex-cl",
+        "--lib",
+        "--tests",
+        "--locked",
+        "--offline",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "committee-before.log": [
+        "cargo",
+        "test",
+        "-p",
+        "logex-cl",
+        "--lib",
+        "--locked",
+        "--offline",
+        "gossip_unavailable_committee_"
+      ],
+      "committee-after.log": [
+        "cargo",
+        "test",
+        "-p",
+        "logex-cl",
+        "--lib",
+        "--locked",
+        "--offline",
+        "gossip_unavailable_committee_"
+      ],
+      "committee-all-cl.log": [
+        "cargo",
+        "test",
+        "-p",
+        "logex-cl",
+        "--lib",
+        "--locked",
+        "--offline"
+      ],
+      "committee-clippy.log": [
+        "cargo",
+        "clippy",
+        "-p",
+        "logex-cl",
+        "--lib",
+        "--tests",
+        "--locked",
+        "--offline",
+        "--",
+        "-D",
+        "warnings"
+      ]
+    },
+    "command_provenance": "Implementer confirmed exact arguments from tool history; cwd /Users/tdenisenko/code/logex, no -j or environment override. Each command redirected stdout/stderr into its named log. Final suite and Clippy files retain the successful reruns after header-change guard.",
+    "initial_source_commit": "4bb4c30a845410e18a78eec2585066eaca1dd194",
+    "source_commit": "d3aeb891875dbb52756f556be381845176b71376",
+    "initial_source_sha256": {
+      "crates/logex-cl/src/network.rs": "ac490f37b16e1fc0f79799b335f6dc029a3f2c7e962d9d057da4446da2ef3232",
+      "crates/logex-cl/src/light_client.rs": "8fb1603c5ccba1b54a48dc612ff1db2366b3d72d75e7ef5a99611df789072f9f",
+      "crates/logex-cl/src/lib.rs": "75add22a0957e215edb6a2d6a9cc8e100abfc502e09edfeeb81e7836a9d7aca8"
+    },
+    "initial_review": {
+      "path": "/private/tmp/logex-consensus-gossip-admission-independent-review-1/final-reconciliation-1/review.json",
+      "sha256": "aa2f51d826f7ebeade92a96bbff7978a81487c9c542b31bc0266c29510dd97ea",
+      "review": {
+        "status": "REVIEWED_NO_ACTIONABLE_FINDING_PENDING_COMMIT_BINDING",
+        "base": "10d05727",
+        "source_hashes": {
+          "network.rs": "ac490f37b16e1fc0f79799b335f6dc029a3f2c7e962d9d057da4446da2ef3232",
+          "light_client.rs": "8fb1603c5ccba1b54a48dc612ff1db2366b3d72d75e7ef5a99611df789072f9f",
+          "lib.rs": "75add22a0957e215edb6a2d6a9cc8e100abfc502e09edfeeb81e7836a9d7aca8"
+        },
+        "diff_sha256": "3f0f65eeb81fcf2d82d6d8eb12cdba4fbb66b743914a1b1cb6c7dadb6cb20763",
+        "findings": [],
+        "resolved_finding": "Signature periods older than retained finalized-store period now Ignore before unavailable committee verification; valid old-period regression preserves store and decode-failure count.",
+        "reviewed": [
+          "Exact modern LC-topic admission before application decompression; inactive recognized topics Ignore, malformed/unknown topics Reject.",
+          "Attested-slot digest/outer schema enforced; older nested header and RPC flexibility retained.",
+          "3999ms due floor and500ms allowance with controlled clock; actual BPO maintenance pre/rotate/retire/expiry tests.",
+          "Processing separate from forwarding; exact corresponding optimistic bytes compare aggregate and header; same-slot343 versus342 participant mismatch ignored for forwarding but participation persisted.",
+          "History pending only after persistence succeeds and Accept; recorded only when report returns true.",
+          "Conditional recorder preserves better cached responses and stable ties while storing real verified-state improvements; no-op avoids snapshot clone/write.",
+          "Header-only changes trigger materialization; durable changes trigger request scheduling; participation-only does not cause history materialization."
+        ],
+        "source_cost_limits": [
+          "Bounded SSZ metadata decode/serialization plus verification remain; no timing claim.",
+          "Ignored but processable updates still perform necessary verification; unchanged recorder avoids full snapshot rewrite.",
+          "Atomic recorder fixtures intentionally operate at trusted recorder boundary, not cryptographic proof."
+        ],
+        "validation_limits": [
+          "Read-only independent reconciliation;236pass1ignored and strictClippy are implementer/root reported checks, not rerun here.",
+          "No source edits, Cargo, remote work or benchmarks.",
+          "Commit binding pending; no broader resource-admission or all-fork protocol closure."
+        ]
+      }
+    },
+    "final_review": {
+      "path": "/private/tmp/logex-consensus-gossip-admission-independent-review-1/committee-final-reconciliation-1/review.json",
+      "sha256": "1577bafacbaa5176993b6e6ba3cf557bc6d2933489b9bb1863a254ae34858f99",
+      "review": {
+        "status": "REVIEWED_NO_ACTIONABLE_FINDING_PENDING_COMMIT_BINDING",
+        "source_hashes": {
+          "network.rs": "2f70d09db57600f8830ec3e48f2a1ea7071b2cef5c88afb4fece297830f42b93",
+          "light_client.rs": "8fb1603c5ccba1b54a48dc612ff1db2366b3d72d75e7ef5a99611df789072f9f",
+          "lib.rs": "75add22a0957e215edb6a2d6a9cc8e100abfc502e09edfeeb81e7836a9d7aca8"
+        },
+        "diff_sha256": "a65b6762bfcc92d920e788649398f5469b43d0f82166636a2136085222606e0f",
+        "finding_closed": "UnknownSyncCommitteePeriod now precisely maps to Ignore; structural/proof/signature errors retain Reject.",
+        "controls_read": [
+          "P+1 next-unknown optimistic and P+2 catchup finality prove exact committee error, topic/timing validity, and same bytes verify with matching trusted bootstrap.",
+          "Ignored updates leave store, response caches, pending/committed forwarding history and counters unchanged.",
+          "Known committee malformed SSZ, invalid signature and execution proof errors Reject with unchanged store.",
+          "Canonical parser rejects extra components, upper-case hex and incorrect lengths; ASCII lowercase check preserves semantics without reencoding."
+        ],
+        "limits": [
+          "Read-only review only;240passing1ignored+Clippy belong to implementer/root evidence.",
+          "Previous final review remains linked by preserved history; this correction closes its subsequently discovered committee gap.",
+          "No Cargo, source edits or benchmarks."
+        ]
+      }
+    },
+    "initial_commit_binding": {
+      "path": "/private/tmp/logex-consensus-gossip-admission-independent-review-1/final-reconciliation-1/commit-binding.json",
+      "sha256": "235f5ae8fc3dcf1c36f3afd1aef477457d44737be9f06c2281c42df928dad8d9",
+      "binding": {
+        "status": "REVIEW_BOUND_TO_COMMITTED_SOURCE",
+        "commit": "4bb4c30a845410e18a78eec2585066eaca1dd194",
+        "parent": "10d0572722e512f292c2bff8096a9c5fd3a01ec4",
+        "source_hashes": {
+          "network.rs": "ac490f37b16e1fc0f79799b335f6dc029a3f2c7e962d9d057da4446da2ef3232",
+          "light_client.rs": "8fb1603c5ccba1b54a48dc612ff1db2366b3d72d75e7ef5a99611df789072f9f",
+          "lib.rs": "75add22a0957e215edb6a2d6a9cc8e100abfc502e09edfeeb81e7836a9d7aca8"
+        },
+        "review_sha256": "aa2f51d826f7ebeade92a96bbff7978a81487c9c542b31bc0266c29510dd97ea",
+        "limits": "Read-only binding; root gates separate. No additional source edits or builds."
+      }
+    },
+    "superseded_gate_attempt": {
+      "source_commit": "4bb4c30a845410e18a78eec2585066eaca1dd194",
+      "reason": "Deliberately stopped only this runner process tree after confirming a local committee-availability attribution defect; no test failure triggered the stop.",
+      "completed": [
+        "vendor",
+        "format",
+        "check",
+        "clippy"
+      ],
+      "test_exit_code": -15,
+      "log_path": "/private/tmp/logex-gossip-admission.ytg0v60d/gates-superseded-4bb4c30a",
+      "pending_correction": "UnknownSyncCommitteePeriod from missing next committee or catch-up maps to Ignore; invalid proof/signature rejection preserved."
+    },
+    "commit_binding": {
+      "path": "/private/tmp/logex-consensus-gossip-admission-independent-review-1/committee-final-reconciliation-1/commit-binding.json",
+      "sha256": "4353b8df53a818bd2bfa9b03bdba3e8bcd76b74b98bb61c53eb5f41ec64c97a2",
+      "binding": {
+        "status": "REVIEW_BOUND_TO_COMMITTED_SOURCE",
+        "commit": "d3aeb891875dbb52756f556be381845176b71376",
+        "parent": "4bb4c30a845410e18a78eec2585066eaca1dd194",
+        "pr_base": "10d0572722e512f292c2bff8096a9c5fd3a01ec4",
+        "source_hashes": {
+          "network.rs": "2f70d09db57600f8830ec3e48f2a1ea7071b2cef5c88afb4fece297830f42b93",
+          "light_client.rs": "8fb1603c5ccba1b54a48dc612ff1db2366b3d72d75e7ef5a99611df789072f9f",
+          "lib.rs": "75add22a0957e215edb6a2d6a9cc8e100abfc502e09edfeeb81e7836a9d7aca8"
+        },
+        "review_sha256": "1577bafacbaa5176993b6e6ba3cf557bc6d2933489b9bb1863a254ae34858f99",
+        "limits": "Read-only binding; no source changes/builds. Root gates separate."
+      }
+    }
+  },
+  "scope": [
+    "Temporary fixtures and scripted objects only; no live discovery, swarm polling, peers or user data.",
+    "No benchmark or remote-host work.",
+    "Supported Capella through Fulu/BPO light-client topics; no unscheduled future-fork timing claim.",
+    "Library validation-report success records local forwarding invocation, not delivery acknowledgment.",
+    "Ignored early messages are not queued for replay; RPC recovery remains available.",
+    "Unknown/inactive topics skip application decode; required global message-ID decoding still precedes duplicate lookup.",
+    "No-op store updates skip historical snapshot clone/write and anchor materialization; changed snapshots retain existing whole-history write cost."
+  ]
+}
