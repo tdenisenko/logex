@@ -4,7 +4,7 @@ use ssz::Decode;
 use ssz_derive::{Decode, Encode};
 use ssz_types::{BitList, BitVector, FixedVector, VariableList};
 use thiserror::Error;
-use tree_hash::{TreeHash as _, merkle_root, mix_in_length};
+use tree_hash::{MerkleHasher, TreeHash as _, merkle_root, mix_in_length};
 use tree_hash_derive::TreeHash;
 use typenum::{U1, U2, U8, U16, U32, U33, U64, U4096, U8192, U131072, U1048576, U1073741824};
 
@@ -222,6 +222,22 @@ fn byte_list_root<N: typenum::Unsigned>(bytes: &VariableList<u8, N>) -> B256 {
     mix_in_length(&merkle_root(bytes, N::USIZE.div_ceil(32)), bytes.len())
 }
 
+// Retain only the Merkle accumulator, rather than 32 bytes per transaction.
+fn transactions_root(transactions: &SszTransactions) -> B256 {
+    let mut hasher = MerkleHasher::with_leaves(SszTransactions::max_len());
+    for transaction in transactions {
+        hasher
+            .write(byte_list_root(transaction).as_slice())
+            .expect("bounded SSZ transaction list fits its Merkle tree");
+    }
+    mix_in_length(
+        &hasher
+            .finish()
+            .expect("transaction roots fill complete leaves"),
+        transactions.len(),
+    )
+}
+
 impl tree_hash::TreeHash for ExecutionPayloadElectraSsz {
     fn tree_hash_type() -> tree_hash::TreeHashType {
         tree_hash::TreeHashType::Container
@@ -236,14 +252,7 @@ impl tree_hash::TreeHash for ExecutionPayloadElectraSsz {
     }
 
     fn tree_hash_root(&self) -> B256 {
-        let mut transaction_roots = Vec::with_capacity(self.transactions.len() * 32);
-        for transaction in &self.transactions {
-            transaction_roots.extend_from_slice(byte_list_root(transaction).as_slice());
-        }
-        let transactions_root = mix_in_length(
-            &merkle_root(&transaction_roots, SszTransactions::max_len()),
-            self.transactions.len(),
-        );
+        let transactions_root = transactions_root(&self.transactions);
         let fields = [
             self.parent_hash.tree_hash_root(),
             self.fee_recipient.tree_hash_root(),
@@ -263,9 +272,9 @@ impl tree_hash::TreeHash for ExecutionPayloadElectraSsz {
             self.blob_gas_used.tree_hash_root(),
             self.excess_blob_gas.tree_hash_root(),
         ];
-        let mut bytes = Vec::with_capacity(fields.len() * 32);
-        for field in fields {
-            bytes.extend_from_slice(field.as_slice());
+        let mut bytes = [0; 17 * 32];
+        for (chunk, field) in bytes.as_chunks_mut::<32>().0.iter_mut().zip(fields) {
+            chunk.copy_from_slice(field.as_slice());
         }
         merkle_root(&bytes, fields.len())
     }
@@ -826,6 +835,27 @@ mod tests {
                 byte_list_root(&bytes),
                 bytes.tree_hash_root(),
                 "length={length}"
+            );
+        }
+    }
+
+    #[test]
+    fn streamed_transaction_roots_match_generic_ssz() {
+        for count in [0, 1, 2, 3, 7, 8, 9, 17] {
+            let transactions = SszTransactions::new(
+                (0..count)
+                    .map(|index| {
+                        let length = [0, 1, 31, 32, 33, 63, 64, 65][index % 8];
+                        VariableList::new((0..length).map(|byte| (byte + index) as u8).collect())
+                            .unwrap()
+                    })
+                    .collect(),
+            )
+            .unwrap();
+            assert_eq!(
+                transactions_root(&transactions),
+                transactions.tree_hash_root(),
+                "count={count}"
             );
         }
     }

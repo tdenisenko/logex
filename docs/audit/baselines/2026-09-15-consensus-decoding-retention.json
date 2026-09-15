@@ -1,0 +1,405 @@
+{
+  "branch": "audit/consensus-decoding-retention",
+  "base_commit": "a9126a6155c02526d56e4b4580f5ffd4560a722c",
+  "source_commit": "331c97fa7eb3603d1832b0bda422a72d31f75fc7",
+  "source_sha256": {
+    "crates/logex-cl/src/lib.rs": "caccf8563188875545e9c2a4d506241ff30f86faae4129fd14af5d23f42cadfe",
+    "crates/logex-cl/src/beacon_block.rs": "b8a2e9220df5d9d290683c4fd8a25d231389355b306b2053985cbad733771c20"
+  },
+  "findings": [
+    "B3-49",
+    "B3-50",
+    "B3-51"
+  ],
+  "classification": "Implementation-based performance opportunities; no incorrect-root/lookup or measured throughput claim.",
+  "evidence_root": "/private/tmp/logex-decoding-retention-tz4xvh8i",
+  "reports": {
+    "before-anchors.json": {
+      "base": "a9126a6155c02526d56e4b4580f5ffd4560a722c",
+      "candidate_sha256": "caccf8563188875545e9c2a4d506241ff30f86faae4129fd14af5d23f42cadfe",
+      "method": "Restore one exact original function in candidate harness at a time; not a full baseline checkout.",
+      "runs": [
+        {
+          "function": "    pub fn replace_anchor_range(",
+          "test": "retained_anchors_unchanged_range_keeps_the_published_file",
+          "command": [
+            "cargo",
+            "test",
+            "-p",
+            "logex-cl",
+            "--lib",
+            "--locked",
+            "--offline",
+            "-j2",
+            "retained_anchors_unchanged_range_keeps_the_published_file"
+          ],
+          "exit_code": 101,
+          "harness_sha256": "6d584b0c67b3a4c5c2877b3626f78972072fa09763db36210258d9a51933380d",
+          "log": "/private/tmp/logex-decoding-retention-tz4xvh8i/before-retained_anchors_unchanged_range_keeps_the_published_file.log",
+          "log_sha256": "3b35edd8c1a5df270fa65fb3fa018b56d3d68c003bd31600472b5ad27cd9e788"
+        },
+        {
+          "function": "fn normalize_anchor_records(",
+          "test": "retained_anchors_sorted_normalization_reuses_input_allocation",
+          "command": [
+            "cargo",
+            "test",
+            "-p",
+            "logex-cl",
+            "--lib",
+            "--locked",
+            "--offline",
+            "-j2",
+            "retained_anchors_sorted_normalization_reuses_input_allocation"
+          ],
+          "exit_code": 101,
+          "harness_sha256": "a50a1f8889795235b832753451960393574a87cf2a8022c8a5102dbc693cd324",
+          "log": "/private/tmp/logex-decoding-retention-tz4xvh8i/before-retained_anchors_sorted_normalization_reuses_input_allocation.log",
+          "log_sha256": "530582116e935b33ab75f0bc090edda7549d9912164ea63485fcacdb4a65885d"
+        }
+      ],
+      "restored_sha256": "caccf8563188875545e9c2a4d506241ff30f86faae4129fd14af5d23f42cadfe"
+    },
+    "anchors-review.json": {
+      "status": "REVIEWED_NO_ACTIONABLE_FINDING",
+      "source_sha256": "caccf8563188875545e9c2a4d506241ff30f86faae4129fd14af5d23f42cadfe",
+      "base": "a9126a61",
+      "scope": "lib.rs retained anchor optimization only; no Beacon decoder review.",
+      "invariants": [
+        "Restoration rejects unsorted/duplicate persisted anchors; descriptor creation and public replace/extend normalize. Internal snapshot mutex is private. Binary search/partition/last rely on this established strictly increasing key invariant.",
+        "Partition predicates compare directly against u64 endpoints, avoiding end+1 overflow; valid contained range implies start index<=end. u64MAX and empty vectors handled.",
+        "Normalized slice equality compares complete AnchorRecord metadata (anchor,finalized,parent root), so no-op cannot discard metadata-only changes.",
+        "update_if_with_writer locks writer before failure latch and prepare; unchanged result avoids candidate clone/write but cannot bypass latched failure. Candidate range is computed under same writer lock as mutation/publication, preventing stale-index races.",
+        "Contained normalized incoming records splice exactly removed interval while preserving sorted unique outer segments. Changed snapshot recomputes derived summaries and preserves indexed/verified-store overlays.",
+        "Noncontained/reversed inputs retain original remove/extend/last-wins normalization semantics. Normalizing incoming first preserves its last duplicate and does not alter override of retained old entries.",
+        "Sorted normalization fast path returns input allocation only when strict uniqueness/order already hold; other cases retain BTreeMap last-wins behavior.",
+        "Write failure keeps old in-memory snapshot and latches failure through unchanged existing writer helper; no new publication order."
+      ],
+      "tests_reviewed": [
+        "Inode-held no-op/reversed-input normalization/empty gap no write, metadata change writes/reopens, failure latch rejects identical request.",
+        "Independent last-record-wins reference covers contained replacement/deletion/insertion, out-of-range override, reversed interval and full u64 boundaries.",
+        "Lookup parity with scan across empty/gaps/exact endpoints/MAX.",
+        "Sorted normalization retains input pointer."
+      ],
+      "limitations": [
+        "Test sources inspected only; root owns reported four passing focused tests and original-function controls/full gates.",
+        "No throughput claim. Out-of-range fallback and changed snapshots still clone/write and normalize as before."
+      ],
+      "findings": [],
+      "execution": "Read-only source review; no Cargo/source edit/commit/remote/benchmark."
+    },
+    "decoding-final-review.json": {
+      "status": "REVIEWED_NO_ACTIONABLE_FINDING",
+      "source_sha256": {
+        "beacon_block.rs": "b8a2e9220df5d9d290683c4fd8a25d231389355b306b2053985cbad733771c20",
+        "lib.rs": "caccf8563188875545e9c2a4d506241ff30f86faae4129fd14af5d23f42cadfe"
+      },
+      "base": "a9126a61",
+      "reviewed": [
+        "SszTransactions is bounded VariableList of at most1048576 composite byte lists, each with1073741824-byte declared SSZ maximum. Streaming feeds exactly one32-byte root per actual transaction into MerkleHasher with the unchanged declared transaction maximum.",
+        "Pinned tree_hash0.10.0 with_leaves allocates depth-sized frontier; finish zero-completes missing leaves including empty input. This matches pinned ssz_types0.11.0 composite-list algorithm. Both old/new roots mix actual transaction count exactly once.",
+        "Inner byte_list_root unchanged, retaining byte-list limit and actual byte-length mixing. Iteration borrows each decoded transaction; root temporary does not escape write call; hasher owns copied frontier nodes and is consumed by finish.",
+        "Expect paths rely on existing VariableList maximum and complete32-byte writes, same invariant as generic ssz_types; no new unchecked peer count or giant maximum-sized tree allocation.",
+        "Execution payload has exactly17 fields in unchanged order; fixed544-byte stack array copies each32-byte field then merkle_root uses17 leaves as before.",
+        "Generic SSZ equivalence tests cover empty/list counts around powers of two and inner lengths around32-byte boundaries; existing real Fulu block retains exact expected root/context oracle.",
+        "lib.rs SHA remains the prior anchor-reviewedcaccf856 snapshot; no cross-file change identified."
+      ],
+      "evidence_read": {
+        "typed_decoding_review_sha256": "2cdf4e4a77594ba876ce993269be48df6385ebc0a1814b3a83df630dd61b9d47"
+      },
+      "limits": [
+        "This removes explicit32bytes-per-transaction root scratch and544-byte container heap scratch; no throughput/RSS measurement claim.",
+        "Typed transaction vectors/inner bytes and allocator overhead remain finite but outside raw RPC quotas; decoding retains existing infallible allocation behavior.",
+        "Typed full Beacon object remains local to decode and returns compact metadata; no new retained typed tree.",
+        "Existing Electra/Fulu schema scope and proposer-signature/canonical trust boundaries unchanged."
+      ],
+      "validation": "Test source and pinned dependencies inspected only; root owns actual focused/original-function/full-gate outcomes. No Cargo/source edit/remote/benchmark.",
+      "findings": []
+    },
+    "typed-decoding-review.json": {
+      "scope": "Initial phase: read-only typed Beacon SSZ allocation and lifetime audit. Subsequent authorized implementation and checks are recorded separately below. No benchmarks or remote operations.",
+      "branch": "audit/consensus-decoding-retention",
+      "base": "a9126a6155c02526d56e4b4580f5ffd4560a722c",
+      "beacon_block_sha256": "d3252c4dea2c3627d65051d44ca5be1d37010f3f8a1192f48a7a1c7acdee173b",
+      "dependencies": {
+        "ethereum_ssz": "0.9.1",
+        "ssz_types": "0.11.0",
+        "tree_hash": "0.10.0",
+        "local_registry": "/Users/tdenisenko/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f"
+      },
+      "finding": {
+        "path": "crates/logex-cl/src/beacon_block.rs:240",
+        "description": "Execution payload root materializes all transaction roots in a temporary Vec before merkle_root, although existing MerkleHasher accepts roots incrementally. This adds exactly 32 bytes per transaction in requested Vec capacity.",
+        "bounded_worst_case": "The SSZ transaction list permits 1,048,576 elements. Empty inner byte lists are SSZ-decodable with repeated offsets, requiring a 4 MiB offset table and producing 32 MiB temporary transaction roots. This is a shape/allocation example, not an execution-valid block claim.",
+        "recommendation": "Stream each existing byte_list_root into MerkleHasher::with_leaves(SszTransactions::max_len()), finish, then mix length. This matches pinned ssz_types/src/tree_hash.rs:31-44 and removes linear scratch without introducing a dependency or custom hash algorithm.",
+        "tests_proposed": [
+          "Small empty, one-item and three-item transaction lists, including empty and nonempty byte lists, compared with generic SSZ list roots.",
+          "Existing real Fulu block fixed expected root and context controls."
+        ],
+        "status": "Initial review finding; subsequently implemented as recorded below."
+      },
+      "dispositions": [
+        {
+          "subject": "Variable list decode bounds",
+          "evidence": "ethereum_ssz/src/decode/impls.rs:513-557 sanitizes first offset against actual bytes, requires divisible nonzero four-byte offset table, checks count maximum, then monotonically sanitizes each next offset before slicing. It does not allocate a separate offset vector."
+        },
+        {
+          "subject": "Allocation from actual elements",
+          "evidence": "ssz_types/src/variable_list.rs:252-271 caps initial variable-element preallocation at min(iterator upper bound, protocol limit, 131072), then pushes actual decoded elements. Lines284-312 derive fixed-element count from input bytes and reject count over maximum before Vec allocation."
+        },
+        {
+          "subject": "No giant tree allocated from type maxima",
+          "evidence": "tree_hash/src/merkle_hasher.rs:168-190 allocates depth-sized accumulator; finish:266-292 completes missing subtrees with cached zero hashes. One-GiB transaction bound controls tree depth, not a one-GiB allocation."
+        },
+        {
+          "subject": "Other collection tree roots",
+          "evidence": "ssz_types/src/tree_hash.rs streams basic packed values and composite roots. Other Beacon collections have explicit small protocol limits; no equivalent materialized list-root vector found."
+        },
+        {
+          "subject": "Typed lifetime",
+          "evidence": "beacon_block.rs:380-403 keeps SignedBeaconBlockElectraSsz local and returns only Copy VerifiedBeaconBlock metadata. network.rs:3961 and4071 decode sequentially, retaining pairs of compact metadata and raw chunks; typed trees do not accumulate across a response."
+        }
+      ],
+      "limits": [
+        "Raw RPC reservations are not total allocator/RSS accounting. Typed transaction Vec descriptors, inner byte allocations, and hashing scratch are additional finite temporary memory.",
+        "On the current 64-bit target, a Vec descriptor has three machine words; one million inner lists therefore imply approximately 24 MiB descriptor storage, excluding allocator bookkeeping and transient reallocation. This is code-based sizing, not a measured RSS bound.",
+        "Typed allocations use ordinary infallible Rust Vec allocation. This review does not establish allocation-failure recovery or a strict process-wide memory ceiling.",
+        "CPU work can scale to the protocol element maximum even for empty transactions. No benchmark or execution-transaction semantic validation is claimed.",
+        "Only current Electra/Fulu body schema is supported; pre-Electra body support remains unchanged and outside this allocation review."
+      ],
+      "conclusion": "No unbounded allocation or escaping typed-tree retention found under existing RPC input limits. Remove the concrete transaction-root scratch allocation; accept and document finite typed decode overhead rather than introduce a new parser/quota architecture without evidence.",
+      "implementation": {
+        "status": "Validated; source frozen, no commit.",
+        "source_sha256": "b8a2e9220df5d9d290683c4fd8a25d231389355b306b2053985cbad733771c20",
+        "changes": [
+          "Specific transactions_root helper streams contiguous-byte transaction roots through pinned MerkleHasher, preserving declared maximum and mixed length.",
+          "Fixed 17-field execution payload roots now use a 544-byte stack array instead of heap Vec.",
+          "Small generic SSZ root-equivalence controls cover counts 0,1,2,3,7,8,9,17 and varied byte lengths around 32-byte boundaries."
+        ],
+        "cleanup": "Removed obsolete transaction_roots Vec and fixed-container Vec. No protocol bounds, trust rules, or RPC behavior changed.",
+        "commands": [
+          {
+            "command": "cargo test -p logex-cl --lib --locked --offline -j 2 beacon_block::tests",
+            "log": "implementation/beacon-focused.log",
+            "exit": 0,
+            "result": "14 passed, 1 ignored"
+          },
+          {
+            "command": "cargo test -p logex-cl --lib --locked --offline -j 2",
+            "log": "implementation/cl-library.log",
+            "exit": 0,
+            "result": "305 passed, 1 ignored"
+          },
+          {
+            "command": "cargo clippy -p logex-cl --lib --tests --locked --offline -j 2 -- -D warnings",
+            "log": "implementation/cl-clippy.log",
+            "exit": 101,
+            "result": "New constant chunks_exact_mut lint; corrected to as_chunks_mut::<32>().0.iter_mut()."
+          },
+          {
+            "command": "cargo test -p logex-cl --lib --locked --offline -j 2",
+            "log": "implementation/cl-library-final.log",
+            "exit": 0,
+            "result": "305 passed, 1 ignored"
+          },
+          {
+            "command": "cargo clippy -p logex-cl --lib --tests --locked --offline -j 2 -- -D warnings",
+            "log": "implementation/cl-clippy-final.log",
+            "exit": 0
+          }
+        ]
+      }
+    }
+  },
+  "validation_status": "All seven local gates passed on source331c97fa;1383 workspace tests,23 ignored;305 consensus tests,1 ignored. Independent reviews pass.",
+  "publication_status": "pending",
+  "artifacts": [
+    {
+      "path": "/private/tmp/logex-decoding-retention-tz4xvh8i/anchors-focused.log",
+      "bytes": 1002,
+      "sha256": "8f66212ea40be027f2ff539ff46b10a5eef953493f53db07857d35579878feb8"
+    },
+    {
+      "path": "/private/tmp/logex-decoding-retention-tz4xvh8i/anchors-review.json",
+      "bytes": 2647,
+      "sha256": "bf90308b1a252a66e0903a82db28031dad75ddab43d58676c44f784167a7d446"
+    },
+    {
+      "path": "/private/tmp/logex-decoding-retention-tz4xvh8i/before-anchors.json",
+      "bytes": 1799,
+      "sha256": "2ae50a33f0a35e4c53667255ccbd0336d35fb7f3cc8c3b47b91a1e383c91411c"
+    },
+    {
+      "path": "/private/tmp/logex-decoding-retention-tz4xvh8i/before-retained_anchors_sorted_normalization_reuses_input_allocation.log",
+      "bytes": 1293,
+      "sha256": "530582116e935b33ab75f0bc090edda7549d9912164ea63485fcacdb4a65885d"
+    },
+    {
+      "path": "/private/tmp/logex-decoding-retention-tz4xvh8i/before-retained_anchors_unchanged_range_keeps_the_published_file.log",
+      "bytes": 1297,
+      "sha256": "3b35edd8c1a5df270fa65fb3fa018b56d3d68c003bd31600472b5ad27cd9e788"
+    },
+    {
+      "path": "/private/tmp/logex-decoding-retention-tz4xvh8i/decoding-final-review.json",
+      "bytes": 2564,
+      "sha256": "7c217a29bf12cf79741ebe507581633c5eb6169e6e854f37e54996621ce4867a"
+    },
+    {
+      "path": "/private/tmp/logex-decoding-retention-tz4xvh8i/implementation/beacon-focused.log",
+      "bytes": 1941,
+      "sha256": "e543d40606a0333f5897aef0257e5aefbd6400becc31a1fb7633f521d384587b"
+    },
+    {
+      "path": "/private/tmp/logex-decoding-retention-tz4xvh8i/implementation/cl-clippy-final.log",
+      "bytes": 453,
+      "sha256": "52cc911b592a60e52c9a327c937c7d3f4dab1d9de6b123e816cc5e7083d9da5c"
+    },
+    {
+      "path": "/private/tmp/logex-decoding-retention-tz4xvh8i/implementation/cl-clippy.log",
+      "bytes": 907,
+      "sha256": "96b5bfe85a70062d29283477eee6430ec15c93892ed178e0dd13e268fc7fd404"
+    },
+    {
+      "path": "/private/tmp/logex-decoding-retention-tz4xvh8i/implementation/cl-library-final.log",
+      "bytes": 26802,
+      "sha256": "2a81bf14e0d7059cb192bade6784912ed7a079bbb34c4e0ee7112888afa478a4"
+    },
+    {
+      "path": "/private/tmp/logex-decoding-retention-tz4xvh8i/implementation/cl-library.log",
+      "bytes": 26726,
+      "sha256": "18d9d6717326387d63c5e13e07f908adc9bb8603d364f543ba3b086b92f296b5"
+    },
+    {
+      "path": "/private/tmp/logex-decoding-retention-tz4xvh8i/typed-decoding-review.json",
+      "bytes": 6593,
+      "sha256": "d70d24c401e5bfd6588ccaa66eb6cdf6f3264141188d1247b5950c67464bbc7d"
+    }
+  ],
+  "gates": {
+    "commit": "331c97fa7eb3603d1832b0bda422a72d31f75fc7",
+    "rustc": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+    "gates": [
+      {
+        "name": "vendor",
+        "command": [
+          "python3",
+          "tools/verify_datafusion_vendor.py"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T13:54:10.637313+00:00",
+        "finished": "2026-09-15T13:54:10.691554+00:00",
+        "sha256": "d8d80949d6f3378c14456842b531f0cade514179e4c94781b95ff9abb6447675",
+        "log": "/private/tmp/logex-decoding-retention-tz4xvh8i/gates/vendor.log"
+      },
+      {
+        "name": "format",
+        "command": [
+          "cargo",
+          "fmt",
+          "--all",
+          "--",
+          "--check"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T13:54:10.691892+00:00",
+        "finished": "2026-09-15T13:54:11.528635+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-decoding-retention-tz4xvh8i/gates/format.log"
+      },
+      {
+        "name": "check",
+        "command": [
+          "cargo",
+          "check",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T13:54:11.528984+00:00",
+        "finished": "2026-09-15T13:54:16.436451+00:00",
+        "sha256": "109d9b9d91ff04a9df7f040e99337de32b8188f890a1f04503c679d2cc0d4ac9",
+        "log": "/private/tmp/logex-decoding-retention-tz4xvh8i/gates/check.log"
+      },
+      {
+        "name": "clippy",
+        "command": [
+          "cargo",
+          "clippy",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T13:54:16.436954+00:00",
+        "finished": "2026-09-15T13:54:20.921838+00:00",
+        "sha256": "f0b615d0f18d1c74fef5e2a4791e003af17bba6b367a8e381fcaad2c28ab03f4",
+        "log": "/private/tmp/logex-decoding-retention-tz4xvh8i/gates/clippy.log"
+      },
+      {
+        "name": "test",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T13:54:20.922382+00:00",
+        "finished": "2026-09-15T13:57:02.369544+00:00",
+        "sha256": "6f50e68a4388c16f82ca38de89bebb5972ff90691346cdc89f9b24cf060ce923",
+        "log": "/private/tmp/logex-decoding-retention-tz4xvh8i/gates/test.log"
+      },
+      {
+        "name": "doc",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--doc",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T13:57:02.370808+00:00",
+        "finished": "2026-09-15T13:57:12.853107+00:00",
+        "sha256": "e7e95b4b37a17b8f28b673c1844a111e3c0665b5fa849dcccbe3f08a060d14db",
+        "log": "/private/tmp/logex-decoding-retention-tz4xvh8i/gates/doc.log"
+      },
+      {
+        "name": "release-build",
+        "command": [
+          "cargo",
+          "build",
+          "-p",
+          "logex-node",
+          "--release",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T13:57:12.853530+00:00",
+        "finished": "2026-09-15T13:58:14.863774+00:00",
+        "sha256": "adc80c60f776f67253877a494b3494281bc48a4ce335b6ba0ec4c6f3b7690c13",
+        "log": "/private/tmp/logex-decoding-retention-tz4xvh8i/gates/release-build.log"
+      }
+    ]
+  }
+}
