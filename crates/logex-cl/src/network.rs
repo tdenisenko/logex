@@ -55,9 +55,8 @@ use crate::rpc::{
 use crate::{
     ConsensusStore, LightClientVerificationError, MAINNET_CONSENSUS_CHAIN_SPEC,
     VerifiedBeaconBlock, VerifiedLightClientStore, apply_finality_update_payload,
-    apply_light_client_update_payload, apply_optimistic_update_payload, decode_finality_update,
-    decode_optimistic_update, decode_verified_beacon_block, force_update_light_client_store,
-    verify_bootstrap_payload,
+    apply_light_client_update_payload, apply_optimistic_update_payload,
+    decode_verified_beacon_block, force_update_light_client_store, verify_bootstrap_payload,
 };
 
 const CONSENSUS_STATE_DIR: &str = "cl";
@@ -766,19 +765,6 @@ fn verified_beacon_blocks_from_light_client_store(
             })
         })
         .collect()
-}
-
-fn finality_update_is_stale(bytes: &[u8], store: &VerifiedLightClientStore) -> bool {
-    decode_finality_update(bytes).is_ok_and(|status| {
-        status.attested_header.beacon_slot <= store.optimistic_header.beacon.slot
-            && status.finalized_header.beacon_slot <= store.finalized_header.beacon.slot
-    })
-}
-
-fn optimistic_update_is_stale(bytes: &[u8], store: &VerifiedLightClientStore) -> bool {
-    decode_optimistic_update(bytes).is_ok_and(|status| {
-        status.attested_header.beacon_slot <= store.optimistic_header.beacon.slot
-    })
 }
 
 fn verified_beacon_block_children_from_blocks(
@@ -2901,7 +2887,7 @@ impl ConsensusNetwork {
                         .permits(&metadata, &store, &next_store);
                     let headers_changed = next_store.finalized_header != store.finalized_header
                         || next_store.optimistic_header != store.optimistic_header;
-                    let persisted = self.consensus.record_gossip_finality_update(
+                    let persisted = self.consensus.record_verified_finality_update(
                         summary,
                         RawRpcResponse {
                             context_bytes: None,
@@ -2920,7 +2906,7 @@ impl ConsensusNetwork {
                         .permits(&metadata, &store, &next_store);
                     let headers_changed = next_store.finalized_header != store.finalized_header
                         || next_store.optimistic_header != store.optimistic_header;
-                    let persisted = self.consensus.record_gossip_optimistic_update(
+                    let persisted = self.consensus.record_verified_optimistic_update(
                         summary,
                         RawRpcResponse {
                             context_bytes: None,
@@ -3659,14 +3645,6 @@ impl ConsensusNetwork {
                     );
                     return;
                 };
-                if finality_update_is_stale(&payload.bytes, &store) {
-                    tracing::trace!(
-                        %peer,
-                        bytes = payload.bytes.len(),
-                        "ignoring stale light-client finality update response"
-                    );
-                    return;
-                }
                 match apply_finality_update_payload(&payload.bytes, &store) {
                     Ok((summary, next_store, _, _)) => {
                         if !rpc_context_matches_slot(&payload, summary.attested_header.beacon_slot)
@@ -3696,21 +3674,25 @@ impl ConsensusNetwork {
                         );
                         self.record_peer_success(peer, RpcRequestKind::LightClientFinalityUpdate);
                         self.finality_update_peers.insert(peer);
-                        if let Err(error) = self.consensus.record_verified_finality_update(
-                            summary,
-                            payload.clone(),
-                            next_store,
-                        ) {
-                            tracing::warn!(
-                                %peer,
-                                %error,
-                                "failed to persist verified finality update"
-                            );
-                            return;
+                        let headers_changed = next_store.finalized_header != store.finalized_header
+                            || next_store.optimistic_header != store.optimistic_header;
+                        let changed = match self
+                            .consensus
+                            .record_verified_finality_update(summary, payload, next_store)
+                        {
+                            Ok(changed) => changed,
+                            Err(error) => {
+                                tracing::warn!(%peer, %error, "failed to persist verified finality update");
+                                return;
+                            }
+                        };
+                        if headers_changed {
+                            self.seed_verified_light_client_headers();
+                            self.materialize_verified_anchor_segments();
                         }
-                        self.seed_verified_light_client_headers();
-                        self.materialize_verified_anchor_segments();
-                        self.drive_rpc_requests();
+                        if changed {
+                            self.drive_rpc_requests();
+                        }
                     }
                     Err(error) => {
                         tracing::warn!(
@@ -3740,14 +3722,6 @@ impl ConsensusNetwork {
                     );
                     return;
                 };
-                if optimistic_update_is_stale(&payload.bytes, &store) {
-                    tracing::trace!(
-                        %peer,
-                        bytes = payload.bytes.len(),
-                        "ignoring stale light-client optimistic update response"
-                    );
-                    return;
-                }
                 match apply_optimistic_update_payload(&payload.bytes, &store) {
                     Ok((summary, next_store, _)) => {
                         if !rpc_context_matches_slot(&payload, summary.attested_header.beacon_slot)
@@ -3776,21 +3750,25 @@ impl ConsensusNetwork {
                         );
                         self.record_peer_success(peer, RpcRequestKind::LightClientOptimisticUpdate);
                         self.optimistic_update_peers.insert(peer);
-                        if let Err(error) = self.consensus.record_verified_optimistic_update(
-                            summary,
-                            payload.clone(),
-                            next_store,
-                        ) {
-                            tracing::warn!(
-                                %peer,
-                                %error,
-                                "failed to persist verified optimistic update"
-                            );
-                            return;
+                        let headers_changed = next_store.finalized_header != store.finalized_header
+                            || next_store.optimistic_header != store.optimistic_header;
+                        let changed = match self
+                            .consensus
+                            .record_verified_optimistic_update(summary, payload, next_store)
+                        {
+                            Ok(changed) => changed,
+                            Err(error) => {
+                                tracing::warn!(%peer, %error, "failed to persist verified optimistic update");
+                                return;
+                            }
+                        };
+                        if headers_changed {
+                            self.seed_verified_light_client_headers();
+                            self.materialize_verified_anchor_segments();
                         }
-                        self.seed_verified_light_client_headers();
-                        self.materialize_verified_anchor_segments();
-                        self.drive_rpc_requests();
+                        if changed {
+                            self.drive_rpc_requests();
+                        }
                     }
                     Err(error) => {
                         tracing::warn!(
@@ -7358,6 +7336,441 @@ mod tests {
                 .next()
                 .unwrap(),
         )
+    }
+
+    fn rpc_participation_slot() -> u64 {
+        (current_wall_clock_slot().saturating_sub(2 * 8192) / 8192) * 8192 + 16
+    }
+
+    fn deliver_range_response(network: &mut ConsensusNetwork, payload: RawRpcResponse) {
+        let peer = PeerId::random();
+        let kind = RpcRequestKind::LightClientUpdatesByRange;
+        network.ensure_request(peer, kind);
+        let key = *network
+            .pending_requests
+            .iter()
+            .find(|(key, pending_peer)| key.kind == kind && **pending_peer == peer)
+            .unwrap()
+            .0;
+        network.handle_rpc_response(
+            kind,
+            peer,
+            key.request_id,
+            Eth2RpcResponse::LightClientUpdatesByRange(vec![payload]),
+        );
+        assert!(!network.pending_requests.contains_key(&key));
+        assert_eq!(
+            network.peer_lifecycle.get(&peer).unwrap().useful_successes,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn rpc_participation_range_summary_does_not_hide_older_singleton_cache() {
+        let temp = TempDir::new().unwrap();
+        let slot = rpc_participation_slot();
+        let (mut network, _) = request_lifecycle_fixture_at_slot(&temp, slot);
+        deliver_singleton_response(&mut network, false, singleton_test_payload(slot, 1, false));
+        let range = crate::light_client::test_cached_light_client_fixture(slot + 4)
+            .payloads
+            .updates_by_period
+            .into_values()
+            .next()
+            .unwrap();
+        deliver_range_response(&mut network, range);
+        let summary = network
+            .consensus
+            .light_client_status()
+            .optimistic_update
+            .unwrap();
+        assert_eq!(summary.attested_header.beacon_slot, slot + 5);
+        let better_cache = singleton_test_payload(slot + 2, 1, false);
+        deliver_singleton_response(&mut network, false, better_cache.clone());
+        assert_eq!(
+            network.consensus.light_client_optimistic_update_payload(),
+            Some(better_cache)
+        );
+        assert_eq!(
+            network.consensus.light_client_status().optimistic_update,
+            Some(summary)
+        );
+        assert_eq!(
+            network
+                .consensus
+                .light_client_store()
+                .unwrap()
+                .optimistic_header
+                .beacon
+                .slot,
+            slot + 5
+        );
+    }
+
+    fn deliver_singleton_response(
+        network: &mut ConsensusNetwork,
+        finality: bool,
+        payload: RawRpcResponse,
+    ) -> PeerId {
+        let peer = PeerId::random();
+        let kind = if finality {
+            RpcRequestKind::LightClientFinalityUpdate
+        } else {
+            RpcRequestKind::LightClientOptimisticUpdate
+        };
+        network.ensure_request(peer, kind);
+        let key = *network
+            .pending_requests
+            .iter()
+            .find(|(key, pending_peer)| key.kind == kind && **pending_peer == peer)
+            .unwrap()
+            .0;
+        let response = if finality {
+            Eth2RpcResponse::LightClientFinalityUpdate(payload)
+        } else {
+            Eth2RpcResponse::LightClientOptimisticUpdate(payload)
+        };
+        network.handle_rpc_response(kind, peer, key.request_id, response);
+        assert!(!network.pending_requests.contains_key(&key));
+        peer
+    }
+
+    fn singleton_test_payload(slot: u64, participants: usize, finality: bool) -> RawRpcResponse {
+        let (finality_bytes, optimistic_bytes) =
+            crate::light_client::test_gossip_payloads(slot, participants);
+        // Mainnet BPO2 digest, independently fixed in the fork conformance fixtures.
+        RawRpcResponse {
+            context_bytes: Some([0x8c, 0x9f, 0x62, 0xfe]),
+            bytes: if finality {
+                finality_bytes
+            } else {
+                optimistic_bytes
+            },
+        }
+    }
+
+    fn assert_rpc_equal_slot_participation(finality: bool, low: usize, high: usize) {
+        let temp = TempDir::new().unwrap();
+        let slot = rpc_participation_slot();
+        let (mut network, _) = request_lifecycle_fixture_at_slot(&temp, slot);
+        deliver_singleton_response(
+            &mut network,
+            finality,
+            singleton_test_payload(slot, low, finality),
+        );
+        let before = network.consensus.light_client_store().unwrap();
+        assert_eq!(before.current_max_active_participants, low);
+        let stronger = singleton_test_payload(slot, high, finality);
+        let expected = if finality {
+            apply_finality_update_payload(&stronger.bytes, &before)
+                .unwrap()
+                .1
+        } else {
+            apply_optimistic_update_payload(&stronger.bytes, &before)
+                .unwrap()
+                .1
+        };
+        assert_eq!(expected.finalized_header, before.finalized_header);
+        assert_eq!(expected.optimistic_header, before.optimistic_header);
+        assert_eq!(expected.current_max_active_participants, high);
+        assert_ne!(expected, before);
+        let peer = deliver_singleton_response(&mut network, finality, stronger.clone());
+        assert_eq!(
+            network
+                .consensus
+                .light_client_store()
+                .unwrap()
+                .current_max_active_participants,
+            high
+        );
+        assert_eq!(network.consensus.light_client_store().unwrap(), expected);
+        assert_eq!(
+            ConsensusStore::open(temp.path(), None)
+                .unwrap()
+                .light_client_store()
+                .unwrap(),
+            expected
+        );
+        assert_eq!(
+            network.peer_lifecycle.get(&peer).unwrap().useful_successes,
+            1
+        );
+        let cached = if finality {
+            network.consensus.light_client_finality_update_payload()
+        } else {
+            network.consensus.light_client_optimistic_update_payload()
+        };
+        assert_eq!(cached, Some(stronger));
+        // Exactly half the improved maximum must not advance optimism. Without
+        // the equal-slot improvement, this signed later update would advance it.
+        let threshold = singleton_test_payload(slot + 1, high / 2, false);
+        let without_improvement = apply_optimistic_update_payload(&threshold.bytes, &before)
+            .unwrap()
+            .1;
+        assert!(
+            without_improvement.optimistic_header.beacon.slot
+                > before.optimistic_header.beacon.slot
+        );
+        deliver_singleton_response(&mut network, false, threshold);
+        assert_eq!(
+            network
+                .consensus
+                .light_client_store()
+                .unwrap()
+                .optimistic_header,
+            expected.optimistic_header
+        );
+    }
+
+    #[tokio::test]
+    async fn rpc_participation_matching_range_summary_still_refreshes_singleton_cache() {
+        for finality in [false, true] {
+            let temp = TempDir::new().unwrap();
+            let slot = rpc_participation_slot();
+            let (mut network, _) = request_lifecycle_fixture_at_slot(&temp, slot);
+            let (low, high) = if finality { (342, 344) } else { (1, 4) };
+            deliver_singleton_response(
+                &mut network,
+                finality,
+                singleton_test_payload(slot, low, finality),
+            );
+            let (range, finality_bytes, optimistic_bytes) =
+                crate::light_client::test_rpc_update_payloads(slot, high);
+            deliver_range_response(
+                &mut network,
+                RawRpcResponse {
+                    context_bytes: Some([0x8c, 0x9f, 0x62, 0xfe]),
+                    bytes: range,
+                },
+            );
+            let range_summary = network.consensus.light_client_status();
+            let payload = RawRpcResponse {
+                context_bytes: Some([0x8c, 0x9f, 0x62, 0xfe]),
+                bytes: if finality {
+                    finality_bytes
+                } else {
+                    optimistic_bytes
+                },
+            };
+            deliver_singleton_response(&mut network, finality, payload.clone());
+            let cached = if finality {
+                network.consensus.light_client_finality_update_payload()
+            } else {
+                network.consensus.light_client_optimistic_update_payload()
+            };
+            assert_eq!(cached, Some(payload));
+            assert_eq!(network.consensus.light_client_status(), range_summary);
+            let weaker_range = crate::light_client::test_rpc_update_payloads(slot, low).0;
+            deliver_range_response(
+                &mut network,
+                RawRpcResponse {
+                    context_bytes: Some([0x8c, 0x9f, 0x62, 0xfe]),
+                    bytes: weaker_range,
+                },
+            );
+            assert_eq!(network.consensus.light_client_status(), range_summary);
+            let reopened = ConsensusStore::open(temp.path(), None).unwrap();
+            assert_eq!(reopened.light_client_status(), range_summary);
+            assert_eq!(
+                reopened.light_client_finality_update_payload(),
+                network.consensus.light_client_finality_update_payload()
+            );
+            assert_eq!(
+                reopened.light_client_optimistic_update_payload(),
+                network.consensus.light_client_optimistic_update_payload()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn rpc_participation_stable_duplicates_and_weaker_responses_do_not_write() {
+        for finality in [false, true] {
+            let temp = TempDir::new().unwrap();
+            let slot = rpc_participation_slot();
+            let (mut network, _) = request_lifecycle_fixture_at_slot(&temp, slot);
+            let (low, high) = if finality { (342, 344) } else { (1, 4) };
+            deliver_singleton_response(
+                &mut network,
+                finality,
+                singleton_test_payload(slot, low, finality),
+            );
+            deliver_singleton_response(
+                &mut network,
+                finality,
+                singleton_test_payload(slot, high, finality),
+            );
+            let before = network.consensus.light_client_store();
+            let summary = network.consensus.light_client_status();
+            let saved = temp.path().join("saved-snapshot.json");
+            fs::rename(network.consensus.state_path(), &saved).unwrap();
+            for participants in [high, low] {
+                let peer = deliver_singleton_response(
+                    &mut network,
+                    finality,
+                    singleton_test_payload(slot, participants, finality),
+                );
+                assert_eq!(
+                    network.peer_lifecycle.get(&peer).unwrap().useful_successes,
+                    1
+                );
+                assert_eq!(network.consensus.light_client_store(), before);
+                assert_eq!(network.consensus.light_client_status(), summary);
+                assert!(!network.consensus.state_path().exists());
+            }
+            fs::rename(saved, network.consensus.state_path()).unwrap();
+            assert_eq!(
+                ConsensusStore::open(temp.path(), None)
+                    .unwrap()
+                    .light_client_store(),
+                before
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn rpc_participation_equal_slot_invalid_responses_receive_no_credit() {
+        for finality in [false, true] {
+            for invalid_context in [false, true] {
+                let temp = TempDir::new().unwrap();
+                let slot = rpc_participation_slot();
+                let (mut network, _) = request_lifecycle_fixture_at_slot(&temp, slot);
+                deliver_singleton_response(
+                    &mut network,
+                    finality,
+                    singleton_test_payload(slot, 342, finality),
+                );
+                let before = network.consensus.light_client_store();
+                let mut payload = singleton_test_payload(slot, 344, finality);
+                if invalid_context {
+                    payload.context_bytes = Some([0; 4]);
+                } else {
+                    // Finality fixed section has two offsets and seven proof nodes;
+                    // optimistic has one offset. Both place signature after 64 committee-bitfield bytes.
+                    let signature_start = if finality { 8 + 7 * 32 + 64 } else { 4 + 64 };
+                    payload.bytes[signature_start..signature_start + 96].fill(0);
+                }
+                let peer = deliver_singleton_response(&mut network, finality, payload);
+                assert_eq!(network.consensus.light_client_store(), before);
+                assert_eq!(
+                    network
+                        .peer_lifecycle
+                        .get(&peer)
+                        .map_or(0, |state| state.useful_successes),
+                    0
+                );
+                assert!(network.peer_failures.contains_key(&peer));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn rpc_participation_local_save_failure_does_not_publish_or_blame_peer() {
+        for finality in [false, true] {
+            let temp = TempDir::new().unwrap();
+            let slot = rpc_participation_slot();
+            let (mut network, _) = request_lifecycle_fixture_at_slot(&temp, slot);
+            let before = network.consensus.light_client_store();
+            let summary = network.consensus.light_client_status();
+            let parent = network.consensus.state_path().parent().unwrap().to_owned();
+            let moved = temp.path().join("saved-cl-directory");
+            fs::rename(&parent, &moved).unwrap();
+            let peer = deliver_singleton_response(
+                &mut network,
+                finality,
+                singleton_test_payload(slot, 342, finality),
+            );
+            assert_eq!(network.consensus.light_client_store(), before);
+            assert_eq!(network.consensus.light_client_status(), summary);
+            assert!(
+                network
+                    .consensus
+                    .light_client_finality_update_payload()
+                    .is_none()
+            );
+            assert!(
+                network
+                    .consensus
+                    .light_client_optimistic_update_payload()
+                    .is_none()
+            );
+            assert!(
+                network
+                    .consensus
+                    .subscribe_storage_failure()
+                    .borrow()
+                    .is_some()
+            );
+            assert_eq!(
+                network.peer_lifecycle.get(&peer).unwrap().useful_successes,
+                1
+            );
+            assert!(!network.peer_failures.contains_key(&peer));
+            fs::rename(moved, parent).unwrap();
+            assert_eq!(
+                ConsensusStore::open(temp.path(), None)
+                    .unwrap()
+                    .light_client_store(),
+                before
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn rpc_participation_missing_committee_remains_local_and_new_finality_advances() {
+        for finality in [false, true] {
+            let temp = TempDir::new().unwrap();
+            let slot = rpc_participation_slot();
+            let (mut network, _) = request_lifecycle_fixture_at_slot(&temp, slot);
+            let before = network.consensus.light_client_store();
+            let peer = deliver_singleton_response(
+                &mut network,
+                finality,
+                singleton_test_payload(slot + 8192, 342, finality),
+            );
+            assert_eq!(network.consensus.light_client_store(), before);
+            assert!(!network.peer_failures.contains_key(&peer));
+            assert_eq!(
+                network
+                    .peer_lifecycle
+                    .get(&peer)
+                    .map_or(0, |state| state.useful_successes),
+                0
+            );
+        }
+        let temp = TempDir::new().unwrap();
+        let slot = rpc_participation_slot();
+        let (mut network, _) = request_lifecycle_fixture_at_slot(&temp, slot);
+        deliver_singleton_response(&mut network, true, singleton_test_payload(slot, 1, true));
+        assert_eq!(
+            network
+                .consensus
+                .light_client_store()
+                .unwrap()
+                .finalized_header
+                .beacon
+                .slot,
+            slot
+        );
+        deliver_singleton_response(&mut network, true, singleton_test_payload(slot, 342, true));
+        assert_eq!(
+            network
+                .consensus
+                .light_client_store()
+                .unwrap()
+                .finalized_header
+                .beacon
+                .slot,
+            slot + 1
+        );
+    }
+
+    #[tokio::test]
+    async fn rpc_participation_equal_slot_optimistic_updates_safety_threshold() {
+        assert_rpc_equal_slot_participation(false, 1, 4);
+    }
+
+    #[tokio::test]
+    async fn rpc_participation_equal_slot_finality_updates_safety_threshold() {
+        assert_rpc_equal_slot_participation(true, 342, 344);
     }
 
     #[tokio::test]

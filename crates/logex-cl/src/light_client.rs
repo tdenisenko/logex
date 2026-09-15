@@ -475,6 +475,29 @@ pub(crate) fn test_gossip_boundary_optimistic(
     tests::gossip_boundary_optimistic(slot, attested_slot, signature_slot)
 }
 
+#[cfg(test)]
+pub(crate) fn test_rpc_update_payloads(
+    slot: u64,
+    participants: usize,
+) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+    let (finality, optimistic) = test_gossip_payloads(slot, participants);
+    let payload = LightClientFinalityUpdateElectra::from_ssz_bytes(&finality).unwrap();
+    let range = LightClientUpdateElectra {
+        attested_header: payload.attested_header,
+        next_sync_committee: SyncCommitteeRaw {
+            pubkeys: FixedBytes::ZERO,
+            aggregate_pubkey: FixedBytes::ZERO,
+        },
+        next_sync_committee_branch: ElectraSyncCommitteeBranch::ZERO,
+        finalized_header: payload.finalized_header,
+        finality_branch: payload.finality_branch,
+        sync_aggregate: payload.sync_aggregate,
+        signature_slot: payload.signature_slot,
+    }
+    .as_ssz_bytes();
+    (range, finality, optimistic)
+}
+
 #[derive(Debug, Clone)]
 enum DecodedBootstrap {
     Capella(LightClientBootstrapCapella),

@@ -365,78 +365,65 @@ impl ConsensusStore {
         })
     }
 
+    /// Record verified state independently of the best diagnostic summary and
+    /// cached singleton response. Range updates can advance the summary alone.
     pub(crate) fn record_verified_finality_update(
         &self,
         status: LightClientFinalityUpdateStatus,
         mut payload: RawRpcResponse,
         store: VerifiedLightClientStore,
-    ) -> Result<(), ConsensusStateError> {
-        light_client::normalize_cached_context(&mut payload, status.attested_header.beacon_slot)
-            .map_err(ConsensusStateError::InvalidCachedPayload)?;
-        self.update(|snapshot| {
-            snapshot.light_client.finality_update = Some(status);
-            snapshot.light_client_payloads.finality_update = Some(payload);
-            snapshot.verified_light_client_store = Some(store);
-            apply_verified_store(snapshot);
-        })
-    }
-
-    pub(crate) fn record_verified_optimistic_update(
-        &self,
-        status: LightClientOptimisticUpdateStatus,
-        mut payload: RawRpcResponse,
-        store: VerifiedLightClientStore,
-    ) -> Result<(), ConsensusStateError> {
-        light_client::normalize_cached_context(&mut payload, status.attested_header.beacon_slot)
-            .map_err(ConsensusStateError::InvalidCachedPayload)?;
-        self.update(|snapshot| {
-            snapshot.light_client.optimistic_update = Some(status);
-            snapshot.light_client_payloads.optimistic_update = Some(payload);
-            snapshot.verified_light_client_store = Some(store);
-            apply_verified_store(snapshot);
-        })
-    }
-
-    /// Gossip can improve participation state without providing a newer
-    /// response to serve. Keep those decisions atomic and avoid rewriting the
-    /// entire historical snapshot when neither decision changes anything.
-    pub(crate) fn record_gossip_finality_update(
-        &self,
-        status: LightClientFinalityUpdateStatus,
-        mut payload: RawRpcResponse,
-        store: VerifiedLightClientStore,
     ) -> Result<bool, ConsensusStateError> {
         light_client::normalize_cached_context(&mut payload, status.attested_header.beacon_slot)
             .map_err(ConsensusStateError::InvalidCachedPayload)?;
         self.update_if_with_writer(
             |current| {
-                let replace_payload = current.light_client_payloads.finality_update.is_none()
-                    || current
+                let cached = current
+                    .light_client_payloads
+                    .finality_update
+                    .as_ref()
+                    .map(|payload| {
+                        light_client::decode_finality_update(&payload.bytes).map_err(|error| {
+                            ConsensusStateError::InvalidCachedPayload(format!(
+                                "cached finality update: {error}"
+                            ))
+                        })
+                    })
+                    .transpose()?;
+                let replace_payload = cached.as_ref().is_none_or(|previous| {
+                    finality_cache_priority(&status) > finality_cache_priority(previous)
+                });
+                let replace_summary =
+                    current
                         .light_client
                         .finality_update
                         .as_ref()
                         .is_none_or(|previous| {
-                            gossip_finality_cache_priority(&status)
-                                > gossip_finality_cache_priority(previous)
+                            finality_cache_priority(&status) > finality_cache_priority(previous)
                         });
-                if !replace_payload && current.verified_light_client_store.as_ref() == Some(&store)
+                if !replace_payload
+                    && !replace_summary
+                    && current.verified_light_client_store.as_ref() == Some(&store)
                 {
-                    return None;
+                    return Ok(None);
                 }
-                Some(move |snapshot: &mut ConsensusSnapshot| {
-                    if replace_payload {
+                Ok(Some(move |snapshot: &mut ConsensusSnapshot| {
+                    if replace_summary {
                         snapshot.light_client.finality_update = Some(status);
+                    }
+                    if replace_payload {
                         snapshot.light_client_payloads.finality_update = Some(payload);
                     }
                     snapshot.verified_light_client_store = Some(store);
                     apply_verified_store(snapshot);
-                })
+                }))
             },
             write_snapshot,
         )
     }
 
-    pub(crate) fn record_gossip_optimistic_update(
+    /// Record verified state independently of the best diagnostic summary and
+    /// cached singleton response. Range updates can advance the summary alone.
+    pub(crate) fn record_verified_optimistic_update(
         &self,
         status: LightClientOptimisticUpdateStatus,
         mut payload: RawRpcResponse,
@@ -446,32 +433,45 @@ impl ConsensusStore {
             .map_err(ConsensusStateError::InvalidCachedPayload)?;
         self.update_if_with_writer(
             |current| {
-                let replace_payload = current.light_client_payloads.optimistic_update.is_none()
-                    || current
+                let cached = current
+                    .light_client_payloads
+                    .optimistic_update
+                    .as_ref()
+                    .map(|payload| {
+                        light_client::decode_optimistic_update(&payload.bytes).map_err(|error| {
+                            ConsensusStateError::InvalidCachedPayload(format!(
+                                "cached optimistic update: {error}"
+                            ))
+                        })
+                    })
+                    .transpose()?;
+                let replace_payload = cached.as_ref().is_none_or(|previous| {
+                    optimistic_cache_priority(&status) > optimistic_cache_priority(previous)
+                });
+                let replace_summary =
+                    current
                         .light_client
                         .optimistic_update
                         .as_ref()
                         .is_none_or(|previous| {
-                            (
-                                status.attested_header.beacon_slot,
-                                status.sync_committee_participants,
-                            ) > (
-                                previous.attested_header.beacon_slot,
-                                previous.sync_committee_participants,
-                            )
+                            optimistic_cache_priority(&status) > optimistic_cache_priority(previous)
                         });
-                if !replace_payload && current.verified_light_client_store.as_ref() == Some(&store)
+                if !replace_payload
+                    && !replace_summary
+                    && current.verified_light_client_store.as_ref() == Some(&store)
                 {
-                    return None;
+                    return Ok(None);
                 }
-                Some(move |snapshot: &mut ConsensusSnapshot| {
-                    if replace_payload {
+                Ok(Some(move |snapshot: &mut ConsensusSnapshot| {
+                    if replace_summary {
                         snapshot.light_client.optimistic_update = Some(status);
+                    }
+                    if replace_payload {
                         snapshot.light_client_payloads.optimistic_update = Some(payload);
                     }
                     snapshot.verified_light_client_store = Some(store);
                     apply_verified_store(snapshot);
-                })
+                }))
             },
             write_snapshot,
         )
@@ -483,8 +483,26 @@ impl ConsensusStore {
         verified_updates_by_period: Vec<(u64, RawRpcResponse)>,
     ) -> Result<(), ConsensusStateError> {
         self.update(|snapshot| {
-            snapshot.light_client.optimistic_update = Some(applied.optimistic_status);
-            if let Some(status) = applied.finality_status {
+            if snapshot
+                .light_client
+                .optimistic_update
+                .as_ref()
+                .is_none_or(|previous| {
+                    optimistic_cache_priority(&applied.optimistic_status)
+                        > optimistic_cache_priority(previous)
+                })
+            {
+                snapshot.light_client.optimistic_update = Some(applied.optimistic_status);
+            }
+            if let Some(status) = applied.finality_status
+                && snapshot
+                    .light_client
+                    .finality_update
+                    .as_ref()
+                    .is_none_or(|previous| {
+                        finality_cache_priority(&status) > finality_cache_priority(previous)
+                    })
+            {
                 snapshot.light_client.finality_update = Some(status);
             }
             for (period, payload) in verified_updates_by_period {
@@ -530,13 +548,13 @@ impl ConsensusStore {
         mutate: impl FnOnce(&mut ConsensusSnapshot),
         write: impl FnOnce(&Path, &ConsensusSnapshot) -> io::Result<()>,
     ) -> Result<(), ConsensusStateError> {
-        self.update_if_with_writer(|_| Some(mutate), write)
+        self.update_if_with_writer(|_| Ok(Some(mutate)), write)
             .map(|_| ())
     }
 
     fn update_if_with_writer<M: FnOnce(&mut ConsensusSnapshot)>(
         &self,
-        prepare: impl FnOnce(&ConsensusSnapshot) -> Option<M>,
+        prepare: impl FnOnce(&ConsensusSnapshot) -> Result<Option<M>, ConsensusStateError>,
         write: impl FnOnce(&Path, &ConsensusSnapshot) -> io::Result<()>,
     ) -> Result<bool, ConsensusStateError> {
         let _writer = self.writer.lock().unwrap();
@@ -545,7 +563,7 @@ impl ConsensusStore {
         }
         let (mut candidate, mutate) = {
             let current = self.inner.lock().unwrap();
-            let Some(mutate) = prepare(&current) else {
+            let Some(mutate) = prepare(&current)? else {
                 return Ok(false);
             };
             (current.clone(), mutate)
@@ -572,9 +590,14 @@ impl ConsensusStore {
     }
 }
 
-fn gossip_finality_cache_priority(
-    status: &LightClientFinalityUpdateStatus,
-) -> (u64, bool, u64, usize) {
+fn optimistic_cache_priority(status: &LightClientOptimisticUpdateStatus) -> (u64, usize) {
+    (
+        status.attested_header.beacon_slot,
+        status.sync_committee_participants,
+    )
+}
+
+fn finality_cache_priority(status: &LightClientFinalityUpdateStatus) -> (u64, bool, u64, usize) {
     (
         status.finalized_header.beacon_slot,
         // 342 is the minimum supermajority in the 512-member mainnet committee.
@@ -2018,21 +2041,64 @@ mod tests {
     }
 
     #[test]
-    fn gossip_cache_preserves_newer_responses_and_skips_unchanged_writes() {
+    fn verified_cache_malformed_retained_payload_is_an_actionable_local_error() {
+        for finality in [false, true] {
+            let temp = TempDir::new().unwrap();
+            let fixture =
+                crate::light_client::test_cached_light_client_fixture(recent_cache_fixture_slot());
+            let (store, _) = initialized_fixture_store(&temp, &fixture);
+            {
+                let mut snapshot = store.inner.lock().unwrap();
+                let malformed = Some(RawRpcResponse {
+                    context_bytes: None,
+                    bytes: vec![0],
+                });
+                if finality {
+                    snapshot.light_client_payloads.finality_update = malformed;
+                } else {
+                    snapshot.light_client_payloads.optimistic_update = malformed;
+                }
+            }
+            let before = store.inner.lock().unwrap().clone();
+            let disk_before = fs::read(store.state_path()).unwrap();
+            let result = if finality {
+                store.record_verified_finality_update(
+                    fixture.status.finality_update.unwrap(),
+                    fixture.payloads.finality_update.unwrap(),
+                    fixture.store,
+                )
+            } else {
+                store.record_verified_optimistic_update(
+                    fixture.status.optimistic_update.unwrap(),
+                    fixture.payloads.optimistic_update.unwrap(),
+                    fixture.store,
+                )
+            };
+            assert!(
+                matches!(result, Err(ConsensusStateError::InvalidCachedPayload(message)) if message.contains("cached") && message.contains("update"))
+            );
+            assert_eq!(*store.inner.lock().unwrap(), before);
+            assert_eq!(fs::read(store.state_path()).unwrap(), disk_before);
+            assert!(store.subscribe_storage_failure().borrow().is_none());
+        }
+    }
+
+    #[test]
+    fn verified_cache_preserves_newer_responses_and_skips_unchanged_writes() {
         let temp = TempDir::new().unwrap();
         let slot = recent_cache_fixture_slot();
         let fixture = crate::light_client::test_cached_light_client_fixture(slot);
         let older = crate::light_client::test_cached_light_client_fixture(slot - 4);
         let (store, _) = initialized_fixture_store(&temp, &fixture);
         store
-            .record_gossip_finality_update(
+            .record_verified_finality_update(
                 fixture.status.finality_update.clone().unwrap(),
                 fixture.payloads.finality_update.clone().unwrap(),
                 fixture.store.clone(),
             )
             .unwrap();
         store
-            .record_gossip_optimistic_update(
+            .record_verified_optimistic_update(
                 fixture.status.optimistic_update.clone().unwrap(),
                 fixture.payloads.optimistic_update.clone().unwrap(),
                 fixture.store.clone(),
@@ -2045,14 +2111,14 @@ mod tests {
         fs::rename(store.state_path(), &saved).unwrap();
         for candidate in [&fixture, &older] {
             store
-                .record_gossip_finality_update(
+                .record_verified_finality_update(
                     candidate.status.finality_update.clone().unwrap(),
                     candidate.payloads.finality_update.clone().unwrap(),
                     fixture.store.clone(),
                 )
                 .unwrap();
             store
-                .record_gossip_optimistic_update(
+                .record_verified_optimistic_update(
                     candidate.status.optimistic_update.clone().unwrap(),
                     candidate.payloads.optimistic_update.clone().unwrap(),
                     fixture.store.clone(),
@@ -2067,21 +2133,21 @@ mod tests {
     }
 
     #[test]
-    fn gossip_cache_persists_store_changes_without_replacing_newer_payloads() {
+    fn verified_cache_persists_store_changes_without_replacing_newer_payloads() {
         let temp = TempDir::new().unwrap();
         let slot = recent_cache_fixture_slot();
         let fixture = crate::light_client::test_cached_light_client_fixture(slot);
         let older = crate::light_client::test_cached_light_client_fixture(slot - 4);
         let (store, _) = initialized_fixture_store(&temp, &fixture);
         store
-            .record_gossip_finality_update(
+            .record_verified_finality_update(
                 fixture.status.finality_update.clone().unwrap(),
                 fixture.payloads.finality_update.clone().unwrap(),
                 fixture.store.clone(),
             )
             .unwrap();
         store
-            .record_gossip_optimistic_update(
+            .record_verified_optimistic_update(
                 fixture.status.optimistic_update.clone().unwrap(),
                 fixture.payloads.optimistic_update.clone().unwrap(),
                 fixture.store.clone(),
@@ -2093,7 +2159,7 @@ mod tests {
         let mut next = fixture.store.clone();
         next.previous_max_active_participants = 1;
         store
-            .record_gossip_finality_update(
+            .record_verified_finality_update(
                 older.status.finality_update.clone().unwrap(),
                 older.payloads.finality_update.clone().unwrap(),
                 next.clone(),
@@ -2102,7 +2168,7 @@ mod tests {
         assert_eq!(store.light_client_store(), Some(next.clone()));
         next.previous_max_active_participants = 2;
         store
-            .record_gossip_optimistic_update(
+            .record_verified_optimistic_update(
                 older.status.optimistic_update.clone().unwrap(),
                 older.payloads.optimistic_update.clone().unwrap(),
                 next.clone(),
@@ -2118,7 +2184,7 @@ mod tests {
     }
 
     #[test]
-    fn gossip_cache_priority_keeps_supermajority_and_prefers_newer_headers() {
+    fn verified_cache_priority_keeps_supermajority_and_prefers_newer_headers() {
         let fixture =
             crate::light_client::test_cached_light_client_fixture(recent_cache_fixture_slot());
         let mut stronger = fixture.status.finality_update.unwrap();
@@ -2126,20 +2192,11 @@ mod tests {
         let mut later_weaker = stronger.clone();
         later_weaker.attested_header.beacon_slot += 1;
         later_weaker.sync_committee_participants = 341;
-        assert!(
-            gossip_finality_cache_priority(&stronger)
-                > gossip_finality_cache_priority(&later_weaker)
-        );
+        assert!(finality_cache_priority(&stronger) > finality_cache_priority(&later_weaker));
         later_weaker.sync_committee_participants = 342;
-        assert!(
-            gossip_finality_cache_priority(&later_weaker)
-                > gossip_finality_cache_priority(&stronger)
-        );
+        assert!(finality_cache_priority(&later_weaker) > finality_cache_priority(&stronger));
         stronger.finalized_header.beacon_slot += 1;
-        assert!(
-            gossip_finality_cache_priority(&stronger)
-                > gossip_finality_cache_priority(&later_weaker)
-        );
+        assert!(finality_cache_priority(&stronger) > finality_cache_priority(&later_weaker));
     }
 
     #[test]
