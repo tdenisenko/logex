@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::cli::IndexProfile;
-use logex_cl::ConsensusStore;
+use logex_cl::{ConsensusStateError, ConsensusStore, consensus_state_exists};
 use logex_index::{IndexBuildProfile, IndexBuilder};
 use logex_storage::{PartitionManager, PartitionManagerConfig};
 
@@ -264,11 +264,12 @@ pub fn run_compact(config: PartitionManagerConfig, limit: Option<usize>) {
 }
 
 pub fn run_info(config: PartitionManagerConfig) {
-    let consensus_state_path = consensus_state_path(&config.data_dir);
-    let consensus = if consensus_state_path.exists() {
-        ConsensusStore::open(&config.data_dir, None).ok()
-    } else {
-        None
+    let consensus = match open_consensus_for_info(&config.data_dir) {
+        Ok(consensus) => consensus,
+        Err(error) => {
+            tracing::error!(%error, "failed to open consensus state for storage info");
+            std::process::exit(1);
+        }
     };
     let storage = match PartitionManager::open(config) {
         Ok(s) => s,
@@ -341,16 +342,35 @@ pub fn run_info(config: PartitionManagerConfig) {
     }
 }
 
-fn consensus_state_path(data_dir: &Path) -> std::path::PathBuf {
-    data_dir.join("cl").join("consensus_state.json")
+fn open_consensus_for_info(data_dir: &Path) -> Result<Option<ConsensusStore>, ConsensusStateError> {
+    if consensus_state_exists(data_dir)? {
+        ConsensusStore::open(data_dir, None).map(Some)
+    } else {
+        Ok(None)
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use alloy_primitives::{Address, B256, Bytes};
     use logex_storage::SegmentReader;
     use logex_types::{LogRow, Source};
+
+    use super::*;
+
+    #[test]
+    fn info_preserves_consensus_open_errors() {
+        let temp = tempfile::tempdir().unwrap();
+        assert!(open_consensus_for_info(temp.path()).unwrap().is_none());
+        std::fs::create_dir(temp.path().join("cl")).unwrap();
+        let legacy = temp.path().join("cl/consensus_state.json");
+        std::fs::write(&legacy, b"legacy evidence").unwrap();
+        assert!(matches!(
+            open_consensus_for_info(temp.path()),
+            Err(ConsensusStateError::ParseState { .. })
+        ));
+        assert_eq!(std::fs::read(legacy).unwrap(), b"legacy evidence");
+    }
 
     #[test]
     fn index_command_preserves_source_artifacts_and_progress() {

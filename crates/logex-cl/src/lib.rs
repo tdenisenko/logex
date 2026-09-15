@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::{self, BufReader, BufWriter, Write};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -19,6 +19,7 @@ mod light_client;
 mod network;
 mod rpc;
 mod rpc_memory;
+mod snapshot_format;
 
 pub(crate) use beacon_block::{VerifiedBeaconBlock, decode_verified_beacon_block};
 pub use chain::{
@@ -41,7 +42,8 @@ pub use network::{
 use rpc::RawRpcResponse;
 
 const CONSENSUS_STATE_DIR: &str = "cl";
-const CONSENSUS_STATE_FILE: &str = "consensus_state.json";
+const CONSENSUS_STATE_FILE: &str = "consensus_state.bin";
+const LEGACY_CONSENSUS_STATE_FILE: &str = "consensus_state.json";
 /// Mainnet reference age limit for opening the consensus store. The Electra
 /// reference assumes at least 8,388,608 ETH of active balance; it is not a
 /// universal lower bound on the state-derived weak-subjectivity period.
@@ -152,10 +154,18 @@ impl ConsensusStore {
         let path = consensus_state_path(data_dir.as_ref());
         let (mut snapshot, mut needs_save) = match fs::File::open(&path) {
             Ok(file) => {
-                let snapshot: ConsensusSnapshot = serde_json::from_reader(BufReader::new(file))
-                    .map_err(|error| ConsensusStateError::ParseState {
-                        path: path.clone(),
-                        message: error.to_string(),
+                let snapshot =
+                    snapshot_format::read(file).map_err(|source| match source.kind() {
+                        io::ErrorKind::InvalidData | io::ErrorKind::UnexpectedEof => {
+                            ConsensusStateError::ParseState {
+                                path: path.clone(),
+                                message: source.to_string(),
+                            }
+                        }
+                        _ => ConsensusStateError::ReadState {
+                            path: path.clone(),
+                            source,
+                        },
                     })?;
                 let snapshot = restore_snapshot(snapshot).map_err(|message| {
                     ConsensusStateError::ParseState {
@@ -168,8 +178,18 @@ impl ConsensusStore {
             Err(source) if source.kind() == io::ErrorKind::NotFound => {
                 // A dangling state-file link is an existing, unavailable state,
                 // not permission to initialize a replacement database.
-                if fs::symlink_metadata(&path).is_ok() {
+                if state_entry_exists(&path)? {
                     return Err(ConsensusStateError::ReadState { path, source });
+                }
+                let legacy = data_dir
+                    .as_ref()
+                    .join(CONSENSUS_STATE_DIR)
+                    .join(LEGACY_CONSENSUS_STATE_FILE);
+                if state_entry_exists(&legacy)? {
+                    return Err(ConsensusStateError::ParseState {
+                        path: legacy,
+                        message: "legacy consensus snapshot has no integrity envelope; use a recent checkpoint in a fresh data directory; existing files were not changed".into(),
+                    });
                 }
                 let checkpoint = checkpoint.ok_or(ConsensusStateError::MissingCheckpoint)?;
                 (load_checkpoint_descriptor(checkpoint)?, true)
@@ -702,11 +722,7 @@ fn write_snapshot(path: &Path, snapshot: &ConsensusSnapshot) -> io::Result<()> {
     let mut staged = tempfile::Builder::new()
         .prefix(".consensus-state-")
         .tempfile_in(parent)?;
-    {
-        let mut writer = BufWriter::new(staged.as_file_mut());
-        serde_json::to_writer_pretty(&mut writer, snapshot).map_err(io::Error::other)?;
-        writer.flush()?;
-    }
+    snapshot_format::write(staged.as_file_mut(), snapshot)?;
     staged.as_file().sync_all()?;
     let _published = staged.persist(path).map_err(|error| error.error)?;
     fs::File::open(parent)?.sync_all()
@@ -965,10 +981,35 @@ impl ConsensusSnapshotExt for ConsensusSnapshot {
     }
 }
 
-fn consensus_state_path(data_dir: &Path) -> PathBuf {
+/// Path of the current integrity-checked consensus snapshot.
+pub fn consensus_state_path(data_dir: &Path) -> PathBuf {
     data_dir
         .join(CONSENSUS_STATE_DIR)
         .join(CONSENSUS_STATE_FILE)
+}
+
+/// Include older-format entries so callers cannot treat an existing store as a
+/// fresh directory. Presence does not imply validity; opening validates contents.
+pub fn consensus_state_exists(data_dir: &Path) -> Result<bool, ConsensusStateError> {
+    if state_entry_exists(&consensus_state_path(data_dir))? {
+        return Ok(true);
+    }
+    state_entry_exists(
+        &data_dir
+            .join(CONSENSUS_STATE_DIR)
+            .join(LEGACY_CONSENSUS_STATE_FILE),
+    )
+}
+
+fn state_entry_exists(path: &Path) -> Result<bool, ConsensusStateError> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(source) => Err(ConsensusStateError::ReadState {
+            path: path.to_owned(),
+            source,
+        }),
+    }
 }
 
 #[cfg(test)]
@@ -978,6 +1019,12 @@ mod tests {
     use std::sync::mpsc;
     use std::time::Duration;
     use tempfile::TempDir;
+
+    fn snapshot_bytes(snapshot: &ConsensusSnapshot) -> Vec<u8> {
+        let mut output = io::Cursor::new(Vec::new());
+        snapshot_format::write(&mut output, snapshot).unwrap();
+        output.into_inner()
+    }
 
     fn verified_header(
         slot: u64,
@@ -1110,7 +1157,7 @@ mod tests {
             light_client_payloads: fixture.payloads,
             verified_light_client_store: Some(fixture.store),
         };
-        fs::write(&path, serde_json::to_vec(&snapshot).unwrap()).unwrap();
+        fs::write(&path, snapshot_bytes(&snapshot)).unwrap();
         assert!(ConsensusStore::open(temp.path(), None).is_ok());
         for family in 0..4 {
             let mut malformed = snapshot.clone();
@@ -1135,7 +1182,7 @@ mod tests {
                 _ => unreachable!(),
             };
             payload.bytes.truncate(3);
-            let bytes = serde_json::to_vec(&malformed).unwrap();
+            let bytes = snapshot_bytes(&malformed);
             fs::write(&path, &bytes).unwrap();
             assert!(
                 matches!(
@@ -1210,6 +1257,38 @@ mod tests {
             let reopened = ConsensusStore::open(temp.path(), None).unwrap();
             assert_eq!(*reopened.inner.lock().unwrap(), before);
         }
+    }
+
+    #[test]
+    fn snapshot_integrity_rejects_changed_root_bytes_before_reopen() {
+        let temp = TempDir::new().unwrap();
+        let store = ConsensusStore::open(
+            temp.path(),
+            Some("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        )
+        .unwrap();
+        store.append_anchors(vec![test_anchor(10)]).unwrap();
+        let path = store.state_path().to_owned();
+        drop(store);
+        let mut bytes = fs::read(&path).unwrap();
+        let prefix = b"\"receipts_root\": \"0x";
+        let records = bytes
+            .windows(b"\"ordered_anchors\"".len())
+            .position(|part| part == b"\"ordered_anchors\"")
+            .unwrap();
+        let digit = records
+            + bytes[records..]
+                .windows(prefix.len())
+                .position(|part| part == prefix)
+                .unwrap()
+            + prefix.len();
+        // A same-length hexadecimal edit remains valid JSON and valid metadata.
+        bytes[digit] = if bytes[digit] == b'a' { b'b' } else { b'a' };
+        fs::write(&path, &bytes).unwrap();
+        let error = ConsensusStore::open(temp.path(), None).unwrap_err();
+        assert!(matches!(error, ConsensusStateError::ParseState { .. }));
+        assert!(error.to_string().contains("checksum"));
+        assert_eq!(fs::read(&path).unwrap(), bytes);
     }
 
     fn test_anchor(block_number: u64) -> AnchorRecord {
@@ -1539,7 +1618,7 @@ mod tests {
             context_bytes: None,
             bytes: vec![1, 2, 3],
         });
-        let bytes = serde_json::to_vec(&snapshot).unwrap();
+        let bytes = snapshot_bytes(&snapshot);
         fs::write(store.state_path(), &bytes).unwrap();
         assert!(matches!(
             ConsensusStore::open(temp.path(), None),
@@ -1566,7 +1645,7 @@ mod tests {
             previous_max_active_participants: 0,
             current_max_active_participants: 0,
         });
-        fs::write(store.state_path(), serde_json::to_vec(&snapshot).unwrap()).unwrap();
+        fs::write(store.state_path(), snapshot_bytes(&snapshot)).unwrap();
         let valid = ConsensusStore::open(temp.path(), None).unwrap();
         assert_eq!(valid.trusted_beacon_slot(), Some(slot));
         assert_eq!(
@@ -1579,7 +1658,7 @@ mod tests {
             .as_mut()
             .unwrap()
             .previous_max_active_participants = 513;
-        let bytes = serde_json::to_vec(&snapshot).unwrap();
+        let bytes = snapshot_bytes(&snapshot);
         fs::write(store.state_path(), &bytes).unwrap();
         let error = ConsensusStore::open(temp.path(), None).unwrap_err();
         assert!(matches!(error, ConsensusStateError::ParseState { .. }));
@@ -1627,7 +1706,7 @@ mod tests {
                     parent_beacon_root: None,
                 })
                 .collect();
-            fs::write(store.state_path(), serde_json::to_vec(&snapshot).unwrap()).unwrap();
+            fs::write(store.state_path(), snapshot_bytes(&snapshot)).unwrap();
             assert!(
                 matches!(
                     ConsensusStore::open(temp.path(), None),
