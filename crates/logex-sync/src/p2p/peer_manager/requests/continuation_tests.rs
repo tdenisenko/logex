@@ -312,7 +312,7 @@ async fn continuation_local_expiry_is_neutral_and_cannot_hide_real_failure() {
             &RequestAttempt::ContinuationDeadline
         ));
         assert!(!chunk_failure_disables_role_peer(&local));
-        assert!(disabled_chunk_peers(&[local.clone()], role).is_empty());
+        assert!(disabled_chunk_peers(std::slice::from_ref(&local), role).is_empty());
         assert!(!fixture.manager.on_request_error(
             peer,
             role.request_kind(),

@@ -11,7 +11,7 @@
   "source_sha256": {
     "crates/logex-sync/src/p2p/peer_manager/requests.rs": "a4a3b7fb6963be592eef3795856f1aee4b440b0198fadccb9c5ca8dd5a98bf25",
     "crates/logex-sync/src/p2p/peer_manager/state.rs": "c41ec64eea826891bc8295af1219a1b4f89773579b7699f6bccb9972c1748927",
-    "crates/logex-sync/src/p2p/peer_manager/requests/continuation_tests.rs": "e74b0e9ef1f45471fda8c0ba3aaa886aad0f000c21cd8695c9994a0a56d1796f"
+    "crates/logex-sync/src/p2p/peer_manager/requests/continuation_tests.rs": "809f5aa58067432a129ce1f005b8d1494c675ee5d5a3f41e57620aa005ea6782"
   },
   "evidence_directory": "/private/tmp/logex-execution-continuation-bounds-ds46fkay",
   "evidence": {
@@ -81,5 +81,6 @@
     "Cooperative cancellation cannot preempt synchronous processing or retract admitted transport requests",
     "Existing positive partial scoring remains; only local expiry is neutral"
   ],
-  "remote": "None; mac-mini work and obsolete-artifact cleanup complete"
+  "remote": "None; mac-mini work and obsolete-artifact cleanup complete",
+  "validation_correction": "First gates passed vendor, format, check, then strict Clippy rejected a test-only cloned single-item slice. Replaced with std::slice::from_ref; first-attempt evidence retained. Full gates rerun on corrected commit."
 }

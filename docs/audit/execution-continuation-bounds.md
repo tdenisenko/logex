@@ -100,6 +100,9 @@ retention while another range expires and succeeds on retry. Independent source
 review found no actionable defect. Searches retained the still-used per-wire,
 paired-plan and merge helpers; both explicit-limit API comments were updated.
 
-Seven local gates, CI and merge remain pending. Evidence hashes and commands are
+The first gates passed vendor verification, formatting and workspace checking;
+strict Clippy identified a test-only cloned one-item slice. It now borrows via
+`std::slice::from_ref`; the failed log is retained. Full gates are rerun on the
+corrected commit. CI and merge remain pending. Evidence hashes and commands are
 recorded in [the validation record](baselines/2026-09-16-execution-continuation-bounds.json).
 No mac-mini work is planned.
