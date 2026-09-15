@@ -558,9 +558,25 @@ fn mark_consensus_network_unavailable(sync_status: &Arc<Mutex<SyncStatus>>) {
     }
 }
 
+async fn stop_for_consensus_storage_failure(
+    failure: &watch::Receiver<Option<Arc<str>>>,
+    sync_status: &Arc<Mutex<SyncStatus>>,
+    shutdown: &mut watch::Receiver<bool>,
+) -> bool {
+    if failure.borrow().is_none() {
+        return false;
+    }
+    mark_consensus_network_unavailable(sync_status);
+    // The node owns bounded shutdown. Do not serve more requests or restart
+    // networking against a permanently failed store while it shuts down.
+    wait_for_shutdown(shutdown).await;
+    true
+}
+
 struct ConsensusNetwork {
     config: ConsensusNetworkConfig,
     consensus: Arc<ConsensusStore>,
+    storage_failure: watch::Receiver<Option<Arc<str>>>,
     sync_status: Arc<Mutex<SyncStatus>>,
     discv5: Discv5,
     swarm: Swarm<ConsensusBehaviour>,
@@ -2057,6 +2073,7 @@ impl ConsensusNetwork {
 
         Ok(Self {
             config,
+            storage_failure: consensus.subscribe_storage_failure(),
             consensus,
             sync_status,
             discv5,
@@ -2119,6 +2136,15 @@ impl ConsensusNetwork {
         mut self,
         mut shutdown: watch::Receiver<bool>,
     ) -> Result<(), ConsensusNetworkError> {
+        if stop_for_consensus_storage_failure(
+            &self.storage_failure,
+            &self.sync_status,
+            &mut shutdown,
+        )
+        .await
+        {
+            return Ok(());
+        }
         self.discv5
             .start()
             .await
@@ -2179,11 +2205,21 @@ impl ConsensusNetwork {
         let mut pending_discovery_queries = 0usize;
 
         loop {
+            if stop_for_consensus_storage_failure(
+                &self.storage_failure,
+                &self.sync_status,
+                &mut shutdown,
+            )
+            .await
+            {
+                break;
+            }
             tokio::select! {
                 _ = wait_for_shutdown(&mut shutdown) => {
                     tracing::info!("consensus network shutting down");
                     break;
                 }
+                _ = self.storage_failure.changed() => {}
                 _ = query_interval.tick() => {
                     self.launch_discovery_queries(&discovery_query_tx, &mut pending_discovery_queries);
                     self.refresh_dialable_peers_from_routing_table();
@@ -2760,6 +2796,7 @@ impl ConsensusNetwork {
                             %error,
                             "failed to persist verified finality update learned from gossip"
                         );
+                        return gossipsub::MessageAcceptance::Ignore;
                     }
                     self.seed_verified_light_client_headers();
                     self.materialize_verified_anchor_segments();
@@ -2820,6 +2857,7 @@ impl ConsensusNetwork {
                             %error,
                             "failed to persist verified optimistic update learned from gossip"
                         );
+                        return gossipsub::MessageAcceptance::Ignore;
                     }
                     self.seed_verified_light_client_headers();
                     self.materialize_verified_anchor_segments();
@@ -3354,6 +3392,7 @@ impl ConsensusNetwork {
                             %error,
                             "failed to persist verified bootstrap payload"
                         );
+                        return;
                     }
                     self.seed_verified_light_client_headers();
                     self.materialize_verified_anchor_segments();
@@ -3455,6 +3494,7 @@ impl ConsensusNetwork {
                             %error,
                             "failed to persist verified light-client updates by range state"
                         );
+                        return;
                     }
                     self.seed_verified_light_client_headers();
                     self.materialize_verified_anchor_segments();
@@ -3533,6 +3573,7 @@ impl ConsensusNetwork {
                                 %error,
                                 "failed to persist verified finality update"
                             );
+                            return;
                         }
                         self.seed_verified_light_client_headers();
                         self.materialize_verified_anchor_segments();
@@ -3612,6 +3653,7 @@ impl ConsensusNetwork {
                                 %error,
                                 "failed to persist verified optimistic update"
                             );
+                            return;
                         }
                         self.seed_verified_light_client_headers();
                         self.materialize_verified_anchor_segments();
@@ -3852,6 +3894,9 @@ impl ConsensusNetwork {
     }
 
     fn drive_peer_connections(&mut self) {
+        if self.storage_failure.borrow().is_some() {
+            return;
+        }
         let bootstrap_needed = self.consensus.light_client_status().bootstrap.is_none();
         let head_progression_needed = !bootstrap_needed
             && live_head_progression_needed(
@@ -3985,6 +4030,9 @@ impl ConsensusNetwork {
     }
 
     fn drive_rpc_requests(&mut self) {
+        if self.storage_failure.borrow().is_some() {
+            return;
+        }
         self.seed_verified_light_client_headers();
         self.refresh_history_sync_target();
         let bootstrap_needed = self.consensus.light_client_status().bootstrap.is_none();
@@ -4858,6 +4906,7 @@ impl ConsensusNetwork {
             .replace_verified_light_client_store(next_store)
         {
             tracing::warn!(%error, "failed to persist forced light-client store update");
+            return;
         }
         self.seed_verified_light_client_headers();
     }
@@ -5277,6 +5326,10 @@ impl ConsensusNetwork {
     }
 
     fn refresh_status(&mut self) {
+        if self.storage_failure.borrow().is_some() {
+            mark_consensus_network_unavailable(&self.sync_status);
+            return;
+        }
         let table_entries = self.discv5.table_entries_enr();
         let light_client = self.consensus.light_client_status();
         let checkpoint = self.consensus.checkpoint();
@@ -6211,6 +6264,36 @@ mod tests {
     use alloy_primitives::b256;
     use libp2p::StreamProtocol;
     use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn consensus_storage_failure_stops_network_until_global_shutdown() {
+        let (failure_tx, failure_rx) = watch::channel(None);
+        let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
+        let status = Arc::new(Mutex::new(SyncStatus {
+            syncing: true,
+            consensus_head_fresh: Some(true),
+            ..Default::default()
+        }));
+        assert!(!stop_for_consensus_storage_failure(&failure_rx, &status, &mut shutdown_rx).await);
+        assert!(status.lock().unwrap().syncing);
+
+        failure_tx
+            .send(Some(Arc::from("state sync failed")))
+            .unwrap();
+        let mut stopping = std::pin::pin!(stop_for_consensus_storage_failure(
+            &failure_rx,
+            &status,
+            &mut shutdown_rx,
+        ));
+        assert!(futures::poll!(&mut stopping).is_pending());
+        {
+            let status = status.lock().unwrap();
+            assert!(!status.syncing);
+            assert_eq!(status.consensus_head_fresh, Some(false));
+        }
+        shutdown_tx.send(true).unwrap();
+        assert!(stopping.await);
+    }
 
     #[test]
     fn unavailable_consensus_network_invalidates_cached_head_status() {

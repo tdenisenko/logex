@@ -91,7 +91,9 @@ workspace check, strict Clippy, 1,207 workspace tests (23 ignored), documentatio
 checks and release node build. The [gate record](baselines/2026-09-15-trust-path-boundaries-gates.json)
 retains commands, toolchain and source/log identities. Independent reviews of
 both production changes and the boundary controls found no required changes.
-Linux/macOS CI and merge remain pending. No timing comparison is claimed for removing the duplicate hash.
+All six CI jobs passed on final head `4985d220` in run `34909362726`.
+PR #153 merged as `037e54ad` on September 14 at 23:39:26 UTC; the
+[CI/merge record](baselines/2026-09-15-trust-path-boundaries-ci.json) retains the result. No timing comparison is claimed for removing the duplicate hash.
 
 Remaining evidence and lifecycle work:
 

@@ -368,6 +368,81 @@ impl VerifiedLightClientStore {
     pub(crate) fn optimistic_anchor(&self) -> Option<ExecutionAnchor> {
         self.optimistic_header.execution_anchor()
     }
+
+    /// Reject impossible persisted structure without reauthenticating local
+    /// trust inputs or imposing additional light-client update policy.
+    pub(crate) fn validate_persisted_state(
+        &self,
+        checkpoint: WeakSubjectivityCheckpoint,
+    ) -> Result<(), String> {
+        if self.checkpoint_root != checkpoint.beacon_root {
+            return Err("verified store checkpoint root differs from snapshot checkpoint".into());
+        }
+        if checkpoint.beacon_slot != Some(self.bootstrap_slot) {
+            return Err(
+                "verified store bootstrap slot differs from snapshot checkpoint slot".into(),
+            );
+        }
+        if self.bootstrap_slot > self.finalized_header.beacon.slot {
+            return Err("verified store finalized slot precedes bootstrap slot".into());
+        }
+        if self.finalized_header.beacon.slot > self.optimistic_header.beacon.slot {
+            return Err("verified store optimistic slot precedes finalized slot".into());
+        }
+
+        let validate_committee = |name: &str, committee: &SyncCommitteeData| {
+            if committee.pubkeys.len() != SYNC_COMMITTEE_PUBKEYS {
+                Err(format!(
+                    "{name} committee has {} public keys; expected {SYNC_COMMITTEE_PUBKEYS}",
+                    committee.pubkeys.len()
+                ))
+            } else {
+                Ok(())
+            }
+        };
+        validate_committee("current", &self.current_sync_committee)?;
+        if let Some(committee) = &self.next_sync_committee {
+            validate_committee("next", committee)?;
+        }
+        for (name, count) in [
+            ("previous", self.previous_max_active_participants),
+            ("current", self.current_max_active_participants),
+        ] {
+            if count > SYNC_COMMITTEE_PUBKEYS {
+                return Err(format!(
+                    "{name} maximum participant count {count} exceeds {SYNC_COMMITTEE_PUBKEYS}"
+                ));
+            }
+        }
+        if let Some(update) = &self.best_valid_update {
+            if !(MIN_SYNC_COMMITTEE_PARTICIPANTS..=SYNC_COMMITTEE_PUBKEYS)
+                .contains(&update.participants)
+            {
+                return Err(format!(
+                    "best update participant count {} is outside {MIN_SYNC_COMMITTEE_PARTICIPANTS}..={SYNC_COMMITTEE_PUBKEYS}",
+                    update.participants
+                ));
+            }
+            if let Some(committee) = &update.next_sync_committee {
+                validate_committee("best update next", committee)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn test_sync_committee() -> SyncCommitteeData {
+    let sk = blst::min_pk::SecretKey::key_gen(&[7u8; 32], &[]).unwrap();
+    let key = sk.sk_to_pk();
+    let pubkey = BlsPublicKey::from_slice(&key.compress());
+    let aggregate =
+        blst::min_pk::AggregatePublicKey::aggregate(&vec![&key; SYNC_COMMITTEE_PUBKEYS], false)
+            .unwrap();
+    SyncCommitteeData {
+        pubkeys: vec![pubkey; SYNC_COMMITTEE_PUBKEYS],
+        aggregate_pubkey: BlsPublicKey::from_slice(&aggregate.to_public_key().compress()),
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1955,6 +2030,17 @@ mod tests {
                     apply_optimistic_update_payload(&payload_with_domain(expected_domain), &store)
                         .unwrap();
                 assert_eq!(next_store.optimistic_header.beacon.slot, attested_slot);
+                assert_eq!(next_store.validate_persisted_state(checkpoint), Ok(()));
+                let forced = force_update_light_client_store(&next_store).unwrap();
+                assert_eq!(forced.validate_persisted_state(checkpoint), Ok(()));
+                if attested_slot == fork_slot {
+                    assert_eq!(
+                        forced.current_sync_committee,
+                        *store.next_sync_committee.as_ref().unwrap()
+                    );
+                    assert!(forced.next_sync_committee.is_none());
+                    assert_eq!(forced.current_max_active_participants, 0);
+                }
                 assert!(matches!(
                     apply_optimistic_update_payload(&payload_with_domain(wrong_domain), &store),
                     Err(LightClientVerificationError::InvalidSyncCommitteeSignature)
@@ -1966,6 +2052,114 @@ mod tests {
 
     fn fixed<const N: usize>(byte: u8) -> FixedBytes<N> {
         FixedBytes::from_slice(&vec![byte; N])
+    }
+
+    fn persisted_store_fixture() -> (WeakSubjectivityCheckpoint, VerifiedLightClientStore) {
+        let slot = 10_000_000;
+        let (checkpoint, bootstrap, _) = bootstrap_payload(slot);
+        let (_, store) = verify_bootstrap_payload(&bootstrap, checkpoint).unwrap();
+        let (update, _) = update_payload_with_next_sync_committee(slot);
+        let mut store = apply_light_client_update_payload(&update, &store)
+            .unwrap()
+            .store;
+        store.next_sync_committee = Some(test_sync_committee());
+        (checkpoint, store)
+    }
+
+    #[test]
+    fn persisted_store_validation_rejects_impossible_deserialized_structure() {
+        let (checkpoint, store) = persisted_store_fixture();
+        assert_eq!(store.validate_persisted_state(checkpoint), Ok(()));
+        let original = serde_json::to_value(&store).unwrap();
+        let reject_mutation = |pointer: &str, value: serde_json::Value, error: &str| {
+            let mut json = original.clone();
+            *json.pointer_mut(pointer).unwrap() = value;
+            // Serde accepts all these malformed structures. The explicit
+            // boundary check must reject them before a restored store is used.
+            let restored: VerifiedLightClientStore = serde_json::from_value(json).unwrap();
+            let actual = restored.validate_persisted_state(checkpoint).unwrap_err();
+            assert!(actual.contains(error), "{pointer}: {actual}");
+        };
+
+        for (pointer, name) in [
+            ("/current_sync_committee/pubkeys", "current committee"),
+            ("/next_sync_committee/pubkeys", "next committee"),
+            (
+                "/best_valid_update/next_sync_committee/pubkeys",
+                "best update next committee",
+            ),
+        ] {
+            for count in [0, 1, 511, 513] {
+                let key = original.pointer(pointer).unwrap()[0].clone();
+                reject_mutation(pointer, serde_json::json!(vec![key; count]), name);
+            }
+        }
+        for (pointer, name) in [
+            ("/previous_max_active_participants", "previous maximum"),
+            ("/current_max_active_participants", "current maximum"),
+            ("/best_valid_update/participants", "best update participant"),
+        ] {
+            for count in [513, usize::MAX] {
+                reject_mutation(pointer, serde_json::json!(count), name);
+            }
+        }
+        reject_mutation(
+            "/best_valid_update/participants",
+            serde_json::json!(0),
+            "best update participant",
+        );
+        reject_mutation(
+            "/checkpoint_root",
+            serde_json::json!(B256::repeat_byte(0xee)),
+            "checkpoint root",
+        );
+        reject_mutation(
+            "/bootstrap_slot",
+            serde_json::json!(store.bootstrap_slot + 1),
+            "bootstrap slot",
+        );
+        reject_mutation(
+            "/finalized_header/beacon/slot",
+            serde_json::json!(store.bootstrap_slot - 1),
+            "finalized slot precedes bootstrap",
+        );
+        reject_mutation(
+            "/optimistic_header/beacon/slot",
+            serde_json::json!(store.finalized_header.beacon.slot - 1),
+            "optimistic slot precedes finalized",
+        );
+        let missing_slot = WeakSubjectivityCheckpoint {
+            beacon_slot: None,
+            ..checkpoint
+        };
+        assert!(store.validate_persisted_state(missing_slot).is_err());
+    }
+
+    #[test]
+    fn persisted_store_validation_accepts_participant_bounds_and_independent_heads() {
+        let (checkpoint, mut store) = persisted_store_fixture();
+        for count in [0, SYNC_COMMITTEE_PUBKEYS] {
+            store.previous_max_active_participants = count;
+            store.current_max_active_participants = count;
+            assert_eq!(store.validate_persisted_state(checkpoint), Ok(()));
+        }
+        for count in [MIN_SYNC_COMMITTEE_PARTICIPANTS, SYNC_COMMITTEE_PUBKEYS] {
+            store.best_valid_update.as_mut().unwrap().participants = count;
+            assert_eq!(store.validate_persisted_state(checkpoint), Ok(()));
+        }
+
+        // Finality may catch up to a competing optimistic header at the same
+        // slot; wire-format fork metadata may also differ after an upgrade.
+        store.optimistic_header.beacon.slot = store.finalized_header.beacon.slot;
+        store.optimistic_header.fork = ConsensusDataFork::Electra;
+        assert_ne!(
+            store.optimistic_header.beacon_root(),
+            store.finalized_header.beacon_root()
+        );
+        assert_eq!(store.validate_persisted_state(checkpoint), Ok(()));
+        store.next_sync_committee = None;
+        store.best_valid_update = None;
+        assert_eq!(store.validate_persisted_state(checkpoint), Ok(()));
     }
 
     fn beacon_header(
@@ -2600,6 +2794,8 @@ mod tests {
         let (bytes, _next_sk) = update_payload_with_next_sync_committee(slot);
 
         let applied = apply_light_client_update_payload(&bytes, &store).unwrap();
+        assert_eq!(store.validate_persisted_state(checkpoint), Ok(()));
+        assert_eq!(applied.store.validate_persisted_state(checkpoint), Ok(()));
         assert_eq!(
             applied.optimistic_status.attested_header.beacon_slot,
             slot + 1
@@ -2610,6 +2806,7 @@ mod tests {
         assert!(applied.store.best_valid_update.is_some());
 
         let forced = force_update_light_client_store(&applied.store).unwrap();
+        assert_eq!(forced.validate_persisted_state(checkpoint), Ok(()));
         assert!(forced.next_sync_committee.is_some());
         assert_eq!(forced.finalized_header.beacon.slot, slot + 1);
     }

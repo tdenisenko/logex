@@ -1,0 +1,160 @@
+{
+  "commit": "8832a8d528f06cdff97ed398f24253c6c7f08457",
+  "rustc": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+  "gates": [
+    {
+      "name": "vendor",
+      "command": [
+        "python3",
+        "tools/verify_datafusion_vendor.py"
+      ],
+      "exit_code": 0,
+      "started": "2026-09-14T23:57:57.492783+00:00",
+      "finished": "2026-09-14T23:57:57.555052+00:00",
+      "sha256": "d8d80949d6f3378c14456842b531f0cade514179e4c94781b95ff9abb6447675",
+      "log": "/private/tmp/logex-consensus-store.oKUecd/gates/vendor.log"
+    },
+    {
+      "name": "format",
+      "command": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "exit_code": 0,
+      "started": "2026-09-14T23:57:57.555471+00:00",
+      "finished": "2026-09-14T23:57:58.378669+00:00",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "log": "/private/tmp/logex-consensus-store.oKUecd/gates/format.log"
+    },
+    {
+      "name": "check",
+      "command": [
+        "cargo",
+        "check",
+        "--workspace",
+        "--all-targets",
+        "--locked",
+        "--offline",
+        "-j",
+        "2"
+      ],
+      "exit_code": 0,
+      "started": "2026-09-14T23:57:58.379069+00:00",
+      "finished": "2026-09-14T23:58:06.563779+00:00",
+      "sha256": "020a4388cc6f521a2cd897ab588b006d7b705d9762fb2bd103e05cc1f73d730d",
+      "log": "/private/tmp/logex-consensus-store.oKUecd/gates/check.log"
+    },
+    {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--locked",
+        "--offline",
+        "-j",
+        "2",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit_code": 0,
+      "started": "2026-09-14T23:58:06.564706+00:00",
+      "finished": "2026-09-14T23:58:17.254058+00:00",
+      "sha256": "f7af5c1badb4bd766a5d8ce6e34af529a9dc8b4b71db5efcf6b38999c2badf7d",
+      "log": "/private/tmp/logex-consensus-store.oKUecd/gates/clippy.log"
+    },
+    {
+      "name": "test",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace",
+        "--all-targets",
+        "--locked",
+        "--offline",
+        "-j",
+        "2"
+      ],
+      "exit_code": 0,
+      "started": "2026-09-14T23:58:17.254817+00:00",
+      "finished": "2026-09-15T00:01:23.031253+00:00",
+      "sha256": "889f95a8a20e707db5343dec014ed35364101ddbab7f024c8eeadee1d0a4f322",
+      "log": "/private/tmp/logex-consensus-store.oKUecd/gates/test.log"
+    },
+    {
+      "name": "doc",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace",
+        "--doc",
+        "--locked",
+        "--offline",
+        "-j",
+        "2"
+      ],
+      "exit_code": 0,
+      "started": "2026-09-15T00:01:23.034700+00:00",
+      "finished": "2026-09-15T00:01:44.888010+00:00",
+      "sha256": "81ecdd64a270eee0653fabb4f82ace89674e1e44354fdc468ef635d1b16d07e3",
+      "log": "/private/tmp/logex-consensus-store.oKUecd/gates/doc.log"
+    },
+    {
+      "name": "release-build",
+      "command": [
+        "cargo",
+        "build",
+        "-p",
+        "logex-node",
+        "--release",
+        "--locked",
+        "--offline",
+        "-j",
+        "2"
+      ],
+      "exit_code": 0,
+      "started": "2026-09-15T00:01:44.888822+00:00",
+      "finished": "2026-09-15T00:02:58.614360+00:00",
+      "sha256": "ecca6324749d398d00bf74b57e371d8b79bbf8e5a5dc9372a3303cdb7ad9b7e6",
+      "log": "/private/tmp/logex-consensus-store.oKUecd/gates/release-build.log"
+    }
+  ],
+  "tests": {
+    "passed": 1227,
+    "failed": 0,
+    "ignored": 23,
+    "groups": 25
+  },
+  "focused_evidence": [
+    {
+      "path": "/private/tmp/logex-consensus-store.oKUecd/before-anchor-publication.log",
+      "sha256": "e2ed99650350676417bfd65c240455406df95911bacc5adb6103cfc80bbf7dc1"
+    },
+    {
+      "path": "/private/tmp/logex-consensus-store.oKUecd/after-anchor-publication.log",
+      "sha256": "386c2406d11f546fe10c7cea583f1c202712836af307428d7855745485b45eb9"
+    },
+    {
+      "path": "/private/tmp/logex-consensus-store.oKUecd/before-anchor-order.log",
+      "sha256": "b830d286fa5b77adb0610dc8b4764adcad87e257dd885a868e29d33f6f919ac6"
+    },
+    {
+      "path": "/private/tmp/logex-consensus-store.oKUecd/cl-tests.log",
+      "sha256": "a97e40df3022fa7c0e62e99fcfcedcffe374ffb11e90150aa0f57921346647e6"
+    },
+    {
+      "path": "/private/tmp/logex-consensus-store.oKUecd/disappeared-directory.log",
+      "sha256": "9c90e586fcee86a71a76745b8a7937a3abc0b588d6af4684ce7b1503dbf21cea"
+    }
+  ],
+  "notes": [
+    "Before publication test failed on append; later mutations reached after fix. Before order test failed on descending order; duplicate control checked after fix.",
+    "No timing benchmark, remote host or external volume was used.",
+    "Existing future-compatibility warnings and Apple debug linker warning are retained; all current gates passed."
+  ]
+}
