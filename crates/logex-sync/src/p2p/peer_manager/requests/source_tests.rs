@@ -1,4 +1,4 @@
-use super::limit_tests::{Fixture, hashes, take_requests};
+use super::limit_tests::{Fixture, hashes, receipt_contexts, take_requests};
 use super::*;
 
 /// Ordinary decoded receipt marker, not an executed transaction or committed block.
@@ -15,7 +15,7 @@ async fn standalone_receipts_preserve_out_of_order_supplier_sources() {
     let requested = hashes();
     let future = fixture
         .manager
-        .get_receipts_prefer_peers(requested.clone(), 1, &[]);
+        .get_receipts_prefer_peers(receipt_contexts(&requested), 1, &[]);
     tokio::pin!(future);
     assert!(futures_util::poll!(future.as_mut()).is_pending());
     let mut requests = take_requests(&mut fixture.receivers);
@@ -76,7 +76,9 @@ fn answer_marked_receipts(
 async fn standalone_receipts_keep_retry_winner_and_completed_chunk_sources() {
     let mut fixture = Fixture::new().await;
     let requested = hashes();
-    let future = fixture.manager.get_receipts(requested.clone(), 1);
+    let future = fixture
+        .manager
+        .get_receipts(receipt_contexts(&requested), 1);
     tokio::pin!(future);
     assert!(futures_util::poll!(future.as_mut()).is_pending());
     let mut requests = take_requests(&mut fixture.receivers);
@@ -121,7 +123,7 @@ async fn standalone_eth69_partial_prefix_keeps_single_supplier_and_empty_sets() 
     let mut fixture = Fixture::new().await;
     let requested = hashes();
     let future = fixture.manager.get_receipts_prefer_peers_with_limits(
-        requested.clone(),
+        receipt_contexts(&requested),
         1,
         &[],
         Duration::from_secs(2),
@@ -176,7 +178,9 @@ async fn standalone_eth70_continuation_keeps_supplier_and_empty_block() {
         peer.version = EthVersion::Eth70;
     }
     let requested = vec![B256::repeat_byte(1), B256::repeat_byte(2)];
-    let future = fixture.manager.get_receipts(requested.clone(), 1);
+    let future = fixture
+        .manager
+        .get_receipts(receipt_contexts(&requested), 1);
     tokio::pin!(future);
     assert!(futures_util::poll!(future.as_mut()).is_pending());
     let mut requests = take_requests(&mut fixture.receivers);

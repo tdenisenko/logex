@@ -50,6 +50,7 @@ mod lifecycle;
 mod requests;
 mod state;
 
+pub use self::requests::ReceiptRequestContext;
 use self::requests::RequestAttempt;
 pub(crate) use self::requests::{
     BodyReceiptRequestAccounting, BodyReceiptRequestOutcome, BodyReceiptRequestPlan,

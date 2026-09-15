@@ -12,6 +12,60 @@ use crate::primitives::{
 use super::state::execution_client_family;
 use super::*;
 
+mod receipt_resources;
+pub use receipt_resources::ReceiptRequestContext;
+use receipt_resources::{ReceiptResourceExceeded, check_receipt_block};
+
+fn receipt_request_hashes(blocks: &[ReceiptRequestContext]) -> Vec<B256> {
+    blocks
+        .iter()
+        .map(ReceiptRequestContext::block_hash)
+        .collect()
+}
+
+fn check_raw_receipt_resources(
+    blocks: &[ReceiptRequestContext],
+    receipts: &[Vec<LogexReceipt>],
+) -> std::result::Result<(), RequestAttempt> {
+    if receipts.len() > blocks.len() {
+        return Err(RequestAttempt::ReceiptResponseOverflow {
+            returned: receipts.len(),
+        });
+    }
+    for (block, receipts) in blocks.iter().zip(receipts) {
+        check_receipt_block(block, 0, receipts)
+            .map_err(RequestAttempt::ReceiptResourcesExceeded)?;
+    }
+    Ok(())
+}
+
+fn check_bloomed_receipt_resources(
+    blocks: &[ReceiptRequestContext],
+    receipts: &ReceiptBatch,
+) -> std::result::Result<(), RequestAttempt> {
+    if receipts.len() > blocks.len() {
+        return Err(RequestAttempt::ReceiptResponseOverflow {
+            returned: receipts.len(),
+        });
+    }
+    for (block, receipts) in blocks.iter().zip(receipts) {
+        check_receipt_block(block, 0, receipts.iter().map(|receipt| &receipt.receipt))
+            .map_err(RequestAttempt::ReceiptResourcesExceeded)?;
+    }
+    Ok(())
+}
+
+// Preserve the collectors' existing outer-shape failure policy even though
+// malformed shape is now rejected before bloom reconstruction.
+fn receipt_chunk_failure(error: RequestAttempt) -> ChunkFailureKind {
+    match error {
+        RequestAttempt::ReceiptResponseOverflow { returned } => {
+            ChunkFailureKind::Incomplete { returned }
+        }
+        error => ChunkFailureKind::Request(error),
+    }
+}
+
 const PIPELINED_CHUNK_REQUEST_PEERS: usize = 3;
 const PIPELINED_BODY_RECEIPT_HEDGE_DELAY: Duration = Duration::from_millis(1_500);
 const PIPELINED_BODY_RECEIPT_REQUEST_TIMEOUT: Duration = Duration::from_secs(4);
@@ -285,6 +339,7 @@ struct PlanLiveBodyReceiptChunk {
 
 pub(crate) struct BodyReceiptRequestPlan {
     hashes: Vec<B256>,
+    receipt_contexts: Vec<ReceiptRequestContext>,
     ranges: Vec<std::ops::Range<usize>>,
     range_indices_by_start: HashMap<usize, usize>,
     return_blocks: usize,
@@ -1122,16 +1177,20 @@ impl PeerManager {
     /// without waiting for every other body chunk to complete.
     pub async fn get_bodies_and_receipts_prefer_peers(
         &mut self,
-        hashes: Vec<B256>,
+        blocks: Vec<ReceiptRequestContext>,
         required_block: u64,
         preferred_peers: &[PeerId],
     ) -> Result<Option<Vec<SourcedBodyReceipts>>> {
-        if hashes.is_empty() {
+        if blocks.is_empty() {
             return Ok(Some(Vec::new()));
         }
-
         let Some(plan) = self
-            .prepare_bodies_and_receipts_request(hashes, required_block, preferred_peers)
+            .prepare_bodies_and_receipts_request_for_blocks(
+                blocks,
+                None,
+                required_block,
+                preferred_peers,
+            )
             .await?
         else {
             return Ok(None);
@@ -1141,34 +1200,15 @@ impl PeerManager {
             .map(|completion| completion.map(|completion| completion.blocks))
     }
 
-    pub(crate) async fn prepare_bodies_and_receipts_request(
+    pub(crate) async fn prepare_bodies_and_receipts_request_for_blocks(
         &mut self,
-        hashes: Vec<B256>,
-        required_block: u64,
-        preferred_peers: &[PeerId],
-    ) -> Result<Option<BodyReceiptRequestPlan>> {
-        self.prepare_bodies_and_receipts_request_inner(
-            hashes,
-            None,
-            None,
-            required_block,
-            preferred_peers,
-            &[],
-        )
-        .await
-    }
-
-    pub(crate) async fn prepare_bodies_and_receipts_request_for_hashes_and_gas(
-        &mut self,
-        hashes: Vec<B256>,
-        gas_used: Vec<u64>,
+        blocks: Vec<ReceiptRequestContext>,
         rows_per_block: Option<f64>,
         required_block: u64,
         preferred_peers: &[PeerId],
     ) -> Result<Option<BodyReceiptRequestPlan>> {
         self.prepare_bodies_and_receipts_request_inner(
-            hashes,
-            Some(gas_used),
+            blocks,
             rows_per_block,
             required_block,
             preferred_peers,
@@ -1177,18 +1217,16 @@ impl PeerManager {
         .await
     }
 
-    pub(crate) async fn prepare_bodies_and_receipts_request_for_hashes_and_gas_excluding(
+    pub(crate) async fn prepare_bodies_and_receipts_request_for_blocks_excluding(
         &mut self,
-        hashes: Vec<B256>,
-        gas_used: Vec<u64>,
+        blocks: Vec<ReceiptRequestContext>,
         rows_per_block: Option<f64>,
         required_block: u64,
         preferred_peers: &[PeerId],
         excluded_peers: &[PeerId],
     ) -> Result<Option<BodyReceiptRequestPlan>> {
         self.prepare_bodies_and_receipts_request_inner(
-            hashes,
-            Some(gas_used),
+            blocks,
             rows_per_block,
             required_block,
             preferred_peers,
@@ -1223,20 +1261,18 @@ impl PeerManager {
 
     async fn prepare_bodies_and_receipts_request_inner(
         &mut self,
-        hashes: Vec<B256>,
-        receipt_gas_used: Option<Vec<u64>>,
+        blocks: Vec<ReceiptRequestContext>,
         rows_per_block: Option<f64>,
         required_block: u64,
         preferred_peers: &[PeerId],
         excluded_peers: &[PeerId],
     ) -> Result<Option<BodyReceiptRequestPlan>> {
         self.drain_events_now();
-        if hashes.is_empty() {
+        if blocks.len() < MIN_PARALLEL_BODY_REQUEST_BLOCKS {
             return Ok(None);
         }
-        if hashes.len() < MIN_PARALLEL_BODY_REQUEST_BLOCKS {
-            return Ok(None);
-        }
+        let hashes = receipt_request_hashes(&blocks);
+        let receipt_gas_used: Vec<_> = blocks.iter().map(ReceiptRequestContext::gas_used).collect();
 
         let mut body_peer_ids = self
             .peer_ids_for_block_requests(Some(required_block), preferred_peers)
@@ -1284,14 +1320,14 @@ impl PeerManager {
             hashes.len(),
             &body_peer_ids,
             &receipt_peer_ids,
-            receipt_gas_used.as_deref(),
+            Some(&receipt_gas_used),
             rows_per_block,
         );
         if ranges.len() < 2 {
             return Ok(None);
         }
         let return_blocks =
-            body_receipt_return_blocks(hashes.len(), receipt_gas_used.as_deref(), rows_per_block);
+            body_receipt_return_blocks(hashes.len(), Some(&receipt_gas_used), rows_per_block);
         let minimum_role_window = body_receipt_scheduled_chunk_limit(
             &ranges,
             body_receipt_plan_progress_target(return_blocks),
@@ -1350,6 +1386,7 @@ impl PeerManager {
 
         Ok(Some(BodyReceiptRequestPlan {
             hashes,
+            receipt_contexts: blocks,
             ranges,
             range_indices_by_start,
             return_blocks,
@@ -2367,8 +2404,11 @@ impl BodyReceiptRequestPlan {
                         receipt_peer,
                         PeerRequestKind::Receipts,
                     );
-                    self.request_receipts_until_complete(receipt_peer, request_hashes.clone())
-                        .await
+                    self.request_receipts_until_complete(
+                        receipt_peer,
+                        self.receipt_contexts[range.clone()].to_vec(),
+                    )
+                    .await
                 };
                 match receipt_result {
                     Ok(receipts) => {
@@ -2478,46 +2518,47 @@ impl BodyReceiptRequestPlan {
     async fn request_receipts_until_complete(
         &self,
         peer_id: PeerId,
-        hashes: Vec<B256>,
+        blocks: Vec<ReceiptRequestContext>,
     ) -> std::result::Result<ReceiptBatch, ChunkFailureKind> {
         let Some(version) = self.peers.get(&peer_id).map(|peer| peer.version) else {
             return Err(ChunkFailureKind::Request(RequestAttempt::Disconnected));
         };
 
         if version >= EthVersion::Eth70 {
+            let expected_blocks = blocks.len();
             let receipts = self
-                .request_receipts70(peer_id, hashes.clone())
+                .request_receipts70(peer_id, blocks)
                 .await
-                .map_err(ChunkFailureKind::Request)?;
-            validate_receipt_response_shape("receipts70", hashes.len(), &receipts)
+                .map_err(receipt_chunk_failure)?;
+            validate_receipt_response_shape("receipts70", expected_blocks, &receipts)
                 .map_err(ChunkFailureKind::ReceiptResponseShapeMismatch)?;
             return Ok(receipts);
         }
 
-        let mut remaining_hashes = hashes.clone();
-        let mut receipts = Vec::with_capacity(hashes.len());
+        let mut remaining_blocks = blocks.clone();
+        let mut receipts = Vec::with_capacity(blocks.len());
 
-        while !remaining_hashes.is_empty() {
-            let request_hashes = remaining_hashes.clone();
+        while !remaining_blocks.is_empty() {
+            let request_blocks = remaining_blocks.clone();
             let request_timeout =
-                self.role_request_timeout(peer_id, PeerRequestKind::Receipts, request_hashes.len());
+                self.role_request_timeout(peer_id, PeerRequestKind::Receipts, request_blocks.len());
             let response = if version >= EthVersion::Eth69 {
-                self.request_receipts69(peer_id, request_hashes.clone(), request_timeout)
+                self.request_receipts69(peer_id, request_blocks.clone(), request_timeout)
                     .await
             } else {
-                self.request_receipts(peer_id, request_hashes.clone(), request_timeout)
+                self.request_receipts(peer_id, request_blocks.clone(), request_timeout)
                     .await
             }
-            .map_err(ChunkFailureKind::Request)?;
+            .map_err(receipt_chunk_failure)?;
 
-            match classify_response_progress(request_hashes.len(), response.len()) {
+            match classify_response_progress(request_blocks.len(), response.len()) {
                 ResponseProgress::Complete => {
                     receipts.extend(response);
                     return Ok(receipts);
                 }
                 ResponseProgress::Partial { returned } => {
                     receipts.extend(response);
-                    remaining_hashes = request_hashes[returned..].to_vec();
+                    remaining_blocks = request_blocks[returned..].to_vec();
                 }
                 ResponseProgress::Empty => {
                     return Err(ChunkFailureKind::Incomplete { returned: 0 });
@@ -2554,7 +2595,7 @@ impl BodyReceiptRequestPlan {
     async fn request_receipts(
         &self,
         peer_id: PeerId,
-        hashes: Vec<B256>,
+        blocks: Vec<ReceiptRequestContext>,
         request_timeout: Duration,
     ) -> std::result::Result<
         Vec<
@@ -2566,21 +2607,25 @@ impl BodyReceiptRequestPlan {
         >,
         RequestAttempt,
     > {
-        self.request_with_channel(
-            peer_id,
-            &move |response| PeerRequest::GetReceipts {
-                request: GetReceipts(hashes.clone()),
-                response,
-            },
-            request_timeout,
-        )
-        .await
+        let hashes = receipt_request_hashes(&blocks);
+        let receipts: ReceiptBatch = self
+            .request_with_channel(
+                peer_id,
+                &move |response| PeerRequest::GetReceipts {
+                    request: GetReceipts(hashes.clone()),
+                    response,
+                },
+                request_timeout,
+            )
+            .await?;
+        check_bloomed_receipt_resources(&blocks, &receipts)?;
+        Ok(receipts)
     }
 
     async fn request_receipts69(
         &self,
         peer_id: PeerId,
-        hashes: Vec<B256>,
+        blocks: Vec<ReceiptRequestContext>,
         request_timeout: Duration,
     ) -> std::result::Result<
         Vec<
@@ -2592,6 +2637,7 @@ impl BodyReceiptRequestPlan {
         >,
         RequestAttempt,
     > {
+        let hashes = receipt_request_hashes(&blocks);
         let receipts: Vec<Vec<<LogexNetworkPrimitives as NetworkPrimitives>::Receipt>> = self
             .request_with_channel(
                 peer_id,
@@ -2602,6 +2648,7 @@ impl BodyReceiptRequestPlan {
                 request_timeout,
             )
             .await?;
+        check_raw_receipt_resources(&blocks, &receipts)?;
         let mut bloom_cache = ReceiptBloomCache::default();
         Ok(logex_receipt_batches_with_cached_blooms(
             receipts,
@@ -2612,7 +2659,7 @@ impl BodyReceiptRequestPlan {
     async fn request_receipts70(
         &self,
         peer_id: PeerId,
-        hashes: Vec<B256>,
+        blocks: Vec<ReceiptRequestContext>,
     ) -> std::result::Result<
         Vec<
             Vec<
@@ -2623,22 +2670,23 @@ impl BodyReceiptRequestPlan {
         >,
         RequestAttempt,
     > {
-        let mut merged = Vec::with_capacity(hashes.len());
+        let mut merged = Vec::with_capacity(blocks.len());
         let mut next_block_index = 0usize;
         let mut first_block_receipt_index = 0u64;
+        let mut partial_weight = 0u128;
         let mut bloom_cache = ReceiptBloomCache::default();
 
-        while next_block_index < hashes.len() {
-            let request_hashes = hashes[next_block_index..].to_vec();
+        while next_block_index < blocks.len() {
+            let request_blocks = receipt_request_hashes(&blocks[next_block_index..]);
             let request_timeout =
-                self.role_request_timeout(peer_id, PeerRequestKind::Receipts, request_hashes.len());
+                self.role_request_timeout(peer_id, PeerRequestKind::Receipts, request_blocks.len());
             let response: Receipts70<<LogexNetworkPrimitives as NetworkPrimitives>::Receipt> = self
                 .request_with_channel(
                     peer_id,
                     &move |response| PeerRequest::GetReceipts70 {
                         request: GetReceipts70 {
                             first_block_receipt_index,
-                            block_hashes: request_hashes.clone(),
+                            block_hashes: request_blocks.clone(),
                         },
                         response,
                     },
@@ -2651,8 +2699,9 @@ impl BodyReceiptRequestPlan {
                 next_block_index,
                 first_block_receipt_index,
                 response,
-                hashes.len(),
+                &blocks,
                 &mut bloom_cache,
+                &mut partial_weight,
             )
             .map_err(Receipts70MergeError::into_request_attempt)?;
 
@@ -2779,10 +2828,10 @@ impl PeerManager {
     /// Request receipts in hash order, preserving each block's actual supplier.
     pub async fn get_receipts(
         &mut self,
-        hashes: Vec<B256>,
+        blocks: Vec<ReceiptRequestContext>,
         required_block: u64,
     ) -> Result<Vec<SourcedReceiptSet>> {
-        self.get_receipts_inner(hashes, required_block, &[], None, None)
+        self.get_receipts_inner(blocks, required_block, &[], None, None)
             .await
     }
 
@@ -2790,11 +2839,11 @@ impl PeerManager {
     /// the rest of the eligible peer set.
     pub async fn get_receipts_prefer_peers(
         &mut self,
-        hashes: Vec<B256>,
+        blocks: Vec<ReceiptRequestContext>,
         required_block: u64,
         preferred_peers: &[PeerId],
     ) -> Result<Vec<SourcedReceiptSet>> {
-        self.get_receipts_inner(hashes, required_block, preferred_peers, None, None)
+        self.get_receipts_inner(blocks, required_block, preferred_peers, None, None)
             .await
     }
 
@@ -2804,14 +2853,14 @@ impl PeerManager {
     /// time; this is not a whole-batch deadline or a cap on wire exchanges.
     pub async fn get_receipts_prefer_peers_with_limits(
         &mut self,
-        hashes: Vec<B256>,
+        blocks: Vec<ReceiptRequestContext>,
         required_block: u64,
         preferred_peers: &[PeerId],
         request_timeout: Duration,
         max_attempts: usize,
     ) -> Result<Vec<SourcedReceiptSet>> {
         self.get_receipts_inner(
-            hashes,
+            blocks,
             required_block,
             preferred_peers,
             Some(request_timeout),
@@ -2822,14 +2871,14 @@ impl PeerManager {
 
     async fn get_receipts_inner(
         &mut self,
-        hashes: Vec<B256>,
+        blocks: Vec<ReceiptRequestContext>,
         required_block: u64,
         preferred_peers: &[PeerId],
         request_timeout: Option<Duration>,
         max_attempts: Option<usize>,
     ) -> Result<Vec<SourcedReceiptSet>> {
         self.drain_events_now();
-        if hashes.is_empty() {
+        if blocks.is_empty() {
             return Ok(Vec::new());
         }
 
@@ -2844,7 +2893,7 @@ impl PeerManager {
         // The optional bulk scheduler has independent retries and deadlines.
         if request_timeout.is_none() && max_attempts.is_none() {
             match self
-                .request_sourced_receipts_parallel_chunks(&peer_ids, hashes.clone())
+                .request_sourced_receipts_parallel_chunks(&peer_ids, blocks.clone())
                 .await
             {
                 Ok(Some((receipts, stats, failures))) => {
@@ -2901,7 +2950,7 @@ impl PeerManager {
                         latest_block = ?peer.remote_status.latest_block,
                         earliest_block = ?peer.remote_status.earliest_block,
                         required_block,
-                        hashes = hashes.len(),
+                        blocks = blocks.len(),
                         preferred = preferred_peers.contains(&peer_id),
                         "requesting receipts from execution peer"
                     );
@@ -2913,12 +2962,12 @@ impl PeerManager {
             if version >= EthVersion::Eth70 {
                 let started_at = Instant::now();
                 match self
-                    .request_receipts70(peer_id, hashes.clone(), request_timeout)
+                    .request_receipts70(peer_id, blocks.clone(), request_timeout)
                     .await
                 {
                     Ok(receipts) => {
                         if let Err(error) =
-                            validate_receipt_response_shape("receipts70", hashes.len(), &receipts)
+                            validate_receipt_response_shape("receipts70", blocks.len(), &receipts)
                         {
                             if self.on_receipt_response_shape_mismatch(peer_id, error) {
                                 dead_peers.insert(peer_id);
@@ -2956,22 +3005,22 @@ impl PeerManager {
                 }
             }
 
-            let mut remaining_hashes = hashes.clone();
-            let mut collected = Vec::with_capacity(hashes.len());
+            let mut remaining_blocks = blocks.clone();
+            let mut collected = Vec::with_capacity(blocks.len());
             let budget = continuation_budget(request_timeout);
             tokio::pin!(budget);
 
-            while !remaining_hashes.is_empty() {
-                let request_hashes = remaining_hashes.clone();
+            while !remaining_blocks.is_empty() {
+                let request_blocks = remaining_blocks.clone();
                 let started_at = Instant::now();
                 let attempt = request_with_continuation_budget(budget.as_mut(), async {
                     if version >= EthVersion::Eth69 {
-                        self.request_receipts69(peer_id, request_hashes.clone(), request_timeout)
+                        self.request_receipts69(peer_id, request_blocks.clone(), request_timeout)
                             .await
                     } else {
                         self.request_receipts_with_timeout(
                             peer_id,
-                            request_hashes.clone(),
+                            request_blocks.clone(),
                             request_timeout,
                         )
                         .await
@@ -2981,7 +3030,7 @@ impl PeerManager {
 
                 match attempt {
                     Ok(receipts) => {
-                        match classify_response_progress(request_hashes.len(), receipts.len()) {
+                        match classify_response_progress(request_blocks.len(), receipts.len()) {
                             ResponseProgress::Complete => {
                                 let elapsed = started_at.elapsed();
                                 let payload_bytes = receipt_batch_payload_bytes(&receipts);
@@ -3012,20 +3061,20 @@ impl PeerManager {
                                     peer_id,
                                     PeerRequestKind::Receipts,
                                     "receipts",
-                                    request_hashes.len(),
+                                    request_blocks.len(),
                                     returned,
                                 );
                                 collected.extend(
                                     receipts.into_iter().map(|receipts| (peer_id, receipts)),
                                 );
-                                remaining_hashes = request_hashes[returned..].to_vec();
+                                remaining_blocks = request_blocks[returned..].to_vec();
                             }
                             ResponseProgress::Empty => {
                                 self.on_zero_progress_response(
                                     peer_id,
                                     PeerRequestKind::Receipts,
                                     "receipts",
-                                    request_hashes.len(),
+                                    request_blocks.len(),
                                 );
                                 break;
                             }
@@ -3033,7 +3082,7 @@ impl PeerManager {
                                 self.on_invalid_response_length(
                                     peer_id,
                                     "receipts",
-                                    request_hashes.len(),
+                                    request_blocks.len(),
                                     returned,
                                 );
                                 dead_peers.insert(peer_id);
@@ -3378,13 +3427,13 @@ impl PeerManager {
     async fn request_sourced_receipts_parallel_chunks(
         &self,
         peer_ids: &[PeerId],
-        hashes: Vec<B256>,
+        blocks: Vec<ReceiptRequestContext>,
     ) -> std::result::Result<Option<ParallelSourcedReceipts>, ParallelChunkError> {
-        if hashes.len() < MIN_PARALLEL_RECEIPT_REQUEST_BLOCKS || peer_ids.is_empty() {
+        if blocks.len() < MIN_PARALLEL_RECEIPT_REQUEST_BLOCKS || peer_ids.is_empty() {
             return Ok(None);
         }
 
-        let ranges = self.request_chunk_ranges(hashes.len(), peer_ids, PeerRequestKind::Receipts);
+        let ranges = self.request_chunk_ranges(blocks.len(), peer_ids, PeerRequestKind::Receipts);
         if ranges.len() < 2 {
             return Ok(None);
         }
@@ -3408,13 +3457,13 @@ impl PeerManager {
             };
             let peer_id =
                 peer_ids[rotated_chunk_index(chunk_index, self.request_cursor) % peer_ids.len()];
-            let request_hashes = hashes[range.clone()].to_vec();
+            let request_blocks = blocks[range.clone()].to_vec();
             attempts.push(
                 async move {
                     let started_at = Instant::now();
-                    let requested = request_hashes.len();
+                    let requested = request_blocks.len();
                     let result = self
-                        .request_receipts_until_complete(peer_id, request_hashes)
+                        .request_receipts_until_complete(peer_id, request_blocks)
                         .await;
                     (
                         chunk_index,
@@ -3484,13 +3533,13 @@ impl PeerManager {
             };
             let peer_id =
                 peer_ids[rotated_chunk_index(chunk_index, self.request_cursor) % peer_ids.len()];
-            let request_hashes = hashes[range.clone()].to_vec();
+            let request_blocks = blocks[range.clone()].to_vec();
             attempts.push(
                 async move {
                     let started_at = Instant::now();
-                    let requested = request_hashes.len();
+                    let requested = request_blocks.len();
                     let result = self
-                        .request_receipts_until_complete(peer_id, request_hashes)
+                        .request_receipts_until_complete(peer_id, request_blocks)
                         .await;
                     (
                         chunk_index,
@@ -3518,11 +3567,11 @@ impl PeerManager {
                     base_chunk_index + ((PARALLEL_CHUNK_RETRY_ROUNDS + 1) * range_count),
                 );
                 for peer_id in retry_peer_ids {
-                    let request_hashes = hashes[range.clone()].to_vec();
+                    let request_blocks = blocks[range.clone()].to_vec();
                     let started_at = Instant::now();
-                    let requested = request_hashes.len();
+                    let requested = request_blocks.len();
                     match self
-                        .request_receipts_until_complete(peer_id, request_hashes)
+                        .request_receipts_until_complete(peer_id, request_blocks)
                         .await
                     {
                         Ok(receipts) => {
@@ -3560,9 +3609,9 @@ impl PeerManager {
             }
         }
 
-        let receipts = sourced_receipts_from_chunks(hashes.len(), chunks);
+        let receipts = sourced_receipts_from_chunks(blocks.len(), chunks);
 
-        if receipts.len() == hashes.len() {
+        if receipts.len() == blocks.len() {
             Ok(Some((receipts, stats, failures)))
         } else if failures.is_empty() {
             Ok(None)
@@ -3617,48 +3666,49 @@ impl PeerManager {
     async fn request_receipts_until_complete(
         &self,
         peer_id: PeerId,
-        hashes: Vec<B256>,
+        blocks: Vec<ReceiptRequestContext>,
     ) -> std::result::Result<ReceiptBatch, ChunkFailureKind> {
         let Some(version) = self.peers.get(&peer_id).map(|peer| peer.version) else {
             return Err(ChunkFailureKind::Request(RequestAttempt::Disconnected));
         };
 
         if version >= EthVersion::Eth70 {
+            let expected_blocks = blocks.len();
             let receipts = self
-                .request_receipts70(peer_id, hashes.clone(), None)
+                .request_receipts70(peer_id, blocks, None)
                 .await
-                .map_err(ChunkFailureKind::Request)?;
-            validate_receipt_response_shape("receipts70", hashes.len(), &receipts)
+                .map_err(receipt_chunk_failure)?;
+            validate_receipt_response_shape("receipts70", expected_blocks, &receipts)
                 .map_err(ChunkFailureKind::ReceiptResponseShapeMismatch)?;
             return Ok(receipts);
         }
 
-        let mut remaining_hashes = hashes.clone();
-        let mut receipts = Vec::with_capacity(hashes.len());
+        let mut remaining_blocks = blocks.clone();
+        let mut receipts = Vec::with_capacity(blocks.len());
         let budget = continuation_budget(None);
         tokio::pin!(budget);
 
-        while !remaining_hashes.is_empty() {
-            let request_hashes = remaining_hashes.clone();
+        while !remaining_blocks.is_empty() {
+            let request_blocks = remaining_blocks.clone();
             let response = request_with_continuation_budget(budget.as_mut(), async {
                 if version >= EthVersion::Eth69 {
-                    self.request_receipts69(peer_id, request_hashes.clone(), None)
+                    self.request_receipts69(peer_id, request_blocks.clone(), None)
                         .await
                 } else {
-                    self.request_receipts(peer_id, request_hashes.clone()).await
+                    self.request_receipts(peer_id, request_blocks.clone()).await
                 }
             })
             .await
-            .map_err(ChunkFailureKind::Request)?;
+            .map_err(receipt_chunk_failure)?;
 
-            match classify_response_progress(request_hashes.len(), response.len()) {
+            match classify_response_progress(request_blocks.len(), response.len()) {
                 ResponseProgress::Complete => {
                     receipts.extend(response);
                     return Ok(receipts);
                 }
                 ResponseProgress::Partial { returned } => {
                     receipts.extend(response);
-                    remaining_hashes = request_hashes[returned..].to_vec();
+                    remaining_blocks = request_blocks[returned..].to_vec();
                 }
                 ResponseProgress::Empty => {
                     return Err(ChunkFailureKind::Incomplete { returned: 0 });
@@ -3833,7 +3883,7 @@ impl PeerManager {
     pub(super) async fn request_receipts(
         &self,
         peer_id: PeerId,
-        hashes: Vec<B256>,
+        blocks: Vec<ReceiptRequestContext>,
     ) -> std::result::Result<
         Vec<
             Vec<
@@ -3844,14 +3894,14 @@ impl PeerManager {
         >,
         RequestAttempt,
     > {
-        self.request_receipts_with_timeout(peer_id, hashes, None)
+        self.request_receipts_with_timeout(peer_id, blocks, None)
             .await
     }
 
     pub(super) async fn request_receipts_with_timeout(
         &self,
         peer_id: PeerId,
-        hashes: Vec<B256>,
+        blocks: Vec<ReceiptRequestContext>,
         request_timeout: Option<Duration>,
     ) -> std::result::Result<
         Vec<
@@ -3863,23 +3913,27 @@ impl PeerManager {
         >,
         RequestAttempt,
     > {
+        let hashes = receipt_request_hashes(&blocks);
         self.serve_cache
-            .record_p2p_upload_payload(request_hashes_payload_bytes(hashes.len()));
-        self.request_with_channel(
-            peer_id,
-            &move |response| PeerRequest::GetReceipts {
-                request: GetReceipts(hashes.clone()),
-                response,
-            },
-            request_timeout,
-        )
-        .await
+            .record_p2p_upload_payload(request_hashes_payload_bytes(blocks.len()));
+        let receipts: ReceiptBatch = self
+            .request_with_channel(
+                peer_id,
+                &move |response| PeerRequest::GetReceipts {
+                    request: GetReceipts(hashes.clone()),
+                    response,
+                },
+                request_timeout,
+            )
+            .await?;
+        check_bloomed_receipt_resources(&blocks, &receipts)?;
+        Ok(receipts)
     }
 
     pub(super) async fn request_receipts69(
         &self,
         peer_id: PeerId,
-        hashes: Vec<B256>,
+        blocks: Vec<ReceiptRequestContext>,
         request_timeout: Option<Duration>,
     ) -> std::result::Result<
         Vec<
@@ -3891,8 +3945,9 @@ impl PeerManager {
         >,
         RequestAttempt,
     > {
+        let hashes = receipt_request_hashes(&blocks);
         self.serve_cache
-            .record_p2p_upload_payload(request_hashes_payload_bytes(hashes.len()));
+            .record_p2p_upload_payload(request_hashes_payload_bytes(blocks.len()));
         let receipts: Vec<Vec<<LogexNetworkPrimitives as NetworkPrimitives>::Receipt>> = self
             .request_with_channel(
                 peer_id,
@@ -3903,6 +3958,7 @@ impl PeerManager {
                 request_timeout,
             )
             .await?;
+        check_raw_receipt_resources(&blocks, &receipts)?;
         let mut bloom_cache = ReceiptBloomCache::default();
         Ok(logex_receipt_batches_with_cached_blooms(
             receipts,
@@ -3913,7 +3969,7 @@ impl PeerManager {
     pub(super) async fn request_receipts70(
         &self,
         peer_id: PeerId,
-        hashes: Vec<B256>,
+        blocks: Vec<ReceiptRequestContext>,
         request_timeout: Option<Duration>,
     ) -> std::result::Result<
         Vec<
@@ -3925,17 +3981,18 @@ impl PeerManager {
         >,
         RequestAttempt,
     > {
-        let mut merged = Vec::with_capacity(hashes.len());
+        let mut merged = Vec::with_capacity(blocks.len());
         let mut next_block_index = 0usize;
         let mut first_block_receipt_index = 0u64;
+        let mut partial_weight = 0u128;
         let mut bloom_cache = ReceiptBloomCache::default();
         let budget = continuation_budget(request_timeout);
         tokio::pin!(budget);
 
-        while next_block_index < hashes.len() {
-            let request_hashes = hashes[next_block_index..].to_vec();
+        while next_block_index < blocks.len() {
+            let request_blocks = receipt_request_hashes(&blocks[next_block_index..]);
             self.serve_cache
-                .record_p2p_upload_payload(receipts70_request_payload_bytes(request_hashes.len()));
+                .record_p2p_upload_payload(receipts70_request_payload_bytes(request_blocks.len()));
             let response: Receipts70<<LogexNetworkPrimitives as NetworkPrimitives>::Receipt> =
                 request_with_continuation_budget(
                     budget.as_mut(),
@@ -3944,7 +4001,7 @@ impl PeerManager {
                         &move |response| PeerRequest::GetReceipts70 {
                             request: GetReceipts70 {
                                 first_block_receipt_index,
-                                block_hashes: request_hashes.clone(),
+                                block_hashes: request_blocks.clone(),
                             },
                             response,
                         },
@@ -3958,8 +4015,9 @@ impl PeerManager {
                 next_block_index,
                 first_block_receipt_index,
                 response,
-                hashes.len(),
+                &blocks,
                 &mut bloom_cache,
+                &mut partial_weight,
             )
             .map_err(Receipts70MergeError::into_request_attempt)?;
 
@@ -4011,8 +4069,9 @@ fn chunk_request_failure_severity(failure: &ChunkRequestFailure) -> u8 {
     };
 
     match error {
-        RequestAttempt::ContinuationDeadline => 0,
-        RequestAttempt::Request(reth_network::p2p::error::RequestError::BadResponse)
+        RequestAttempt::ContinuationDeadline | RequestAttempt::ReceiptResourcesExceeded(_) => 0,
+        RequestAttempt::ReceiptResponseOverflow { .. }
+        | RequestAttempt::Request(reth_network::p2p::error::RequestError::BadResponse)
         | RequestAttempt::Request(reth_network::p2p::error::RequestError::UnsupportedCapability) => {
             3
         }
@@ -4384,14 +4443,7 @@ fn schedule_body_receipt_plan_chunk<'a>(
         &mut chunk,
         hashes,
     );
-    schedule_body_receipt_plan_receipt_role(
-        plan,
-        attempts,
-        peer_state,
-        range.start,
-        &mut chunk,
-        hashes,
-    );
+    schedule_body_receipt_plan_receipt_role(plan, attempts, peer_state, range.start, &mut chunk);
     active_chunks.insert(range.start, chunk);
 }
 
@@ -4586,7 +4638,6 @@ fn schedule_body_receipt_plan_receipt_role<'a>(
     peer_state: &mut BodyReceiptPlanPeerState,
     start: usize,
     chunk: &mut PlanLiveBodyReceiptChunk,
-    hashes: &[B256],
 ) -> bool {
     let Some(peer_id) = next_body_receipt_role_candidate(
         &chunk.candidates.receipts,
@@ -4596,21 +4647,21 @@ fn schedule_body_receipt_plan_receipt_role<'a>(
         return false;
     };
 
-    let request_hashes = hashes.to_vec();
+    let request_blocks = plan.receipt_contexts[chunk.range.clone()].to_vec();
     record_body_receipt_attempt_peer(&mut peer_state.receipt_in_flight_peers, Some(peer_id));
     chunk.state.receipts.in_flight += 1;
     chunk.state.receipts.last_scheduled_at = Some(Instant::now());
     attempts.push(
         async move {
             let started_at = Instant::now();
-            let requested = request_hashes.len();
+            let requested = request_blocks.len();
             let _active = BodyReceiptActiveRequestGuard::new(
                 &plan.accounting_tx,
                 peer_id,
                 PeerRequestKind::Receipts,
             );
             let result = plan
-                .request_receipts_until_complete(peer_id, request_hashes)
+                .request_receipts_until_complete(peer_id, request_blocks)
                 .await;
             BodyReceiptPlanRoleAttempt::Receipts {
                 start,
@@ -4852,7 +4903,7 @@ fn schedule_missing_body_receipt_plan_roles<'a>(
     }
     if attempts.len() < max_role_attempts
         && should_schedule_receipts
-        && schedule_body_receipt_plan_receipt_role(plan, attempts, peer_state, start, chunk, hashes)
+        && schedule_body_receipt_plan_receipt_role(plan, attempts, peer_state, start, chunk)
     {
         scheduled += 1;
     }
@@ -5646,6 +5697,11 @@ fn split_contiguous_prefix<T>(
 pub(super) enum RequestAttempt {
     /// A local role window elapsed; this does not indicate peer misbehavior.
     ContinuationDeadline,
+    /// Receipt data exceeded this request's header-derived resource allowance.
+    ReceiptResourcesExceeded(ReceiptResourceExceeded),
+    ReceiptResponseOverflow {
+        returned: usize,
+    },
     Disconnected,
     Request(reth_network::p2p::error::RequestError),
 }
@@ -5656,6 +5712,7 @@ pub(super) enum Receipts70MergeError {
     ResponseOverflow,
     UnexpectedAppend,
     NoProgress,
+    ResourceExceeded(ReceiptResourceExceeded),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -5675,7 +5732,10 @@ struct ReceiptResponseShapeMismatch {
 
 impl Receipts70MergeError {
     pub(super) fn into_request_attempt(self) -> RequestAttempt {
-        RequestAttempt::Request(reth_network::p2p::error::RequestError::BadResponse)
+        match self {
+            Self::ResourceExceeded(error) => RequestAttempt::ReceiptResourcesExceeded(error),
+            _ => RequestAttempt::Request(reth_network::p2p::error::RequestError::BadResponse),
+        }
     }
 }
 
@@ -5737,59 +5797,77 @@ pub(super) fn merge_receipts70_response(
     next_block_index: usize,
     first_block_receipt_index: u64,
     response: Receipts70<LogexReceipt>,
-    expected_blocks: usize,
+    blocks: &[ReceiptRequestContext],
     bloom_cache: &mut ReceiptBloomCache,
+    partial_weight: &mut u128,
 ) -> std::result::Result<(usize, u64), Receipts70MergeError> {
-    let previous_state = (next_block_index, first_block_receipt_index);
     let returned_blocks = response.receipts.len();
     if returned_blocks == 0 {
         return Err(Receipts70MergeError::EmptyResponse);
     }
-
-    if next_block_index + returned_blocks > expected_blocks {
-        return Err(Receipts70MergeError::ResponseOverflow);
-    }
-
-    let last_block_incomplete = response.last_block_incomplete;
-    let receipts = logex_receipt_batches_with_cached_blooms(response.receipts, bloom_cache);
-    for (offset, block_receipts) in receipts.into_iter().enumerate() {
-        let target_index = next_block_index + offset;
-        if target_index < merged.len() {
-            if offset != 0 || first_block_receipt_index == 0 {
-                return Err(Receipts70MergeError::UnexpectedAppend);
-            }
-            if block_receipts.is_empty() {
-                return Err(Receipts70MergeError::NoProgress);
-            }
-            merged[target_index].extend(block_receipts);
-        } else if target_index == merged.len() {
-            merged.push(block_receipts);
-        } else {
-            return Err(Receipts70MergeError::ResponseOverflow);
+    let end = next_block_index
+        .checked_add(returned_blocks)
+        .filter(|end| *end <= blocks.len())
+        .ok_or(Receipts70MergeError::ResponseOverflow)?;
+    // Cursor, retained prefix and weight always describe the same unfinished block.
+    let appending = first_block_receipt_index != 0;
+    if appending {
+        if merged.len() != next_block_index + 1
+            || merged[next_block_index].len() as u128 != u128::from(first_block_receipt_index)
+        {
+            return Err(Receipts70MergeError::UnexpectedAppend);
         }
-    }
-
-    let (updated_block_index, updated_receipt_index) = if last_block_incomplete {
-        let partial_block_index = next_block_index + returned_blocks - 1;
-        let received_receipts = merged
-            .get(partial_block_index)
-            .map(Vec::len)
-            .unwrap_or_default();
-        if received_receipts == 0 {
+        if response.receipts[0].is_empty() {
             return Err(Receipts70MergeError::NoProgress);
         }
-        (
-            next_block_index + returned_blocks - 1,
-            received_receipts as u64,
-        )
-    } else {
-        (next_block_index + returned_blocks, 0)
-    };
-
-    if (updated_block_index, updated_receipt_index) == previous_state {
+    } else if merged.len() != next_block_index || *partial_weight != 0 {
+        return Err(Receipts70MergeError::UnexpectedAppend);
+    }
+    let last_block_incomplete = response.last_block_incomplete;
+    if last_block_incomplete && response.receipts[returned_blocks - 1].is_empty() {
         return Err(Receipts70MergeError::NoProgress);
     }
 
+    let mut last_weight = 0;
+    for (offset, receipts) in response.receipts.iter().enumerate() {
+        let previous = if offset == 0 && appending {
+            *partial_weight
+        } else {
+            0
+        };
+        last_weight = check_receipt_block(&blocks[next_block_index + offset], previous, receipts)
+            .map_err(Receipts70MergeError::ResourceExceeded)?;
+    }
+    let updated_block_index = if last_block_incomplete { end - 1 } else { end };
+    let updated_receipt_index = if last_block_incomplete {
+        let previous = if appending && returned_blocks == 1 {
+            first_block_receipt_index
+        } else {
+            0
+        };
+        let incoming = u64::try_from(response.receipts[returned_blocks - 1].len())
+            .map_err(|_| Receipts70MergeError::ResponseOverflow)?;
+        previous
+            .checked_add(incoming)
+            .ok_or(Receipts70MergeError::ResponseOverflow)?
+    } else {
+        0
+    };
+
+    // No mutation or bloom reconstruction happens until every block passes.
+    let receipts = logex_receipt_batches_with_cached_blooms(response.receipts, bloom_cache);
+    for (offset, receipts) in receipts.into_iter().enumerate() {
+        if offset == 0 && appending {
+            merged[next_block_index].extend(receipts);
+        } else {
+            merged.push(receipts);
+        }
+    }
+    *partial_weight = if last_block_incomplete {
+        last_weight
+    } else {
+        0
+    };
     Ok((updated_block_index, updated_receipt_index))
 }
 
@@ -6983,6 +7061,7 @@ mod tests {
     fn body_receipt_plan_max_return_blocks_caps_speculative_prefix() {
         let ranges = vec![0..300, 300..690, 690..1_100, 1_100..1_500];
         let plan = BodyReceiptRequestPlan {
+            receipt_contexts: limit_tests::receipt_contexts(&vec![B256::ZERO; 1_500]),
             hashes: vec![B256::ZERO; 1_500],
             range_indices_by_start: ranges
                 .iter()
@@ -7343,6 +7422,7 @@ mod tests {
             .collect::<Vec<_>>();
         let ranges = vec![0..64, 64..128, 128..192, 192..256];
         let plan = BodyReceiptRequestPlan {
+            receipt_contexts: limit_tests::receipt_contexts(&vec![B256::ZERO; 256]),
             hashes: vec![B256::ZERO; 256],
             range_indices_by_start: ranges
                 .iter()
@@ -7390,6 +7470,7 @@ mod tests {
             .collect::<Vec<_>>();
         let ranges = vec![0..64, 64..128, 128..192, 192..256];
         let plan = BodyReceiptRequestPlan {
+            receipt_contexts: limit_tests::receipt_contexts(&vec![B256::ZERO; 256]),
             hashes: vec![B256::ZERO; 256],
             range_indices_by_start: ranges
                 .iter()
@@ -7437,6 +7518,7 @@ mod tests {
             .collect::<Vec<_>>();
         let ranges = vec![0..64, 64..128, 128..192, 192..256];
         let plan = BodyReceiptRequestPlan {
+            receipt_contexts: limit_tests::receipt_contexts(&vec![B256::ZERO; 256]),
             hashes: vec![B256::ZERO; 256],
             range_indices_by_start: ranges
                 .iter()
@@ -7549,6 +7631,7 @@ mod tests {
             .collect::<Vec<_>>();
         let ranges = vec![0..32, 32..64, 64..96, 96..128];
         let mut plan = BodyReceiptRequestPlan {
+            receipt_contexts: limit_tests::receipt_contexts(&vec![B256::ZERO; 128]),
             hashes: vec![B256::ZERO; 128],
             range_indices_by_start: ranges
                 .iter()
@@ -7793,6 +7876,7 @@ mod tests {
             .collect::<Vec<_>>();
         let ranges = std::iter::once(0..32).collect::<Vec<_>>();
         let plan = BodyReceiptRequestPlan {
+            receipt_contexts: limit_tests::receipt_contexts(&vec![B256::ZERO; 32]),
             hashes: vec![B256::ZERO; 32],
             range_indices_by_start: HashMap::from([(0usize, 0usize)]),
             ranges,
@@ -8679,6 +8763,7 @@ mod tests {
     fn eth70_partial_receipts_are_merged_across_requests() {
         let mut merged = ReceiptBatch::new();
         let mut bloom_cache = ReceiptBloomCache::default();
+        let mut partial_weight = 0;
 
         let (next_block_index, first_block_receipt_index) = merge_receipts70_response(
             &mut merged,
@@ -8692,8 +8777,9 @@ mod tests {
                     vec![fake_receipt(3)],
                 ],
             },
-            3,
+            &limit_tests::receipt_contexts(&[B256::ZERO; 3]),
             &mut bloom_cache,
+            &mut partial_weight,
         )
         .expect("first partial response should merge");
 
@@ -8710,8 +8796,9 @@ mod tests {
                 last_block_incomplete: false,
                 receipts: vec![vec![fake_receipt(4)]],
             },
-            3,
+            &limit_tests::receipt_contexts(&[B256::ZERO; 3]),
             &mut bloom_cache,
+            &mut partial_weight,
         )
         .expect("continuation response should merge");
 
@@ -8725,6 +8812,7 @@ mod tests {
     fn eth70_empty_response_is_rejected() {
         let mut merged = ReceiptBatch::new();
         let mut bloom_cache = ReceiptBloomCache::default();
+        let mut partial_weight = 0;
 
         let error = merge_receipts70_response(
             &mut merged,
@@ -8734,8 +8822,9 @@ mod tests {
                 last_block_incomplete: false,
                 receipts: Vec::<Vec<LogexReceipt>>::new(),
             },
-            1,
+            &limit_tests::receipt_contexts(&[B256::ZERO]),
             &mut bloom_cache,
+            &mut partial_weight,
         )
         .expect_err("empty response should be rejected");
 
@@ -8763,3 +8852,6 @@ mod salvage_tests;
 
 #[cfg(test)]
 mod continuation_tests;
+
+#[cfg(test)]
+mod resource_tests;

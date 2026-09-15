@@ -19,6 +19,7 @@ impl Fixture {
         receipt_peer.version = version;
         let mut plan = ownership_tests::test_plan(&body_peer);
         plan.hashes = (0..9).map(B256::repeat_byte).collect();
+        plan.receipt_contexts = limit_tests::receipt_contexts(&plan.hashes);
         plan.ranges = vec![0..8, 8..9];
         plan.range_indices_by_start = HashMap::from([(0, 0), (8, 1)]);
         plan.return_blocks = 8;

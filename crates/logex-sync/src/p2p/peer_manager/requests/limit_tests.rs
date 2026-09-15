@@ -95,6 +95,13 @@ pub(super) fn hashes() -> Vec<B256> {
     (0..64).map(|byte| B256::repeat_byte(byte + 1)).collect()
 }
 
+pub(super) fn receipt_contexts(hashes: &[B256]) -> Vec<ReceiptRequestContext> {
+    hashes
+        .iter()
+        .map(|hash| ReceiptRequestContext::test_with_hash(*hash, 1_000_000))
+        .collect()
+}
+
 async fn fetch(manager: &mut PeerManager, kind: PeerRequestKind, limited: bool) -> Result<usize> {
     match (kind, limited) {
         (PeerRequestKind::Bodies, true) => manager
@@ -106,11 +113,17 @@ async fn fetch(manager: &mut PeerManager, kind: PeerRequestKind, limited: bool) 
             .await
             .map(|bodies| bodies.len()),
         (PeerRequestKind::Receipts, true) => manager
-            .get_receipts_prefer_peers_with_limits(hashes(), 1, &[], Duration::from_secs(2), 2)
+            .get_receipts_prefer_peers_with_limits(
+                receipt_contexts(&hashes()),
+                1,
+                &[],
+                Duration::from_secs(2),
+                2,
+            )
             .await
             .map(|receipts| receipts.len()),
         (PeerRequestKind::Receipts, false) => manager
-            .get_receipts(hashes(), 1)
+            .get_receipts(receipt_contexts(&hashes()), 1)
             .await
             .map(|receipts| receipts.len()),
         _ => unreachable!(),
