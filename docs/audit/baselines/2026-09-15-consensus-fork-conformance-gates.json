@@ -1,0 +1,202 @@
+{
+  "commit": "26df603cb2ee9da8fc18014422b2facab149c6b8",
+  "rustc": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+  "gates": [
+    {
+      "name": "vendor",
+      "command": [
+        "python3",
+        "tools/verify_datafusion_vendor.py"
+      ],
+      "exit_code": 0,
+      "started": "2026-09-15T01:06:04.202119+00:00",
+      "finished": "2026-09-15T01:06:04.265040+00:00",
+      "sha256": "d8d80949d6f3378c14456842b531f0cade514179e4c94781b95ff9abb6447675",
+      "log": "/private/tmp/logex-fork-conformance.lKbK6w/gates/vendor.log"
+    },
+    {
+      "name": "format",
+      "command": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "exit_code": 0,
+      "started": "2026-09-15T01:06:04.265428+00:00",
+      "finished": "2026-09-15T01:06:05.092734+00:00",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "log": "/private/tmp/logex-fork-conformance.lKbK6w/gates/format.log"
+    },
+    {
+      "name": "check",
+      "command": [
+        "cargo",
+        "check",
+        "--workspace",
+        "--all-targets",
+        "--locked",
+        "--offline",
+        "-j",
+        "2"
+      ],
+      "exit_code": 0,
+      "started": "2026-09-15T01:06:05.093141+00:00",
+      "finished": "2026-09-15T01:06:11.643488+00:00",
+      "sha256": "f386e4e7890473201135b8d5a6892138ebe5b65dfe3a50c06e6fc7c03dcd0bc3",
+      "log": "/private/tmp/logex-fork-conformance.lKbK6w/gates/check.log"
+    },
+    {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--locked",
+        "--offline",
+        "-j",
+        "2",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit_code": 0,
+      "started": "2026-09-15T01:06:11.644204+00:00",
+      "finished": "2026-09-15T01:06:19.235776+00:00",
+      "sha256": "5f907239771c0f096a23201793316cfc1151e137b2aa56f8ac342d7f440c2bea",
+      "log": "/private/tmp/logex-fork-conformance.lKbK6w/gates/clippy.log"
+    },
+    {
+      "name": "test",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace",
+        "--all-targets",
+        "--locked",
+        "--offline",
+        "-j",
+        "2"
+      ],
+      "exit_code": 0,
+      "started": "2026-09-15T01:06:19.236396+00:00",
+      "finished": "2026-09-15T01:09:20.887347+00:00",
+      "sha256": "ee1ead27ce8d1806fda7b4df5ac9d2e890cfdb6d2bf6f101bce7dc7889733474",
+      "log": "/private/tmp/logex-fork-conformance.lKbK6w/gates/test.log"
+    },
+    {
+      "name": "doc",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace",
+        "--doc",
+        "--locked",
+        "--offline",
+        "-j",
+        "2"
+      ],
+      "exit_code": 0,
+      "started": "2026-09-15T01:09:20.891334+00:00",
+      "finished": "2026-09-15T01:09:36.268566+00:00",
+      "sha256": "85377a464d0d98d3043039f57050526304de96faa25b83dfcf54953d70027fca",
+      "log": "/private/tmp/logex-fork-conformance.lKbK6w/gates/doc.log"
+    },
+    {
+      "name": "release-build",
+      "command": [
+        "cargo",
+        "build",
+        "-p",
+        "logex-node",
+        "--release",
+        "--locked",
+        "--offline",
+        "-j",
+        "2"
+      ],
+      "exit_code": 0,
+      "started": "2026-09-15T01:09:36.270657+00:00",
+      "finished": "2026-09-15T01:11:00.160902+00:00",
+      "sha256": "c5809149aa73259b919dbc4e28c66c6d9f3da24b42ad7a559fff87d2f2025646",
+      "log": "/private/tmp/logex-fork-conformance.lKbK6w/gates/release-build.log"
+    }
+  ],
+  "tests": {
+    "passed": 1257,
+    "failed": 0,
+    "ignored": 23,
+    "groups": 25
+  },
+  "focused_evidence": [
+    {
+      "path": "/private/tmp/logex-fork-conformance.lKbK6w/cl-tests-final.log",
+      "sha256": "2dc1596915e7ad1666db5b12ed0f50350322ac75def51843c0eb9a710fe1dda4"
+    },
+    {
+      "path": "/private/tmp/logex-fork-conformance.lKbK6w/clippy-final.log",
+      "sha256": "c6fa5cd3b4ebe48ac29f13e454b90cfe2ec7c5430ed0f7ad262da12f484fc02c"
+    },
+    {
+      "path": "/private/tmp/logex-fork-conformance.lKbK6w/before-finality-summary.log",
+      "sha256": "95182409fc6911e33faae0cc95238f53b8aeb6e62a55322a198628baba2dd74b"
+    },
+    {
+      "path": "/private/tmp/logex-fork-conformance.lKbK6w/gates-before-cleanup/results.json",
+      "sha256": "d30b871125eaa9b433dded8c1157f42d313d5ff9dd7e086837e6618d31fca557"
+    },
+    {
+      "path": "/private/tmp/logex-genesis-finality.z6alRT/before.log",
+      "sha256": "67a3051ae027b5fecab4efa0b746a893d3ff27574e37310f07b7fef3efad541f"
+    },
+    {
+      "path": "/private/tmp/logex-genesis-finality.z6alRT/before-genesis-proof.log",
+      "sha256": "8062d0b079ceeb7c228c31249521fe096e17a8efaa9280eff38b31446b9f8e7f"
+    },
+    {
+      "path": "/private/tmp/logex-genesis-finality.z6alRT/before-digests.log",
+      "sha256": "594590e29c45bcf37c9e3d6686b541d67128bfba42f561a9d61e4b12f9fc7d09"
+    },
+    {
+      "path": "/private/tmp/logex-genesis-finality.z6alRT/before-rpc-context.log",
+      "sha256": "e83367a8319b27ca43ecbe53942b713bf9de37135a7689fd5fb758f7f7c47325"
+    },
+    {
+      "path": "/private/tmp/logex-genesis-finality.z6alRT/before-beacon-context.log",
+      "sha256": "2254654a38c038b578ec12d36f35250e57373ca9aef85ef191a90ea1aee41351"
+    },
+    {
+      "path": "/private/tmp/logex-genesis-finality.z6alRT/before-committee.log",
+      "sha256": "964002e82a9b81d501473b1783286b79d4a8857137a6943a31db994b0f799f8b"
+    },
+    {
+      "path": "/private/tmp/logex-genesis-finality.z6alRT/after-committee.log",
+      "sha256": "0f9a9e77d4a17621a7e2604009c30212b69e3efbb53d8cd78b5c2e33158e2435"
+    },
+    {
+      "path": "/private/tmp/logex-genesis-finality.z6alRT/committee-diagnostic.log",
+      "sha256": "0f93e58a81a75587c5c1f8939d079d99a293fbb51c40236580819ee9e4e4f253"
+    },
+    {
+      "path": "/private/tmp/logex-genesis-finality.z6alRT/clippy-diagnostic.log",
+      "sha256": "c6fa5cd3b4ebe48ac29f13e454b90cfe2ec7c5430ed0f7ad262da12f484fc02c"
+    },
+    {
+      "path": "/private/tmp/logex-fork-conformance-evidence/official-tests.log",
+      "sha256": "294503d48dc66e09674552c4940a036a178f990d4edbd67ec6581374239c47ea"
+    },
+    {
+      "path": "/private/tmp/logex-fork-conformance-evidence/official-clippy.log",
+      "sha256": "5a96131416e97b8aded39ab175382dfdaeb3c7a77252c051112384651e73e4c1"
+    }
+  ],
+  "notes": [
+    "Before tests fail at the first reached family; all supported cases pass after corrections.",
+    "The first full gate pass at 37091d88 is preserved separately; final source removes only the unused MissingFinalizedHeader error variant plus documentation.",
+    "Official random SSZ fixtures establish serialization conformance, not signature/proof authenticity or all official state transitions.",
+    "No timing benchmark, remote host, external volume or production data was used.",
+    "Existing dependency future-compatibility and Apple debug-linker warnings remain; all required gates pass."
+  ]
+}

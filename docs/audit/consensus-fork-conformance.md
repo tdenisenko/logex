@@ -110,5 +110,8 @@ are asserted and which are retained only as source evidence.
 
 The completed integrated consensus-crate run passes 179 tests (one ignored),
 including the official fixtures and committee controls; focused strict Clippy
-also passes. Full workspace gates and CI/merge records are being completed. Live sync and the
-staging soak remain later gates.
+also passes. Source `26df603c` passed all seven local gates: vendor verification,
+formatting, workspace check, strict Clippy, 1,257 workspace tests (23 ignored),
+documentation tests and release build. [Gate records](baselines/2026-09-15-consensus-fork-conformance-gates.json)
+retain commands, toolchain and evidence hashes. Linux/macOS CI and merge remain
+pending. Live sync and the staging soak remain later gates.
