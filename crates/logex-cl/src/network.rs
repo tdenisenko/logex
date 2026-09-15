@@ -167,12 +167,10 @@ impl ConsensusDialAddressFamilies {
 
 #[derive(Debug, Error)]
 pub enum ConsensusNetworkError {
-    #[error("failed to load discovery secret {path}: {source}")]
+    #[error("failed to load or create discovery secret {path}: {source}")]
     ReadSecret { path: PathBuf, source: io::Error },
     #[error("failed to parse discovery secret {path}: {message}")]
     ParseSecret { path: PathBuf, message: String },
-    #[error("failed to persist discovery secret {path}: {source}")]
-    PersistSecret { path: PathBuf, source: io::Error },
     #[error("failed to load known peers {path}: {source}")]
     ReadKnownPeers { path: PathBuf, source: io::Error },
     #[error("failed to preserve damaged known peers {path}: {source}")]
@@ -6881,49 +6879,18 @@ fn enr_has_discv5_endpoint_for_families(families: ConsensusDialAddressFamilies, 
 }
 
 fn load_or_create_secret_key(secret_key_path: &Path) -> Result<CombinedKey, ConsensusNetworkError> {
-    match secret_key_path.try_exists() {
-        Ok(true) => {
-            let contents = fs::read_to_string(secret_key_path).map_err(|source| {
-                ConsensusNetworkError::ReadSecret {
-                    path: secret_key_path.to_path_buf(),
-                    source,
-                }
-            })?;
-            let hex_key = contents.trim().trim_start_matches("0x");
-            let mut bytes =
-                hex::decode(hex_key).map_err(|error| ConsensusNetworkError::ParseSecret {
-                    path: secret_key_path.to_path_buf(),
-                    message: error.to_string(),
-                })?;
-            CombinedKey::secp256k1_from_bytes(&mut bytes).map_err(|error| {
-                ConsensusNetworkError::ParseSecret {
-                    path: secret_key_path.to_path_buf(),
-                    message: error.to_string(),
-                }
-            })
-        }
-        Ok(false) => {
-            if let Some(dir) = secret_key_path.parent() {
-                fs::create_dir_all(dir).map_err(|source| ConsensusNetworkError::PersistSecret {
-                    path: secret_key_path.to_path_buf(),
-                    source,
-                })?;
-            }
-
-            let key = CombinedKey::generate_secp256k1();
-            fs::write(secret_key_path, hex::encode(key.encode())).map_err(|source| {
-                ConsensusNetworkError::PersistSecret {
-                    path: secret_key_path.to_path_buf(),
-                    source,
-                }
-            })?;
-            Ok(key)
-        }
-        Err(source) => Err(ConsensusNetworkError::ReadSecret {
+    let mut bytes = crate::load_or_create_discovery_key(secret_key_path).map_err(|source| {
+        ConsensusNetworkError::ReadSecret {
             path: secret_key_path.to_path_buf(),
             source,
-        }),
-    }
+        }
+    })?;
+    CombinedKey::secp256k1_from_bytes(&mut bytes).map_err(|error| {
+        ConsensusNetworkError::ParseSecret {
+            path: secret_key_path.to_path_buf(),
+            message: error.to_string(),
+        }
+    })
 }
 
 fn load_known_peers(path: &Path) -> Result<Vec<PersistedPeer>, ConsensusNetworkError> {
@@ -9418,11 +9385,21 @@ mod tests {
     fn discovery_secret_is_stable_after_first_write() {
         let temp = TempDir::new().unwrap();
         let path = discovery_secret_path(temp.path());
+        // Production ConsensusStore::open initializes and syncs this directory.
+        crate::create_synced_directory(path.parent().unwrap()).unwrap();
 
         let first = load_or_create_secret_key(&path).unwrap();
         let second = load_or_create_secret_key(&path).unwrap();
 
         assert_eq!(first.encode(), second.encode());
+    }
+
+    #[test]
+    fn discovery_secret_does_not_recreate_missing_storage_parent() {
+        let temp = TempDir::new().unwrap();
+        let path = discovery_secret_path(temp.path());
+        assert!(load_or_create_secret_key(&path).is_err());
+        assert!(!path.parent().unwrap().exists());
     }
 
     #[test]

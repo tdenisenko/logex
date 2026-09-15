@@ -1,0 +1,88 @@
+{
+  "status": "Implementation and focused tests/review pass; final gates/CI/merge pending",
+  "branch": "audit/consensus-discovery-key",
+  "base": "5df5b2f52bf8d63dfe154372fd593eebf9018c8e",
+  "source_sha256": {
+    "crates/logex-cl/src/discovery_key.rs": "166518b84f836855589c4af5bfbe80f317bb719366148adb7c73aaa486c91f71",
+    "crates/logex-cl/src/network.rs": "53df56d040ae9150709feeadafad24d7e5cd3127d8d35deeff5eae3ed261bd7c",
+    "crates/logex-cl/src/lib.rs": "76eababfe3619dff921f3aca9c01ec38712b74e6744f39db536a2974354d3b0d",
+    "crates/logex-sync/src/p2p/persistence.rs": "e35c3d543d27204706996dcacd87f39ad9574200527edafa25b5842ab282f1cd",
+    "crates/logex-node/src/runtime.rs": "816b8193f37b57238f798243d9b348606aa940ba78f34c30074027e1bdadc318"
+  },
+  "findings": {
+    "B3-60": "Discovery identity direct final-path creation lacks serialization and durability",
+    "B3-61": "Unbounded reads for fixed-size discovery identity",
+    "B3-62": "Network loaders recreate missing initialized storage parents",
+    "B3-63": "New identity mode depends on ambient mask"
+  },
+  "evidence_directory": "/private/tmp/logex-discovery-key-2ntzzfok",
+  "evidence": {
+    "final-review.json": {
+      "sha256": "505cf3b81d1e5f2e92d384efd8780155b223f522819f75f4589edfb4de54e01f",
+      "bytes": 5512
+    },
+    "publication-review.json": {
+      "sha256": "5fdfb3b9d307db95b80c0743821ade2c956dfcdb66494f7cf5c748827637804f",
+      "bytes": 5434
+    },
+    "exfat-creation-review.json": {
+      "sha256": "3833116d693441ae4bbf437899d77bd3cb00f3db594132cde55ee974a0bf5ede",
+      "bytes": 5113
+    },
+    "original-parent-control.json": {
+      "sha256": "15c4f9b90af8138696f0a43952035228c6dbffd951adafaadcc8da4f56758b2c",
+      "bytes": 637
+    },
+    "original-parent-control.log": {
+      "sha256": "42f435819d60f23b2d72571fa05f446c14fe72d4f5b31616c8618281ea6e9173",
+      "bytes": 1462
+    },
+    "key-tests-first.log": {
+      "sha256": "e3068bea5b98b54797b8a4b8443a45ba515f60c708fdc87f43abf1b77dac4c63",
+      "bytes": 1955
+    },
+    "cl-tests.log": {
+      "sha256": "6aa48e11f0f19ed8fb5df452af79abbbc2d773d44a2ffdce2ffec220c303b8e9",
+      "bytes": 30338
+    },
+    "el-persistence-tests.log": {
+      "sha256": "59c1a856c093bfce8f8c05b419df03b54d38c7bc9ce99e0b64c2e2a59249b7a7",
+      "bytes": 994
+    },
+    "remote-cleanup-result.json": {
+      "sha256": "d44dd4e458f6f3993557fe58e0b4747d60a30d36414e06e201f94ff85f081cce",
+      "bytes": 302
+    },
+    "remote-cleanup-inventory.log": {
+      "sha256": "d6b072454e1f26952794587f50619c90e924ac9a2bed76149800c68f77ee6f9b",
+      "bytes": 943
+    },
+    "cooperative-probe.log": {
+      "sha256": "ef56ce70f043281c79616e9152279a6a97fc92e18d2fdd3286354719f2e2e378",
+      "bytes": 195
+    },
+    "exfat-probe.log": {
+      "sha256": "01f9c7a20f59882c4e5d40820ce10846075fbf1d4e1f2d2353e48aca9c62f9a0",
+      "bytes": 266
+    }
+  },
+  "focused_consensus_tests": {
+    "passed": 342,
+    "failed": 0,
+    "ignored": 1
+  },
+  "focused_execution_persistence_tests": {
+    "passed": 4,
+    "failed": 0,
+    "ignored": 0
+  },
+  "limits": {
+    "read_bytes_maximum": 129,
+    "encoded_bytes_maximum": 128,
+    "creation": "Cooperating current writers, stable nonblocking lock; trusted initialized directory",
+    "mac_mini": "Only fixed fixture primitives on detached disposable ExFAT image; exact folder removed, 536902963 file bytes",
+    "existing_modes": "Preserved; per-file POSIX enforcement unavailable on ExFAT",
+    "performance": "Startup/restart only; no additional ingestion work, no benchmark or timing percentage claimed",
+    "scope": "No physical power-loss simulation or entire Rust helper execution on ExFAT; no expected-volume supervision implementation"
+  }
+}

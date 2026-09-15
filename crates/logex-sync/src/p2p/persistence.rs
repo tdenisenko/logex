@@ -2,7 +2,6 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use alloy_primitives::hex;
 use reth_network_peers::NodeRecord;
 use secp256k1::SecretKey;
 
@@ -17,25 +16,10 @@ pub fn known_peers_path(data_dir: &Path) -> PathBuf {
     data_dir.join(KNOWN_PEERS_FILE)
 }
 
+/// Load the stable identity after the data-directory owner initializes its parent.
 pub fn load_or_create_secret_key(secret_key_path: &Path) -> io::Result<SecretKey> {
-    match secret_key_path.try_exists() {
-        Ok(true) => {
-            let contents = fs::read_to_string(secret_key_path)?;
-            let hex_key = contents.trim().trim_start_matches("0x");
-            let bytes = hex::decode(hex_key).map_err(io::Error::other)?;
-            SecretKey::from_slice(&bytes).map_err(io::Error::other)
-        }
-        Ok(false) => {
-            if let Some(dir) = secret_key_path.parent() {
-                fs::create_dir_all(dir)?;
-            }
-
-            let secret = SecretKey::new(&mut rand::thread_rng());
-            fs::write(secret_key_path, hex::encode(secret.secret_bytes()))?;
-            Ok(secret)
-        }
-        Err(err) => Err(err),
-    }
+    let bytes = logex_cl::load_or_create_discovery_key(secret_key_path)?;
+    SecretKey::from_slice(&bytes).map_err(io::Error::other)
 }
 
 pub fn load_known_peers(path: &Path) -> io::Result<Vec<NodeRecord>> {
@@ -98,6 +82,18 @@ mod tests {
         let second = load_or_create_secret_key(&path).unwrap();
 
         assert_eq!(first.secret_bytes(), second.secret_bytes());
+        assert_eq!(
+            first.secret_bytes(),
+            logex_cl::load_or_create_discovery_key(&path).unwrap()
+        );
+    }
+
+    #[test]
+    fn discovery_secret_does_not_recreate_missing_storage_parent() {
+        let tmp = TempDir::new().unwrap();
+        let absent = tmp.path().join("missing-storage");
+        assert!(load_or_create_secret_key(&discovery_secret_path(&absent)).is_err());
+        assert!(!absent.exists());
     }
 
     #[test]

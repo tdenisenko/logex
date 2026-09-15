@@ -1,5 +1,5 @@
 {
-  "status": "All seven local gates and final independent review pass; PR/CI/merge pending",
+  "status": "Merged in PR #172 after all seven local gates, independent review and all six CI jobs passed",
   "branch": "audit/consensus-metadata-retention",
   "base": "ccb19d3b72371aed6189f6a2a68fa8a2e9b5cbd6",
   "source_commit": "6772c7fabf03635e416e6fc89a0d69b94156ae8c",
@@ -230,5 +230,10 @@
     "New test compile setup needed explicit integer conversion and actual existing response-limit error variant",
     "Exhaustion fixture incorrectly excluded authenticated checkpoint availability; corrected oracle distinguishes incomplete optimistic head"
   ],
-  "remaining": "CI/merge for this milestone; protected history lifetime/cost and broader offline audit, volume supervision and offline repair remain open"
+  "remaining": "Protected history lifetime/cost and broader offline audit, volume supervision and offline repair remain open",
+  "pull_request": "https://github.com/tdenisenko/logex/pull/172",
+  "pr_head": "e4a06c33ad671e10e75abe4ebc1d1cd30c683424",
+  "ci_run": 34991505077,
+  "merge_commit": "5df5b2f52bf8d63dfe154372fd593eebf9018c8e",
+  "merged_at": "2026-09-15T15:59:49Z"
 }
