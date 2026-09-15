@@ -29,6 +29,7 @@ fn check_raw_receipt_resources(
 ) -> std::result::Result<(), RequestAttempt> {
     if receipts.len() > blocks.len() {
         return Err(RequestAttempt::ReceiptResponseOverflow {
+            requested: blocks.len(),
             returned: receipts.len(),
         });
     }
@@ -45,6 +46,7 @@ fn check_bloomed_receipt_resources(
 ) -> std::result::Result<(), RequestAttempt> {
     if receipts.len() > blocks.len() {
         return Err(RequestAttempt::ReceiptResponseOverflow {
+            requested: blocks.len(),
             returned: receipts.len(),
         });
     }
@@ -55,13 +57,17 @@ fn check_bloomed_receipt_resources(
     Ok(())
 }
 
-// Preserve the collectors' existing outer-shape failure policy even though
-// malformed shape is now rejected before bloom reconstruction.
+// Carry the exact wire request size through early receipt shape validation.
+// The original chunk can be larger than a continuation's remaining tail.
 fn receipt_chunk_failure(error: RequestAttempt) -> ChunkFailureKind {
     match error {
-        RequestAttempt::ReceiptResponseOverflow { returned } => {
-            ChunkFailureKind::Incomplete { returned }
-        }
+        RequestAttempt::ReceiptResponseOverflow {
+            requested,
+            returned,
+        } => ChunkFailureKind::ResponseOverflow {
+            requested,
+            returned,
+        },
         error => ChunkFailureKind::Request(error),
     }
 }
@@ -745,7 +751,8 @@ pub(crate) struct ReverseHeaderPagesRequestOutcome {
 #[derive(Debug, Clone)]
 enum ChunkFailureKind {
     Request(RequestAttempt),
-    Incomplete { returned: usize },
+    EmptyResponse,
+    ResponseOverflow { requested: usize, returned: usize },
     ReceiptResponseShapeMismatch(ReceiptResponseShapeMismatch),
 }
 
@@ -1122,20 +1129,15 @@ impl PeerManager {
                     ResponseProgress::Partial { returned } => {
                         let elapsed = started_at.elapsed();
                         let payload_bytes = raw_block_bodies_payload_bytes(&bodies);
-                        self.record_peer_request_success(
-                            peer_id,
-                            PeerRequestKind::Bodies,
-                            returned,
-                            elapsed,
-                        );
-                        self.record_p2p_download_payload(payload_bytes, elapsed);
-                        self.on_partial_response(
+                        self.record_peer_partial_response(
                             peer_id,
                             PeerRequestKind::Bodies,
                             "block bodies",
                             request_hashes.len(),
                             returned,
+                            elapsed,
                         );
+                        self.record_p2p_download_payload(payload_bytes, elapsed);
                         collected.extend(bodies.into_iter().map(|body| (peer_id, body)));
                         remaining_hashes = request_hashes[returned..].to_vec();
                     }
@@ -2504,10 +2506,13 @@ impl BodyReceiptRequestPlan {
                     remaining_hashes = request_hashes[returned..].to_vec();
                 }
                 ResponseProgress::Empty => {
-                    return Err(ChunkFailureKind::Incomplete { returned: 0 });
+                    return Err(ChunkFailureKind::EmptyResponse);
                 }
                 ResponseProgress::Overflow { returned } => {
-                    return Err(ChunkFailureKind::Incomplete { returned });
+                    return Err(ChunkFailureKind::ResponseOverflow {
+                        requested: request_hashes.len(),
+                        returned,
+                    });
                 }
             }
         }
@@ -2561,10 +2566,13 @@ impl BodyReceiptRequestPlan {
                     remaining_blocks = request_blocks[returned..].to_vec();
                 }
                 ResponseProgress::Empty => {
-                    return Err(ChunkFailureKind::Incomplete { returned: 0 });
+                    return Err(ChunkFailureKind::EmptyResponse);
                 }
                 ResponseProgress::Overflow { returned } => {
-                    return Err(ChunkFailureKind::Incomplete { returned });
+                    return Err(ChunkFailureKind::ResponseOverflow {
+                        requested: request_blocks.len(),
+                        returned,
+                    });
                 }
             }
         }
@@ -2984,6 +2992,7 @@ impl PeerManager {
                         );
                         self.record_p2p_download_payload(payload_bytes, elapsed);
                         self.advance_request_cursor();
+                        self.remove_dead_peers(&dead_peers);
                         return Ok(receipts
                             .into_iter()
                             .map(|receipts| (peer_id, receipts))
@@ -3045,25 +3054,21 @@ impl PeerManager {
                                 collected.extend(
                                     receipts.into_iter().map(|receipts| (peer_id, receipts)),
                                 );
+                                self.remove_dead_peers(&dead_peers);
                                 return Ok(collected);
                             }
                             ResponseProgress::Partial { returned } => {
                                 let elapsed = started_at.elapsed();
                                 let payload_bytes = receipt_batch_payload_bytes(&receipts);
-                                self.record_peer_request_success(
-                                    peer_id,
-                                    PeerRequestKind::Receipts,
-                                    returned,
-                                    elapsed,
-                                );
-                                self.record_p2p_download_payload(payload_bytes, elapsed);
-                                self.on_partial_response(
+                                self.record_peer_partial_response(
                                     peer_id,
                                     PeerRequestKind::Receipts,
                                     "receipts",
                                     request_blocks.len(),
                                     returned,
+                                    elapsed,
                                 );
+                                self.record_p2p_download_payload(payload_bytes, elapsed);
                                 collected.extend(
                                     receipts.into_iter().map(|receipts| (peer_id, receipts)),
                                 );
@@ -3652,10 +3657,13 @@ impl PeerManager {
                     remaining_hashes = request_hashes[returned..].to_vec();
                 }
                 ResponseProgress::Empty => {
-                    return Err(ChunkFailureKind::Incomplete { returned: 0 });
+                    return Err(ChunkFailureKind::EmptyResponse);
                 }
                 ResponseProgress::Overflow { returned } => {
-                    return Err(ChunkFailureKind::Incomplete { returned });
+                    return Err(ChunkFailureKind::ResponseOverflow {
+                        requested: request_hashes.len(),
+                        returned,
+                    });
                 }
             }
         }
@@ -3711,10 +3719,13 @@ impl PeerManager {
                     remaining_blocks = request_blocks[returned..].to_vec();
                 }
                 ResponseProgress::Empty => {
-                    return Err(ChunkFailureKind::Incomplete { returned: 0 });
+                    return Err(ChunkFailureKind::EmptyResponse);
                 }
                 ResponseProgress::Overflow { returned } => {
-                    return Err(ChunkFailureKind::Incomplete { returned });
+                    return Err(ChunkFailureKind::ResponseOverflow {
+                        requested: request_blocks.len(),
+                        returned,
+                    });
                 }
             }
         }
@@ -3755,36 +3766,25 @@ impl PeerManager {
                         dead_peers.insert(failure.peer_id);
                     }
                 }
-                ChunkFailureKind::Incomplete { returned } => {
-                    match classify_response_progress(failure.requested, returned) {
-                        ResponseProgress::Partial { returned } => {
-                            self.on_partial_response(
-                                failure.peer_id,
-                                failure.role.request_kind(),
-                                response_kind,
-                                failure.requested,
-                                returned,
-                            );
-                        }
-                        ResponseProgress::Empty => {
-                            self.on_zero_progress_response(
-                                failure.peer_id,
-                                failure.role.request_kind(),
-                                response_kind,
-                                failure.requested,
-                            );
-                        }
-                        ResponseProgress::Overflow { returned } => {
-                            self.on_invalid_response_length(
-                                failure.peer_id,
-                                response_kind,
-                                failure.requested,
-                                returned,
-                            );
-                            dead_peers.insert(failure.peer_id);
-                        }
-                        ResponseProgress::Complete => {}
-                    }
+                ChunkFailureKind::EmptyResponse => {
+                    self.on_zero_progress_response(
+                        failure.peer_id,
+                        failure.role.request_kind(),
+                        response_kind,
+                        failure.requested,
+                    );
+                }
+                ChunkFailureKind::ResponseOverflow {
+                    requested,
+                    returned,
+                } => {
+                    self.on_invalid_response_length(
+                        failure.peer_id,
+                        response_kind,
+                        requested,
+                        returned,
+                    );
+                    dead_peers.insert(failure.peer_id);
                 }
                 ChunkFailureKind::ReceiptResponseShapeMismatch(error) => {
                     if self.on_receipt_response_shape_mismatch(failure.peer_id, error) {
@@ -4168,7 +4168,7 @@ fn chunk_failure_disables_role_peer(failure: &ChunkRequestFailure) -> bool {
                     reth_network::p2p::error::RequestError::ConnectionDropped
                 )
         ),
-        ChunkFailureKind::Incomplete { .. } => true,
+        ChunkFailureKind::EmptyResponse | ChunkFailureKind::ResponseOverflow { .. } => true,
         ChunkFailureKind::ReceiptResponseShapeMismatch(error) => {
             receipt_response_shape_mismatch_disables_receipt_peer(*error)
         }
@@ -5700,6 +5700,7 @@ pub(super) enum RequestAttempt {
     /// Receipt data exceeded this request's header-derived resource allowance.
     ReceiptResourcesExceeded(ReceiptResourceExceeded),
     ReceiptResponseOverflow {
+        requested: usize,
         returned: usize,
     },
     Disconnected,
@@ -8274,7 +8275,7 @@ mod tests {
                 role: ChunkRequestRole::Bodies,
                 peer_id: other_peer,
                 requested: 32,
-                kind: ChunkFailureKind::Incomplete { returned: 0 },
+                kind: ChunkFailureKind::EmptyResponse,
             },
         ]);
 
@@ -8300,8 +8301,7 @@ mod tests {
                 )
         }));
         assert!(failures.iter().any(|failure| {
-            failure.peer_id == other_peer
-                && matches!(failure.kind, ChunkFailureKind::Incomplete { returned: 0 })
+            failure.peer_id == other_peer && matches!(failure.kind, ChunkFailureKind::EmptyResponse)
         }));
     }
 
@@ -8578,7 +8578,7 @@ mod tests {
                 role: ChunkRequestRole::Receipts,
                 peer_id: receipt_peer,
                 requested: 16,
-                kind: ChunkFailureKind::Incomplete { returned: 0 },
+                kind: ChunkFailureKind::EmptyResponse,
             },
         ];
 
@@ -8855,3 +8855,9 @@ mod continuation_tests;
 
 #[cfg(test)]
 mod resource_tests;
+
+#[cfg(test)]
+mod partial_progress_tests;
+
+#[cfg(test)]
+mod failure_context_tests;

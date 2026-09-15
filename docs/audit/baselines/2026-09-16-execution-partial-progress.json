@@ -1,0 +1,124 @@
+{
+  "base_commit": "9317c42a6ae050553d64ea34d9755b8bf010ef5e",
+  "branch": "audit/execution-partial-progress",
+  "findings": [
+    "B4-24",
+    "B4-25",
+    "B4-26",
+    "B4-27"
+  ],
+  "status": "247 focused tests and independent final review passed; source/gates/PR pending",
+  "original_controls": {
+    "passed": 3,
+    "failed": 19,
+    "total": 22
+  },
+  "final_new_controls": 26,
+  "evidence_directory": "/private/tmp/logex-execution-partial-progress-j7z1hyfa",
+  "evidence": {
+    "compile-attempt-original-test-preparation.json": {
+      "sha256": "b4af6a2520f25302ffa08b1d6a70e07fb8345eabf91f5dae719c18b09b78e29c",
+      "bytes": 1164
+    },
+    "original-failure_context_tests.rs": {
+      "sha256": "93f8f91a172d14507d24f6f8601281089a3fdb3bb9d254bdcfabf713e939c942",
+      "bytes": 8082
+    },
+    "original-partial_progress_tests.rs": {
+      "sha256": "0b1c8bdafa2a6bc818c00bcc4aa8a142c8dcec961004be6df280ad929b3977af",
+      "bytes": 7777
+    },
+    "compile-attempt-original-partial_progress_tests.log": {
+      "sha256": "c7b4f3e9044c9e94e4cec18e01baf17020e3d3eb2911456216a4deec74b3f705",
+      "bytes": 1097
+    },
+    "compile-attempt-original-failure_context_tests.log": {
+      "sha256": "c7b4f3e9044c9e94e4cec18e01baf17020e3d3eb2911456216a4deec74b3f705",
+      "bytes": 1097
+    },
+    "original-controls.json": {
+      "sha256": "9b5e3c446bc614dc63c6606298ad572818d17148bceb6e01cb06f20b2b6affc1",
+      "bytes": 697
+    },
+    "proposed-fix-review.json": {
+      "sha256": "149d8825f06b6bee2f52232be844dd46e499f1818dfd0327210d3dbe3e34b4f8",
+      "bytes": 3145
+    },
+    "final-review-before-saturation-oracle-correction.json": {
+      "sha256": "11e63400582f055ddb33eb619d99ce0bd560f200277855270dca28add239e501",
+      "bytes": 3525
+    },
+    "final-focused-first-attempt.log": {
+      "sha256": "4f7eef6371695bf1548e33d2ae77a372f2344026b5cd93e7f1bdee2bd2055636",
+      "bytes": 27435
+    },
+    "initial-policy-original-partial_progress_tests.rs": {
+      "sha256": "d40b0f77c8b2c86c4cd4d793400d70d861f5a623daccd69132a4b67499c4e6ce",
+      "bytes": 7773
+    },
+    "partial-progress-restoration-tests.rs": {
+      "sha256": "1e0c72e5956c6d0fd26df935159d0b4f2f932bccffa262be9166ef74138473d3",
+      "bytes": 3732
+    },
+    "final-review.json": {
+      "sha256": "61003e7d459d1df571c2208df984db2efdadd874ca0ca99009dcc2d42f08d869",
+      "bytes": 3425
+    },
+    "compile-attempt-original-partial_progress_tests.rs": {
+      "sha256": "f837d6c7c5a86f063d15d379cee0e0d4358ef6a6487c565fd57e4519a38a79b6",
+      "bytes": 7765
+    },
+    "final-focused.log": {
+      "sha256": "a76e2a28d1a509b72c1bc49f7ed44932d26dad204f3285bcfb76de017725d2f6",
+      "bytes": 26888
+    },
+    "initial-policy-original-partial_progress_tests.log": {
+      "sha256": "ba3b65c50da61ee9c84a24eac6a9c113b8fff73bfa83e6c17286041accb33be1",
+      "bytes": 5515
+    },
+    "original-partial_progress_tests.log": {
+      "sha256": "f538ebbe55e31f3a3317f48023653cf7970c06d4cc153d8531453c202262cb2f",
+      "bytes": 3952
+    },
+    "partial-policy-review.json": {
+      "sha256": "a5ad70738bb8ace88da6dbe33a45eaab8907ccdec37c4a5443a17dcb4d4f925e",
+      "bytes": 7205
+    },
+    "initial-policy-original-controls.json": {
+      "sha256": "5b26fb08d13b57ad4a12b5f8d5e83b6d3f64f12b0309229e0e2b2e2a40f98162",
+      "bytes": 697
+    },
+    "compile-attempt-original-failure_context_tests.rs": {
+      "sha256": "93f8f91a172d14507d24f6f8601281089a3fdb3bb9d254bdcfabf713e939c942",
+      "bytes": 8082
+    },
+    "compile-attempt-original-partial-progress-tests.rs": {
+      "sha256": "a58465222da15057cdd5d06d5ecf87092f43bf97ceececbe108332a59fb4177a",
+      "bytes": 7000
+    },
+    "compile-attempt-original-controls.json": {
+      "sha256": "ceaab11fc064c272ee9cb22f39ad2de2fdf740d3316d6bd9ecb979191a9e3f60",
+      "bytes": 697
+    },
+    "original-failure_context_tests.log": {
+      "sha256": "492d604b85976bfc99ced3e8520e24d84dde94b7137b07344b8fcb4009d92254",
+      "bytes": 8999
+    }
+  },
+  "scope_limits": [
+    "No throughput benchmark or gain claim",
+    "Transport fixtures do not prove content/root validation",
+    "No practical timeout counter overflow reproduction",
+    "Offline audit incomplete; volume supervision and verified repair remain"
+  ],
+  "harness_corrections": [
+    "Use matches! for PeerRequestKind (no PartialEq)",
+    "Existing limit decrease is ceil(2*n/3), not half",
+    "Defensive saturation expects existing threshold8, not integer max"
+  ],
+  "focused_tests": {
+    "passed": 247,
+    "failed": 0,
+    "ignored": 0
+  }
+}

@@ -72,8 +72,10 @@ allowance.
 Both plan and manager ETH69 paths check raw receipt objects before bloom work.
 ETH68 already arrives with wire blooms, so it is checked before local collection.
 Known excess outer block counts are rejected before resource or bloom work and
-mapped back to the collectors' existing `Incomplete` shape classification.
-Sequential protocol-fault handling and chunk role disabling remain unchanged.
+originally mapped back to the collectors' existing `Incomplete` classification.
+The follow-up [progress review](execution-partial-progress.md) replaces that
+ambiguous outcome with exact tail overflow context. Sequential protocol-fault
+handling and chunk role disabling remain intact.
 The initial implementation review caught this classification distinction; its
 finding and correction are retained in the evidence record.
 
@@ -118,6 +120,7 @@ Cleanup removed the hash-only paired prepare wrapper and independent optional
 hash/gas API parameters. Still-used scheduling and final verification helpers
 remain. Validation metadata records original/final logs, proof and review hashes.
 All seven local gates pass on `641d5a2e`, including 1,532 workspace
-tests (23 ignored), doc tests and release linking. CI and merge remain pending.
+tests (23 ignored), doc tests and release linking. All six CI jobs then passed on `995b64e9`;
+[PR #186](https://github.com/tdenisenko/logex/pull/186) merged as `9317c42a`.
 [Validation record](baselines/2026-09-16-execution-receipt-resource-bounds.json).
 No Mac mini work was performed.
