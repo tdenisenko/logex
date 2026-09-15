@@ -1,5 +1,5 @@
 {
-  "status": "Implementation, original-method controls, focused tests and final review pass; gates/CI/merge pending",
+  "status": "All seven local gates and final independent review pass; PR/CI/merge pending",
   "branch": "audit/execution-peer-persistence",
   "base": "558bef698377392791a93bd7bb78d0de18aa2af4",
   "source_sha256": {
@@ -66,6 +66,10 @@
     "cl-tests-final.log": {
       "sha256": "d37a5bab1c3cdd1e7c9f316327a683fec5ac398e2d54cfefe7bbd25fb68a2787",
       "bytes": 30424
+    },
+    "gates/results.json": {
+      "sha256": "fbf6aa45198d2867fe447e53b810249afa6a169288a56788ca4162954d7da18f",
+      "bytes": 3758
     }
   },
   "focused_execution_persistence_tests": {
@@ -88,5 +92,139 @@
     "dependencies": "Existing locked serde direct edge and tempfile promoted from dev only; no new package version",
     "remote": "No remote work; prior mac-mini cleanup complete",
     "remaining": "Unbounded live known_peers inventory is a separate recorded EL lead; broader offline audit, supervision and verified repair remain open"
+  },
+  "source_commit": "3dfd553a6dc6c33188c11cd723abeb02dce1541d",
+  "workspace_tests": {
+    "groups": 25,
+    "passed": 1435,
+    "failed": 0,
+    "ignored": 23
+  },
+  "gates": {
+    "commit": "3dfd553a6dc6c33188c11cd723abeb02dce1541d",
+    "rustc": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+    "gates": [
+      {
+        "name": "vendor",
+        "command": [
+          "python3",
+          "tools/verify_datafusion_vendor.py"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T17:00:00.832308+00:00",
+        "finished": "2026-09-15T17:00:00.905554+00:00",
+        "sha256": "d8d80949d6f3378c14456842b531f0cade514179e4c94781b95ff9abb6447675",
+        "log": "/private/tmp/logex-execution-peer-cache-x8nai65l/gates/vendor.log"
+      },
+      {
+        "name": "format",
+        "command": [
+          "cargo",
+          "fmt",
+          "--all",
+          "--",
+          "--check"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T17:00:00.906850+00:00",
+        "finished": "2026-09-15T17:00:01.925144+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-execution-peer-cache-x8nai65l/gates/format.log"
+      },
+      {
+        "name": "check",
+        "command": [
+          "cargo",
+          "check",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T17:00:01.925683+00:00",
+        "finished": "2026-09-15T17:00:07.855063+00:00",
+        "sha256": "22af09584cf8504c43d7e43a7147292b38a3190d22d53b0853296a176fbf916e",
+        "log": "/private/tmp/logex-execution-peer-cache-x8nai65l/gates/check.log"
+      },
+      {
+        "name": "clippy",
+        "command": [
+          "cargo",
+          "clippy",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T17:00:07.856085+00:00",
+        "finished": "2026-09-15T17:00:16.405661+00:00",
+        "sha256": "43be17dcfb07eaf4a27d3b89cf741e3ade245f4cc87fb62fae50719cd17d1396",
+        "log": "/private/tmp/logex-execution-peer-cache-x8nai65l/gates/clippy.log"
+      },
+      {
+        "name": "test",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T17:00:16.406299+00:00",
+        "finished": "2026-09-15T17:03:08.374838+00:00",
+        "sha256": "afe3d8d68a545b7c71d05a504f70f64f7161f72ee3f532e0fa973fd587e584ab",
+        "log": "/private/tmp/logex-execution-peer-cache-x8nai65l/gates/test.log"
+      },
+      {
+        "name": "doc",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--doc",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T17:03:08.376084+00:00",
+        "finished": "2026-09-15T17:03:20.257819+00:00",
+        "sha256": "00157b0ac25c14056388fa5da11b59be7b409591df39e72fced1822fec9c852c",
+        "log": "/private/tmp/logex-execution-peer-cache-x8nai65l/gates/doc.log"
+      },
+      {
+        "name": "release-build",
+        "command": [
+          "cargo",
+          "build",
+          "-p",
+          "logex-node",
+          "--release",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T17:03:20.258635+00:00",
+        "finished": "2026-09-15T17:04:24.774234+00:00",
+        "sha256": "39b86993675e4ac8ad5c56870c84711e827930e97150cc7f07793a25b24ab3be",
+        "log": "/private/tmp/logex-execution-peer-cache-x8nai65l/gates/release-build.log"
+      }
+    ]
   }
 }

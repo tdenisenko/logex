@@ -71,8 +71,10 @@ preexisting-staging regressions respectively; candidate source was restored
 byte-for-byte after each control. Independent review found the additional entry
 check above, which was corrected in both loaders. The original CL loader also fails the new ordinary-link regression; its source
 was restored exactly afterward. Final independent review passes, as do 11 execution
-persistence tests and all 343 consensus tests (one existing ignored test). Full
-workspace gates, CI and merge remain pending.
+persistence tests and all 343 consensus tests (one existing ignored test). Source `3dfd553a` passes all seven local gates: vendor verification,
+formatting, workspace check, strict Clippy, 1,435 workspace tests
+(23 ignored), documentation tests and release node linking. CI and
+merge remain pending.
 
 [Validation record](baselines/2026-09-15-execution-peer-persistence.json).
 
