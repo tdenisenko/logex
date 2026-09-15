@@ -1,0 +1,293 @@
+use super::*;
+use std::task::Poll;
+
+/// Reth requires a real listener to construct its public handle. This manager is
+/// retained but never polled. A TCP listener is bound on localhost:0, but no
+/// connection task is started; discovery, DNS and network service tasks are disabled.
+struct Fixture {
+    manager: PeerManager,
+    _network: NetworkManager<LogexNetworkPrimitives>,
+    _directory: tempfile::TempDir,
+    receivers: Vec<mpsc::Receiver<PeerRequest<LogexNetworkPrimitives>>>,
+}
+
+impl Fixture {
+    async fn new() -> Self {
+        let serve_cache = Arc::new(ServeCacheProvider::new());
+        let config = NetworkConfigBuilder::<LogexNetworkPrimitives>::new(
+            SecretKey::from_slice(&[1; 32]).unwrap(),
+        )
+        .listener_addr("127.0.0.1:0".parse().unwrap())
+        .disable_discovery()
+        .disable_nat()
+        .disable_tx_gossip(true)
+        .build(Arc::clone(&serve_cache));
+        assert!(config.boot_nodes.is_empty());
+        assert!(config.required_block_hashes.is_empty());
+        assert!(config.discovery_v4_config.is_none());
+        assert!(config.discovery_v5_config.is_none());
+        assert!(config.dns_discovery_config.is_none());
+        let network = NetworkManager::new(config).await.unwrap();
+        assert!(network.local_addr().ip().is_loopback());
+        let directory = tempfile::tempdir().unwrap();
+        let local_head = Head::default();
+        let mut manager = PeerManager {
+            network: network.handle().clone(),
+            network_task: None,
+            eth_request_task: None,
+            dns_discovery_task: None,
+            network_events: Box::pin(futures_util::stream::pending()),
+            discovery_events: Box::pin(futures_util::stream::pending()),
+            dns_discovery_events: None,
+            peers: HashMap::new(),
+            peer_order: VecDeque::new(),
+            request_cursor: 0,
+            pending: HashMap::new(),
+            pending_dials: HashMap::new(),
+            saturated_peers: HashMap::new(),
+            receipt_quarantined_peers: HashMap::new(),
+            productive: VecDeque::new(),
+            known_peers: Vec::new(),
+            configured_peer_ids: HashSet::new(),
+            known_scan_cursor: 0,
+            body_receipt_owners: BodyReceiptOwnerLedger::default(),
+            known_peers_path: directory.path().join("known-peers.json"),
+            persisted_known_peers: Vec::new(),
+            serve_cache,
+            fork_filter: MAINNET.fork_filter(local_head),
+            local_head,
+            bind_ip: "127.0.0.1".parse().unwrap(),
+            dial_families: DialAddressFamilies::IPV4,
+            network_activated: false,
+            max_peers: 3,
+            session_metrics: ExecutionPeerSessionMetrics::default(),
+            body_receipt_scheduler_metrics: BodyReceiptSchedulerMetrics::default(),
+        };
+        let mut receivers = Vec::new();
+        for byte in 1..=3 {
+            let id = PeerId::repeat_byte(byte);
+            let (mut peer, receiver) = ownership_tests::test_session(id);
+            peer.is_serving = true;
+            peer.consecutive_timeouts = 0;
+            peer.body_request_limit = 32;
+            peer.receipt_request_limit = 32;
+            peer.body_paused_until = None;
+            peer.receipt_paused_until = None;
+            peer.receipt_quarantined_until = None;
+            manager.peers.insert(id, peer);
+            manager.peer_order.push_back(id);
+            receivers.push(receiver);
+        }
+        let peers = manager.peer_ids_for_requests(Some(1));
+        for kind in [PeerRequestKind::Bodies, PeerRequestKind::Receipts] {
+            assert!(manager.request_chunk_ranges(64, &peers, kind).len() >= 2);
+        }
+        Self {
+            manager,
+            _network: network,
+            _directory: directory,
+            receivers,
+        }
+    }
+}
+
+fn hashes() -> Vec<B256> {
+    (0..64).map(|byte| B256::repeat_byte(byte + 1)).collect()
+}
+
+async fn fetch(manager: &mut PeerManager, kind: PeerRequestKind, limited: bool) -> Result<usize> {
+    match (kind, limited) {
+        (PeerRequestKind::Bodies, true) => manager
+            .get_bodies_prefer_peers_with_limits(hashes(), 1, &[], Duration::from_secs(2), 2)
+            .await
+            .map(|bodies| bodies.len()),
+        (PeerRequestKind::Bodies, false) => manager
+            .get_bodies(hashes(), 1)
+            .await
+            .map(|bodies| bodies.len()),
+        (PeerRequestKind::Receipts, true) => manager
+            .get_receipts_prefer_peers_with_limits(hashes(), 1, &[], Duration::from_secs(2), 2)
+            .await
+            .map(|(_, receipts)| receipts.len()),
+        (PeerRequestKind::Receipts, false) => manager
+            .get_receipts(hashes(), 1)
+            .await
+            .map(|(_, receipts)| receipts.len()),
+        _ => unreachable!(),
+    }
+}
+
+fn take_requests(
+    receivers: &mut [mpsc::Receiver<PeerRequest<LogexNetworkPrimitives>>],
+) -> Vec<(usize, PeerRequest<LogexNetworkPrimitives>)> {
+    let mut requests = Vec::new();
+    for (index, receiver) in receivers.iter_mut().enumerate() {
+        while let Ok(request) = receiver.try_recv() {
+            requests.push((index, request));
+        }
+    }
+    requests
+}
+
+fn response_closed(request: &PeerRequest<LogexNetworkPrimitives>) -> bool {
+    match request {
+        PeerRequest::GetBlockBodies { response, .. } => response.is_closed(),
+        PeerRequest::GetReceipts69 { response, .. } => response.is_closed(),
+        _ => panic!("unexpected fixture request"),
+    }
+}
+
+fn requested_hashes(request: &PeerRequest<LogexNetworkPrimitives>) -> &[B256] {
+    match request {
+        PeerRequest::GetBlockBodies { request, .. } => &request.0,
+        PeerRequest::GetReceipts69 { request, .. } => &request.0,
+        _ => panic!("unexpected fixture request"),
+    }
+}
+
+fn answer(request: PeerRequest<LogexNetworkPrimitives>, empty: bool) {
+    let count = if empty {
+        0
+    } else {
+        requested_hashes(&request).len()
+    };
+    answer_prefix(request, count);
+}
+
+fn answer_prefix(request: PeerRequest<LogexNetworkPrimitives>, count: usize) {
+    assert!(count <= requested_hashes(&request).len());
+    match request {
+        PeerRequest::GetBlockBodies { response, .. } => {
+            let _ = response.send(Ok(BlockBodies(vec![Default::default(); count])));
+        }
+        PeerRequest::GetReceipts69 { response, .. } => {
+            let _ = response.send(Ok(Receipts69(vec![Vec::new(); count])));
+        }
+        _ => panic!("unexpected fixture request"),
+    }
+}
+
+async fn limited_bulk_api_uses_two_second_request_deadline(kind: PeerRequestKind) {
+    let mut fixture = Fixture::new().await;
+    let future = fetch(&mut fixture.manager, kind, true);
+    tokio::pin!(future);
+    assert!(futures_util::poll!(future.as_mut()).is_pending());
+    let first = take_requests(&mut fixture.receivers);
+    assert!(!first.is_empty());
+    tokio::time::advance(Duration::from_secs(2)).await;
+    assert!(futures_util::poll!(future.as_mut()).is_pending());
+    assert!(
+        first.iter().all(|(_, request)| response_closed(request)),
+        "explicit deadline must replace the bulk default timeout"
+    );
+}
+
+async fn limited_bulk_api_selects_at_most_two_peers(kind: PeerRequestKind) {
+    let mut fixture = Fixture::new().await;
+    let future = fetch(&mut fixture.manager, kind, true);
+    tokio::pin!(future);
+    let mut selected = HashSet::new();
+    let mut completed = false;
+    for _ in 0..32 {
+        match futures_util::poll!(future.as_mut()) {
+            Poll::Ready(result) => {
+                assert!(result.is_err());
+                completed = true;
+                break;
+            }
+            Poll::Pending => {
+                let requests = take_requests(&mut fixture.receivers);
+                assert!(
+                    !requests.is_empty(),
+                    "fixture must progress through local replies"
+                );
+                for (index, request) in requests {
+                    selected.insert(index);
+                    answer(request, true);
+                }
+            }
+        }
+    }
+    assert!(completed);
+    assert_eq!(
+        selected.len(),
+        2,
+        "explicit peer-selection cap must include all work"
+    );
+}
+
+async fn default_bulk_apis_keep_concurrent_chunks(kind: PeerRequestKind) {
+    let mut fixture = Fixture::new().await;
+    let future = fetch(&mut fixture.manager, kind, false);
+    tokio::pin!(future);
+    assert!(futures_util::poll!(future.as_mut()).is_pending());
+    let requests = take_requests(&mut fixture.receivers);
+    assert!(
+        requests.len() >= 2,
+        "bulk chunks must be concurrently admitted before replies"
+    );
+    for (_, request) in requests {
+        answer(request, false);
+    }
+    assert_eq!(future.await.unwrap(), 64);
+}
+
+async fn limited_bulk_partial_prefix_continues_on_the_same_peer(kind: PeerRequestKind) {
+    let mut fixture = Fixture::new().await;
+    let future = fetch(&mut fixture.manager, kind, true);
+    tokio::pin!(future);
+    assert!(futures_util::poll!(future.as_mut()).is_pending());
+    let mut requests = take_requests(&mut fixture.receivers);
+    assert_eq!(requests.len(), 1);
+    let (first_peer, first) = requests.pop().unwrap();
+    assert_eq!(requested_hashes(&first), hashes());
+    answer_prefix(first, 32);
+    assert!(futures_util::poll!(future.as_mut()).is_pending());
+    let mut requests = take_requests(&mut fixture.receivers);
+    assert_eq!(requests.len(), 1);
+    let (next_peer, next) = requests.pop().unwrap();
+    assert_eq!(next_peer, first_peer);
+    assert_eq!(requested_hashes(&next), &hashes()[32..]);
+    answer_prefix(next, 32);
+    assert_eq!(future.await.unwrap(), 64);
+}
+
+#[tokio::test(start_paused = true)]
+async fn limited_bulk_api_uses_two_second_request_deadline_bodies() {
+    limited_bulk_api_uses_two_second_request_deadline(PeerRequestKind::Bodies).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn limited_bulk_api_uses_two_second_request_deadline_receipts() {
+    limited_bulk_api_uses_two_second_request_deadline(PeerRequestKind::Receipts).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn limited_bulk_api_selects_at_most_two_peers_bodies() {
+    limited_bulk_api_selects_at_most_two_peers(PeerRequestKind::Bodies).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn limited_bulk_api_selects_at_most_two_peers_receipts() {
+    limited_bulk_api_selects_at_most_two_peers(PeerRequestKind::Receipts).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn default_bulk_apis_keep_concurrent_chunks_bodies() {
+    default_bulk_apis_keep_concurrent_chunks(PeerRequestKind::Bodies).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn default_bulk_apis_keep_concurrent_chunks_receipts() {
+    default_bulk_apis_keep_concurrent_chunks(PeerRequestKind::Receipts).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn limited_bulk_partial_prefix_continues_on_the_same_peer_bodies() {
+    limited_bulk_partial_prefix_continues_on_the_same_peer(PeerRequestKind::Bodies).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn limited_bulk_partial_prefix_continues_on_the_same_peer_receipts() {
+    limited_bulk_partial_prefix_continues_on_the_same_peer(PeerRequestKind::Receipts).await;
+}

@@ -1,5 +1,5 @@
 {
-  "status": "All seven local gates and final independent review pass; PR/CI/merge pending",
+  "status": "Merged after all seven local gates and all six exact-head CI jobs passed",
   "branch": "audit/execution-request-deadlines",
   "base": "7bc714c83447b0fc034af30f9c0fc2b6fb370d22",
   "source_sha256": {
@@ -214,5 +214,21 @@
         "log": "/private/tmp/logex-execution-request-deadlines-97f27oas/gates/release-build.log"
       }
     ]
+  },
+  "ci": {
+    "run_id": 35013247412,
+    "head": "e0227241a2ee2dde18cea0444209b03390d8aa0e",
+    "checks": 6,
+    "conclusion": "SUCCESS"
+  },
+  "merge": {
+    "headRefOid": "e0227241a2ee2dde18cea0444209b03390d8aa0e",
+    "mergeCommit": {
+      "oid": "19f8c139f3519f41ff120c948e23321cdb02fc46"
+    },
+    "mergedAt": "2026-09-15T19:31:24Z",
+    "number": 178,
+    "state": "MERGED",
+    "url": "https://github.com/tdenisenko/logex/pull/178"
   }
 }

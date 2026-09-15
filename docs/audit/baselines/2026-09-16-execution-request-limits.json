@@ -1,0 +1,78 @@
+{
+  "status": "Implemented; original controls and full sync tests pass; final review passes; workspace gates pending",
+  "branch": "audit/execution-request-limits",
+  "base": "19f8c139f3519f41ff120c948e23321cdb02fc46",
+  "source_sha256": {
+    "crates/logex-sync/src/p2p/peer_manager/requests.rs": "7c40fbe4a9da0be0d6a94c2a9d2f04fb796c5190264a35aa1e33a456749db001",
+    "crates/logex-sync/src/p2p/peer_manager/requests/limit_tests.rs": "b55b643e2c37dc16278f3c776660c22fbeec07b6b326612d35b2058cd8d9e4b7"
+  },
+  "finding": {
+    "id": "B4-14",
+    "severity": "medium",
+    "effect": "Bulk parallel dispatch bypasses explicit per-exchange timeout and peer-selection cap",
+    "correction": "Route explicit limits through existing bounded peer loop, retaining default parallel dispatch"
+  },
+  "evidence_directory": "/private/tmp/logex-execution-request-limits-fk0t8jwc",
+  "evidence": {
+    "final-review.json": {
+      "sha256": "c6a4391574a2f87957691d07164ff2a2124a2a489786d4a9f5a0cfec4ce82658",
+      "bytes": 3594
+    },
+    "fixture-review.json": {
+      "sha256": "1e5861317096f585bfd1ac08f4f6454419b3d208e1dd4d0ac64c463a461f9e2a",
+      "bytes": 4671
+    },
+    "independent-policy-test-review.json": {
+      "sha256": "92811a3f89556f3757a1a3a81fc02b0c836f11b43a760fec81ab2320022b50df",
+      "bytes": 2913
+    },
+    "original-controls.json": {
+      "sha256": "6bc82c89666576bab98da5b3479cfa3987f54d01cff09b50cd1c30e42724be2b",
+      "bytes": 498
+    },
+    "original-controls.log": {
+      "sha256": "897a85702d0dff5cd6c3907d3e952877125e8e1ba66a6992df17b8f6ff0151df",
+      "bytes": 2677
+    },
+    "original-role-controls.log": {
+      "sha256": "ed452463bd868015374b005d00862f7ee0a5a63324a25ffdb993ee51f902fbd2",
+      "bytes": 4711
+    },
+    "original-role-tests.rs": {
+      "sha256": "b55b643e2c37dc16278f3c776660c22fbeec07b6b326612d35b2058cd8d9e4b7",
+      "bytes": 11269
+    },
+    "original-source-diff.patch": {
+      "sha256": "74247580dd86bd29d89a5250a6478ef03d87c52207cec4b3e7426cf9de60317b",
+      "bytes": 377
+    },
+    "prior-limit-policy-review.json": {
+      "sha256": "29764eaaa23ecdf6f341fb9e2ca2931458ebec3f614d05077861a33d66478a8e",
+      "bytes": 5325
+    },
+    "sync-tests.log": {
+      "sha256": "f04164a14ee6317466c1cd5641cef9c915f98656e1604762ddfab659cb555650",
+      "bytes": 35651
+    }
+  },
+  "focused_sync_tests": {
+    "passed": 358,
+    "failed": 0,
+    "ignored": 1
+  },
+  "new_tests": 8,
+  "original_controls": {
+    "deadline_and_peer_cap_failures": 4,
+    "chosen_sequential_continuation_failures": 2,
+    "default_concurrency_passes": 2,
+    "scope": "Actual public APIs before production edits; local channels, paused time and dormant loopback listener"
+  },
+  "contract": {
+    "timeout": "Per exchange, including admission; not whole-batch duration",
+    "attempts": "Peer selections, minimum1; positive partial/ETH70 continuation may issue several wire exchanges",
+    "cost": "Explicit large fallback loses bulk concurrency; default and ordinary small forward requests retain scheduling; no extra storage/validation work",
+    "remaining": "Aggregate salvage/ETH70 budgets, per-block receipt source propagation, broader offline audit, volume supervision and repair",
+    "benchmark": "None under updated user policy",
+    "remote": "No remote work; mac-mini cleanup complete"
+  }
+}
