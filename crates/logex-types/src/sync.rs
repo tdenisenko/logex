@@ -166,13 +166,17 @@ pub struct ConsensusNetworkStatus {
     pub head_recovery_active: bool,
     /// Number of stale-head recovery RPC requests sent since startup.
     pub head_recovery_attempts: u64,
-    /// Recent consensus P2P payload download rate in bytes per second.
+    /// Approximate observed consensus application payload rate in bytes per second.
+    /// Counts compressed gossip data and decoded RPC SSZ/context bytes, not transport bytes.
     pub p2p_download_bytes_per_sec: u64,
-    /// Recent consensus P2P payload upload rate in bytes per second.
+    /// Approximate queued consensus RPC payload rate in bytes per second.
+    /// Counts decoded SSZ/context bytes; queue submission does not confirm delivery.
     pub p2p_upload_bytes_per_sec: u64,
-    /// Cumulative bytes received through consensus RPC and gossip payloads.
+    /// Cumulative observed compressed gossip and decoded RPC SSZ/context payload bytes.
+    /// Excludes transport overhead and traffic rejected before application accounting.
     pub p2p_downloaded_payload_bytes: u64,
-    /// Cumulative bytes sent through consensus RPC payloads.
+    /// Cumulative queued consensus RPC payload bytes, excluding transport overhead.
+    /// This is not a confirmed transmitted-byte count.
     pub p2p_uploaded_payload_bytes: u64,
     /// Most recent noteworthy consensus connection event.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -332,13 +336,17 @@ pub struct ExecutionNetworkStatus {
     pub historical_scheduler_body_blocks: u64,
     /// Cumulative blocks returned by successful historical receipt requests.
     pub historical_scheduler_receipt_blocks: u64,
-    /// Recent successful execution P2P download rate in estimated wire bytes per second.
+    /// Approximate successful execution response payload rate in bytes per second.
+    /// Uses normalized RLP encoded lengths, not compressed wire bytes.
     pub p2p_download_bytes_per_sec: u64,
-    /// Recent successful execution P2P upload rate in estimated wire bytes per second.
+    /// Approximate execution request/serving payload rate in bytes per second.
+    /// Counts payload estimates before confirmed delivery; excludes transport overhead.
     pub p2p_upload_bytes_per_sec: u64,
-    /// Cumulative estimated wire bytes returned by successful execution P2P responses.
+    /// Cumulative normalized RLP payload-length estimates for successful execution responses.
+    /// Locally reconstructed response fields can differ from the original wire representation.
     pub p2p_downloaded_payload_bytes: u64,
-    /// Cumulative estimated wire bytes sent for execution P2P traffic.
+    /// Cumulative execution request/serving payload estimates, not confirmed transmitted bytes.
+    /// Excludes compression, framing, encryption and transport acknowledgements.
     pub p2p_uploaded_payload_bytes: u64,
     /// Connected geth peers.
     pub connected_geth_peers: usize,

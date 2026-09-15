@@ -3,15 +3,13 @@ use std::ops::{Bound, RangeBounds, RangeInclusive};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
-use alloy_consensus::{
-    Block, BlockBody, Header, ReceiptWithBloom, RlpEncodableReceipt as _, TxReceipt as _,
-};
+use alloy_consensus::{Block, BlockBody, Header, ReceiptWithBloom, RlpEncodableReceipt as _};
 use alloy_eips::BlockHashOrNumber;
-use alloy_primitives::{Address, B256, BlockHash, BlockNumber, TxHash, TxNumber};
+use alloy_primitives::{Address, B256, BlockHash, BlockNumber, Bloom, TxHash, TxNumber};
 use alloy_rlp::Encodable as _;
 use reth_chainspec::{ChainInfo, ChainSpecProvider, MAINNET};
 use reth_db_models::StoredBlockBodyIndices;
-use reth_primitives_traits::{InMemorySize, RecoveredBlock, SealedHeader};
+use reth_primitives_traits::{RecoveredBlock, SealedHeader};
 use reth_storage_api::errors::provider::ProviderResult;
 use reth_storage_api::{
     BlockBodyIndicesProvider, BlockHashReader, BlockIdReader, BlockNumReader, BlockReader,
@@ -117,13 +115,14 @@ fn headers_payload_bytes(headers: &[Header]) -> u64 {
 }
 
 fn block_payload_bytes(block: &Block<reth_ethereum_primitives::TransactionSigned>) -> u64 {
-    usize_to_u64(block.body.size())
+    usize_to_u64(block.body.length())
 }
 
 fn receipts_payload_bytes(receipts: &[LogexReceipt]) -> u64 {
     receipts.iter().fold(0u64, |total, receipt| {
-        let bloom = receipt.bloom();
-        let receipt_bytes = receipt.rlp_encoded_length_with_bloom(&bloom);
+        // Bloom is always a fixed 256-byte string. Its value does not affect
+        // encoded length, so telemetry need not hash every log to reconstruct it.
+        let receipt_bytes = receipt.rlp_encoded_length_with_bloom(&Bloom::ZERO);
         total.saturating_add(usize_to_u64(receipt_bytes))
     })
 }
@@ -631,7 +630,7 @@ impl TransactionsProvider for ServeCacheProvider {
         let transactions = self.map_block(block, |cached| cached.block.body.transactions.clone());
         if let Some(transactions) = &transactions {
             let payload_bytes = transactions.iter().fold(0u64, |total, tx| {
-                total.saturating_add(usize_to_u64(tx.size()))
+                total.saturating_add(usize_to_u64(tx.length()))
             });
             self.record_p2p_upload_payload(payload_bytes);
         }
@@ -645,7 +644,7 @@ impl TransactionsProvider for ServeCacheProvider {
         let transactions =
             self.map_blocks_range(range, |cached| cached.block.body.transactions.clone());
         let payload_bytes = transactions.iter().flatten().fold(0u64, |total, tx| {
-            total.saturating_add(usize_to_u64(tx.size()))
+            total.saturating_add(usize_to_u64(tx.length()))
         });
         self.record_p2p_upload_payload(payload_bytes);
         Ok(transactions)
@@ -793,7 +792,7 @@ impl BlockReader for ServeCacheProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_consensus::{Eip658Value, TxType};
+    use alloy_consensus::{Eip658Value, TxReceipt as _, TxType};
     use alloy_primitives::{Log, LogData};
 
     fn test_block(
@@ -827,6 +826,64 @@ mod tests {
             },
             logs_bloom: Default::default(),
         }
+    }
+
+    #[test]
+    fn served_payload_sizes_use_encoded_fields() {
+        use alloy_consensus::{SignableTransaction, TxLegacy};
+        use alloy_primitives::{Signature, U256};
+
+        let (header, mut body) = test_block(2);
+        body.ommers.push(Header::default());
+        body.transactions.push(
+            TxLegacy::default()
+                .into_signed(Signature::new(U256::from(1), U256::from(2), false))
+                .into(),
+        );
+        let block = Block::new(header, body);
+        assert_eq!(
+            block_payload_bytes(&block),
+            alloy_rlp::encode(&block.body).len() as u64
+        );
+
+        let receipts = [TxType::Legacy, TxType::Eip1559].map(|tx_type| {
+            let mut receipt = test_receipt().receipt;
+            receipt.tx_type = tx_type;
+            receipt.status = if tx_type.is_legacy() {
+                Eip658Value::PostState(B256::repeat_byte(3))
+            } else {
+                Eip658Value::success()
+            };
+            receipt
+        });
+        let expected = receipts
+            .iter()
+            .map(|receipt| {
+                let mut bytes = Vec::new();
+                receipt.rlp_encode_with_bloom(&receipt.bloom(), &mut bytes);
+                bytes.len() as u64
+            })
+            .sum::<u64>();
+        assert_eq!(receipts_payload_bytes(&receipts), expected);
+
+        let transaction_bytes = block
+            .body
+            .transactions
+            .iter()
+            .map(|tx| alloy_rlp::encode(tx).len() as u64)
+            .sum::<u64>();
+        let provider = ServeCacheProvider::new();
+        provider.insert_block(block.header.clone(), block.body.clone(), &[]);
+        assert_eq!(
+            provider.transactions_by_block(2.into()).unwrap(),
+            Some(block.body.transactions.clone())
+        );
+        assert_eq!(provider.p2p_upload_snapshot().1, transaction_bytes);
+        assert_eq!(
+            provider.transactions_by_block_range(2..=2).unwrap(),
+            vec![block.body.transactions]
+        );
+        assert_eq!(provider.p2p_upload_snapshot().1, transaction_bytes * 2);
     }
 
     #[test]

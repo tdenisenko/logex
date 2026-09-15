@@ -1124,7 +1124,7 @@
       <div class="mini-grid">
         <div class="mini"><span class="k">Remaining</span><span class="v" id="executionRemaining">--</span></div>
         <div class="mini"><span class="k">Logs/sec</span><span class="v" id="executionRate">--</span></div>
-        <div class="mini"><span class="k">P2P bandwidth</span><span class="v" id="executionP2pDownload">--</span></div>
+        <div class="mini"><span class="k">P2P payload rate (est.)</span><span class="v" id="executionP2pDownload" aria-describedby="p2pPayloadBasis">--</span><span class="note" id="p2pPayloadBasis">Approximate application data, excluding transport overhead. Upload counts do not confirm delivery.</span></div>
         <div class="mini"><span class="k">Serving peers</span><span class="v" id="executionPeers">--</span></div>
         <div class="mini"><span class="k">Consensus Layer</span><span class="v" id="consensusStatus">--</span><span class="note" id="consensusDetail">Checkpoint to latest block.</span></div>
         <div class="mini"><span class="k">Log block range</span><span class="v" id="logRange">--</span><span class="note" id="logRangeDetail">Verified local logs available for queries.</span></div>
@@ -1185,7 +1185,7 @@
           <div class="debug-item"><span class="k">Execution peer candidates</span><span class="v" id="debugPeerCandidates">--</span></div>
           <div class="debug-item"><span class="k">P2P address mode</span><span class="v" id="debugP2pAddressMode">--</span></div>
           <div class="debug-item"><span class="k">P2P address families</span><span class="v" id="debugP2pAddressFamilies">--</span></div>
-          <div class="debug-item"><span class="k">P2P bandwidth</span><span class="v" id="debugP2pDownload">--</span></div>
+          <div class="debug-item"><span class="k">P2P payload rate (est.)</span><span class="v" id="debugP2pDownload" aria-describedby="p2pPayloadBasis debugP2pPayloadBasis">--</span><span class="note" id="debugP2pPayloadBasis">Execution: estimated RLP payloads. Consensus: compressed gossip and decoded RPC payloads, including context bytes. Upload includes request attempts, queued responses and serving lookups.</span></div>
           <div class="debug-item"><span class="k">Execution peer families</span><span class="v" id="debugExecutionPeerFamilies">--</span></div>
           <div class="debug-item"><span class="k">P2P warning</span><span class="v" id="debugP2pWarning">--</span></div>
           <div class="debug-item"><span class="k">Execution bootstrap warning</span><span class="v" id="debugExecutionBootstrapWarning">--</span></div>
@@ -3244,7 +3244,7 @@ function updateStatus(data) {
   setText('debugP2pDownload',
     fmtP2pBandwidth(p2pDownloadBytesPerSec, p2pUploadBytesPerSec) +
     '; totals ↓ ' + fmtBytes(p2pDownloadedPayloadBytes) +
-    ' / ↑ ' + fmtBytes(p2pUploadedPayloadBytes) + ' payload');
+    ' / ↑ ' + fmtBytes(p2pUploadedPayloadBytes) + ' estimated payload');
   setText('debugExecutionPeerFamilies',
     'connected ' + fmt(numberOrNull(executionNetwork.connected_ipv4_peers)) + ' IPv4 / ' +
     fmt(numberOrNull(executionNetwork.connected_ipv6_peers)) + ' IPv6; serving ' +

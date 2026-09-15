@@ -1,0 +1,125 @@
+{
+  "status": "Source and focused checks complete; seven gates, CI and merge pending",
+  "branch": "audit/network-payload-accounting",
+  "base": "a56470af0a49f0b6b3a8ebcc01fe1cc387f8145a",
+  "source_sha256": {
+    "Cargo.lock": "a398fe1b4d53d8b472ee7f51280ed81e1ddfedc014b773d7ae76592d65bc4264",
+    "crates/logex-sync/Cargo.toml": "8e9cbc8025fb863fa337cfb080e163e737fcecdb833566a90ec6ba97f22580d3",
+    "crates/logex-sync/src/p2p/peer_manager/mod.rs": "1b05b5c786b7f5e5207dcf8ec73783939e2e56f6e4e6ae1c58b62c8c4a827953",
+    "crates/logex-sync/src/p2p/peer_manager/requests.rs": "a9e2ceef900345d6dcb02de0953ce384ac6fa9b4d6f5d099f68f6c1be1c5c3c5",
+    "crates/logex-sync/src/p2p/peer_manager/requests/payload_tests.rs": "8673a89408e6150d543b2f29707f838d6add2cd3f3e79eb3f95215c14b725d6c",
+    "crates/logex-sync/src/p2p/peer_manager/state.rs": "8e9b0829a1f315db4f65ad090732148247f9c36c2671ff3e9e63e59b892b7f6c",
+    "crates/logex-sync/src/p2p/serve_cache.rs": "1704c2cf5beeeb2064379c2bd120b6c2ee121996b9d4919bfb5fe1f9e8d560ab",
+    "crates/logex-sync/src/primitives.rs": "d975827ccb7735d2f65ee55b184bcfc976e5b0d8f71020eb5c054900e607a44b",
+    "crates/logex-types/src/sync.rs": "e0b8793a40a328021cc8905a4e58040c5a0df46b38e887afe0004e69da1cc6ed",
+    "crates/logex-server/src/web_ui.html": "94057f6b82aec6db604e157aedba2d19848e45089866ef428739ef6934696dc4"
+  },
+  "finding": {
+    "id": "B4-19",
+    "severity": "low",
+    "effect": "Telemetry repeats full RLP encoding/Snappy compression and mixes unsupported wire/ACK factors with decoded and memory-size units",
+    "correction": "Use normalized encoded lengths, remove synthetic transport estimates and document approximate mixed application payload basis"
+  },
+  "evidence_directory": "/private/tmp/logex-network-payload-accounting-2jt7elcj",
+  "evidence": {
+    "telemetry-cost-followup.json": {
+      "sha256": "142aad193e74eddda316f2ff0854127284cc90d6f81ab4e3cbf3006fa0762241",
+      "bytes": 1462
+    },
+    "telemetry-independent-review.json": {
+      "sha256": "5dc5956ff06ec5945b613aca212c874f993fa353a846dc07c1a8901364352170",
+      "bytes": 4950
+    },
+    "status-accounting-review.json": {
+      "sha256": "da3a03bec3b901bf4ccffb36554bddf7df13b47de39aa19cfc5db466c573749c",
+      "bytes": 1766
+    },
+    "dashboard-check.json": {
+      "sha256": "af323594246bf6399f352a32f1ec50805cb3fb18b8aaf4313c7d0ae261618809",
+      "bytes": 518
+    },
+    "original-requests-controls.json": {
+      "sha256": "5af98848d9713743684f2634ae0ada4ff20db3f4f406efc757e096c675cd2eae",
+      "bytes": 263
+    },
+    "original-payload-tests.rs": {
+      "sha256": "95d6fc3cba78e913602af8eedff0fbd8774fe26d4c64032513422ed68a0cbd59",
+      "bytes": 3826
+    },
+    "original-payload-tests.log": {
+      "sha256": "b852cda7f07310b1543c495df83eaaa8b0b3cdb70b66b2071e4c4fc74e574c1e",
+      "bytes": 3702
+    },
+    "original-controls-all.json": {
+      "sha256": "5cd90afcba4e6cef83ac5b2b2fce34e729af26258add20234ce77622fb404ec1",
+      "bytes": 725
+    },
+    "original-controls-all.diff": {
+      "sha256": "e44099c2caab63684fd399a113b8022f47b19bd254deb114240d58bf4672c222",
+      "bytes": 1746
+    },
+    "original-payload-tests-final.rs": {
+      "sha256": "8673a89408e6150d543b2f29707f838d6add2cd3f3e79eb3f95215c14b725d6c",
+      "bytes": 4308
+    },
+    "original-payload-controls-all.log": {
+      "sha256": "c1010ffa8300d4adcf1f697f8ba652579530a89364a36a26bb575e1509c56d52",
+      "bytes": 4415
+    },
+    "sync-tests-first.log": {
+      "sha256": "b6b322092200917d6c91bdf3d9dd81496feb3c24c6e80c9b0eca6c1f86d71722",
+      "bytes": 38377
+    },
+    "sync-tests-final.log": {
+      "sha256": "324fa2551c4502efb28bab367bdb57775c71a931f7b7eef7341e409b67f7f044",
+      "bytes": 38376
+    },
+    "served-payload-final.log": {
+      "sha256": "4f5f04f395b999343e835a2b11f1f27ec10be2f4cd69357ffa6becdd8365c9a0",
+      "bytes": 848
+    },
+    "receipt-length-matrix-final.log": {
+      "sha256": "2601ce59b4cf1c818b2d66fea5892435c7e0e30df099f4363dde23785731bc4a",
+      "bytes": 779
+    },
+    "cleanup-review.json": {
+      "sha256": "d5f0300a8bab12ada252d82c3a122a4753b82b4c6c9203a22f01072e6c5f1676",
+      "bytes": 619
+    },
+    "implementation-review.json": {
+      "sha256": "fced209b29a1c4dd9d8f3394d8270c07cefe25e6dbd2ddee4a85127ef6d4cb58",
+      "bytes": 5300
+    },
+    "before-matrix-review.json": {
+      "sha256": "02187e2bf59f3613d98bf4d298cbc9564b53a76846882f0ab856627e4660a64a",
+      "bytes": 2238
+    },
+    "final-review.json": {
+      "sha256": "97fd43a5b9ae94926ab11eeb8903ca20788cc1584a6d514e2836e1e3ef4f799c",
+      "bytes": 2369
+    }
+  },
+  "original_controls": {
+    "production_unchanged": true,
+    "passed": 2,
+    "failed": 6,
+    "caveat": "Normalized-length expectations establish changed accounting contract, not six independent integrity bugs"
+  },
+  "focused_sync_tests": {
+    "passed": 385,
+    "failed": 0,
+    "ignored": 1
+  },
+  "new_tests": 6,
+  "strengthened_existing_test": "Direct encoded-length checks in independent Alloy-reference receipt matrix across all five supported transaction types",
+  "contract": {
+    "download": "Normalized RLP returned list lengths; reconstructed receipt bloom means not original wire representation",
+    "upload": "Request field estimates and individually served encoded fields; counts attempts/lookups, not confirmed bytes sent",
+    "CL": "Compressed observed gossip plus decoded SSZ/context RPC; outgoing queued estimates",
+    "metrics": "Remove1.45 wire and2.75% ACK factors; unchanged keys, aggregation and time windows",
+    "cost": "No telemetry encode/Snappy buffers for concrete types, fixed bloom length without hashing logs, typed receipt length uses one inner traversal",
+    "limits": "Nested field traversal remains; no constant-time or allocation-budget claim; serving sums/request estimates omit some outer envelope bytes",
+    "benchmark": "None; no quantified speedup and historical counter values not comparable after basis change",
+    "remote": "None; mac-mini audit tests and cleanup complete"
+  }
+}

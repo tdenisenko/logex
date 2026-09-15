@@ -328,12 +328,13 @@ impl RlpEncodableReceipt for LogexReceipt {
             return inner;
         }
 
+        // The typed envelope adds one byte to the already measured receipt.
+        // Reuse that length instead of traversing the log fields twice more.
         Header {
             list: false,
-            payload_length: self.eip2718_encoded_length_with_bloom(bloom),
+            payload_length: 1 + inner,
         }
-        .length()
-            + self.eip2718_encoded_length_with_bloom(bloom)
+        .length_with_payload()
     }
 
     fn rlp_encode_with_bloom(&self, bloom: &Bloom, out: &mut dyn BufMut) {
@@ -574,6 +575,11 @@ mod tests {
                         };
                         let canonical = alloy_rlp::encode(&envelope);
                         assert_eq!(canonical, alloy_rlp::encode(&expected));
+                        assert_eq!(expected.length(), canonical.len());
+                        assert_eq!(
+                            receipt.rlp_encoded_length_with_bloom(&logs_bloom),
+                            canonical.len()
+                        );
                         let mut input = canonical.as_slice();
                         assert_eq!(
                             ReceiptWithBloom::<LogexReceipt>::decode(&mut input).unwrap(),
