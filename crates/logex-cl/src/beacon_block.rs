@@ -693,6 +693,21 @@ mod tests {
     }
 
     #[test]
+    fn historical_electra_beacon_context_uses_unshifted_digest() {
+        for slot in [364_032 * 32, 411_392 * 32 - 1] {
+            let block = sample_block(slot, B256::ZERO);
+            let mut response = RawRpcResponse {
+                context_bytes: Some([0xad, 0x53, 0x2c, 0xeb]),
+                bytes: block.as_ssz_bytes(),
+            };
+            assert_eq!(decode_verified_beacon_block(&response).unwrap().slot, slot);
+            // The old implementation applied Fulu's blob shift before Fulu.
+            response.context_bytes = Some([0xe3, 0x85, 0x95, 0x71]);
+            assert!(decode_verified_beacon_block(&response).is_err());
+        }
+    }
+
+    #[test]
     fn beacon_decode_enforces_execution_extra_data_limit() {
         let block = sample_block(14_132_160, B256::ZERO);
         for length in [0, 31, 32, 33] {

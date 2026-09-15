@@ -1,0 +1,29 @@
+{
+  "reviewed_at": "2026-09-15",
+  "mainnet_config_revision": "81ce8fd6f88d1fd04299010f58266dd082110e9c",
+  "digest_spec_revision": "4d623657a12ef326b7a50107589e6b0c33b439ec",
+  "prysm_revision": "5c92ffe9173a6da349e83f87c41a3bdbc46554e4",
+  "files": [
+    {
+      "path": "/private/tmp/logex-fork-conformance.lKbK6w/mainnet.yaml",
+      "sha256": "1c954ef11d38db5c0728f0487da0c29cc2c18869809bff765ab8a4788b269731"
+    },
+    {
+      "path": "/private/tmp/spec-4d623657-fulu.md",
+      "sha256": "b27b9cec968d3ae8eff4cafd5ddb250e30149ff651984880a6d17fbd324c4e69"
+    },
+    {
+      "path": "/private/tmp/prysm-pinned-config.go",
+      "sha256": "bb9937be99468814b0dc9cfc48f59abb771ac522f300bc8a2d2a9726ca14d647"
+    },
+    {
+      "path": "/private/tmp/logex-fork-conformance-evidence/derive_digests.py",
+      "sha256": "0ad235316afffabf126143e255283f2a0a8f643e6bff153d2dd1018e43785e98"
+    },
+    {
+      "path": "/private/tmp/logex-fork-conformance.lKbK6w/independent-digests.txt",
+      "sha256": "0f8edfd81766a68c0dcd7ed355408f8a6eb4442fe6e78729a3620e2bff4cc99a"
+    }
+  ],
+  "schedule_disposition": "Existing activated mainnet fork and blob schedules match the pinned official config. Gloas, Heze and EIP8321 remain disabled there at FAR_FUTURE_EPOCH; no activation invented."
+}

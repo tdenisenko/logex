@@ -6571,6 +6571,31 @@ mod tests {
     }
 
     #[test]
+    fn historical_rpc_context_uses_the_object_epoch() {
+        for (epoch, correct, incorrect) in [
+            (194_048, [0xbb, 0xa4, 0xda, 0x96], [0xad, 0x53, 0x2c, 0xeb]),
+            (269_568, [0x6a, 0x95, 0xa1, 0xa9], [0x24, 0x43, 0x18, 0x33]),
+            (364_032, [0xad, 0x53, 0x2c, 0xeb], [0xe3, 0x85, 0x95, 0x71]),
+            (411_392, [0xcc, 0x2c, 0x5c, 0xdb], [0xad, 0x53, 0x2c, 0xeb]),
+            (412_672, [0xcb, 0x0d, 0x1a, 0xcc], [0xcc, 0x2c, 0x5c, 0xdb]),
+            (419_072, [0x8c, 0x9f, 0x62, 0xfe], [0xcb, 0x0d, 0x1a, 0xcc]),
+        ] {
+            let slot = epoch * 32;
+            let mut response = RawRpcResponse {
+                context_bytes: Some(correct),
+                bytes: Vec::new(),
+            };
+            assert!(rpc_context_matches_slot(&response, slot), "epoch {epoch}");
+            response.context_bytes = Some(incorrect);
+            assert!(!rpc_context_matches_slot(&response, slot), "epoch {epoch}");
+            assert!(crate::light_client::normalize_cached_context(&mut response, slot).is_err());
+            response.context_bytes = None;
+            crate::light_client::normalize_cached_context(&mut response, slot).unwrap();
+            assert_eq!(response.context_bytes, Some(correct), "epoch {epoch}");
+        }
+    }
+
+    #[test]
     fn peer_backoff_delay_grows_and_caps() {
         assert_eq!(peer_backoff_delay(1), Duration::from_secs(15));
         assert_eq!(peer_backoff_delay(2), Duration::from_secs(30));

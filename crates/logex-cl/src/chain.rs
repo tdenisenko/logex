@@ -44,6 +44,7 @@ pub struct ConsensusChainSpec {
     pub genesis_validators_root: B256,
     pub genesis_fork_version: [u8; 4],
     pub fork_schedule: &'static [ScheduledFork],
+    pub fulu_fork_epoch: u64,
     pub electra_max_blobs_per_block: u64,
     pub blob_schedule: &'static [BlobScheduleEntry],
 }
@@ -85,15 +86,25 @@ impl ConsensusChainSpec {
 
     pub fn fork_digest_for_epoch(self, epoch: u64) -> [u8; 4] {
         let base_digest = self.fork_data_root(self.fork_version_for_epoch(epoch));
+        let mut fork_digest = [
+            base_digest[0],
+            base_digest[1],
+            base_digest[2],
+            base_digest[3],
+        ];
+        // Fulu changes the digest rule only from its activation epoch onward.
+        // Historical RPC objects keep their original, unshifted fork digest.
+        if epoch < self.fulu_fork_epoch {
+            return fork_digest;
+        }
         let blob_parameters = self.blob_parameters_for_epoch(epoch);
         let mut hasher = Sha256::new();
         hasher.update(blob_parameters.epoch.to_le_bytes());
         hasher.update(blob_parameters.max_blobs_per_block.to_le_bytes());
         let blob_hash = hasher.finalize();
 
-        let mut fork_digest = [0u8; 4];
         for (index, byte) in fork_digest.iter_mut().enumerate() {
-            *byte = base_digest[index] ^ blob_hash[index];
+            *byte ^= blob_hash[index];
         }
         fork_digest
     }
@@ -223,6 +234,7 @@ pub const MAINNET_CONSENSUS_CHAIN_SPEC: ConsensusChainSpec = ConsensusChainSpec 
         "4b363db94e286120d76eb905340fdd4e54bfe9f06bf33ff6cf5ad27f511bfe95"
     ),
     genesis_fork_version: [0x00, 0x00, 0x00, 0x00],
+    fulu_fork_epoch: 411_392,
     electra_max_blobs_per_block: 9,
     fork_schedule: &[
         ScheduledFork {
@@ -356,6 +368,40 @@ mod tests {
         assert_ne!(bpo1, bpo2);
         assert_eq!(current, bpo2);
         assert_eq!(hex::encode(current), "8c9f62fe");
+    }
+
+    #[test]
+    fn mainnet_fork_digests_match_independent_boundary_vectors() {
+        // SHA256 vectors from the pinned mainnet config and corrected Fulu
+        // rule; see docs/audit/consensus-fork-conformance.md. Expected values
+        // do not call this implementation's fork/blob selection helpers.
+        let transitions = [
+            (0, "b5303f2a"),
+            (74_240, "afcaaba0"),
+            (144_896, "4a26c58b"),
+            (194_048, "bba4da96"),
+            (269_568, "6a95a1a9"),
+            (364_032, "ad532ceb"),
+            (411_392, "cc2c5cdb"),
+            (412_672, "cb0d1acc"),
+            (419_072, "8c9f62fe"),
+        ];
+        for (index, (epoch, expected)) in transitions.iter().enumerate() {
+            for epoch in [*epoch, epoch + 1] {
+                assert_eq!(
+                    hex::encode(MAINNET_CONSENSUS_CHAIN_SPEC.fork_digest_for_epoch(epoch)),
+                    *expected,
+                    "epoch {epoch}"
+                );
+            }
+            if index > 0 {
+                assert_eq!(
+                    hex::encode(MAINNET_CONSENSUS_CHAIN_SPEC.fork_digest_for_epoch(epoch - 1)),
+                    transitions[index - 1].1,
+                    "epoch before {epoch}"
+                );
+            }
+        }
     }
 
     #[test]
