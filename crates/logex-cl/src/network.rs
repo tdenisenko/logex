@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::convert::Infallible;
 use std::fs;
 use std::io;
@@ -1141,33 +1141,6 @@ fn cached_beacon_block_payloads_by_range(
         })
         .filter_map(|block| payloads.get(&block.beacon_root).cloned())
         .collect()
-}
-
-fn cached_light_client_update_payloads_by_range(
-    request: LightClientUpdatesByRangeRequest,
-    payloads: &BTreeMap<u64, RawRpcResponse>,
-) -> Vec<RawRpcResponse> {
-    if request.count == 0 {
-        return Vec::new();
-    }
-
-    let end_period = request.start_period.saturating_add(request.count);
-    let mut range = payloads.range(request.start_period..end_period);
-    let Some((&first_period, first_payload)) = range.next() else {
-        return Vec::new();
-    };
-
-    let mut responses = vec![first_payload.clone()];
-    let mut expected_period = first_period.saturating_add(1);
-    for (&period, payload) in range {
-        if period != expected_period {
-            break;
-        }
-        responses.push(payload.clone());
-        expected_period = expected_period.saturating_add(1);
-    }
-
-    responses
 }
 
 fn select_checkpoint_forward_child<I>(
@@ -2926,8 +2899,7 @@ impl ConsensusNetwork {
                         Eth2RpcRequest::LightClientBootstrap(root) => {
                             if root == self.consensus.checkpoint().beacon_root {
                                 self.consensus
-                                    .light_client_payloads()
-                                    .bootstrap
+                                    .light_client_bootstrap_payload()
                                     .map(Eth2RpcResponse::LightClientBootstrap)
                                     .unwrap_or_else(|| {
                                         resource_unavailable(
@@ -2942,8 +2914,7 @@ impl ConsensusNetwork {
                         }
                         Eth2RpcRequest::LightClientFinalityUpdate => self
                             .consensus
-                            .light_client_payloads()
-                            .finality_update
+                            .light_client_finality_update_payload()
                             .map(Eth2RpcResponse::LightClientFinalityUpdate)
                             .unwrap_or_else(|| {
                                 resource_unavailable(
@@ -2952,8 +2923,7 @@ impl ConsensusNetwork {
                             }),
                         Eth2RpcRequest::LightClientOptimisticUpdate => self
                             .consensus
-                            .light_client_payloads()
-                            .optimistic_update
+                            .light_client_optimistic_update_payload()
                             .map(Eth2RpcResponse::LightClientOptimisticUpdate)
                             .unwrap_or_else(|| {
                                 resource_unavailable(
@@ -2962,7 +2932,7 @@ impl ConsensusNetwork {
                             }),
                         Eth2RpcRequest::LightClientUpdatesByRange(request) => {
                             let responses =
-                                self.cached_verified_light_client_updates_by_range(request);
+                                self.consensus.light_client_update_payloads(request.start_period, request.count);
                             if responses.is_empty() {
                                 resource_unavailable(
                                     "light-client updates by range are not yet available locally",
@@ -4722,14 +4692,6 @@ impl ConsensusNetwork {
             &canonical_blocks,
             &self.verified_beacon_block_payloads,
         )
-    }
-
-    fn cached_verified_light_client_updates_by_range(
-        &self,
-        request: LightClientUpdatesByRangeRequest,
-    ) -> Vec<RawRpcResponse> {
-        let payloads = self.consensus.light_client_payloads();
-        cached_light_client_update_payloads_by_range(request, &payloads.updates_by_period)
     }
 
     fn pending_history_roots(&self) -> HashSet<B256> {
@@ -8046,52 +8008,6 @@ mod tests {
         );
 
         assert_eq!(responses, vec![payload(0x10), payload(0x11), payload(0x13)]);
-    }
-
-    #[test]
-    fn cached_light_client_updates_by_range_start_at_earliest_known_period() {
-        let payload = |byte: u8| RawRpcResponse {
-            context_bytes: Some([byte; 4]),
-            bytes: vec![byte],
-        };
-        let payloads = BTreeMap::from([
-            (10u64, payload(0x0a)),
-            (12u64, payload(0x0c)),
-            (13u64, payload(0x0d)),
-        ]);
-
-        let responses = cached_light_client_update_payloads_by_range(
-            LightClientUpdatesByRangeRequest {
-                start_period: 11,
-                count: 4,
-            },
-            &payloads,
-        );
-
-        assert_eq!(responses, vec![payload(0x0c), payload(0x0d)]);
-    }
-
-    #[test]
-    fn cached_light_client_updates_by_range_stops_on_first_gap() {
-        let payload = |byte: u8| RawRpcResponse {
-            context_bytes: Some([byte; 4]),
-            bytes: vec![byte],
-        };
-        let payloads = BTreeMap::from([
-            (20u64, payload(0x14)),
-            (21u64, payload(0x15)),
-            (23u64, payload(0x17)),
-        ]);
-
-        let responses = cached_light_client_update_payloads_by_range(
-            LightClientUpdatesByRangeRequest {
-                start_period: 20,
-                count: 8,
-            },
-            &payloads,
-        );
-
-        assert_eq!(responses, vec![payload(0x14), payload(0x15)]);
     }
 
     #[test]
