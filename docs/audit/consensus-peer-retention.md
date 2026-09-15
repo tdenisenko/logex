@@ -48,7 +48,10 @@ ordering independent of input order, retained counters and the 256-entry cap.
 All seven local gates passed on this source, including 1,286 workspace tests
 (23 ignored), documentation tests and the release build. The [gate record](baselines/2026-09-15-consensus-peer-retention-gates.json)
 includes toolchain, commands and evidence hashes. Independent source review
-found no actionable issue in this bounded patch. CI and merge remain pending.
+found no actionable issue in this bounded patch. All six Linux/macOS CI jobs passed on head `28a2b90e` in run
+`34920332568`. [PR #158](https://github.com/tdenisenko/logex/pull/158)
+merged as `c7ef4411` on September 15 at 02:19:48 UTC. See the
+[CI and merge record](baselines/2026-09-15-consensus-peer-retention-ci.json).
 No timing benchmark, remote host or production data is used.
 Removal of repeated ENR parsing is an implementation-level cost reduction, not
 a measured throughput percentage or complete event-loop performance claim.
