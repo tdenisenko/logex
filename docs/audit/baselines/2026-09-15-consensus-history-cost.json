@@ -1,0 +1,424 @@
+{
+  "status": "All seven local gates and independent final reviews pass; PR/CI/merge pending",
+  "branch": "audit/consensus-history-cost",
+  "base": "9a57c22c80057b5c54cd1be248d2c1773976de4b",
+  "source_commit": "7ef16e28360086b3d6b7905d8602987c03b895bf",
+  "source_sha256": {
+    "crates/logex-cl/src/lib.rs": "a12ea8a9c1b79defdb50e7a97cbd257dbeade8403bbe831ad7cb14eab7118064",
+    "crates/logex-cl/src/network.rs": "85fdf20ebb014ca96c9a1e92df3975cb55fc296482519811bb04de097e6a6110",
+    "crates/logex-cl/src/snapshot_format.rs": "c6ea186e45c0adcc64aa7cf7bcdd74b9e5d62b27fe4ea74d81b33cd170baa08f",
+    "crates/logex-sync/src/engine/anchored.rs": "64c1375fec70abc3350fa70ba72b7928d10469369dcdfdea48bbf34b6ecdd4c3"
+  },
+  "findings": {
+    "B3-55": "Repeated full gap scan on status/coverage reads",
+    "B3-56": "Full-history clone/scan for bounded execution batches and reorg floor predicate",
+    "B3-57": "Canonical chain allocation solely for existence check",
+    "B3-58": "Exact identical applied update still clones and durably rewrites snapshot"
+  },
+  "classification": "Performance opportunities; no wrong-result finding or timing percentage claimed.",
+  "evidence_directory": "/private/tmp/logex-history-cost-0v2derrt",
+  "evidence": {
+    "retention-review.json": {
+      "sha256": "8e6e93d5b96ffde4d026feb94aea903ee9dfd8cb0cf685a1e859d357ab2d82cc",
+      "bytes": 6649
+    },
+    "payload-retention-review.json": {
+      "sha256": "deae0cbe7ec946011c194998b47cc9c6b815173cd601c87135a23d08d803b22e",
+      "bytes": 3354
+    },
+    "network-completeness.json": {
+      "sha256": "b01bac3195b92dd0092aa39e2c39d863e4127f14f3841df7cfb605eb647a378f",
+      "bytes": 2658
+    },
+    "applied-update-patch-review.json": {
+      "sha256": "56877d9741effb391ebff2d503635e484442156e71776df9030e7701f8082b5a",
+      "bytes": 1581
+    },
+    "history-final-review.json": {
+      "sha256": "d9a60d401c4b499a8eb87cc6edfec881ede017f428a110cd8751982fff95f05e",
+      "bytes": 4405
+    },
+    "applied-update-final-review.json": {
+      "sha256": "de0e3d1217fdd8e62a49d616e2b1fa8150a4d70f36ce4d595171d3b63d0c8df8",
+      "bytes": 4339
+    },
+    "before-noop.json": {
+      "sha256": "b5e99f291aae66bf50f85b72731c8f6a16c3200eef4d067757b1d0fd38387efb",
+      "bytes": 844
+    },
+    "before-noop.log": {
+      "sha256": "abe3bb640e1a9bf14a131c70b211e9c14deb60e17e0d0e403ec92a1bd7dc1bb8",
+      "bytes": 1345
+    },
+    "cl-tests-first.log": {
+      "sha256": "ccae3be493c01d8271a566415522c77ca4e39e678164abc3d8c4c1f36e9a075e",
+      "bytes": 273369
+    },
+    "cl-tests-second.log": {
+      "sha256": "1eeec5c511ece990198d94b202d2ed836646410a427c374a27e54d61deb0c6ae",
+      "bytes": 27536
+    },
+    "sync-tests.log": {
+      "sha256": "393f6b6053dbfa12a786eaddec90b45097d6dab3b948c88a0516b795f7f09d9e",
+      "bytes": 32815
+    },
+    "sync-tests-final.log": {
+      "sha256": "532dbf5a54f99fc7eb1a3fbe985c2e59b7f27832e146176f374e7e6504c983b0",
+      "bytes": 31765
+    },
+    "clippy.log": {
+      "sha256": "29898f195dec580faaa87b46db702b6406540ea2be143185a1ab83ba80b8ca0a",
+      "bytes": 2401
+    }
+  },
+  "before_fix": {
+    "base": "9a57c22c80057b5c54cd1be248d2c1773976de4b",
+    "method": "Exact original applied-update method substituted into current bounded test harness; not full baseline checkout. Candidate restored byte-for-byte.",
+    "command": [
+      "cargo",
+      "test",
+      "-p",
+      "logex-cl",
+      "--lib",
+      "--locked",
+      "--offline",
+      "-j",
+      "2",
+      "applied_update_noop_preserves_file_and_detects_each_changed_component"
+    ],
+    "exit_code": 101,
+    "expected_file_replacement_failure": true,
+    "method_sha256": "eb529e07cac18bb6e229bf2f6f08f1cc472b6b1b997983c272cc494ed7455574",
+    "harness_sha256": "be36c4f7d82de7c05afe8754e6ea755487cd9b0b6633adb2b9e90520d696c368",
+    "candidate_sha256": "a12ea8a9c1b79defdb50e7a97cbd257dbeade8403bbe831ad7cb14eab7118064",
+    "log_sha256": "abe3bb640e1a9bf14a131c70b211e9c14deb60e17e0d0e403ec92a1bd7dc1bb8"
+  },
+  "focused": {
+    "consensus": {
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "logex-cl",
+        "--lib",
+        "--locked",
+        "--offline",
+        "-j",
+        "2"
+      ],
+      "passed": 313,
+      "ignored": 1,
+      "exit_code": 0,
+      "log": "cl-tests-second.log"
+    },
+    "sync": {
+      "command": [
+        "cargo",
+        "test",
+        "-p",
+        "logex-sync",
+        "--lib",
+        "--locked",
+        "--offline",
+        "-j",
+        "2"
+      ],
+      "passed": 323,
+      "ignored": 1,
+      "exit_code": 0,
+      "log": "sync-tests-final.log"
+    },
+    "clippy": {
+      "command": [
+        "cargo",
+        "clippy",
+        "-p",
+        "logex-cl",
+        "-p",
+        "logex-sync",
+        "--all-targets",
+        "--locked",
+        "--offline",
+        "-j",
+        "2",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit_code": 0,
+      "log": "clippy.log"
+    }
+  },
+  "reviews": {
+    "coverage_consumers_visitor": {
+      "status": "INDEPENDENT_SCOPED_REVIEW_NO_ACTIONABLE_FINDING",
+      "source_sha256": {
+        "crates/logex-cl/src/lib.rs": "a12ea8a9c1b79defdb50e7a97cbd257dbeade8403bbe831ad7cb14eab7118064",
+        "crates/logex-cl/src/network.rs": "85fdf20ebb014ca96c9a1e92df3975cb55fc296482519811bb04de097e6a6110",
+        "crates/logex-cl/src/snapshot_format.rs": "c6ea186e45c0adcc64aa7cf7bcdd74b9e5d62b27fe4ea74d81b33cd170baa08f",
+        "crates/logex-sync/src/engine/anchored.rs": "64c1375fec70abc3350fa70ba72b7928d10469369dcdfdea48bbf34b6ecdd4c3"
+      },
+      "excluded_from_independent_review": "record_verified_applied_update no-op patch and its new test were prepared by this reviewer; those require separate root review.",
+      "invariants": [
+        "anchor_gap_count private/serde skipped defaults0 on deserialize and recomputed by restore before publication. Checkpoint descriptor construction uses recomputed summaries; empty initialization0 correct.",
+        "Every production ordered_anchors replace/append/range-splice/fallback mutation calls recompute_snapshot_anchors. Candidate cloning preserves cache; publication moves cache+records atomically under existing mutex after write. Failed write leaves oldcache and oldrecords while failure latch prevents later mutation; reopen recomputes disk candidate.",
+        "Coverage floor/ceiling/count/cache read under one mutex. No checksum/persisted shape changes from skipped cache; no trusting serialized gapcount.",
+        "anchor_records_after partition selects strict greater suffix with count=min(limit,len-start);0/MAX bounds safe, copy bounded by selected count.",
+        "contiguous_anchor_batch never scans past first limit accepted records nor skips an unacceptable initial/gap record. First limit suffix therefore preserves full-history result including bootstrap jump and empty/MAX cases.",
+        "Reorg any record<=tip is equivalent to sorted history first<=tip. Existing separate-lock snapshot timing unchanged.",
+        "Canonical visitor retains checkpoint existence/slot, map-key/root equality and strictly descending parent-slot checks. Cycles must violate descending slot before repeating indefinitely. Completeness no longer allocates chain vector; collection still reverses head-first visit into previous order.",
+        "Visitor callbacks may see prefix before later rejection, but current uses only disposable private Vec or no-op, so failure cannot publish partial ancestry."
+      ],
+      "tests_assessed": [
+        "Independent coverage scan after all mutation families and reopen; serde cache omission.",
+        "Blocked-writer and failed-save tests check cache stays with old published records then recomputes on reopen.",
+        "Bounded consumer parity over gaps/bootstrap/limits/MAX and floorpredicate parity.",
+        "Existing enumerated ancestry combinations plus missing checkpoint/head, slot/root mismatch, checkpoint-only andMAX controls."
+      ],
+      "limits": [
+        "Coverage becomesO(1) but recompute remainsO(history) on actual record changes; changed snapshot persistence still whole-state.",
+        "Completeness traversal remainsO(path length) CPU without allocation; materialization consumers still retain required chain Vec.",
+        "No benchmark/throughput/RSS claim. Tests inspected not run; root owns CL/sync gates."
+      ],
+      "findings": [],
+      "execution": "Read-only, no Cargo/source edit/commit/remote.",
+      "final_binding": {
+        "changes": {},
+        "root_reported_validation": "CL313 passed,1 ignored. Original applied-update before-control failed expected file-identity assertion; candidate restored byte-identical per before-noop.json. Not personally executed.",
+        "scope": "Own no-op patch/test remains excluded from independent clearance. Root fixture correction only; independent cache/API/visitor/consumer findings unchanged."
+      },
+      "sync_fixture_final_binding": {
+        "changes": {
+          "crates/logex-sync/src/engine/anchored.rs": {
+            "before": "a5fe8b837272218cb1896af817b4510a41de3d330e7532d4fdb5fc6116ff3ddc",
+            "after": "64c1375fec70abc3350fa70ba72b7928d10469369dcdfdea48bbf34b6ecdd4c3"
+          }
+        },
+        "interpretation": "Boundary fixture constructs header0 then assigns block.number, avoiding unrelated timestamp+number overflow while preserving MAX block-number anchor selection oracle. Production unchanged.",
+        "reported_validation": "Sync323 passed1 ignored; strict CL and sync Clippy passed. Reported root results, not personally executed."
+      }
+    },
+    "applied_update_and_cache": {
+      "scope": "Independent read-only review of applied-update no-op and derived coverage cache; no Cargo or source edits.",
+      "source_sha256": "a12ea8a9c1b79defdb50e7a97cbd257dbeade8403bbe831ad7cb14eab7118064",
+      "verdict": "No actionable correctness regression found.",
+      "applied_update_checks": [
+        {
+          "path": "lib.rs:549-588",
+          "result": "Collecting incoming period pairs into BTreeMap preserves original insert-loop last-key-wins semantics. Exact raw equality includes context_bytes and full byte Vec contents; unchanged earlier duplicates do not cause false writes."
+        },
+        {
+          "path": "lib.rs:554-577",
+          "result": "Diagnostic updates use unchanged optimistic/finality ranking and strict greater-than, preserving stable ties and independently improved summaries. Missing incoming finality remains no change."
+        },
+        {
+          "path": "lib.rs:582",
+          "result": "Full derived PartialEq of VerifiedLightClientStore includes checkpoint/bootstrap slot, both committees, finalized/optimistic headers, best_valid_update and both max participant counters; cannot skip relevant committee/participation-only changes."
+        },
+        {
+          "path": "lib.rs:643-669",
+          "result": "Writer mutex and prior-storage-failure check precede no-op prepare. Exact no-op returns before snapshot clone/write; changed candidate remains private until successful write. Failed write latches storage and does not publish; next no-op also returns StorageFailed."
+        },
+        {
+          "path": "lib.rs:2632",
+          "result": "New control checks same-file identity on duplicate last-wins exact no-op, context-only payload change, independently missing summaries, full store-only change, reopen and existing storage-failure latch. Existing priority controls cover stronger/weaker summary ordering."
+        }
+      ],
+      "coverage_checks": [
+        {
+          "path": "lib.rs:119",
+          "result": "anchor_gap_count is private derived cache and serde(skip); deserialized zero is never published without restore recomputation."
+        },
+        {
+          "path": "lib.rs:347-406",
+          "result": "All production anchor mutations (replace, append, range splice and fallback merge) call recompute_snapshot_anchors. Exact range no-op leaves unchanged correct cache."
+        },
+        {
+          "path": "lib.rs:824-852,978-1014",
+          "result": "Descriptor initialization recomputes after normalization; empty root initialization starts zero; restore checks sorted/unique anchors then recomputes before publication."
+        },
+        {
+          "path": "lib.rs:643-679",
+          "result": "Cache is cloned/recomputed in same private candidate transaction as records. Readers cannot see future gap count before write completion, and failed publication preserves old cache."
+        },
+        {
+          "path": "lib.rs:1517-1595,1600-1730",
+          "result": "Controls compare independent gap/reference suffix after mutations/reopen, assert cache absent from serialization, and check old/new coverage at blocked write and directory-sync failure boundaries."
+        }
+      ],
+      "limits": [
+        "This is exact no-op persistence avoidance, not skipped verification: caller still verifies/applies input before this recorder.",
+        "Status priority comparison intentionally treats equal-ranking alternate metadata as unchanged, matching prior behavior.",
+        "No retention limits or anchor deletion introduced; O(1) coverage is derived from retained ordered records.",
+        "Full-workspace validation remains parent-owned."
+      ],
+      "final_fixture_rebind": {
+        "change": "Initial saved range payload explicitly sets context_bytes=None; normalization then supplies Some(canonical context), making the context-only mutation independent of fixture default. Assertion compares context options. Production implementation unchanged.",
+        "review": "Exact raw equality includes Option context and bytes, so None-to-Some update must persist while earlier overwritten duplicate still must not. Existing reopen checks verify canonical stored context.",
+        "reported_validation": "Parent reports CL313 passed/1 ignored and original unconditional method fails same-file identity control; no Cargo run by this reviewer.",
+        "before_evidence": "before-noop.json (parent-owned original-method substitution and exact restoration evidence).",
+        "prior_report": "applied-update-review-before-final-fixture.json"
+      }
+    }
+  },
+  "retention_disposition": [
+    "No safe basis found to drop old anchors within this task. Required consumers currently depend on checkpoint-to-head ancestry and retained execution-anchor queries.",
+    "Materialization still constructs complete anchor records, but PR169 avoids identical range snapshot clone/write. Do not claim every materialization persists again.",
+    "Status coverage scans may be redundant; parent owns coverage algorithm review, so not separately implemented here.",
+    "Range responses may add SSZ/root-checked but not yet checkpoint-connected metadata. No total map bound found; this is a retention-policy issue requiring careful trusted-lineage/pending-work design, not license to evict anchors arbitrarily.",
+    "No function named anchor_ranges or lineage prune found in current crates; relevant actual paths are replace_anchor_range and cached_target_lineage_roots."
+  ],
+  "limits": [
+    "Keep required checkpoint-to-head/reorg/restart anchors; no arbitrary eviction.",
+    "Optional raw bodies separately bounded; disconnected metadata/children maps and lifetime persisted history remain open.",
+    "Actual changed snapshots still clone/serialize/write complete history.",
+    "Gap recomputation remains O(N) on actual anchor mutations; bounded suffix retains separate temporary/output vectors.",
+    "Applied response normalization adds bounded incoming BTreeMap work.",
+    "Completeness still traverses lineage O(N), preserves existing validation scope and collector order.",
+    "No benchmark, new format field, dependency, unsafe code, remote operation or production data use."
+  ],
+  "initial_failures": [
+    {
+      "log": "cl-tests-first.log",
+      "exit_code": 101,
+      "description": "312 passed, one new test failed because fixture already had context. Corrected to explicit initial None context; implementation unchanged."
+    },
+    {
+      "log": "sync-tests.log",
+      "exit_code": 101,
+      "description": "322 passed, one new test overflowed ordinary timestamp helper at MAX block number. Corrected to set block number independently; production unchanged."
+    }
+  ],
+  "local_validation": {
+    "commit": "7ef16e28360086b3d6b7905d8602987c03b895bf",
+    "rustc": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+    "gates": [
+      {
+        "name": "vendor",
+        "command": [
+          "python3",
+          "tools/verify_datafusion_vendor.py"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T14:59:59.336873+00:00",
+        "finished": "2026-09-15T14:59:59.390456+00:00",
+        "sha256": "d8d80949d6f3378c14456842b531f0cade514179e4c94781b95ff9abb6447675",
+        "log": "/private/tmp/logex-history-cost-0v2derrt/gates/vendor.log"
+      },
+      {
+        "name": "format",
+        "command": [
+          "cargo",
+          "fmt",
+          "--all",
+          "--",
+          "--check"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T14:59:59.390771+00:00",
+        "finished": "2026-09-15T15:00:00.298214+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-history-cost-0v2derrt/gates/format.log"
+      },
+      {
+        "name": "check",
+        "command": [
+          "cargo",
+          "check",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T15:00:00.298740+00:00",
+        "finished": "2026-09-15T15:00:06.598536+00:00",
+        "sha256": "4f8bd7ab4fcbab496cf758c487258475ff58ffc5844412352830342616f9766c",
+        "log": "/private/tmp/logex-history-cost-0v2derrt/gates/check.log"
+      },
+      {
+        "name": "clippy",
+        "command": [
+          "cargo",
+          "clippy",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T15:00:06.599143+00:00",
+        "finished": "2026-09-15T15:00:12.363292+00:00",
+        "sha256": "98bbd130e5e44c3fdf6ea7cd8e788db9b4dbe51e5f2edb072f3e9e8a76e44ae6",
+        "log": "/private/tmp/logex-history-cost-0v2derrt/gates/clippy.log"
+      },
+      {
+        "name": "test",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T15:00:12.363900+00:00",
+        "finished": "2026-09-15T15:03:09.959444+00:00",
+        "sha256": "e41a5bad07c24836aaaf3e7c1a5125c8626ca5b36d41272e55f8447e846bad3e",
+        "log": "/private/tmp/logex-history-cost-0v2derrt/gates/test.log"
+      },
+      {
+        "name": "doc",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--doc",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T15:03:09.961587+00:00",
+        "finished": "2026-09-15T15:03:23.657072+00:00",
+        "sha256": "ac6281e1709d3c53cd2dcf2d190fbd32f88101e819a967118b9059795d5c24c0",
+        "log": "/private/tmp/logex-history-cost-0v2derrt/gates/doc.log"
+      },
+      {
+        "name": "release-build",
+        "command": [
+          "cargo",
+          "build",
+          "-p",
+          "logex-node",
+          "--release",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T15:03:23.657729+00:00",
+        "finished": "2026-09-15T15:04:26.975759+00:00",
+        "sha256": "0d1c3d71cbf2ca1942e87117841299e1723c64df7a1d3ec431dfda9fc0876d7a",
+        "log": "/private/tmp/logex-history-cost-0v2derrt/gates/release-build.log"
+      }
+    ]
+  },
+  "workspace_tests": {
+    "passed": 1397,
+    "ignored": 23,
+    "groups": 25
+  }
+}

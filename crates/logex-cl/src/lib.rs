@@ -116,6 +116,10 @@ pub struct ConsensusSnapshot {
     pub anchors: ChainAnchors,
     #[serde(default)]
     pub ordered_anchors: Vec<AnchorRecord>,
+    // Recomputed whenever materialized anchors change and on restore. Keep this
+    // derived cache in the same publication transaction, never in the file.
+    #[serde(skip)]
+    anchor_gap_count: usize,
     #[serde(default)]
     pub light_client: ConsensusLightClientStatus,
     #[serde(default)]
@@ -240,13 +244,25 @@ impl ConsensusStore {
         self.inner.lock().unwrap().ordered_anchors.clone()
     }
 
+    /// Copy at most `limit` materialized records strictly after the given block.
+    pub fn anchor_records_after(&self, block_number: u64, limit: usize) -> Vec<AnchorRecord> {
+        if limit == 0 {
+            return Vec::new();
+        }
+        let snapshot = self.inner.lock().unwrap();
+        let anchors = &snapshot.ordered_anchors;
+        let start = anchors.partition_point(|record| record.anchor.block_number <= block_number);
+        let count = limit.min(anchors.len() - start);
+        anchors[start..start + count].to_vec()
+    }
+
     pub fn anchor_coverage(&self) -> AnchorCoverage {
         let snapshot = self.inner.lock().unwrap();
         AnchorCoverage {
             floor: snapshot.ordered_anchors.first().map(|record| record.anchor),
             ceiling: snapshot.ordered_anchors.last().map(|record| record.anchor),
             count: snapshot.ordered_anchors.len(),
-            gap_count: anchor_record_gap_count(&snapshot.ordered_anchors),
+            gap_count: snapshot.anchor_gap_count,
         }
     }
 
@@ -529,38 +545,57 @@ impl ConsensusStore {
         applied: AppliedLightClientUpdate,
         verified_updates_by_period: Vec<(u64, RawRpcResponse)>,
     ) -> Result<(), ConsensusStateError> {
-        self.update(|snapshot| {
-            if snapshot
-                .light_client
-                .optimistic_update
-                .as_ref()
-                .is_none_or(|previous| {
-                    optimistic_cache_priority(&applied.optimistic_status)
-                        > optimistic_cache_priority(previous)
-                })
-            {
-                snapshot.light_client.optimistic_update = Some(applied.optimistic_status);
-            }
-            if let Some(status) = applied.finality_status
-                && snapshot
+        // Match insertion's last-record-wins behavior before comparing payloads.
+        let verified_updates_by_period: BTreeMap<_, _> =
+            verified_updates_by_period.into_iter().collect();
+        self.update_if_with_writer(
+            move |current| {
+                let optimistic_changed = current
                     .light_client
-                    .finality_update
+                    .optimistic_update
                     .as_ref()
                     .is_none_or(|previous| {
-                        finality_cache_priority(&status) > finality_cache_priority(previous)
-                    })
-            {
-                snapshot.light_client.finality_update = Some(status);
-            }
-            for (period, payload) in verified_updates_by_period {
-                snapshot
-                    .light_client_payloads
-                    .updates_by_period
-                    .insert(period, payload);
-            }
-            snapshot.verified_light_client_store = Some(applied.store);
-            apply_verified_store(snapshot);
-        })
+                        optimistic_cache_priority(&applied.optimistic_status)
+                            > optimistic_cache_priority(previous)
+                    });
+                let finality_changed = applied.finality_status.as_ref().is_some_and(|status| {
+                    current
+                        .light_client
+                        .finality_update
+                        .as_ref()
+                        .is_none_or(|previous| {
+                            finality_cache_priority(status) > finality_cache_priority(previous)
+                        })
+                });
+                let payloads_changed =
+                    verified_updates_by_period.iter().any(|(period, payload)| {
+                        current.light_client_payloads.updates_by_period.get(period) != Some(payload)
+                    });
+                if !optimistic_changed
+                    && !finality_changed
+                    && !payloads_changed
+                    && current.verified_light_client_store.as_ref() == Some(&applied.store)
+                {
+                    return Ok(None);
+                }
+                Ok(Some(move |snapshot: &mut ConsensusSnapshot| {
+                    if optimistic_changed {
+                        snapshot.light_client.optimistic_update = Some(applied.optimistic_status);
+                    }
+                    if finality_changed {
+                        snapshot.light_client.finality_update = applied.finality_status;
+                    }
+                    snapshot
+                        .light_client_payloads
+                        .updates_by_period
+                        .extend(verified_updates_by_period);
+                    snapshot.verified_light_client_store = Some(applied.store);
+                    apply_verified_store(snapshot);
+                }))
+            },
+            write_snapshot,
+        )
+        .map(|_| ())
     }
 
     pub(crate) fn replace_verified_light_client_store(
@@ -794,6 +829,7 @@ fn load_checkpoint_descriptor(input: &str) -> Result<ConsensusSnapshot, Consensu
             },
             anchors: ChainAnchors::default(),
             ordered_anchors,
+            anchor_gap_count: 0,
             light_client: ConsensusLightClientStatus::default(),
             light_client_payloads: PersistedLightClientPayloads::default(),
             verified_light_client_store: None,
@@ -806,6 +842,7 @@ fn load_checkpoint_descriptor(input: &str) -> Result<ConsensusSnapshot, Consensu
         checkpoint,
         anchors: ChainAnchors::default(),
         ordered_anchors: Vec::new(),
+        anchor_gap_count: 0,
         light_client: ConsensusLightClientStatus::default(),
         light_client_payloads: PersistedLightClientPayloads::default(),
         verified_light_client_store: None,
@@ -939,6 +976,7 @@ fn apply_verified_store(snapshot: &mut ConsensusSnapshot) {
 }
 
 fn recompute_snapshot_anchors(snapshot: &mut ConsensusSnapshot) {
+    snapshot.anchor_gap_count = anchor_record_gap_count(&snapshot.ordered_anchors);
     let indexed_head = snapshot.anchors.indexed_head;
     snapshot.anchors = compute_chain_anchors(&snapshot.ordered_anchors);
     snapshot.anchors.indexed_head = indexed_head;
@@ -1153,6 +1191,7 @@ mod tests {
             checkpoint: fixture.checkpoint,
             anchors: ChainAnchors::default(),
             ordered_anchors: Vec::new(),
+            anchor_gap_count: 0,
             light_client: fixture.status,
             light_client_payloads: fixture.payloads,
             verified_light_client_store: Some(fixture.store),
@@ -1478,6 +1517,85 @@ mod tests {
         );
     }
 
+    fn assert_coverage_matches_records(store: &ConsensusStore) {
+        let records = store.ordered_anchors();
+        let mut previous: Option<AnchorRecord> = None;
+        let mut gaps = 0;
+        for record in &records {
+            if let Some(parent) = previous
+                && (parent.anchor.block_number.checked_add(1) != Some(record.anchor.block_number)
+                    || record.parent_beacon_root != Some(parent.anchor.beacon_root))
+            {
+                gaps += 1;
+            }
+            previous = Some(*record);
+        }
+        assert_eq!(
+            store.anchor_coverage(),
+            AnchorCoverage {
+                floor: records.first().map(|record| record.anchor),
+                ceiling: records.last().map(|record| record.anchor),
+                count: records.len(),
+                gap_count: gaps,
+            }
+        );
+        for block in [0, 1, 2, 3, 5, 9, u64::MAX - 1, u64::MAX] {
+            for limit in [0, 1, 3, usize::MAX] {
+                let expected: Vec<_> = records
+                    .iter()
+                    .copied()
+                    .filter(|record| record.anchor.block_number > block)
+                    .take(limit)
+                    .collect();
+                assert_eq!(store.anchor_records_after(block, limit), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn retained_anchor_coverage_and_suffix_match_reference_after_mutations() {
+        let temp = TempDir::new().unwrap();
+        let store = ConsensusStore::open(
+            temp.path(),
+            Some("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        )
+        .unwrap();
+        let mut linked = test_anchor(2);
+        linked.parent_beacon_root = Some(test_anchor(1).anchor.beacon_root);
+        let sets = [
+            Vec::new(),
+            vec![test_anchor(1), linked, test_anchor(5)],
+            vec![test_anchor(u64::MAX), test_anchor(0), test_anchor(0)],
+        ];
+        for records in sets {
+            store.replace_anchors(records).unwrap();
+            assert_coverage_matches_records(&store);
+            store.append_anchors(vec![test_anchor(9), linked]).unwrap();
+            assert_coverage_matches_records(&store);
+            store.replace_anchor_range(1, 5, vec![linked]).unwrap();
+            assert_coverage_matches_records(&store);
+            store.replace_anchor_range(1, 5, Vec::new()).unwrap();
+            assert_coverage_matches_records(&store);
+            // Preserve the public reversed/out-of-range merge fallback too.
+            store.replace_anchor_range(5, 1, vec![linked]).unwrap();
+            assert_coverage_matches_records(&store);
+            store
+                .replace_anchor_range(1, 3, vec![test_anchor(5)])
+                .unwrap();
+            assert_coverage_matches_records(&store);
+            let reopened = ConsensusStore::open(temp.path(), None).unwrap();
+            assert_coverage_matches_records(&reopened);
+            assert_eq!(reopened.anchor_coverage(), store.anchor_coverage());
+        }
+        let snapshot = store.inner.lock().unwrap();
+        assert!(
+            serde_json::to_value(&*snapshot)
+                .unwrap()
+                .get("anchor_gap_count")
+                .is_none()
+        );
+    }
+
     #[test]
     fn readers_keep_previous_snapshot_until_save_completes() {
         let temp = TempDir::new().unwrap();
@@ -1492,6 +1610,7 @@ mod tests {
             writer_store.update_with_writer(
                 |candidate| {
                     candidate.ordered_anchors.push(test_anchor(10));
+                    candidate.ordered_anchors.push(test_anchor(12));
                     recompute_snapshot_anchors(candidate);
                 },
                 |path, candidate| {
@@ -1504,14 +1623,27 @@ mod tests {
         entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
         let (read_tx, read_rx) = mpsc::channel();
         let reader_store = Arc::clone(&store);
-        let reader =
-            std::thread::spawn(move || read_tx.send(reader_store.ordered_anchors()).unwrap());
+        let reader = std::thread::spawn(move || {
+            read_tx
+                .send((
+                    reader_store.ordered_anchors(),
+                    reader_store.anchor_coverage(),
+                ))
+                .unwrap()
+        });
         let observed = read_rx.recv_timeout(Duration::from_secs(2));
         resume_tx.send(()).unwrap();
         writer.join().unwrap().unwrap();
         reader.join().unwrap();
-        assert_eq!(observed.unwrap(), Vec::<AnchorRecord>::new());
-        assert_eq!(store.ordered_anchors(), vec![test_anchor(10)]);
+        let (records, coverage) = observed.unwrap();
+        assert!(records.is_empty());
+        assert_eq!(coverage.count, 0);
+        assert_eq!(coverage.gap_count, 0);
+        assert_eq!(
+            store.ordered_anchors(),
+            vec![test_anchor(10), test_anchor(12)]
+        );
+        assert_eq!(store.anchor_coverage().gap_count, 1);
         assert_eq!(
             ConsensusStore::open(temp.path(), None)
                 .unwrap()
@@ -1561,6 +1693,7 @@ mod tests {
         let result = store.update_with_writer(
             |candidate| {
                 candidate.ordered_anchors.push(test_anchor(10));
+                candidate.ordered_anchors.push(test_anchor(12));
                 recompute_snapshot_anchors(candidate);
             },
             |path, candidate| {
@@ -1572,6 +1705,8 @@ mod tests {
         );
         assert!(result.is_err());
         assert!(store.ordered_anchors().is_empty());
+        assert_eq!(store.anchor_coverage().count, 0);
+        assert_eq!(store.anchor_coverage().gap_count, 0);
         let disk_after_error = fs::read(store.state_path()).unwrap();
         assert!(matches!(
             store.append_anchors(vec![test_anchor(11)]),
@@ -1579,12 +1714,17 @@ mod tests {
         ));
         assert_eq!(fs::read(store.state_path()).unwrap(), disk_after_error);
         let reopened = ConsensusStore::open(temp.path(), None).unwrap();
-        assert_eq!(reopened.ordered_anchors(), vec![test_anchor(10)]);
+        assert_eq!(
+            reopened.ordered_anchors(),
+            vec![test_anchor(10), test_anchor(12)]
+        );
+        assert_eq!(reopened.anchor_coverage().gap_count, 1);
         reopened.append_anchors(vec![test_anchor(11)]).unwrap();
         assert_eq!(
             reopened.ordered_anchors(),
-            vec![test_anchor(10), test_anchor(11)]
+            vec![test_anchor(10), test_anchor(11), test_anchor(12)]
         );
+        assert_coverage_matches_records(&reopened);
     }
 
     #[test]
@@ -1884,6 +2024,7 @@ mod tests {
             },
             anchors: ChainAnchors::default(),
             ordered_anchors: Vec::new(),
+            anchor_gap_count: 0,
             light_client: ConsensusLightClientStatus::default(),
             light_client_payloads: PersistedLightClientPayloads::default(),
             verified_light_client_store: None,
@@ -1913,6 +2054,7 @@ mod tests {
             },
             anchors: ChainAnchors::default(),
             ordered_anchors: Vec::new(),
+            anchor_gap_count: 0,
             light_client: ConsensusLightClientStatus::default(),
             light_client_payloads: PersistedLightClientPayloads::default(),
             verified_light_client_store: Some(VerifiedLightClientStore {
@@ -1959,6 +2101,7 @@ mod tests {
             },
             anchors: ChainAnchors::default(),
             ordered_anchors: Vec::new(),
+            anchor_gap_count: 0,
             light_client: ConsensusLightClientStatus::default(),
             light_client_payloads: PersistedLightClientPayloads::default(),
             verified_light_client_store: None,
@@ -2482,6 +2625,104 @@ mod tests {
         assert!(finality_cache_priority(&later_weaker) > finality_cache_priority(&stronger));
         stronger.finalized_header.beacon_slot += 1;
         assert!(finality_cache_priority(&stronger) > finality_cache_priority(&later_weaker));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn applied_update_noop_preserves_file_and_detects_each_changed_component() {
+        use std::os::unix::fs::MetadataExt;
+
+        let temp = TempDir::new().unwrap();
+        let slot = recent_cache_fixture_slot();
+        let mut fixture = crate::light_client::test_cached_light_client_fixture(slot);
+        let (store, initial) = initialized_fixture_store(&temp, &fixture);
+        let (period, mut payload) = fixture.payloads.updates_by_period.pop_first().unwrap();
+        payload.context_bytes = None;
+        let applied = apply_light_client_update_payload(&payload.bytes, &initial).unwrap();
+        store
+            .record_verified_applied_update(applied.clone(), vec![(period, payload.clone())])
+            .unwrap();
+        let held = fs::File::open(store.state_path()).unwrap();
+        let identity = (
+            held.metadata().unwrap().dev(),
+            held.metadata().unwrap().ino(),
+        );
+        let mut contextual = payload.clone();
+        crate::light_client::normalize_cached_context(
+            &mut contextual,
+            applied.optimistic_status.attested_header.beacon_slot,
+        )
+        .unwrap();
+        assert_ne!(payload.context_bytes, contextual.context_bytes);
+        // An earlier differing duplicate must not force a write: final key wins.
+        store
+            .record_verified_applied_update(
+                applied.clone(),
+                vec![(period, contextual.clone()), (period, payload.clone())],
+            )
+            .unwrap();
+        let metadata = fs::metadata(store.state_path()).unwrap();
+        assert_eq!((metadata.dev(), metadata.ino()), identity);
+
+        // A context-only cache change remains meaningful even when store/status match.
+        store
+            .record_verified_applied_update(applied.clone(), vec![(period, contextual.clone())])
+            .unwrap();
+        let metadata = fs::metadata(store.state_path()).unwrap();
+        assert_ne!((metadata.dev(), metadata.ino()), identity);
+        let reopened = ConsensusStore::open(temp.path(), None).unwrap();
+        assert_eq!(
+            reopened.light_client_update_payloads(period, 1),
+            vec![contextual.clone()]
+        );
+        drop(reopened);
+
+        // Independently reset only diagnostic summaries, keeping real verified bytes/store.
+        store
+            .update(|snapshot| {
+                snapshot.light_client.optimistic_update = None;
+                snapshot.light_client.finality_update = None;
+            })
+            .unwrap();
+        store
+            .record_verified_applied_update(applied.clone(), vec![(period, contextual.clone())])
+            .unwrap();
+        let reopened = ConsensusStore::open(temp.path(), None).unwrap();
+        assert_eq!(
+            reopened.light_client_status().optimistic_update,
+            Some(applied.optimistic_status.clone())
+        );
+        assert_eq!(
+            reopened.light_client_status().finality_update,
+            applied.finality_status.clone()
+        );
+        drop(reopened);
+
+        // Restore the genuine bootstrap store alone; equal summaries/payloads must
+        // not suppress publishing the full subsequently verified store again.
+        store
+            .update(|snapshot| {
+                snapshot.verified_light_client_store = Some(initial.clone());
+                apply_verified_store(snapshot);
+            })
+            .unwrap();
+        assert_ne!(store.light_client_store(), Some(applied.store.clone()));
+        store
+            .record_verified_applied_update(applied.clone(), vec![(period, contextual.clone())])
+            .unwrap();
+        assert_eq!(
+            ConsensusStore::open(temp.path(), None)
+                .unwrap()
+                .light_client_store(),
+            Some(applied.store.clone())
+        );
+        store
+            .storage_failure
+            .send_replace(Some("prior save failure".into()));
+        assert!(matches!(
+            store.record_verified_applied_update(applied, vec![(period, contextual)]),
+            Err(ConsensusStateError::StorageFailed(_))
+        ));
     }
 
     #[test]

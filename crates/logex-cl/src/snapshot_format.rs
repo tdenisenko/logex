@@ -145,6 +145,7 @@ mod tests {
             },
             anchors: ChainAnchors::default(),
             ordered_anchors: Vec::new(),
+            anchor_gap_count: 0,
             light_client: ConsensusLightClientStatus::default(),
             light_client_payloads: Default::default(),
             verified_light_client_store: None,

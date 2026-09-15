@@ -1110,6 +1110,43 @@ fn canonical_chain_blocks_to_root(
     checkpoint_slot: u64,
     target_root: B256,
 ) -> Option<Vec<VerifiedBeaconBlock>> {
+    let mut reverse_chain = Vec::new();
+    visit_canonical_chain_to_root(
+        verified_beacon_blocks,
+        checkpoint_root,
+        checkpoint_slot,
+        target_root,
+        |block| reverse_chain.push(block),
+    )?;
+    reverse_chain.reverse();
+    Some(reverse_chain)
+}
+
+fn canonical_chain_is_complete(
+    verified_beacon_blocks: &HashMap<B256, VerifiedBeaconBlock>,
+    checkpoint_root: B256,
+    checkpoint_slot: u64,
+    target_root: B256,
+) -> bool {
+    visit_canonical_chain_to_root(
+        verified_beacon_blocks,
+        checkpoint_root,
+        checkpoint_slot,
+        target_root,
+        |_| {},
+    )
+    .is_some()
+}
+
+// Visits head to checkpoint without allocating traversal state. The collector
+// reverses this order; completeness checks use a no-op visitor.
+fn visit_canonical_chain_to_root(
+    verified_beacon_blocks: &HashMap<B256, VerifiedBeaconBlock>,
+    checkpoint_root: B256,
+    checkpoint_slot: u64,
+    target_root: B256,
+    mut visit: impl FnMut(VerifiedBeaconBlock),
+) -> Option<()> {
     let checkpoint_block = *verified_beacon_blocks.get(&checkpoint_root)?;
     if checkpoint_block.slot != checkpoint_slot {
         return None;
@@ -1117,7 +1154,6 @@ fn canonical_chain_blocks_to_root(
 
     let mut current_root = target_root;
     let mut child_slot = None;
-    let mut reverse_chain = Vec::new();
     loop {
         let block = if current_root == checkpoint_root {
             checkpoint_block
@@ -1129,15 +1165,14 @@ fn canonical_chain_blocks_to_root(
         if block.beacon_root != current_root || child_slot.is_some_and(|slot| block.slot >= slot) {
             return None;
         }
-        reverse_chain.push(block);
+        visit(block);
         if current_root == checkpoint_root {
             break;
         }
         child_slot = Some(block.slot);
         current_root = block.parent_root;
     }
-    reverse_chain.reverse();
-    Some(reverse_chain)
+    Some(())
 }
 
 fn cached_target_lineage_roots(
@@ -4944,9 +4979,14 @@ impl ConsensusNetwork {
     fn refresh_history_sync_target(&mut self) {
         let latest = self.latest_history_sync_target();
         let current = self.active_history_target;
-        let current_complete = current
-            .and_then(|target| self.canonical_chain_blocks(target))
-            .is_some();
+        let current_complete = current.is_some_and(|target| {
+            canonical_chain_is_complete(
+                &self.verified_beacon_blocks,
+                target.checkpoint_root,
+                target.checkpoint_slot,
+                target.optimistic_root,
+            )
+        });
         let next = select_history_sync_target(current, latest, current_complete);
         if next != current {
             tracing::debug!(
@@ -5161,17 +5201,6 @@ impl ConsensusNetwork {
             return;
         }
         self.refresh_history_sync_target();
-    }
-
-    fn canonical_chain_blocks(
-        &self,
-        target: HistorySyncTarget,
-    ) -> Option<Vec<VerifiedBeaconBlock>> {
-        self.canonical_chain_blocks_to_root(
-            target.checkpoint_root,
-            target.checkpoint_slot,
-            target.optimistic_root,
-        )
     }
 
     fn materializable_history_chain(
@@ -11747,6 +11776,16 @@ mod tests {
                     root = block.parent_root;
                 }
                 assert_eq!(
+                    canonical_chain_is_complete(
+                        &cached,
+                        checkpoint.beacon_root,
+                        0,
+                        blocks[3].beacon_root
+                    ),
+                    expected.is_some(),
+                    "completeness: slots={slots:?}, parents={parents}"
+                );
+                assert_eq!(
                     canonical_chain_blocks_to_root(
                         &cached,
                         checkpoint.beacon_root,
@@ -11758,6 +11797,73 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn canonical_completeness_preserves_checkpoint_and_metadata_checks() {
+        let checkpoint = ancestry_test_block(0, 1, 0);
+        let head = ancestry_test_block(u64::MAX, 2, 1);
+        for defect in 0..6 {
+            let mut cached = HashMap::from([
+                (checkpoint.beacon_root, checkpoint),
+                (head.beacon_root, head),
+            ]);
+            let mut checkpoint_slot = 0;
+            match defect {
+                0 => {}
+                1 => {
+                    cached.remove(&checkpoint.beacon_root);
+                }
+                2 => {
+                    cached.remove(&head.beacon_root);
+                }
+                3 => {
+                    checkpoint_slot = 1;
+                }
+                4 => {
+                    cached.get_mut(&checkpoint.beacon_root).unwrap().beacon_root = B256::ZERO;
+                }
+                5 => {
+                    cached.get_mut(&head.beacon_root).unwrap().beacon_root = B256::ZERO;
+                }
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                canonical_chain_is_complete(
+                    &cached,
+                    checkpoint.beacon_root,
+                    checkpoint_slot,
+                    head.beacon_root
+                ),
+                defect == 0
+            );
+            assert_eq!(
+                canonical_chain_blocks_to_root(
+                    &cached,
+                    checkpoint.beacon_root,
+                    checkpoint_slot,
+                    head.beacon_root
+                )
+                .is_some(),
+                defect == 0
+            );
+        }
+        let cached = HashMap::from([(checkpoint.beacon_root, checkpoint)]);
+        assert!(canonical_chain_is_complete(
+            &cached,
+            checkpoint.beacon_root,
+            0,
+            checkpoint.beacon_root
+        ));
+        assert_eq!(
+            canonical_chain_blocks_to_root(
+                &cached,
+                checkpoint.beacon_root,
+                0,
+                checkpoint.beacon_root
+            ),
+            Some(vec![checkpoint])
+        );
     }
 
     #[test]

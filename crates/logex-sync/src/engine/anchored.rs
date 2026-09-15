@@ -3412,7 +3412,7 @@ impl SyncEngine {
         contiguous_anchor_batch(
             current,
             !storage_has_head,
-            &consensus.ordered_anchors(),
+            &consensus.anchor_records_after(current, limit as usize),
             limit as usize,
         )
     }
@@ -6910,9 +6910,9 @@ fn locate_consensus_reorg(
 
     let tip_number = tip.number();
     let has_anchor_at_or_before_tip = consensus
-        .ordered_anchors()
-        .iter()
-        .any(|record| record.anchor.block_number <= tip_number);
+        .anchor_coverage()
+        .floor
+        .is_some_and(|anchor| anchor.block_number <= tip_number);
     if !has_anchor_at_or_before_tip && consensus.next_anchor_after(tip_number).is_some() {
         tracing::debug!(
             tip_block = tip_number,
@@ -7217,6 +7217,56 @@ mod tests {
         assert!(!historical_header_has_empty_body_and_receipts(
             &with_withdrawals
         ));
+    }
+
+    #[test]
+    fn bounded_anchor_suffix_preserves_full_history_batch_selection() {
+        let temp = TempDir::new().unwrap();
+        let store = ConsensusStore::open(
+            temp.path(),
+            Some("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        )
+        .unwrap();
+        for numbers in [
+            vec![],
+            vec![0, 1, 2, 4, 5, 8],
+            vec![100, 101, 102, 104],
+            vec![u64::MAX - 1, u64::MAX],
+        ] {
+            let records = numbers
+                .into_iter()
+                .map(|number| {
+                    // Exercise block-number bounds without deriving a timestamp
+                    // beyond u64 in the ordinary small-header fixture helper.
+                    let mut block = header(0, B256::ZERO, 1);
+                    block.number = number;
+                    anchor_for(&block, 1)
+                })
+                .collect::<Vec<_>>();
+            store.replace_anchors(records.clone()).unwrap();
+            for current in [0, 1, 3, 99, 100, 102, 103, u64::MAX - 1, u64::MAX] {
+                for limit in [0, 1, 2, 16] {
+                    let suffix = store.anchor_records_after(current, limit);
+                    assert!(suffix.len() <= limit);
+                    for bootstrap in [false, true] {
+                        assert_eq!(
+                            contiguous_anchor_batch(current, bootstrap, &suffix, limit),
+                            contiguous_anchor_batch(current, bootstrap, &records, limit),
+                            "current={current} limit={limit} bootstrap={bootstrap}"
+                        );
+                    }
+                    assert_eq!(
+                        store
+                            .anchor_coverage()
+                            .floor
+                            .is_some_and(|anchor| anchor.block_number <= current),
+                        records
+                            .iter()
+                            .any(|record| record.anchor.block_number <= current)
+                    );
+                }
+            }
+        }
     }
 
     #[test]

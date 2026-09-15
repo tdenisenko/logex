@@ -104,6 +104,7 @@ remain necessary.
 
 Source `6d7371a2` passes all seven local gates: vendored dependency integrity,
 formatting, workspace check, strict Clippy, 1,393 workspace tests (23 ignored),
-documentation tests and the release node build. CI and merge remain pending.
+documentation tests and the release node build. All six Linux/macOS CI jobs passed in run `34982691191` on head `5508b7c0`.
+PR #170 merged as `9a57c22c` after exact head/base verification.
 Full workspace and CI acceptance are recorded in the
 [validation record](baselines/2026-09-15-consensus-snapshot-integrity.json).

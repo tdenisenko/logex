@@ -1,5 +1,5 @@
 {
-  "status": "All seven local gates and independent final reviews pass; PR/CI/merge pending",
+  "status": "Merged after all seven local gates and all six Linux/macOS CI jobs passed",
   "branch": "audit/consensus-snapshot-integrity",
   "base": "2bf55c4a99402dd73f2d6f66d174aeae3146e2ac",
   "source_commit": "6d7371a2cdeaf94808d4b9d62679dc2200e0d4f1",
@@ -311,5 +311,79 @@
     "passed": 1393,
     "ignored": 23,
     "groups": 25
-  }
+  },
+  "pull_request": {
+    "baseRefOid": "2bf55c4a99402dd73f2d6f66d174aeae3146e2ac",
+    "headRefOid": "5508b7c053f6573df559e27ea7063cb800e679ee",
+    "mergeCommit": {
+      "oid": "9a57c22c80057b5c54cd1be248d2c1773976de4b"
+    },
+    "mergedAt": "2026-09-15T14:47:17Z",
+    "number": 170,
+    "state": "MERGED",
+    "statusCheckRollup": [
+      {
+        "__typename": "CheckRun",
+        "completedAt": "2026-09-15T14:36:54Z",
+        "conclusion": "SUCCESS",
+        "detailsUrl": "https://github.com/tdenisenko/logex/actions/runs/34982691191/job/104426764696",
+        "name": "Check",
+        "startedAt": "2026-09-15T14:35:42Z",
+        "status": "COMPLETED",
+        "workflowName": "CI"
+      },
+      {
+        "__typename": "CheckRun",
+        "completedAt": "2026-09-15T14:35:58Z",
+        "conclusion": "SUCCESS",
+        "detailsUrl": "https://github.com/tdenisenko/logex/actions/runs/34982691191/job/104426764896",
+        "name": "Format",
+        "startedAt": "2026-09-15T14:35:41Z",
+        "status": "COMPLETED",
+        "workflowName": "CI"
+      },
+      {
+        "__typename": "CheckRun",
+        "completedAt": "2026-09-15T14:36:52Z",
+        "conclusion": "SUCCESS",
+        "detailsUrl": "https://github.com/tdenisenko/logex/actions/runs/34982691191/job/104426764532",
+        "name": "Clippy",
+        "startedAt": "2026-09-15T14:35:42Z",
+        "status": "COMPLETED",
+        "workflowName": "CI"
+      },
+      {
+        "__typename": "CheckRun",
+        "completedAt": "2026-09-15T14:40:47Z",
+        "conclusion": "SUCCESS",
+        "detailsUrl": "https://github.com/tdenisenko/logex/actions/runs/34982691191/job/104426764900",
+        "name": "Test",
+        "startedAt": "2026-09-15T14:35:42Z",
+        "status": "COMPLETED",
+        "workflowName": "CI"
+      },
+      {
+        "__typename": "CheckRun",
+        "completedAt": "2026-09-15T14:45:33Z",
+        "conclusion": "SUCCESS",
+        "detailsUrl": "https://github.com/tdenisenko/logex/actions/runs/34982691191/job/104426764914",
+        "name": "macOS Test",
+        "startedAt": "2026-09-15T14:35:49Z",
+        "status": "COMPLETED",
+        "workflowName": "CI"
+      },
+      {
+        "__typename": "CheckRun",
+        "completedAt": "2026-09-15T14:39:57Z",
+        "conclusion": "SUCCESS",
+        "detailsUrl": "https://github.com/tdenisenko/logex/actions/runs/34982691191/job/104426764796",
+        "name": "Release Build",
+        "startedAt": "2026-09-15T14:35:42Z",
+        "status": "COMPLETED",
+        "workflowName": "CI"
+      }
+    ],
+    "url": "https://github.com/tdenisenko/logex/pull/170"
+  },
+  "ci_run_id": 34982691191
 }
