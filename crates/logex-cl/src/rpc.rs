@@ -45,6 +45,54 @@ const MAX_RPC_RESPONSE_SSZ_BYTES: usize = 10 * 1024 * 1024 + 1024;
 const MAX_RPC_RESPONSE_CHUNKS: usize = 128;
 const MAX_RPC_STREAM_WIRE_BYTES: usize = 256 * 1024 * 1024;
 
+fn request_payload_limit(protocol: &Eth2RpcProtocol) -> usize {
+    match protocol {
+        Eth2RpcProtocol::StatusV1 => 84,
+        Eth2RpcProtocol::StatusV2 => 92,
+        Eth2RpcProtocol::GoodbyeV1 | Eth2RpcProtocol::PingV1 => 8,
+        Eth2RpcProtocol::MetadataV1
+        | Eth2RpcProtocol::MetadataV2
+        | Eth2RpcProtocol::MetadataV3
+        | Eth2RpcProtocol::LightClientFinalityUpdateV1
+        | Eth2RpcProtocol::LightClientOptimisticUpdateV1 => 0,
+        Eth2RpcProtocol::LightClientBootstrapV1 => 32,
+        Eth2RpcProtocol::LightClientUpdatesByRangeV1 => 16,
+        Eth2RpcProtocol::BeaconBlocksByRangeV1 | Eth2RpcProtocol::BeaconBlocksByRangeV2 => 24,
+        Eth2RpcProtocol::BeaconBlocksByRootV1 | Eth2RpcProtocol::BeaconBlocksByRootV2 => {
+            MAX_RPC_REQUEST_SSZ_BYTES
+        }
+    }
+}
+
+fn response_payload_limit(protocol: &Eth2RpcProtocol, result_code: u8) -> usize {
+    if result_code != SUCCESS_CODE {
+        return ERROR_MESSAGE_LIMIT;
+    }
+    // Largest supported SSZ layouts: Deneb execution header (616 bytes with
+    // 32-byte extra_data), Electra committee/finality branches (6/7 roots).
+    const HEADER: usize = 112 + 4 + 128 + 616;
+    const COMMITTEE: usize = 512 * 48 + 48;
+    const AGGREGATE: usize = 64 + 96;
+    match protocol {
+        Eth2RpcProtocol::StatusV1 => 84,
+        Eth2RpcProtocol::StatusV2 => 92,
+        Eth2RpcProtocol::GoodbyeV1 | Eth2RpcProtocol::PingV1 => 8,
+        Eth2RpcProtocol::MetadataV1 => 16,
+        Eth2RpcProtocol::MetadataV2 => 17,
+        Eth2RpcProtocol::MetadataV3 => 25,
+        Eth2RpcProtocol::LightClientBootstrapV1 => 4 + COMMITTEE + 6 * 32 + HEADER,
+        Eth2RpcProtocol::LightClientFinalityUpdateV1 => 8 + 7 * 32 + AGGREGATE + 8 + 2 * HEADER,
+        Eth2RpcProtocol::LightClientOptimisticUpdateV1 => 4 + AGGREGATE + 8 + HEADER,
+        Eth2RpcProtocol::LightClientUpdatesByRangeV1 => {
+            8 + COMMITTEE + 6 * 32 + 7 * 32 + AGGREGATE + 8 + 2 * HEADER
+        }
+        Eth2RpcProtocol::BeaconBlocksByRangeV1
+        | Eth2RpcProtocol::BeaconBlocksByRangeV2
+        | Eth2RpcProtocol::BeaconBlocksByRootV1
+        | Eth2RpcProtocol::BeaconBlocksByRootV2 => MAX_RPC_RESPONSE_SSZ_BYTES,
+    }
+}
+
 pub type Eth2RpcBehaviour = request_response::Behaviour<Eth2RpcCodec>;
 pub type Eth2RpcEvent = request_response::Event<Eth2RpcRequest, Eth2RpcResponse>;
 pub type Eth2OutboundRequestId = request_response::OutboundRequestId;
@@ -360,7 +408,7 @@ impl Codec for Eth2RpcCodec {
     where
         T: AsyncRead + Unpin + Send,
     {
-        let payload = read_request_payload(io).await?;
+        let payload = read_request_payload(protocol, io).await?;
         decode_request(protocol, &payload)
     }
 
@@ -590,10 +638,7 @@ fn decode_response(protocol: &Eth2RpcProtocol, bytes: &[u8]) -> io::Result<Eth2R
 
     let result_code = bytes[0];
     if result_code != SUCCESS_CODE {
-        let payload = decode_ssz_snappy_payload(&bytes[1..])?;
-        if payload.len() > ERROR_MESSAGE_LIMIT {
-            return Err(invalid_data("error payload exceeds ErrorMessage limit"));
-        }
+        let payload = decode_ssz_snappy_payload_with_limit(&bytes[1..], ERROR_MESSAGE_LIMIT)?;
         return Ok(Eth2RpcResponse::Error(Eth2RpcErrorResponse {
             code: result_code,
             message: payload,
@@ -615,7 +660,10 @@ fn decode_response(protocol: &Eth2RpcProtocol, bytes: &[u8]) -> io::Result<Eth2R
     } else {
         None
     };
-    let payload = decode_ssz_snappy_payload(&bytes[(1 + context_len)..])?;
+    let payload = decode_ssz_snappy_payload_with_limit(
+        &bytes[(1 + context_len)..],
+        response_payload_limit(protocol, SUCCESS_CODE),
+    )?;
 
     match protocol {
         Eth2RpcProtocol::StatusV1 | Eth2RpcProtocol::StatusV2 => {
@@ -654,16 +702,17 @@ fn decode_response(protocol: &Eth2RpcProtocol, bytes: &[u8]) -> io::Result<Eth2R
     }
 }
 
-async fn read_request_payload<T>(io: &mut T) -> io::Result<Vec<u8>>
+async fn read_request_payload<T>(protocol: &Eth2RpcProtocol, io: &mut T) -> io::Result<Vec<u8>>
 where
     T: AsyncRead + Unpin + Send,
 {
-    let max_wire_bytes = max_snappy_wire_bytes(MAX_RPC_REQUEST_SSZ_BYTES);
+    let payload_limit = request_payload_limit(protocol);
+    let max_wire_bytes = max_snappy_wire_bytes(payload_limit);
     let bytes = read_bounded_to_end(io, max_wire_bytes, "RPC request").await?;
     if bytes.is_empty() {
         return Ok(Vec::new());
     }
-    decode_ssz_snappy_payload_with_limit(&bytes, MAX_RPC_REQUEST_SSZ_BYTES)
+    decode_ssz_snappy_payload_with_limit(&bytes, payload_limit)
 }
 
 async fn read_bounded_to_end<T>(
@@ -789,10 +838,11 @@ where
 {
     let mut bytes = Vec::new();
     let mut chunk = [0u8; 4096];
+    let mut scanner = SnappyPayloadScanner::default();
     let max_wire_bytes = max_snappy_wire_bytes(MAX_RPC_RESPONSE_SSZ_BYTES)
         .saturating_add(1 + success_response_context_len(protocol));
     loop {
-        if let Some(consumed) = single_response_len(protocol, &bytes)? {
+        if let Some(consumed) = scan_single_response(protocol, &bytes, &mut scanner)? {
             return decode_response(protocol, &bytes[..consumed]);
         }
 
@@ -809,6 +859,7 @@ where
     }
 }
 
+#[cfg(test)]
 fn decode_ssz_snappy_payload(bytes: &[u8]) -> io::Result<Vec<u8>> {
     decode_ssz_snappy_payload_with_limit(bytes, MAX_RPC_RESPONSE_SSZ_BYTES)
 }
@@ -829,92 +880,140 @@ fn decode_ssz_snappy_payload_with_limit(
     Ok(raw)
 }
 
-fn decode_ssz_snappy_payload_prefix(bytes: &[u8]) -> io::Result<(Vec<u8>, usize)> {
-    decode_ssz_snappy_payload_prefix_with_limit(bytes, MAX_RPC_RESPONSE_SSZ_BYTES)
+// Inspect framing without decompressing on each partial network read. The raw
+// block length header is read through snap; snap still owns decompression/CRC.
+#[derive(Default)]
+struct SnappyPayloadScanner {
+    header: Option<(usize, usize)>,
+    offset: usize,
+    decoded_len: usize,
+    #[cfg(test)]
+    frames_scanned: usize,
+}
+
+impl SnappyPayloadScanner {
+    fn advance(
+        &mut self,
+        bytes: &[u8],
+        max_uncompressed_bytes: usize,
+    ) -> io::Result<Option<usize>> {
+        let (declared_len, prefix_len) = match self.header {
+            Some(header) => header,
+            None => {
+                let Some((declared_len, prefix_len)) = decode_unsigned_varint_prefix(bytes)? else {
+                    return Ok(None);
+                };
+                let declared_len = usize::try_from(declared_len)
+                    .map_err(|_| invalid_data("payload length does not fit in memory"))?;
+                if declared_len > max_uncompressed_bytes {
+                    return Err(invalid_data(format!(
+                        "declared payload length {declared_len} exceeds the {max_uncompressed_bytes}-byte limit"
+                    )));
+                }
+                self.header = Some((declared_len, prefix_len));
+                self.offset = prefix_len;
+                (declared_len, prefix_len)
+            }
+        };
+        // Empty SSZ payloads use a zero prefix and no Snappy frames, matching
+        // FrameEncoder's output. Do not consume the next RPC response chunk.
+        while self.decoded_len < declared_len {
+            let Some(header) = bytes.get(self.offset..self.offset + 4) else {
+                return Ok(None);
+            };
+            let kind = header[0];
+            let length = usize::from(header[1])
+                | (usize::from(header[2]) << 8)
+                | (usize::from(header[3]) << 16);
+            // Match snap 1.1.1 FrameDecoder's per-frame input/output bounds.
+            if length > snap::raw::max_compress_len(65_536) {
+                return Err(invalid_data("Snappy frame exceeds the decoder frame limit"));
+            }
+            let end = self.offset + 4 + length;
+            if end - prefix_len > snap::raw::max_compress_len(declared_len) {
+                return Err(invalid_data(
+                    "Snappy payload exceeds its compressed wire limit",
+                ));
+            }
+            if self.offset == prefix_len && kind != 0xff {
+                return Err(invalid_data(
+                    "Snappy payload is missing its stream identifier",
+                ));
+            }
+            let Some(body) = bytes.get(self.offset + 4..end) else {
+                return Ok(None);
+            };
+            let output_len = match kind {
+                0x00 => {
+                    let compressed = body.get(4..).ok_or_else(|| {
+                        invalid_data("Snappy compressed frame is missing its checksum")
+                    })?;
+                    snap::raw::decompress_len(compressed)
+                        .map_err(|error| invalid_data(error.to_string()))?
+                }
+                0x01 => length.checked_sub(4).ok_or_else(|| {
+                    invalid_data("Snappy uncompressed frame is missing its checksum")
+                })?,
+                0xff => {
+                    if body != b"sNaPpY" {
+                        return Err(invalid_data("invalid Snappy stream identifier"));
+                    }
+                    0
+                }
+                0x80..=0xfe => 0, // Reserved skippable chunks and padding.
+                _ => return Err(invalid_data("unsupported unskippable Snappy frame type")),
+            };
+            if output_len > 65_536 || output_len > declared_len - self.decoded_len {
+                return Err(invalid_data(
+                    "Snappy frame output exceeds declared payload length",
+                ));
+            }
+            self.decoded_len += output_len;
+            self.offset = end;
+            #[cfg(test)]
+            {
+                self.frames_scanned += 1;
+            }
+        }
+        Ok(Some(self.offset))
+    }
 }
 
 fn decode_ssz_snappy_payload_prefix_with_limit(
     bytes: &[u8],
     max_uncompressed_bytes: usize,
 ) -> io::Result<(Vec<u8>, usize)> {
-    let (declared_len, varint_len) = decode_unsigned_varint_prefix(bytes)?.ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::UnexpectedEof,
-            "missing payload length prefix",
-        )
-    })?;
-    let declared_len = usize::try_from(declared_len)
-        .map_err(|_| invalid_data("payload length does not fit in memory"))?;
-    if declared_len > max_uncompressed_bytes {
-        return Err(invalid_data(format!(
-            "declared payload length {declared_len} exceeds the {max_uncompressed_bytes}-byte limit"
-        )));
-    }
-    let compressed = &bytes[varint_len..];
-    let mut cursor = io::Cursor::new(compressed);
-    let mut decoder = FrameDecoder::new(&mut cursor);
-    let mut raw = Vec::with_capacity(declared_len);
-    let mut chunk = [0u8; 4096];
-    while raw.len() < declared_len {
-        let read = io::Read::read(&mut decoder, &mut chunk)?;
-        if read == 0 {
-            return Err(io::Error::new(
+    let mut scanner = SnappyPayloadScanner::default();
+    let consumed = scanner
+        .advance(bytes, max_uncompressed_bytes)?
+        .ok_or_else(|| {
+            io::Error::new(
                 io::ErrorKind::UnexpectedEof,
-                format!(
-                    "snappy payload ended after {} bytes, expected {}",
-                    raw.len(),
-                    declared_len
-                ),
-            ));
-        }
-        let remaining = declared_len - raw.len();
-        raw.extend_from_slice(&chunk[..read.min(remaining)]);
-    }
-    if raw.len() != declared_len {
-        return Err(invalid_data(format!(
-            "decoded payload length {} did not match declared {}",
-            raw.len(),
-            declared_len
-        )));
-    }
-    Ok((raw, varint_len + cursor.position() as usize))
-}
-
-fn try_decode_ssz_snappy_payload_prefix(bytes: &[u8]) -> io::Result<Option<(Vec<u8>, usize)>> {
-    let Some((declared_len, varint_len)) = decode_unsigned_varint_prefix(bytes)? else {
-        return Ok(None);
-    };
-    let declared_len = usize::try_from(declared_len)
-        .map_err(|_| invalid_data("payload length does not fit in memory"))?;
-    if declared_len > MAX_RPC_RESPONSE_SSZ_BYTES {
-        return Err(invalid_data(format!(
-            "declared payload length {declared_len} exceeds the {MAX_RPC_RESPONSE_SSZ_BYTES}-byte limit"
-        )));
-    }
-    let compressed = &bytes[varint_len..];
-    let mut cursor = io::Cursor::new(compressed);
-    let mut decoder = FrameDecoder::new(&mut cursor);
+                "incomplete SSZ-snappy payload",
+            )
+        })?;
+    let (declared_len, prefix_len) = scanner.header.expect("complete scan has a length header");
+    let mut decoder = FrameDecoder::new(&bytes[prefix_len..consumed]);
     let mut raw = Vec::with_capacity(declared_len);
-    let mut chunk = [0u8; 4096];
-    while raw.len() < declared_len {
-        let read = match io::Read::read(&mut decoder, &mut chunk) {
-            Ok(read) => read,
-            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
-            Err(error) => return Err(error),
-        };
-        if read == 0 {
-            return Ok(None);
-        }
-        let remaining = declared_len - raw.len();
-        raw.extend_from_slice(&chunk[..read.min(remaining)]);
+    io::Read::read_to_end(
+        &mut io::Read::take(&mut decoder, declared_len as u64 + 1),
+        &mut raw,
+    )?;
+    if raw.len() != declared_len {
+        return Err(invalid_data(
+            "decoded Snappy length differs from its declaration",
+        ));
     }
-    Ok(Some((raw, varint_len + cursor.position() as usize)))
+    Ok((raw, consumed))
 }
 
 fn decode_unsigned_varint_prefix(bytes: &[u8]) -> io::Result<Option<(u64, usize)>> {
     let mut value = 0u64;
     let mut shift = 0u32;
     for (index, byte) in bytes.iter().copied().enumerate().take(10) {
+        if index == 9 && byte > 1 {
+            return Err(invalid_data("payload length varint exceeds uint64"));
+        }
         value |= u64::from(byte & 0x7f) << shift;
         if byte & 0x80 == 0 {
             return Ok(Some((value, index + 1)));
@@ -947,12 +1046,15 @@ fn encode_status(protocol: &Eth2RpcProtocol, status: StatusMessage) -> Vec<u8> {
 
 fn encode_metadata(protocol: &Eth2RpcProtocol, metadata: MetaData) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(match protocol {
+        Eth2RpcProtocol::MetadataV1 => 16,
         Eth2RpcProtocol::MetadataV3 => 25,
         _ => 17,
     });
     bytes.extend_from_slice(&encode_u64(metadata.seq_number));
     bytes.extend_from_slice(&metadata.attnets);
-    bytes.extend_from_slice(&metadata.syncnets);
+    if !matches!(protocol, Eth2RpcProtocol::MetadataV1) {
+        bytes.extend_from_slice(&metadata.syncnets);
+    }
     if matches!(protocol, Eth2RpcProtocol::MetadataV3) {
         bytes.extend_from_slice(&encode_u64(metadata.custody_group_count));
     }
@@ -996,6 +1098,7 @@ fn decode_status(protocol: &Eth2RpcProtocol, bytes: &[u8]) -> io::Result<StatusM
 
 fn decode_metadata(protocol: &Eth2RpcProtocol, bytes: &[u8]) -> io::Result<MetaData> {
     let expected_len = match protocol {
+        Eth2RpcProtocol::MetadataV1 => 16,
         Eth2RpcProtocol::MetadataV3 => 25,
         _ => 17,
     };
@@ -1012,7 +1115,9 @@ fn decode_metadata(protocol: &Eth2RpcProtocol, bytes: &[u8]) -> io::Result<MetaD
     let mut attnets = [0u8; 8];
     attnets.copy_from_slice(&bytes[8..16]);
     let mut syncnets = [0u8; 1];
-    syncnets.copy_from_slice(&bytes[16..17]);
+    if !matches!(protocol, Eth2RpcProtocol::MetadataV1) {
+        syncnets.copy_from_slice(&bytes[16..17]);
+    }
     let custody_group_count = match protocol {
         Eth2RpcProtocol::MetadataV3 => decode_u64(&bytes[17..25])?,
         _ => 0,
@@ -1129,10 +1234,8 @@ fn decode_stream_response(
         let result_code = bytes[offset];
         offset += 1;
         if result_code != SUCCESS_CODE {
-            let (payload, consumed) = decode_ssz_snappy_payload_prefix(&bytes[offset..])?;
-            if payload.len() > ERROR_MESSAGE_LIMIT {
-                return Err(invalid_data("error payload exceeds ErrorMessage limit"));
-            }
+            let (payload, consumed) =
+                decode_ssz_snappy_payload_prefix_with_limit(&bytes[offset..], ERROR_MESSAGE_LIMIT)?;
             if offset + consumed != bytes.len() {
                 return Err(invalid_data(
                     "error response on multi-chunk stream must terminate the stream",
@@ -1160,17 +1263,20 @@ fn decode_stream_response(
             None
         };
 
-        let (payload, consumed) = decode_ssz_snappy_payload_prefix(&bytes[offset..])?;
+        if chunks.len() == MAX_RPC_RESPONSE_CHUNKS {
+            return Err(invalid_data(format!(
+                "RPC response stream exceeds the {MAX_RPC_RESPONSE_CHUNKS}-chunk limit"
+            )));
+        }
+        let (payload, consumed) = decode_ssz_snappy_payload_prefix_with_limit(
+            &bytes[offset..],
+            response_payload_limit(protocol, SUCCESS_CODE),
+        )?;
         offset += consumed;
         chunks.push(RawRpcResponse {
             context_bytes,
             bytes: payload,
         });
-        if chunks.len() > MAX_RPC_RESPONSE_CHUNKS {
-            return Err(invalid_data(format!(
-                "RPC response stream exceeds the {MAX_RPC_RESPONSE_CHUNKS}-chunk limit"
-            )));
-        }
     }
 
     Ok(StreamedRpcResponse::Success(chunks))
@@ -1191,7 +1297,16 @@ fn is_multi_chunk_protocol(protocol: &Eth2RpcProtocol) -> bool {
     )
 }
 
+#[cfg(test)]
 fn single_response_len(protocol: &Eth2RpcProtocol, bytes: &[u8]) -> io::Result<Option<usize>> {
+    scan_single_response(protocol, bytes, &mut SnappyPayloadScanner::default())
+}
+
+fn scan_single_response(
+    protocol: &Eth2RpcProtocol,
+    bytes: &[u8],
+    scanner: &mut SnappyPayloadScanner,
+) -> io::Result<Option<usize>> {
     let Some((&result_code, rest)) = bytes.split_first() else {
         return Ok(None);
     };
@@ -1204,7 +1319,10 @@ fn single_response_len(protocol: &Eth2RpcProtocol, bytes: &[u8]) -> io::Result<O
         return Ok(None);
     }
     let payload_offset = 1 + context_len;
-    let Some((_, consumed)) = try_decode_ssz_snappy_payload_prefix(&bytes[payload_offset..])?
+    let Some(consumed) = scanner.advance(
+        &bytes[payload_offset..],
+        response_payload_limit(protocol, result_code),
+    )?
     else {
         return Ok(None);
     };
@@ -1378,6 +1496,334 @@ mod tests {
     }
 
     #[test]
+    fn framing_rejects_surplus_snappy_output() {
+        for declared in [8, 4096] {
+            let encoded = encode_ssz_snappy_payload(&vec![0x42; declared + 1]).unwrap();
+            let (_, prefix_len) = decode_unsigned_varint_prefix(&encoded).unwrap().unwrap();
+            let mut prefix = unsigned_varint::encode::u64_buffer();
+            let mut malformed = unsigned_varint::encode::u64(declared as u64, &mut prefix).to_vec();
+            malformed.extend_from_slice(&encoded[prefix_len..]);
+            assert!(
+                decode_ssz_snappy_payload(&malformed).is_err(),
+                "declared {declared}"
+            );
+            assert!(
+                SnappyPayloadScanner::default()
+                    .advance(&malformed, MAX_RPC_RESPONSE_SSZ_BYTES)
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn framing_rejects_uint64_varint_overflow() {
+        let mut bytes = [0x80; 10];
+        bytes[0] = 0x88;
+        bytes[9] = 0x02;
+        assert!(decode_unsigned_varint_prefix(&bytes).is_err());
+    }
+
+    #[test]
+    fn framing_metadata_v1_matches_literal_wire_schema() {
+        let bytes = [
+            5, 0, 0, 0, 0, 0, 0, 0, 0xbb, 0xbb, 0xbb, 0xbb, 0xbb, 0xbb, 0xbb, 0xbb,
+        ];
+        let expected = MetaData {
+            seq_number: 5,
+            attnets: [0xbb; 8],
+            syncnets: [0],
+            custody_group_count: 0,
+        };
+        assert_eq!(
+            decode_metadata(&Eth2RpcProtocol::MetadataV1, &bytes).unwrap(),
+            expected
+        );
+        assert_eq!(
+            encode_metadata(&Eth2RpcProtocol::MetadataV1, expected),
+            bytes
+        );
+    }
+
+    #[test]
+    fn framing_rejects_oversized_small_protocol_header_without_payload() {
+        for (protocol, declared) in [
+            (Eth2RpcProtocol::PingV1, 9),
+            (Eth2RpcProtocol::StatusV1, 85),
+            (Eth2RpcProtocol::StatusV2, 93),
+            (Eth2RpcProtocol::MetadataV1, 17),
+            (Eth2RpcProtocol::MetadataV2, 18),
+            (Eth2RpcProtocol::MetadataV3, 26),
+        ] {
+            assert!(single_response_len(&protocol, &[SUCCESS_CODE, declared]).is_err());
+        }
+        assert!(single_response_len(&Eth2RpcProtocol::PingV1, &[1, 0x81, 0x02]).is_err());
+    }
+
+    #[test]
+    fn framing_scanner_handles_every_prefix_without_rescanning_frames() {
+        // Flush creates several data frames without a large allocation.
+        let mut encoder = FrameEncoder::new(Vec::new());
+        for _ in 0..3 {
+            io::Write::write_all(&mut encoder, &[0x42; 32]).unwrap();
+            io::Write::flush(&mut encoder).unwrap();
+        }
+        let mut encoded = vec![96];
+        encoded.extend(encoder.into_inner().unwrap());
+        let mut scanner = SnappyPayloadScanner::default();
+        for end in 0..encoded.len() {
+            assert_eq!(scanner.advance(&encoded[..end], 96).unwrap(), None);
+        }
+        assert_eq!(scanner.advance(&encoded, 96).unwrap(), Some(encoded.len()));
+        assert_eq!(scanner.frames_scanned, 4); // Identifier plus three data frames.
+        assert_eq!(decode_ssz_snappy_payload(&encoded).unwrap(), vec![0x42; 96]);
+        for end in 0..encoded.len() {
+            assert!(decode_ssz_snappy_payload(&encoded[..end]).is_err());
+        }
+    }
+
+    #[test]
+    fn framing_preserves_padding_crc_checks_and_chunk_boundaries() {
+        let raw = (0u8..64).collect::<Vec<_>>();
+        let mut padded = encode_ssz_snappy_payload(&raw).unwrap();
+        // Insert a permitted padding frame after the stream identifier.
+        padded.splice(11..11, [0xfe, 1, 0, 0, 0]);
+        assert_eq!(decode_ssz_snappy_payload(&padded).unwrap(), raw);
+        let mut corrupt = padded.clone();
+        *corrupt.last_mut().unwrap() ^= 1;
+        assert!(decode_ssz_snappy_payload(&corrupt).is_err());
+        let mut repeated_identifier = encode_ssz_snappy_payload(&raw).unwrap();
+        repeated_identifier.splice(11..11, [0xff, 6, 0, 0, b's', b'N', b'a', b'P', b'p', b'Y']);
+        assert_eq!(
+            decode_ssz_snappy_payload(&repeated_identifier).unwrap(),
+            raw
+        );
+
+        let chunks = vec![
+            RawRpcResponse {
+                context_bytes: Some([1, 2, 3, 4]),
+                bytes: raw,
+            },
+            RawRpcResponse {
+                context_bytes: Some([4, 3, 2, 1]),
+                bytes: vec![7; 8],
+            },
+        ];
+        let protocol = Eth2RpcProtocol::LightClientUpdatesByRangeV1;
+        let encoded = encode_streamed_success_responses(&protocol, chunks.clone()).unwrap();
+        assert_eq!(
+            decode_response(&protocol, &encoded).unwrap(),
+            Eth2RpcResponse::LightClientUpdatesByRange(chunks)
+        );
+        assert_eq!(decode_ssz_snappy_payload(&[0]).unwrap(), Vec::<u8>::new());
+        assert!(decode_ssz_snappy_payload(&[]).is_err());
+    }
+
+    #[test]
+    fn framing_compressed_limit_counts_bytes_after_ssz_prefix() {
+        let raw = (0u8..64).collect::<Vec<_>>();
+        let encoded = encode_ssz_snappy_payload(&raw).unwrap();
+        let allowance = snap::raw::max_compress_len(raw.len()) - (encoded.len() - 1);
+        assert!(allowance >= 4);
+        for extra in [0, 1] {
+            let length = allowance - 4 + extra;
+            let mut padded = encoded.clone();
+            let mut padding = vec![0xfe, length as u8, 0, 0];
+            padding.resize(length + 4, 0);
+            padded.splice(11..11, padding);
+            assert_eq!(decode_ssz_snappy_payload(&padded).is_ok(), extra == 0);
+        }
+    }
+
+    #[test]
+    fn framing_largest_supported_light_client_layouts_fit_protocol_limits() {
+        fn pad_headers(payload: &mut RawRpcResponse, second_offset_field: Option<usize>) {
+            fn pad_header(header: &[u8]) -> Vec<u8> {
+                // Beacon header is 112 bytes; execution is the variable field
+                // following it. Deneb execution extra_data's offset is at 436.
+                let execution = u32::from_le_bytes(header[112..116].try_into().unwrap()) as usize;
+                let extra = u32::from_le_bytes(
+                    header[execution + 436..execution + 440].try_into().unwrap(),
+                ) as usize;
+                let mut padded = header.to_vec();
+                padded.resize(execution + extra + 32, 0x42);
+                padded
+            }
+            let first = u32::from_le_bytes(payload.bytes[..4].try_into().unwrap()) as usize;
+            let second = second_offset_field.map(|field| {
+                u32::from_le_bytes(payload.bytes[field..field + 4].try_into().unwrap()) as usize
+            });
+            let first_header =
+                pad_header(&payload.bytes[first..second.unwrap_or(payload.bytes.len())]);
+            let second_header = second.map(|start| pad_header(&payload.bytes[start..]));
+            payload.bytes.truncate(first);
+            payload.bytes.extend_from_slice(&first_header);
+            if let (Some(field), Some(header)) = (second_offset_field, second_header) {
+                let offset = payload.bytes.len() as u32;
+                payload.bytes[field..field + 4].copy_from_slice(&offset.to_le_bytes());
+                payload.bytes.extend_from_slice(&header);
+            }
+        }
+        let fixture = crate::light_client::test_cached_light_client_fixture(419_072 * 32 + 16);
+        let payloads = fixture.payloads;
+        let finality = payloads.finality_update.unwrap();
+        let finalized_offset =
+            u32::from_le_bytes(finality.bytes[4..8].try_into().unwrap()) as usize;
+        let mut range = payloads.updates_by_period.into_values().next().unwrap();
+        // Replace the short default finalized header with an unchanged full
+        // header from the finality fixture. This is a wire-layout control only.
+        let offset_field = 4 + 512 * 48 + 48 + 6 * 32;
+        let range_finalized_offset = u32::from_le_bytes(
+            range.bytes[offset_field..offset_field + 4]
+                .try_into()
+                .unwrap(),
+        ) as usize;
+        range.bytes.truncate(range_finalized_offset);
+        range
+            .bytes
+            .extend_from_slice(&finality.bytes[finalized_offset..]);
+        for (protocol, mut payload, expected_size) in [
+            (
+                Eth2RpcProtocol::LightClientBootstrapV1,
+                payloads.bootstrap.unwrap(),
+                25_680,
+            ),
+            (
+                Eth2RpcProtocol::LightClientFinalityUpdateV1,
+                finality,
+                2_120,
+            ),
+            (
+                Eth2RpcProtocol::LightClientOptimisticUpdateV1,
+                payloads.optimistic_update.unwrap(),
+                1_032,
+            ),
+            (Eth2RpcProtocol::LightClientUpdatesByRangeV1, range, 26_936),
+        ] {
+            // Fill each execution extra_data to its 32-byte SSZ limit. This
+            // changes execution commitments: only framing/layout is asserted.
+            let second = match protocol {
+                Eth2RpcProtocol::LightClientFinalityUpdateV1 => Some(4),
+                Eth2RpcProtocol::LightClientUpdatesByRangeV1 => Some(offset_field),
+                _ => None,
+            };
+            pad_headers(&mut payload, second);
+            assert_eq!(payload.bytes.len(), expected_size, "{protocol:?}");
+            assert_eq!(
+                response_payload_limit(&protocol, SUCCESS_CODE),
+                expected_size
+            );
+            payload.context_bytes = Some([1, 2, 3, 4]);
+            let encoded =
+                encode_single_success_response_with_context(payload.context_bytes, &payload.bytes)
+                    .unwrap();
+            assert!(decode_response(&protocol, &encoded).is_ok());
+            let mut prefix = unsigned_varint::encode::u64_buffer();
+            let mut oversized = vec![0, 1, 2, 3, 4];
+            oversized.extend_from_slice(unsigned_varint::encode::u64(
+                (expected_size + 1) as u64,
+                &mut prefix,
+            ));
+            if is_multi_chunk_protocol(&protocol) {
+                assert!(
+                    decode_response(&protocol, &oversized)
+                        .unwrap_err()
+                        .to_string()
+                        .contains("declared payload length")
+                );
+            } else {
+                assert!(single_response_len(&protocol, &oversized).is_err());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn framing_request_limits_apply_before_payload_decode() {
+        for protocol in [
+            Eth2RpcProtocol::PingV1,
+            Eth2RpcProtocol::StatusV2,
+            Eth2RpcProtocol::LightClientBootstrapV1,
+            Eth2RpcProtocol::LightClientUpdatesByRangeV1,
+        ] {
+            let limit = request_payload_limit(&protocol);
+            let mut prefix = unsigned_varint::encode::u64_buffer();
+            let bytes = unsigned_varint::encode::u64((limit + 1) as u64, &mut prefix);
+            let error = read_request_payload(&protocol, &mut futures::io::Cursor::new(bytes))
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("declared payload length"));
+        }
+    }
+
+    #[tokio::test]
+    async fn framing_single_response_accepts_every_byte_fragmentation() {
+        struct Bytewise<'a>(&'a [u8]);
+        impl futures::io::AsyncRead for Bytewise<'_> {
+            fn poll_read(
+                mut self: std::pin::Pin<&mut Self>,
+                _: &mut std::task::Context<'_>,
+                out: &mut [u8],
+            ) -> std::task::Poll<io::Result<usize>> {
+                if out.is_empty() || self.0.is_empty() {
+                    return std::task::Poll::Ready(Ok(0));
+                }
+                out[0] = self.0[0];
+                self.0 = &self.0[1..];
+                std::task::Poll::Ready(Ok(1))
+            }
+        }
+        let protocol = Eth2RpcProtocol::MetadataV1;
+        let metadata = MetaData {
+            seq_number: 42,
+            attnets: [0xa5; 8],
+            ..MetaData::empty()
+        };
+        let encoded = encode_response(&protocol, Eth2RpcResponse::MetaData(metadata)).unwrap();
+        assert_eq!(
+            read_single_response(&protocol, &mut Bytewise(&encoded))
+                .await
+                .unwrap(),
+            Eth2RpcResponse::MetaData(metadata)
+        );
+        assert!(
+            read_single_response(&protocol, &mut Bytewise(&[]))
+                .await
+                .is_err()
+        );
+        for end in 0..encoded.len() {
+            assert!(
+                read_single_response(&protocol, &mut Bytewise(&encoded[..end]))
+                    .await
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn framing_rejects_excess_chunk_before_decoding_its_payload() {
+        let protocol = Eth2RpcProtocol::BeaconBlocksByRangeV1;
+        let mut bytes = [0, 0].repeat(MAX_RPC_RESPONSE_CHUNKS);
+        bytes.extend_from_slice(&[SUCCESS_CODE, 0xff]); // Invalid/incomplete payload.
+        let error = decode_response(&protocol, &bytes).unwrap_err();
+        assert!(error.to_string().contains("chunk limit"));
+    }
+
+    #[test]
+    fn framing_varints_preserve_full_uint64_and_nonminimal_values() {
+        let mut max = [0xff; 10];
+        max[9] = 1;
+        assert_eq!(
+            decode_unsigned_varint_prefix(&max).unwrap(),
+            Some((u64::MAX, 10))
+        );
+        assert_eq!(
+            decode_unsigned_varint_prefix(&[0x88, 0]).unwrap(),
+            Some((8, 2))
+        );
+        assert_eq!(decode_unsigned_varint_prefix(&[0x80]).unwrap(), None);
+        assert!(decode_unsigned_varint_prefix(&[0x80; 10]).is_err());
+    }
+
+    #[test]
     fn oversized_declared_payload_is_rejected_before_allocation() {
         let mut prefix = unsigned_varint::encode::u64_buffer();
         let encoded = unsigned_varint::encode::u64(
@@ -1512,6 +1958,7 @@ mod tests {
         assert_eq!(
             decoded,
             MetaData {
+                syncnets: [0],
                 custody_group_count: 0,
                 ..metadata
             }

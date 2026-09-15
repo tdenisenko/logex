@@ -113,5 +113,10 @@ including the official fixtures and committee controls; focused strict Clippy
 also passes. Source `26df603c` passed all seven local gates: vendor verification,
 formatting, workspace check, strict Clippy, 1,257 workspace tests (23 ignored),
 documentation tests and release build. [Gate records](baselines/2026-09-15-consensus-fork-conformance-gates.json)
-retain commands, toolchain and evidence hashes. Linux/macOS CI and merge remain
-pending. Live sync and the staging soak remain later gates.
+retain commands, toolchain and evidence hashes. All six Linux/macOS CI jobs
+passed on head `f726bb03` in run `34916285463`; [PR #156](https://github.com/tdenisenko/logex/pull/156)
+merged as `e79e2d23` on September 15, 2026 at 01:17:37 UTC.
+[Final CI/merge records](baselines/2026-09-15-consensus-fork-conformance-ci.json)
+retain the exact head and outcomes. The named batch-one conformance leads now
+have an offline disposition; complete stored-state integrity, retention and
+network/lifecycle work remain tracked in their respective batches. Live sync and the staging soak remain later gates.
