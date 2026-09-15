@@ -219,9 +219,6 @@ impl PeerManager {
         let p2p_download = self.session_metrics.p2p_download.snapshot(Instant::now());
         let (served_upload_bytes_per_sec, served_uploaded_payload_bytes) =
             self.serve_cache.p2p_upload_snapshot();
-        let ack_upload_bytes_per_sec = estimate_tcp_ack_upload_bytes(p2p_download.bytes_per_sec);
-        let ack_uploaded_payload_bytes =
-            estimate_tcp_ack_upload_bytes(p2p_download.total_payload_bytes);
 
         ExecutionNetworkStatus {
             max_peers: self.max_peers,
@@ -306,11 +303,9 @@ impl PeerManager {
             historical_scheduler_body_blocks: self.body_receipt_scheduler_metrics.body_blocks,
             historical_scheduler_receipt_blocks: self.body_receipt_scheduler_metrics.receipt_blocks,
             p2p_download_bytes_per_sec: p2p_download.bytes_per_sec,
-            p2p_upload_bytes_per_sec: served_upload_bytes_per_sec
-                .saturating_add(ack_upload_bytes_per_sec),
+            p2p_upload_bytes_per_sec: served_upload_bytes_per_sec,
             p2p_downloaded_payload_bytes: p2p_download.total_payload_bytes,
-            p2p_uploaded_payload_bytes: served_uploaded_payload_bytes
-                .saturating_add(ack_uploaded_payload_bytes),
+            p2p_uploaded_payload_bytes: served_uploaded_payload_bytes,
             connected_geth_peers: client_counts.connected_geth,
             connected_nethermind_peers: client_counts.connected_nethermind,
             connected_reth_peers: client_counts.connected_reth,
@@ -969,12 +964,6 @@ impl PeerManager {
             self.request_cursor %= len;
         }
     }
-}
-
-fn estimate_tcp_ack_upload_bytes(download_bytes: u64) -> u64 {
-    ((download_bytes as f64) * TCP_ACK_UPLOAD_ESTIMATE_FACTOR)
-        .round()
-        .clamp(0.0, u64::MAX as f64) as u64
 }
 
 pub(super) fn push_unique_peer(peers: &mut Vec<NodeRecord>, node: NodeRecord) {

@@ -126,47 +126,15 @@ fn usize_to_u64(value: usize) -> u64 {
     value.try_into().unwrap_or(u64::MAX)
 }
 
-fn compressed_rlpx_payload_bytes<T: alloy_rlp::Encodable>(payload: &T) -> u64 {
-    let uncompressed_len = payload.length();
-    if uncompressed_len == 0 {
-        return 0;
-    }
-
-    let encoded = alloy_rlp::encode(payload);
-    let compressed_len = snap::raw::Encoder::new()
-        .compress_vec(&encoded)
-        .map(|compressed| compressed.len())
-        .unwrap_or(uncompressed_len);
-    estimate_wire_bytes_from_compressed_payload(compressed_len)
-}
-
-fn compressed_rlpx_list_payload_bytes<T: alloy_rlp::Encodable>(payload: &[T]) -> u64 {
-    let uncompressed_len = alloy_rlp::list_length::<T, T>(payload);
-    if uncompressed_len == 0 {
-        return 0;
-    }
-
-    let mut encoded = Vec::with_capacity(uncompressed_len);
-    alloy_rlp::encode_list::<T, T>(payload, &mut encoded);
-    let compressed_len = snap::raw::Encoder::new()
-        .compress_vec(&encoded)
-        .map(|compressed| compressed.len())
-        .unwrap_or(uncompressed_len);
-    estimate_wire_bytes_from_compressed_payload(compressed_len)
-}
-
-fn estimate_wire_bytes_from_compressed_payload(compressed_len: usize) -> u64 {
-    ((compressed_len as f64) * RLPX_COMPRESSED_PAYLOAD_WIRE_ESTIMATE_FACTOR)
-        .round()
-        .clamp(0.0, u64::MAX as f64) as u64
-}
-
+// Normalized uncompressed application payload size, excluding request IDs and
+// transport framing. Receipt blooms may have been reconstructed after ETH69/70
+// decoding, so this is not the original wire representation.
 fn raw_block_bodies_payload_bytes(bodies: &RawBlockBodies) -> u64 {
-    compressed_rlpx_payload_bytes(bodies)
+    usize_to_u64(alloy_rlp::Encodable::length(bodies))
 }
 
 fn headers_payload_bytes<H: alloy_rlp::Encodable>(headers: &[H]) -> u64 {
-    compressed_rlpx_list_payload_bytes(headers)
+    usize_to_u64(alloy_rlp::list_length::<H, H>(headers))
 }
 
 fn request_hashes_payload_bytes(hash_count: usize) -> u64 {
@@ -186,7 +154,7 @@ fn receipts70_request_payload_bytes(hash_count: usize) -> u64 {
 }
 
 fn receipt_batch_payload_bytes(receipts: &ReceiptBatch) -> u64 {
-    compressed_rlpx_payload_bytes(receipts)
+    usize_to_u64(alloy_rlp::Encodable::length(receipts))
 }
 
 #[derive(Debug, Clone)]
@@ -8741,3 +8709,6 @@ mod limit_tests;
 
 #[cfg(test)]
 mod source_tests;
+
+#[cfg(test)]
+mod payload_tests;

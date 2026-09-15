@@ -82,7 +82,8 @@ Whole-domain controls use only a handful of cached entries and were not run
 against the original numeric-span loops. Final independent review and all seven
 local gates pass on source `910f4a72`: vendor verification, formatting, workspace
 check, strict Clippy, 1,483 workspace tests (23 ignored), documentation tests and
-release node linking. PR, exact-head CI and merge remain pending.
+release node linking. All six CI jobs passed on head `9e7ceac5` (run
+`35021368483`); PR #181 merged as `a56470af` after fresh exact-head/base checks.
 
 See [the validation record](baselines/2026-09-16-execution-cache-canonicality.json).
 Cache payload admission, aggregate request budgets and cheaper/honest network
