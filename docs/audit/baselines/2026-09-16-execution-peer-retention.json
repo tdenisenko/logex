@@ -1,5 +1,5 @@
 {
-  "status": "Final independent review and focused validation pass; full gates, CI and merge pending",
+  "status": "All seven local gates and final independent review pass; PR/CI/merge pending",
   "branch": "audit/execution-peer-retention",
   "base": "556b988c11542e9d385f9fc3041b7afe15cb05e7",
   "source_sha256": {
@@ -65,6 +65,18 @@
     "sync-tests-first.log": {
       "sha256": "7a9d8dec725c2c9608d20d339cbb680d8f79f403120a503987194b6880de1446",
       "bytes": 32976
+    },
+    "gates/results.json": {
+      "sha256": "9216e1dfe0bc1c9ec349783b1cfc61b3dd0591fe779681ff9d12c6c89551e01f",
+      "bytes": 3786
+    },
+    "cleanup-review.json": {
+      "sha256": "fd3442e392e326bc0c14944db8ab7df59787ddc3e18d41644d48f8efb64643bb",
+      "bytes": 572
+    },
+    "cleanup-references.log": {
+      "sha256": "861149da2b8e266a6ee9b4975dbe0a60cac13ac06001caff9d11edc7e0fb05ce",
+      "bytes": 1976
     }
   },
   "focused_sync_tests": {
@@ -86,5 +98,139 @@
     "performance": "No benchmark or throughput percentage. No extra disk writes, fsync, dependency or format change. Bounded learned-list work and removed reseed clone.",
     "remaining": "Other networking structures and user configuration not covered by a global fixed memory cap; broader offline audit, volume supervision and verified repair remain open",
     "remote": "No remote work; mac-mini cleanup complete"
+  },
+  "source_commit": "999cac6857e233268d78a5fb7217379377ace4bf",
+  "workspace_tests": {
+    "groups": 25,
+    "passed": 1440,
+    "failed": 0,
+    "ignored": 23
+  },
+  "gates": {
+    "commit": "999cac6857e233268d78a5fb7217379377ace4bf",
+    "rustc": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+    "gates": [
+      {
+        "name": "vendor",
+        "command": [
+          "python3",
+          "tools/verify_datafusion_vendor.py"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T17:39:18.420675+00:00",
+        "finished": "2026-09-15T17:39:18.477109+00:00",
+        "sha256": "d8d80949d6f3378c14456842b531f0cade514179e4c94781b95ff9abb6447675",
+        "log": "/private/tmp/logex-execution-peer-retention-_thsqidq/gates/vendor.log"
+      },
+      {
+        "name": "format",
+        "command": [
+          "cargo",
+          "fmt",
+          "--all",
+          "--",
+          "--check"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T17:39:18.477454+00:00",
+        "finished": "2026-09-15T17:39:19.342675+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-execution-peer-retention-_thsqidq/gates/format.log"
+      },
+      {
+        "name": "check",
+        "command": [
+          "cargo",
+          "check",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T17:39:19.343068+00:00",
+        "finished": "2026-09-15T17:39:25.511376+00:00",
+        "sha256": "e3853a634882a698f7eba2911571da89dce4e6fa1f37dcdeba08f3c3e552abf3",
+        "log": "/private/tmp/logex-execution-peer-retention-_thsqidq/gates/check.log"
+      },
+      {
+        "name": "clippy",
+        "command": [
+          "cargo",
+          "clippy",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T17:39:25.511885+00:00",
+        "finished": "2026-09-15T17:39:30.565899+00:00",
+        "sha256": "ba2aed79e54060b861847a097706c4bf0621499c2d33bb56a8c082778e90b40d",
+        "log": "/private/tmp/logex-execution-peer-retention-_thsqidq/gates/clippy.log"
+      },
+      {
+        "name": "test",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T17:39:30.566549+00:00",
+        "finished": "2026-09-15T17:42:11.078839+00:00",
+        "sha256": "215843030206975b6d33bcdc72574860e86191df17e847bc2993a6ff3ee37f25",
+        "log": "/private/tmp/logex-execution-peer-retention-_thsqidq/gates/test.log"
+      },
+      {
+        "name": "doc",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--doc",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T17:42:11.079790+00:00",
+        "finished": "2026-09-15T17:42:19.835141+00:00",
+        "sha256": "47aab57d27205603530a6f6c68cf4dcefae6e4935dcae5a56d1df9300ae8c337",
+        "log": "/private/tmp/logex-execution-peer-retention-_thsqidq/gates/doc.log"
+      },
+      {
+        "name": "release-build",
+        "command": [
+          "cargo",
+          "build",
+          "-p",
+          "logex-node",
+          "--release",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T17:42:19.835676+00:00",
+        "finished": "2026-09-15T17:43:03.676599+00:00",
+        "sha256": "d0bbe24a1ad7f73a8e04edc3f81c207807f0b749a307fd6e22667d7f0dca7139",
+        "log": "/private/tmp/logex-execution-peer-retention-_thsqidq/gates/release-build.log"
+      }
+    ]
   }
 }
