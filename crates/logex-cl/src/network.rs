@@ -1601,9 +1601,10 @@ impl PeerDialAddressStats {
         *failures = (*failures).saturating_add(1);
     }
 
-    fn priority(self, class: DialAddressClass, bootstrap_needed: bool) -> i32 {
-        class.default_priority(bootstrap_needed) + self.successes(class) as i32 * 100
-            - self.failures(class) as i32 * 125
+    fn priority(self, class: DialAddressClass, bootstrap_needed: bool) -> i64 {
+        // The complete weighted u32 history fits in i64 without losing ordering.
+        i64::from(class.default_priority(bootstrap_needed)) + i64::from(self.successes(class)) * 100
+            - i64::from(self.failures(class)) * 125
     }
 
     const fn successes(self, class: DialAddressClass) -> u32 {
@@ -1710,17 +1711,19 @@ impl PeerLifecycleState {
                 | RpcRequestKind::BeaconBlocksByRoot
         );
         match kind {
-            RpcRequestKind::Status => self.status_successes += 1,
+            RpcRequestKind::Status => {
+                self.status_successes = self.status_successes.saturating_add(1);
+            }
             RpcRequestKind::LightClientBootstrap => {
-                self.bootstrap_successes += 1;
-                self.useful_successes += 1;
+                self.bootstrap_successes = self.bootstrap_successes.saturating_add(1);
+                self.useful_successes = self.useful_successes.saturating_add(1);
             }
             RpcRequestKind::LightClientUpdatesByRange
             | RpcRequestKind::LightClientFinalityUpdate
             | RpcRequestKind::LightClientOptimisticUpdate
             | RpcRequestKind::BeaconBlocksByRange
             | RpcRequestKind::BeaconBlocksByRoot => {
-                self.useful_successes += 1;
+                self.useful_successes = self.useful_successes.saturating_add(1);
             }
             RpcRequestKind::Goodbye | RpcRequestKind::MetaData | RpcRequestKind::Ping => {}
         }
@@ -5137,7 +5140,7 @@ impl ConsensusNetwork {
         addrs
     }
 
-    fn dial_address_priority(&self, peer: PeerId, addr: &Multiaddr, bootstrap_needed: bool) -> i32 {
+    fn dial_address_priority(&self, peer: PeerId, addr: &Multiaddr, bootstrap_needed: bool) -> i64 {
         dial_address_class(addr)
             .map(|class| {
                 self.peer_lifecycle
@@ -5147,7 +5150,7 @@ impl ConsensusNetwork {
                         PeerDialAddressStats::default().priority(class, bootstrap_needed)
                     })
             })
-            .unwrap_or(i32::MIN / 2)
+            .unwrap_or(i64::MIN / 2)
     }
 
     fn mark_peer_ignored_for_run(&mut self, peer: PeerId, reason: String) {
@@ -9513,6 +9516,144 @@ mod tests {
             stats.priority(DialAddressClass::Tcp4, true)
                 > stats.priority(DialAddressClass::Quic4, true)
         );
+    }
+
+    #[test]
+    fn peer_scoring_large_dial_counters_keep_exact_scores() {
+        // Literal results cover multiplication, signed-conversion and subtraction
+        // boundaries of the original 32-bit score, including mixed history.
+        for (successes, failures, expected) in [
+            (0, 0, 400_i64),
+            (21_474_833, 0, 2_147_483_700),
+            (0, 17_179_870, -2_147_483_350),
+            (2_147_483_648, 0, 214_748_365_200),
+            (0, 2_147_483_648, -268_435_455_600),
+            (u32::MAX, 0, 429_496_729_900),
+            (0, u32::MAX, -536_870_911_475),
+            (u32::MAX, u32::MAX, -107_374_181_975),
+        ] {
+            let stats = PeerDialAddressStats {
+                tcp4_successes: successes,
+                tcp4_failures: failures,
+                ..Default::default()
+            };
+            assert_eq!(
+                stats.priority(DialAddressClass::Tcp4, true),
+                expected,
+                "successes={successes}, failures={failures}"
+            );
+        }
+    }
+
+    #[test]
+    fn peer_scoring_dial_ranking_is_monotonic_for_every_class() {
+        for class in [
+            DialAddressClass::Tcp4,
+            DialAddressClass::Quic4,
+            DialAddressClass::Tcp6,
+            DialAddressClass::Quic6,
+        ] {
+            for bootstrap_needed in [false, true] {
+                let mut previous_success = i64::MIN;
+                let mut previous_failure = i64::MAX;
+                for count in [0, 1, 17_179_870, 21_474_833, 2_147_483_648, u32::MAX] {
+                    let mut stats = PeerDialAddressStats::default();
+                    *stats.successes_mut(class) = count;
+                    let success = stats.priority(class, bootstrap_needed);
+                    assert!(success > previous_success);
+                    previous_success = success;
+                    *stats.successes_mut(class) = 0;
+                    *stats.failures_mut(class) = count;
+                    let failure = stats.priority(class, bootstrap_needed);
+                    assert!(failure < previous_failure);
+                    previous_failure = failure;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn peer_scoring_restored_success_counters_saturate() {
+        let temp = TempDir::new().unwrap();
+        let path = known_peers_path(temp.path());
+        let cached = PersistedPeer {
+            enr: MAINNET_BOOTNODES[0].to_string(),
+            support: None,
+            status_successes: u32::MAX,
+            bootstrap_successes: u32::MAX,
+            useful_successes: u32::MAX,
+            dial_stats: PeerDialAddressStats::default(),
+        };
+        persist_known_peers(&path, &[cached]).unwrap();
+        let loaded = load_known_peers(&path).unwrap();
+        for kind in [
+            RpcRequestKind::Status,
+            RpcRequestKind::LightClientBootstrap,
+            RpcRequestKind::LightClientUpdatesByRange,
+            RpcRequestKind::LightClientFinalityUpdate,
+            RpcRequestKind::LightClientOptimisticUpdate,
+            RpcRequestKind::BeaconBlocksByRange,
+            RpcRequestKind::BeaconBlocksByRoot,
+            RpcRequestKind::Goodbye,
+            RpcRequestKind::MetaData,
+            RpcRequestKind::Ping,
+        ] {
+            let mut lifecycle = PeerLifecycleState::from_persisted(&loaded[0]);
+            let priority = peer_lifecycle_priority(&lifecycle, 5, false);
+            lifecycle.record_success(kind);
+            assert_eq!(lifecycle.status_successes, u32::MAX);
+            assert_eq!(lifecycle.bootstrap_successes, u32::MAX);
+            assert_eq!(lifecycle.useful_successes, u32::MAX);
+            assert!(lifecycle.preferred());
+            assert_eq!(peer_lifecycle_priority(&lifecycle, 5, false), priority);
+        }
+    }
+
+    #[tokio::test]
+    async fn peer_scoring_restored_dial_history_preserves_address_selection() {
+        let temp = TempDir::new().unwrap();
+        let network = peer_retention_fixture(&temp);
+        let enr = freshness_enr(1, 1, Some(9000), false, network.fork_digest);
+        let peer = peer_id_from_enr(&enr).unwrap();
+        let cached = PersistedPeer {
+            enr: enr.to_base64(),
+            support: None,
+            status_successes: 0,
+            bootstrap_successes: 0,
+            useful_successes: 0,
+            dial_stats: PeerDialAddressStats {
+                tcp4_successes: u32::MAX,
+                quic4_failures: u32::MAX,
+                ..Default::default()
+            },
+        };
+        persist_known_peers(&network.known_peers_path, &[cached]).unwrap();
+        let loaded = ConsensusNetwork::new(
+            network.config.clone(),
+            network.consensus.clone(),
+            network.sync_status.clone(),
+        )
+        .unwrap();
+        let tcp: Multiaddr = format!("/ip4/127.0.0.1/tcp/9000/p2p/{peer}")
+            .parse()
+            .unwrap();
+        let quic: Multiaddr = format!("/ip4/127.0.0.1/udp/9000/quic-v1/p2p/{peer}")
+            .parse()
+            .unwrap();
+        for bootstrap_needed in [false, true] {
+            assert_eq!(
+                loaded.select_dial_addresses(
+                    peer,
+                    vec![quic.clone(), tcp.clone()],
+                    bootstrap_needed
+                ),
+                vec![tcp.clone(), quic.clone()]
+            );
+            assert!(
+                loaded.dial_address_priority(peer, &Multiaddr::empty(), bootstrap_needed)
+                    < loaded.dial_address_priority(peer, &quic, bootstrap_needed)
+            );
+        }
     }
 
     #[test]
