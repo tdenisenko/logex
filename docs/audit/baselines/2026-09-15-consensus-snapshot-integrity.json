@@ -1,0 +1,315 @@
+{
+  "status": "All seven local gates and independent final reviews pass; PR/CI/merge pending",
+  "branch": "audit/consensus-snapshot-integrity",
+  "base": "2bf55c4a99402dd73f2d6f66d174aeae3146e2ac",
+  "source_commit": "6d7371a2cdeaf94808d4b9d62679dc2200e0d4f1",
+  "source_sha256": {
+    "crates/logex-cl/src/lib.rs": "13759bab340a13915cef8bb3c29792f31b2f9304a5fb263767e6c42840e94f2e",
+    "crates/logex-cl/src/snapshot_format.rs": "d5359d0daf4e3248f26e71789a0751a0ad2642bc65f69bbd3cb4566c03e1cb8c",
+    "crates/logex-node/src/runtime.rs": "816b8193f37b57238f798243d9b348606aa940ba78f34c30074027e1bdadc318",
+    "crates/logex-node/src/commands.rs": "821ccd547f1ddf270e057c3a5c0edf9aafd6d3cef79fe680c5ac94f539b40d3e",
+    "crates/logex-node/Cargo.toml": "4e218715fc37cf436767f57ee171aa93dc90d534ef4b1e847a260b03202c8321"
+  },
+  "findings": [
+    "B3-52",
+    "B3-53",
+    "B3-54"
+  ],
+  "evidence_directory": "/private/tmp/logex-snapshot-integrity-h725kf_j",
+  "evidence": {
+    "before-root-edit.json": {
+      "sha256": "76a283a440eccb232b23e259ea2c1ebccd6b13f2f76f0079b8bbdbfde68fe316",
+      "bytes": 845
+    },
+    "before-root-edit.log": {
+      "sha256": "8e4d25c5819579e117922cf54094b9507d8b80b65f77245626d1bbe0cd9486da",
+      "bytes": 2930
+    },
+    "cl-all-first.log": {
+      "sha256": "7bb0f1eabcbdd5652b739ea00cc8ddf79406262562e0f0409a64e3088ad6c9da",
+      "bytes": 27268
+    },
+    "final-review.json": {
+      "sha256": "1ea5699b3ba4f67eced0ec83e3c1b5f5392ea9c2a98d6d527964128d5944dd03",
+      "bytes": 3023
+    },
+    "node-final-review.json": {
+      "sha256": "51eab6c75952a58e8e395ca660310870d04f3ab2e88378b3172d3fe2dc8de17c",
+      "bytes": 2761
+    },
+    "node-review-before-parent-sync.json": {
+      "sha256": "ebd5dfe7cee7740d2cf757f00e31ab97cdcb24fbac14534f6020fa4168feb075",
+      "bytes": 2076
+    },
+    "node-integration-review.json": {
+      "sha256": "722c63b609cbf063c6a545faa7ce385a6c347a319698d3728a44417d79d538cb",
+      "bytes": 7192
+    },
+    "node-implementation/node-clippy-dangling-final.log": {
+      "sha256": "cc8c46f17ad4e2e1cf6f217d22170a303495e30d738d2f346c9af230ea10a5e0",
+      "bytes": 457
+    },
+    "node-implementation/node-all-final.log": {
+      "sha256": "99145e0a88883cfeaf728d07da90e379993fa5321ba8ec66d404d351db09b1b2",
+      "bytes": 9456
+    },
+    "node-implementation/node-clippy-final.log": {
+      "sha256": "fcc8c5141ecfb77eced23845f0094b1a3a78138446b3638e90b0d7a47035190f",
+      "bytes": 457
+    },
+    "node-implementation/node-all.log": {
+      "sha256": "e8927fca88f9a4b84e63669b47bbf61b6317ed4f70157a1a7ece264f18b9bd85",
+      "bytes": 14842
+    },
+    "node-implementation/node-clippy.log": {
+      "sha256": "81499f811a735304c14d36794b010427609a0bb1a4d45b2e32dadf26b50c94ee",
+      "bytes": 613
+    },
+    "node-implementation/node-dangling-final.log": {
+      "sha256": "96ca483eb59ea863b27ae2db3ff643dd69a58d651863d384d4836bdb324b2849",
+      "bytes": 751
+    }
+  },
+  "before_fix": {
+    "base": "2bf55c4a99402dd73f2d6f66d174aeae3146e2ac",
+    "method": "Added bounded root-byte edit test to original CL read/write implementation; node integration edits are not compiled by this CL-only control.",
+    "command": [
+      "cargo",
+      "test",
+      "-p",
+      "logex-cl",
+      "--lib",
+      "--locked",
+      "--offline",
+      "-j2",
+      "snapshot_integrity_rejects_changed_root_bytes_before_reopen"
+    ],
+    "exit_code": 101,
+    "lib_harness_sha256": "718d1f1e355f91c99f3a73dd59fc616a1979587e675aae551e00c0ed858329dc",
+    "log_sha256": "8e4d25c5819579e117922cf54094b9507d8b80b65f77245626d1bbe0cd9486da",
+    "note": "Changes one hexadecimal digit in an ordered anchor receipt root, preserving JSON shape/length. Original open accepted the modified trusted record. Earlier draft changed a derived summary and is not used as this finding evidence."
+  },
+  "focused": {
+    "consensus": {
+      "passed": 310,
+      "ignored": 1,
+      "log": "cl-all-first.log"
+    },
+    "node": {
+      "passed": 107,
+      "ignored": 0,
+      "log": "node-implementation/node-all-final.log",
+      "note": "Authorized loopback run. Later native+legacy dangling test extension passed focused and strict Clippy; full final-source gates follow."
+    }
+  },
+  "review": {
+    "cl": {
+      "status": "CL_FINAL_SOURCE_REVIEW_NO_ACTIONABLE_FINDING",
+      "source_sha256": {
+        "lib.rs": "13759bab340a13915cef8bb3c29792f31b2f9304a5fb263767e6c42840e94f2e",
+        "snapshot_format.rs": "d5359d0daf4e3248f26e71789a0751a0ad2642bc65f69bbd3cb4566c03e1cb8c"
+      },
+      "scope": "Consensus CL snapshot envelope only; node integration awaits separate final review.",
+      "reviewed": [
+        "48-byte LXCLSN01 header checked before JSON; metadata from same opened File; checked subtraction enforces exact declared payload length without allocating file-sized buffer.",
+        "BufReader outside HashReader<Take> batches digest updates. serde_json::from_reader performs end checking, including trailing whitespace. Take exhaustion and digest checked before restore/reconcile/publication. Final underlying read detects append after initial metadata.",
+        "BufWriter outside HashWriter hashes/counts actual successful writes; partial writes counted exactly. Payload flush and into_inner finish before seeking and writing header. Staging file sync/atomic persist/directory sync remain in original order with no added barriers.",
+        "Hash/count/write/seek/read failures propagate. Invalid data/EOF become ParseState; other real I/O kinds become ReadState. Existing writer failure latch/previous in-memory snapshot policy unchanged.",
+        "New .bin authoritative if present. Missing .bin checks symlink_metadata for dangling entry then legacy .json; legacy-only refuses initialization with fresh-directory diagnostic, other metadata errors propagate. Both-file behavior uses valid new .bin and leaves legacy untouched.",
+        "Public presence helper checks both formats, including dangling entries; it does not assert validity.",
+        "Malformed cache/order fixtures are now correctly sealed so restore_snapshot remains exercised after envelope validation. Actual root-byte corruption is meaningful retained-state mutation, unlike ignored derived summaries."
+      ],
+      "tests_assessed": [
+        "Envelope bytes/JSON payload digest and whitespace",
+        "Truncated header/body, version/digest/length faults, u64MAX declaration, appended bytes and post-metadata short/long sources",
+        "Partial writes/reads with exact reference bytes and staging write/seek failures",
+        "Root-byte mutation rejected, legacy unchanged, correctly sealed malformed semantic snapshots",
+        "Existing persistence failure/no-op publication controls retained"
+      ],
+      "limits": [
+        "Unkeyed integrity checksum is accidental damage detection, not authenticity or rollback prevention.",
+        "JSON is deserialized before checksum verification but not restored/published; no new total allocation/RSS bound.",
+        "Normal atomic replacement uses pinned inode; arbitrary concurrent external coherent rewrite remains outside integrity guarantee.",
+        "Root reports310CL pass1ignored; no Cargo or tests executed by this review."
+      ],
+      "findings": [],
+      "execution": "Read-only source/dependency review and evidence file only; no source edits, commit, remote or benchmark."
+    },
+    "node": {
+      "status": "FINAL_RECONCILIATION_NO_ACTIONABLE_FINDING",
+      "source_sha256": {
+        "src/runtime.rs": "816b8193f37b57238f798243d9b348606aa940ba78f34c30074027e1bdadc318",
+        "src/commands.rs": "821ccd547f1ddf270e057c3a5c0edf9aafd6d3cef79fe680c5ac94f539b40d3e",
+        "Cargo.toml": "4e218715fc37cf436767f57ee171aa93dc90d534ef4b1e847a260b03202c8321"
+      },
+      "reviewed": [
+        "Runtime/info use shared state presence, preserving native/legacy/dangling entries and propagating metadata/open errors rather than hiding invalid state.",
+        "Automatic archive/recovery only follows existing stale weak-subjectivity/recent-checkpoint/execution-progress conditions. Parse/checksum/legacy errors do not route into automatic replacement.",
+        "Unique TempDir child makes archive target privately owned and noncolliding; rename failure leaves original in place and empty temporary child can clean up. After rename keep() prevents accidental original deletion if later sync fails.",
+        "tempfile moved from dev-only to production dependency without adding new package version; normal snapshot sync path unaffected."
+      ],
+      "recommendation": {
+        "location": "archive_consensus_state after tempdir_in, before rename",
+        "action": "Sync parent directory immediately after creation and before moving old snapshot.",
+        "reason": "Establish archive-directory link ordering before original name can disappear. Current successful return syncs both directories, but pre-sync makes interruption ordering explicit.",
+        "failure": "Pre-sync error returns before rename with original unchanged; post-rename keep remains before child/parent sync.",
+        "limits": "Reasoned directory operation ordering, not physical powerloss test/guarantee.",
+        "status": "RESOLVED: parent sync now occurs after child creation before rename, with error propagation; keep follows successful rename before remaining barriers."
+      },
+      "validation": "Node integration report records107/107 node tests passed on authorized rerun, followed by final expanded native/legacy dangling control and strict node Clippy passing. Initial11 sandbox loopback permission failures remain retained as environmental failures. These are reported retained results, not personally executed by this independent source review.",
+      "findings_other": [],
+      "execution": "Read-only source review, no Cargo/source edit/remote/commit.",
+      "prior_review_sha256": "ebd5dfe7cee7740d2cf757f00e31ab97cdcb24fbac14534f6020fa4168feb075",
+      "reconciliation": [
+        "All three hashes match supplied final freeze.",
+        "Native and legacy dangling-link controls each verify existing entry preserved and no replacement native file created.",
+        "No further actionable finding; source unchanged outside reviewed final correction."
+      ]
+    }
+  },
+  "implementation_cost": "One streamed buffered serialization/hash pass; 48 bytes framing; same normal-save fsync count. Rare archive uses ordered directory barriers. No benchmark, throughput percentage or RSS guarantee.",
+  "compatibility": "Authorized breaking native format; preserve legacy bytes, require fresh directory/checkpoint. Native is authoritative if both entries exist. No migration.",
+  "limits": [
+    "Checksum detects accidental damage, not local-file authenticity or rollback.",
+    "JSON is privately deserialized before digest check; no total allocation/file-size ceiling.",
+    "Physical power-loss behavior not experimentally reproduced in this milestone.",
+    "Retention, actual-change full-snapshot writes, coverage scans and broader offline audit remain open."
+  ],
+  "non_acceptance_evidence": [
+    "draft-derived-summary-edit.log: changed a recomputed summary, not retained-root evidence",
+    "first-envelope.log: initial focused pass with draft deprecated idiom warning, fixed before final review",
+    "node-implementation/node-all.log: 11 existing loopback fixtures denied by sandbox; authorized rerun passes"
+  ],
+  "local_validation": {
+    "commit": "6d7371a2cdeaf94808d4b9d62679dc2200e0d4f1",
+    "rustc": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+    "gates": [
+      {
+        "name": "vendor",
+        "command": [
+          "python3",
+          "tools/verify_datafusion_vendor.py"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T14:29:52.078966+00:00",
+        "finished": "2026-09-15T14:29:52.134369+00:00",
+        "sha256": "d8d80949d6f3378c14456842b531f0cade514179e4c94781b95ff9abb6447675",
+        "log": "/private/tmp/logex-snapshot-integrity-h725kf_j/gates/vendor.log"
+      },
+      {
+        "name": "format",
+        "command": [
+          "cargo",
+          "fmt",
+          "--all",
+          "--",
+          "--check"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T14:29:52.134706+00:00",
+        "finished": "2026-09-15T14:29:52.972722+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-snapshot-integrity-h725kf_j/gates/format.log"
+      },
+      {
+        "name": "check",
+        "command": [
+          "cargo",
+          "check",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T14:29:52.973222+00:00",
+        "finished": "2026-09-15T14:29:58.763169+00:00",
+        "sha256": "eb32a2bd0748b389e42e97eb1f1e2203fefbcab9e9dbba13c7d58632b2a34097",
+        "log": "/private/tmp/logex-snapshot-integrity-h725kf_j/gates/check.log"
+      },
+      {
+        "name": "clippy",
+        "command": [
+          "cargo",
+          "clippy",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T14:29:58.763736+00:00",
+        "finished": "2026-09-15T14:30:01.709640+00:00",
+        "sha256": "8af20965160cf5cd207db446dd4956c0f5cf20d4dc691e09810561ff3a950f2b",
+        "log": "/private/tmp/logex-snapshot-integrity-h725kf_j/gates/clippy.log"
+      },
+      {
+        "name": "test",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T14:30:01.710486+00:00",
+        "finished": "2026-09-15T14:32:37.398939+00:00",
+        "sha256": "35c4edeaf69f40cc23bf72d7d052738f322633d832fdc6f4611f1f0f51cda6eb",
+        "log": "/private/tmp/logex-snapshot-integrity-h725kf_j/gates/test.log"
+      },
+      {
+        "name": "doc",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--doc",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T14:32:37.399965+00:00",
+        "finished": "2026-09-15T14:32:48.291093+00:00",
+        "sha256": "18be08c4a91d438ef641457ba9853e7093b696046e7a846393f7316370ca28ff",
+        "log": "/private/tmp/logex-snapshot-integrity-h725kf_j/gates/doc.log"
+      },
+      {
+        "name": "release-build",
+        "command": [
+          "cargo",
+          "build",
+          "-p",
+          "logex-node",
+          "--release",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T14:32:48.291659+00:00",
+        "finished": "2026-09-15T14:33:53.741964+00:00",
+        "sha256": "cd045c2318bcc70c4f67d0574e056510e2b4571e3c15080f492a7455798ff245",
+        "log": "/private/tmp/logex-snapshot-integrity-h725kf_j/gates/release-build.log"
+      }
+    ]
+  },
+  "workspace_tests": {
+    "passed": 1393,
+    "ignored": 23,
+    "groups": 25
+  }
+}
