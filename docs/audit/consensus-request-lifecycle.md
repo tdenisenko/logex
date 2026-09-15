@@ -130,4 +130,7 @@ Source `c2b1a315` passed vendor verification, formatting, workspace all-target
 check, strict all-target Clippy, 1,280 workspace tests (23 ignored), documentation
 tests and the release node build. [Gate records](baselines/2026-09-15-consensus-request-lifecycle-gates.json)
 retain exact commands, toolchain, source hashes, logs and focused review evidence.
-CI and merge are pending.
+All six CI jobs passed on head `0ce9aad6` in run `34918556634`.
+[PR #157](https://github.com/tdenisenko/logex/pull/157) merged as `aa624447`
+on September 15, 2026 at 01:52:34 UTC. [CI and merge records](baselines/2026-09-15-consensus-request-lifecycle-ci.json)
+retain the exact head and final outcomes.

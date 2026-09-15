@@ -1,0 +1,235 @@
+{
+  "commit": "dc1c07d3af5d94fc46f38b0dd3b8f8fabf3612bc",
+  "rustc": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+  "gates": [
+    {
+      "name": "vendor",
+      "command": [
+        "python3",
+        "tools/verify_datafusion_vendor.py"
+      ],
+      "exit_code": 0,
+      "started": "2026-09-15T02:04:45.648899+00:00",
+      "finished": "2026-09-15T02:04:45.710302+00:00",
+      "sha256": "d8d80949d6f3378c14456842b531f0cade514179e4c94781b95ff9abb6447675",
+      "log": "/private/tmp/logex-peer-retention.lbvJM5/gates/vendor.log"
+    },
+    {
+      "name": "format",
+      "command": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "exit_code": 0,
+      "started": "2026-09-15T02:04:45.710694+00:00",
+      "finished": "2026-09-15T02:04:46.551951+00:00",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "log": "/private/tmp/logex-peer-retention.lbvJM5/gates/format.log"
+    },
+    {
+      "name": "check",
+      "command": [
+        "cargo",
+        "check",
+        "--workspace",
+        "--all-targets",
+        "--locked",
+        "--offline",
+        "-j",
+        "2"
+      ],
+      "exit_code": 0,
+      "started": "2026-09-15T02:04:46.552335+00:00",
+      "finished": "2026-09-15T02:04:53.961896+00:00",
+      "sha256": "b2496f69b85af5d80c9e30f387cafb33d43e605f255d5ec62468c57eb28e6578",
+      "log": "/private/tmp/logex-peer-retention.lbvJM5/gates/check.log"
+    },
+    {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--locked",
+        "--offline",
+        "-j",
+        "2",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit_code": 0,
+      "started": "2026-09-15T02:04:53.962848+00:00",
+      "finished": "2026-09-15T02:05:01.719245+00:00",
+      "sha256": "22ce569309e87a99614c335518d090f0b7a95213bd405bf445283f359d8eee18",
+      "log": "/private/tmp/logex-peer-retention.lbvJM5/gates/clippy.log"
+    },
+    {
+      "name": "test",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace",
+        "--all-targets",
+        "--locked",
+        "--offline",
+        "-j",
+        "2"
+      ],
+      "exit_code": 0,
+      "started": "2026-09-15T02:05:01.720091+00:00",
+      "finished": "2026-09-15T02:08:29.174767+00:00",
+      "sha256": "a79fd179355d7caff06f3bdf6e57d4bea1e38afa177c1b7565bd480256fab2d8",
+      "log": "/private/tmp/logex-peer-retention.lbvJM5/gates/test.log"
+    },
+    {
+      "name": "doc",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace",
+        "--doc",
+        "--locked",
+        "--offline",
+        "-j",
+        "2"
+      ],
+      "exit_code": 0,
+      "started": "2026-09-15T02:08:29.178910+00:00",
+      "finished": "2026-09-15T02:08:48.127864+00:00",
+      "sha256": "e4155222da97f34d81a217a689af5511e5c335aa1313d15f4fd6acbab849bbb2",
+      "log": "/private/tmp/logex-peer-retention.lbvJM5/gates/doc.log"
+    },
+    {
+      "name": "release-build",
+      "command": [
+        "cargo",
+        "build",
+        "-p",
+        "logex-node",
+        "--release",
+        "--locked",
+        "--offline",
+        "-j",
+        "2"
+      ],
+      "exit_code": 0,
+      "started": "2026-09-15T02:08:48.128586+00:00",
+      "finished": "2026-09-15T02:10:15.209052+00:00",
+      "sha256": "f2ef5acaa8521d6cd9fe2ccabd40236666986bd7ad6c2e046cbd2ecd8ddbd46c",
+      "log": "/private/tmp/logex-peer-retention.lbvJM5/gates/release-build.log"
+    }
+  ],
+  "workspace_test_summary": {
+    "groups": 25,
+    "passed": 1286,
+    "failed": 0,
+    "ignored": 23
+  },
+  "base": "aa624447113fb5edbc2ce48f2c1bb0cc7e7cc042",
+  "branch": "audit/consensus-peer-retention",
+  "source_sha256": {
+    "crates/logex-cl/src/network.rs": "baf430183223f3bbb628a3df24a5076ca7b1c25528bc7e587f58a1770ac332b1"
+  },
+  "focused_evidence": [
+    {
+      "path": "/private/tmp/logex-consensus-peer-retention-independent-review-1/review.json",
+      "bytes": 3871,
+      "sha256": "1b85853ec17170cbc38a36ab8e3b48561767a02a5e496ff1b1fc4f70eceb17da"
+    },
+    {
+      "path": "/private/tmp/logex-consensus-peer-retention-independent-review-1/reviewed.diff",
+      "bytes": 21397,
+      "sha256": "4d5c65034b45dff200b6f806e3abf118bd2112acdfd27e8de72e468a4a8bcd61"
+    },
+    {
+      "path": "/private/tmp/logex-peer-retention.lbvJM5/after-persist-family.log",
+      "bytes": 1126,
+      "sha256": "52c920f5673efbd7716015fdfb8a97b22af5bee8ce668914e6ce5865de0441e1"
+    },
+    {
+      "path": "/private/tmp/logex-peer-retention.lbvJM5/after-selection.log",
+      "bytes": 1219,
+      "sha256": "bf7c16a050e44d0d0594f0c0a388e33f41cfd4a8656bbccb73c0b379e1bcfa31"
+    },
+    {
+      "path": "/private/tmp/logex-peer-retention.lbvJM5/after.log",
+      "bytes": 1038,
+      "sha256": "ea8200f4c9be1c39a03c31f435493d7b355642da92038fb9eac3765a21101553"
+    },
+    {
+      "path": "/private/tmp/logex-peer-retention.lbvJM5/before-family.log",
+      "bytes": 1308,
+      "sha256": "2b716c0ba5e7c92da8d119c493b98154ec1392d0ecd5eb31f53a005012d4228c"
+    },
+    {
+      "path": "/private/tmp/logex-peer-retention.lbvJM5/before-persist-family.log",
+      "bytes": 1384,
+      "sha256": "6163f5dab6fb571e2df626ecdd7e75b4ab2fd48d14963f6ffa8c1905b38b7383"
+    },
+    {
+      "path": "/private/tmp/logex-peer-retention.lbvJM5/before.log",
+      "bytes": 1281,
+      "sha256": "4169a8d8bcdbc6bac7781e4ee89a758070716f396eb023d63c25ab1a4961d1da"
+    },
+    {
+      "path": "/private/tmp/logex-peer-retention.lbvJM5/clippy-selection.log",
+      "bytes": 453,
+      "sha256": "bb6317d7932769e394fd1b0e78d6cacf9283785091187f487a2f44480700c300"
+    },
+    {
+      "path": "/private/tmp/logex-peer-retention.lbvJM5/clippy.log",
+      "bytes": 453,
+      "sha256": "bf7d3a056eed1949ba581a8b59811eb884ed84c550f4582be7da9634f2f257f4"
+    },
+    {
+      "path": "/private/tmp/logex-peer-retention.lbvJM5/network.log",
+      "bytes": 7667,
+      "sha256": "13fd7ee88ea077f09ae2b49e3100815efc98d631a6af154f08a007764f329fd4"
+    }
+  ],
+  "independent_review": {
+    "status": "BOUNDED_READ_ONLY_REVIEW_NO_ACTIONABLE_PATCH_FINDING",
+    "base": "aa624447",
+    "agent_commit": "f2c6c56f",
+    "network_sha256": "baf430183223f3bbb628a3df24a5076ca7b1c25528bc7e587f58a1770ac332b1",
+    "diff_sha256": "4d5c65034b45dff200b6f806e3abf118bd2112acdfd27e8de72e468a4a8bcd61",
+    "dependency_hashes": {
+      "/Users/tdenisenko/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/discv5-0.10.4/src/service.rs": "408fb84197063b008e06a621547d4fdcf28ec28b8a73417e663beb505020ff8a",
+      "/Users/tdenisenko/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/enr-0.13.0/src/lib.rs": "1bffa4c356e50a6dd0c06dd2e93e79985c159404ab87295f110a740888e9cfff"
+    },
+    "reviewed": [
+      "Pruning enumerates dialable keys plus lifecycle-only keys exactly once; active connected/dialing/closing peers stay outside inactive count. Bootnodes/pending requests retain protection within count exactly as prior policy.",
+      "Excess is calculated before protected-inactive filtering, so nonprotected removals bring total inactive union toward500 without overriding protected peers when they alone exceed the cap.",
+      "Existing preference/useful-success/status-success/PeerId ascending eviction order remains unchanged. Eviction removes dialable, observed, lifecycle, per-connection/support/failure/success state and per-peer inbound buckets; no pending request is eligible. Periodic expiry remains separate.",
+      "Live observations and saved selection share the same IP+TCP/QUIC endpoint construction and configured-family filter, including existing mapped-IPv6 rejection. Discovery UDP alone does not establish RPC eligibility.",
+      "selected_known_peers preserves relevant-fork/OP-stack filtering, known-no-Status exclusion, remembered metadata and dial counters, descending identical peer_priority and ascending serialized-ENR tie breaker, then256 cap.",
+      "Priority is derived once from already decoded routing-table ENRs. Installed enr parser verifies signatures, so removing comparator reparse avoids redundant work without removing a trust-boundary check. No measured speed claim.",
+      "Cache selection does not require configured-family UDP when compatible RPC exists: this matches existing startup path, which loads usable RPC addresses even when discovery endpoint cannot be seeded. last_persisted comparison and persistence behavior remain unchanged.",
+      "Read new mixed-union/dedup, priority/protection, repeated-prune, live-family and saved-cache ordering/limit controls; no tests executed by reviewer."
+    ],
+    "freshness_followup": {
+      "status": "SEPARATE_SEQUENCE_AWARE_INVENTORY_LEAD",
+      "observation": "An older stored compatible address may remain after an ineligible observed ENR because helper returnsNone without deleting. Family filtering extends the already existing no-RPC-address case.",
+      "evidence": "Pinned discv5 service.discovered emits Discovered before routing-table seq comparisons; network observes events/query results/table snapshots without storing ENRseq in address map.",
+      "implication": "Cannot claim freshness, and blind delete-on-None can let older advertisements erase newer usable addresses. Sequence-authoritative replacement/removal needs a scoped design and bounded newer/older/reordered-event controls.",
+      "current_clearance": "No additional current family-eligibility/ranking/retention blocker; current stored address family remains configured. Latest ENR endpoint freshness is not established."
+    },
+    "limits": [
+      "Read-only source/dependency review; no Cargo, tests, benchmark, remote/live operations, edits or commits.",
+      "Root owns gates and final snapshot reconciliation.",
+      "Periodic retention is not an instantaneous hard memory bound; protected peers may exceed500.",
+      "Gossip/message IDs, cache-file crash durability/malformed-file handling and sequence freshness are not closed."
+    ]
+  },
+  "scope": [
+    "Temporary fixtures and scripted objects only; no live discovery, swarm polling, peers or user data.",
+    "No benchmark or remote-host work.",
+    "Existing retention cap, priority policy and protected states retained.",
+    "Sequence-aware ENR freshness, aggregate response memory, gossip message-ID conformance and peer-cache durability remain separate recorded follow-ups."
+  ]
+}
