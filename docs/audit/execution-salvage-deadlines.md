@@ -61,8 +61,10 @@ followed by a successful retry through another body peer. They verify source IDs
 preserved chunks, exact role statistics, peer failures and balanced active guards.
 Independent source review found no actionable defect in the correction.
 
-Seven local gates, exact-head CI and merge remain pending before this milestone
-can close. Evidence and source identities are recorded in
+All seven local gates pass on source `2894e2b5`: vendor verification, formatting,
+workspace check, strict Clippy, 1,497 workspace tests (23 ignored), documentation
+tests and release node linking. PR, exact-head CI and merge remain pending.
+Evidence and source identities are recorded in
 [the validation record](baselines/2026-09-16-execution-salvage-deadlines.json). The broader offline audit, volume supervision,
 verified repair and subsequent live/staging acceptance remain incomplete.
 Mac-mini audit tests and obsolete-artifact cleanup remain complete; no remote
