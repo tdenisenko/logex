@@ -1,0 +1,80 @@
+{
+  "status": "Focused tests, original controls and final review pass; full local gates and PR/CI/merge pending",
+  "branch": "audit/execution-request-deadlines",
+  "base": "7bc714c83447b0fc034af30f9c0fc2b6fb370d22",
+  "source_sha256": {
+    "crates/logex-sync/Cargo.toml": "b679f6c08a8d05a032d6ecfac2bf4203887264ddac5538314fe196835745d0cb",
+    "crates/logex-sync/src/p2p/peer_manager/requests.rs": "84c3074b0f79c18f1e3e29dba82fddd0307206928184f7e390cc015226101fb2",
+    "crates/logex-sync/src/p2p/peer_manager/requests/deadline_tests.rs": "e0feb2e321df12f5ab1fd213c6d7a40552e767b0ea7597945c73cac5387fa146",
+    "crates/logex-sync/src/p2p/peer_manager/requests/ownership_tests.rs": "5504f695213fab173eb003258bb70c1e3dedc1bb692cfbd852be9d7f4831ad56"
+  },
+  "finding": {
+    "id": "B4-13",
+    "severity": "medium",
+    "effect": "Bounded local queue admission precedes the old response timeout, allowing request wait to exceed configured duration",
+    "correction": "One unboxed generic helper applies one timeout over send and response, reused by all three wrappers"
+  },
+  "evidence_directory": "/private/tmp/logex-execution-request-deadlines-97f27oas",
+  "evidence": {
+    "sender-deadline-review.json": {
+      "sha256": "a009afa22566a3af6734d0dd90b22e05000345865cb9fde7805c04e483cd1722",
+      "bytes": 6496
+    },
+    "enclosing-deadline-review.json": {
+      "sha256": "9e87849759f2c510d3f5f505b7c0f6e795bf86b32fdf99da21b3a61ff6568707",
+      "bytes": 2576
+    },
+    "limit-policy-review.json": {
+      "sha256": "29764eaaa23ecdf6f341fb9e2ca2931458ebec3f614d05077861a33d66478a8e",
+      "bytes": 5325
+    },
+    "final-review.json": {
+      "sha256": "5f3604d51ad92763a16e6d1e320d00dc239a114989bca5a356350d8e27b9672f",
+      "bytes": 4999
+    },
+    "original-deadline-controls.json": {
+      "sha256": "1561627439b98d7023a6f7eeba379d9712d31f6dfcb007b89cac6e0fdfdc61f9",
+      "bytes": 1107
+    },
+    "original-deadline-controls.log": {
+      "sha256": "86c418f05c544b3e022d75c2d96c7f65a9562754ea6d84da27159cad7cda67ec",
+      "bytes": 7318
+    },
+    "original-deadline-tests.rs": {
+      "sha256": "cc9c265f9334de7f8d2b0a1253823ceef0641db5a0767b58070ee4d372adb4c7",
+      "bytes": 2517
+    },
+    "sync-tests-first.log": {
+      "sha256": "3f5bf88d62d950f9f55cfcfed3e420d7fd01ea2e5725d2d49801c219841dacf5",
+      "bytes": 34777
+    },
+    "cleanup-review.json": {
+      "sha256": "3f5875b795ddc7721a8acd5ebdaca6632c06dd9fd9f925a926e2071c7300ee59",
+      "bytes": 673
+    },
+    "sender-uses.log": {
+      "sha256": "fa4481db069412c03b95be365b3564fb6d70425bcb8b79852cc0e1237ec3ed93",
+      "bytes": 1964
+    },
+    "old-response-only-timers.log": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    }
+  },
+  "focused_sync_tests": {
+    "passed": 350,
+    "failed": 0,
+    "ignored": 1
+  },
+  "new_tests": 6,
+  "contract": {
+    "deadline": "Includes queue admission and response waiting under existing adaptive/explicit/default values",
+    "errors": "Existing request/disconnected outcomes preserved; timeout is session/request-path availability, not proof of remote receipt or invalid data",
+    "ownership": "Captured session and existing owner ledger unchanged",
+    "cancellation": "Pending send canceled; admitted request remains Reth-owned after receiver closure",
+    "cost": "One existing oneshot and timer; no boxing, additional heap abstraction, storage writes, dependency versions or benchmark; removes two sender clones",
+    "testing": "Dev-only Tokio test-util enables paused-clock tests; baseline controls use actual original header helper",
+    "remaining": "B4-14 explicit-limit parallel bypass, aggregate salvage/ETH70 budgets and broader audit/volume/repair remain open",
+    "remote": "No remote work; mac-mini cleanup complete"
+  }
+}
