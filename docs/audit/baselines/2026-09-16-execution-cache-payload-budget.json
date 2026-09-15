@@ -1,0 +1,92 @@
+{
+  "status": "32 cache tests and independent implementation review pass; source commit, seven local gates, CI and merge pending",
+  "branch": "audit/execution-cache-payload-budget",
+  "base": "bc5856162311e7d40a2211e9f121c3491b91ee6e",
+  "finding": {
+    "id": "B4-21",
+    "severity": "medium",
+    "effect": "Count-only optional EL cache has no logical-payload admission budget; callers copy payloads even when discarded immediately",
+    "correction": "128MiB normalized logical payload plus existing counts; borrowed preflight, clone outsidewrite, authoritative locked admission/charge release"
+  },
+  "source_sha256": {
+    "crates/logex-sync/src/p2p/serve_cache.rs": "40e3d78e03aaf176ed38af723bbd3d9da6bfcc7979a7a87641162f6dfda1b6cf",
+    "crates/logex-sync/src/p2p/serve_cache/payload_budget_tests.rs": "3b20e27b04358f5acffeda8693bae7c8adafcc235dbf6b12dce238014a561858",
+    "crates/logex-sync/src/p2p/peer_manager/mod.rs": "40b2bb377cd7cb1dda3e8bbaf40d65bbf2b2f174b8acb3d9dc98bf68dbac1a76",
+    "crates/logex-sync/src/engine/anchored.rs": "80b2fa62f8b634fe374622dc48ab15926c916a9939c3e6beb9dc4e69e1e4fd99",
+    "crates/logex-sync/src/engine/historical.rs": "84922edb3a094aadb2bb41d443bfdbe9d9fd62f26b1c81e3c531a6113979233c",
+    "crates/logex-sync/src/engine/live.rs": "e7f01b31139e17a86f6686d821742a8ccafed87120cffd419f56a1f4f8050f60"
+  },
+  "evidence_directory": "/private/tmp/logex-execution-cache-payload-budget-v1okni6e",
+  "evidence": {
+    "cache-budget-review.json": {
+      "sha256": "02b2e24951be191566ea1cf4dcf98a61aa76f9fe5f1728298e53495756b6dbf5",
+      "bytes": 7758
+    },
+    "cache-admission-callers-review.json": {
+      "sha256": "5afed13176654eeb7eafecff348121bf0048d02a99455d8efd000a4bb6f07e6f",
+      "bytes": 5620
+    },
+    "original-controls.json": {
+      "sha256": "c3ed497fef48c23574b86000ed845d939d88185cba1c76f2f05b77015ded4fee",
+      "bytes": 357
+    },
+    "original-tests.rs": {
+      "sha256": "d177cf28e3da0e46c117429570781c239ca6ccacd2dc64b4a40f3b582c2b3329",
+      "bytes": 7020
+    },
+    "original-controls.log": {
+      "sha256": "d4f55cc3682f935aab6bf5da31fd33f4e14a58bd58f8114039c3e9cb14d88340",
+      "bytes": 3877
+    },
+    "test-authoring-compile-error.log": {
+      "sha256": "ed2b293cd0ccc13daaa889ec50f856e4cce5b6e37e6f709b3d3e6a97eccc8592",
+      "bytes": 538
+    },
+    "fixed-cache-tests.log": {
+      "sha256": "0dcda418ac7dd85ccf41ae230eff509aa5805521daaf3df03dd5697c904fb139",
+      "bytes": 3634
+    },
+    "final-cache-tests.log": {
+      "sha256": "185ca8063c2f3e0798a8294df2c23c91ee4cc6ac557bfa902985f8468ff82419",
+      "bytes": 3757
+    },
+    "implementation-review.json": {
+      "sha256": "bb57242cbc2e9d1aab24fa248108dc038d16553ceb3a499a4d60ea06f2f79758",
+      "bytes": 4669
+    },
+    "cleanup-review.json": {
+      "sha256": "5fa778fdd5b30bbede07f6ec3c232b0425382f24aaf23e188aafbfd9670c373a",
+      "bytes": 403
+    },
+    "final-review.json": {
+      "sha256": "c26b58f84cc234dd5975bf65901fb4c6263acaa2daab829c7f59d73fe47c3377",
+      "bytes": 6044
+    }
+  },
+  "original_controls": {
+    "production_unchanged": true,
+    "passed": 1,
+    "failed": 5,
+    "caveat": "Small desired-policy limits intentionally ignored by original test constructor because no original budget setting exists; not a reproduced OOM or ignored configuration"
+  },
+  "corrected_cache_tests": {
+    "passed": 32,
+    "failed": 0,
+    "ignored": 0,
+    "new_tests": 8
+  },
+  "metric": {
+    "limit_bytes": 134217728,
+    "charge": "header RLP length + body RLP length + each receipt RLP length with ZERO bloom, without outer receipt-list envelope",
+    "excludes": [
+      "separately count-bounded headers",
+      "spare capacity and shared Bytes backing",
+      "maps/allocator metadata",
+      "caller batches",
+      "outgoing owned responses",
+      "concurrent preflight copies"
+    ]
+  },
+  "performance": "One allocation-free length walk for candidates not excluded by count/age, at most4096entry scans each preflight/final admission underpressure, no payload clone underwrite; no benchmark",
+  "remote": "None; mac-mini work and obsolete-artifact cleanup complete"
+}
