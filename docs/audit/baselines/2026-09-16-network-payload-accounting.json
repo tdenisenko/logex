@@ -1,5 +1,5 @@
 {
-  "status": "Source and focused checks complete; seven gates, CI and merge pending",
+  "status": "All seven local gates and independent review pass; PR, CI and merge pending",
   "branch": "audit/network-payload-accounting",
   "base": "a56470af0a49f0b6b3a8ebcc01fe1cc387f8145a",
   "source_sha256": {
@@ -97,6 +97,14 @@
     "final-review.json": {
       "sha256": "97fd43a5b9ae94926ab11eeb8903ca20788cc1584a6d514e2836e1e3ef4f799c",
       "bytes": 2369
+    },
+    "gates/results.json": {
+      "sha256": "d6243139abe1b14a5ee513bcde493202f8bf23b702babcb107394f790c98e655",
+      "bytes": 3800
+    },
+    "gates/test-summary.json": {
+      "sha256": "0b86a6e0f4dcc9a094b356d2de6f86d26ef40dbd828785425185b022bb30ee26",
+      "bytes": 69
     }
   },
   "original_controls": {
@@ -121,5 +129,139 @@
     "limits": "Nested field traversal remains; no constant-time or allocation-budget claim; serving sums/request estimates omit some outer envelope bytes",
     "benchmark": "None; no quantified speedup and historical counter values not comparable after basis change",
     "remote": "None; mac-mini audit tests and cleanup complete"
+  },
+  "source_commit": "72c5a022dc9a33a5e0542c4f1a3c4532d7966d43",
+  "workspace_tests": {
+    "groups": 25,
+    "passed": 1489,
+    "failed": 0,
+    "ignored": 23
+  },
+  "gates": {
+    "commit": "72c5a022dc9a33a5e0542c4f1a3c4532d7966d43",
+    "rustc": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+    "gates": [
+      {
+        "name": "vendor",
+        "command": [
+          "python3",
+          "tools/verify_datafusion_vendor.py"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T21:03:08.464735+00:00",
+        "finished": "2026-09-15T21:03:08.527962+00:00",
+        "sha256": "d8d80949d6f3378c14456842b531f0cade514179e4c94781b95ff9abb6447675",
+        "log": "/private/tmp/logex-network-payload-accounting-2jt7elcj/gates/vendor.log"
+      },
+      {
+        "name": "format",
+        "command": [
+          "cargo",
+          "fmt",
+          "--all",
+          "--",
+          "--check"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T21:03:08.528348+00:00",
+        "finished": "2026-09-15T21:03:09.457620+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-network-payload-accounting-2jt7elcj/gates/format.log"
+      },
+      {
+        "name": "check",
+        "command": [
+          "cargo",
+          "check",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T21:03:09.458126+00:00",
+        "finished": "2026-09-15T21:03:14.259418+00:00",
+        "sha256": "be15a93f2b5e6edda5fda947b5baf38a2ee321e17428fc30e960d75438225cc9",
+        "log": "/private/tmp/logex-network-payload-accounting-2jt7elcj/gates/check.log"
+      },
+      {
+        "name": "clippy",
+        "command": [
+          "cargo",
+          "clippy",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T21:03:14.260040+00:00",
+        "finished": "2026-09-15T21:03:31.045954+00:00",
+        "sha256": "1fbac14f63e4f917c2521f8599c0ddf8fe059631d8e8c171c704903cca2df732",
+        "log": "/private/tmp/logex-network-payload-accounting-2jt7elcj/gates/clippy.log"
+      },
+      {
+        "name": "test",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T21:03:31.047105+00:00",
+        "finished": "2026-09-15T21:08:16.203337+00:00",
+        "sha256": "3c369b0cfe3b4bd33492723be992cd32fd626c5acdd3d1d4f030b6f5aa7c968b",
+        "log": "/private/tmp/logex-network-payload-accounting-2jt7elcj/gates/test.log"
+      },
+      {
+        "name": "doc",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--doc",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T21:08:16.206921+00:00",
+        "finished": "2026-09-15T21:08:32.296620+00:00",
+        "sha256": "3cc5de713c0f19b88e26c26280991d60d653c23323006553d5267dc9fd0555a9",
+        "log": "/private/tmp/logex-network-payload-accounting-2jt7elcj/gates/doc.log"
+      },
+      {
+        "name": "release-build",
+        "command": [
+          "cargo",
+          "build",
+          "-p",
+          "logex-node",
+          "--release",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T21:08:32.297580+00:00",
+        "finished": "2026-09-15T21:10:43.585705+00:00",
+        "sha256": "cda5cfda9cfdcf10ad8ff62d105f2cc4b82524622ffc59999e2efaa7007a2eec",
+        "log": "/private/tmp/logex-network-payload-accounting-2jt7elcj/gates/release-build.log"
+      }
+    ]
   }
 }

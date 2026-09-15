@@ -84,7 +84,9 @@ lockfile edge removal. Dashboard checks verify syntax, unique IDs, description
 references and unchanged JavaScript calculations; no browser-rendering claim.
 
 See [the validation record](baselines/2026-09-16-network-payload-accounting.json).
-Final seven local gates, exact-head CI and merge are recorded before closure.
+All seven local gates pass on source `72c5a022`: vendor verification, formatting,
+workspace check, strict Clippy, 1,489 workspace tests (23 ignored), documentation
+tests and release node linking. PR, exact-head CI and merge remain pending.
 Cache payload admission, aggregate continuation budgets, the broader offline
 audit, volume supervision and verified repair remain open. Live sync and staging
 acceptance follow offline completion. Mac-mini audit testing and obsolete artifact
