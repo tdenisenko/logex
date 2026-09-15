@@ -18,6 +18,9 @@ use tree_hash::{TreeHash as _, merkle_root, mix_in_length};
 
 use crate::MAINNET_CONSENSUS_CHAIN_SPEC;
 
+#[cfg(test)]
+mod conformance_tests;
+
 const SYNC_COMMITTEE_PUBKEYS: usize = 512;
 const BLS_PUBKEY_BYTES: usize = 48;
 const SYNC_COMMITTEE_BITS_BYTES: usize = 64;
@@ -1083,15 +1086,17 @@ impl DecodedUpdate {
     fn next_sync_committee_branch(&self) -> Option<Vec<B256>> {
         match self {
             Self::Capella(payload)
-                if payload.next_sync_committee != SyncCommitteeRaw::default() =>
+                if branch_has_nonzero(payload.next_sync_committee_branch.as_slice()) =>
             {
                 Some(branch_from_fixed(&payload.next_sync_committee_branch))
             }
-            Self::Deneb(payload) if payload.next_sync_committee != SyncCommitteeRaw::default() => {
+            Self::Deneb(payload)
+                if branch_has_nonzero(payload.next_sync_committee_branch.as_slice()) =>
+            {
                 Some(branch_from_fixed(&payload.next_sync_committee_branch))
             }
             Self::Electra(payload)
-                if payload.next_sync_committee != SyncCommitteeRaw::default() =>
+                if branch_has_nonzero(payload.next_sync_committee_branch.as_slice()) =>
             {
                 Some(branch_from_fixed(&payload.next_sync_committee_branch))
             }
@@ -1454,15 +1459,15 @@ fn verified_optional_sync_committee<const N: usize>(
     committee: &SyncCommitteeRaw,
     branch: &FixedBytes<N>,
 ) -> Result<Option<SyncCommitteeData>, LightClientVerificationError> {
-    if committee == &SyncCommitteeRaw::default() {
-        if branch_has_nonzero(branch.as_slice()) {
-            return Err(
-                LightClientVerificationError::InvalidNextSyncCommitteeProof { attested_slot: 0 },
-            );
-        }
-        Ok(None)
-    } else {
-        Ok(Some(committee.to_persisted()))
+    // Presence follows the branch, not the committee bytes. A zero branch
+    // cannot carry a committee even if it reconstructs the signed state root.
+    match (
+        branch_has_nonzero(branch.as_slice()),
+        committee == &SyncCommitteeRaw::default(),
+    ) {
+        (false, true) => Ok(None),
+        (true, false) => Ok(Some(committee.to_persisted())),
+        _ => Err(LightClientVerificationError::InvalidNextSyncCommitteeProof { attested_slot: 0 }),
     }
 }
 
@@ -3126,6 +3131,69 @@ mod tests {
                 attested,
                 finalized
             ),
+        }
+    }
+
+    #[test]
+    fn next_committee_presence_requires_nonzero_branch_in_signed_updates_and_cache() {
+        for schema in 0..3 {
+            for has_branch in [false, true] {
+                let (_, range, store) = genesis_finality_fixture(schema, false, None);
+                let sk = SecretKey::key_gen(&[7u8; 32], &[]).unwrap();
+                macro_rules! with_committee {
+                    ($ty:ty) => {{
+                        let mut update = <$ty>::from_ssz_bytes(&range).unwrap();
+                        update.next_sync_committee = sync_committee_from_secret_key(&sk);
+                        if has_branch {
+                            update.next_sync_committee_branch = FixedBytes::repeat_byte(0xd1);
+                        }
+                        update.attested_header.beacon.state_root = branch_root(
+                            update.next_sync_committee.tree_hash_root(),
+                            &branch_from_fixed(&update.next_sync_committee_branch),
+                            subtree_index(next_sync_committee_gindex_at_slot(
+                                update.attested_header.beacon.slot,
+                            )),
+                        );
+                        update.sync_aggregate = signed_sync_aggregate(
+                            &sk,
+                            &update.attested_header.beacon,
+                            update.signature_slot,
+                        );
+                        update.as_ssz_bytes()
+                    }};
+                }
+                let bytes = match schema {
+                    0 => with_committee!(LightClientUpdateCapella),
+                    1 => with_committee!(LightClientUpdateDeneb),
+                    _ => with_committee!(LightClientUpdateElectra),
+                };
+                assert_eq!(
+                    apply_light_client_update_payload(&bytes, &store).is_ok(),
+                    has_branch,
+                    "schema {schema}, branch present {has_branch}"
+                );
+                let mut cache = crate::PersistedLightClientPayloads {
+                    updates_by_period: std::collections::BTreeMap::from([(
+                        sync_committee_period_at_slot(store.bootstrap_slot),
+                        crate::rpc::RawRpcResponse {
+                            bytes,
+                            context_bytes: None,
+                        },
+                    )]),
+                    ..Default::default()
+                };
+                assert_eq!(
+                    validate_cached_light_client_payloads(
+                        &mut cache,
+                        WeakSubjectivityCheckpoint {
+                            beacon_root: store.checkpoint_root,
+                            beacon_slot: Some(store.bootstrap_slot),
+                        },
+                    )
+                    .is_ok(),
+                    has_branch,
+                );
+            }
         }
     }
 
