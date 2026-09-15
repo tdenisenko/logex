@@ -10,7 +10,7 @@ rate-limit response from a peer fault. The broader offline audit remains open.
 | --- | --- | --- | --- |
 | B3-45 | High | Each writer retained only one encoded chunk, but concurrent writers had no shared allowance. Copied light-client payloads could also wait in response channels without a reservation. | Shared serving admission before queuing, held through the writer and failed-send handling. |
 | B3-46 | Medium | Failed-send diagnostics unconditionally formatted entire response byte vectors, then retained and copied that string into status. Large LC responses could become still larger diagnostic strings. | Bounded variant/count/byte/error-code summaries. |
-| B3-47 | Medium | Remote rate-limit code 139 was counted as an ordinary fault. LC/Beacon responses caused cooldown followed by fault disconnection; repeated Status responses could also disconnect a healthy busy peer. | Brief per-peer availability deferral without fault counters or disconnection for exactly this code. |
+| B3-47 | Medium | Remote rate-limit code 139 was counted as an ordinary fault. LC/Beacon responses caused cooldown followed by fault disconnection; repeated Status responses could also disconnect a healthy busy peer. | Brief per-peer availability deferral; repeated Busy for the same request type triggers nonfault rotation and a temporary redial delay. |
 | B3-48 | Low | The singleton LC writer applied the general 10 MiB body limit rather than its smaller protocol-specific bound. A direct codec caller could emit a response that the receiving codec rejects. Normal cached payloads already undergo validation. | Apply the singleton protocol limit before encoding/writing; this is an output-boundary correction, not evidence of invalid normal cache contents. |
 
 ## Ownership and resource policy
@@ -45,9 +45,26 @@ on success, write failure and cancellation.
 
 A remote Busy response is temporary availability information. It briefly defers
 that peer without changing fault counters or penalizing healthy peer inventory.
-Other peers remain available. Non-rate-limit error codes keep their existing
-handling. This prevents the new normal local-memory rejection path from causing
-avoidable peer churn between LogEx instances.
+The first two replies delay requests for one second. The third Busy reply for the
+same request type closes the connection as planned availability rotation and
+prevents redial for 30 seconds, freeing a slot for another peer. The counters
+saturate at three within the existing bounded peer lifecycle and survive short
+retry expiry and reconnect. Only a successful response of that same request type
+resets its counter; unrelated Status or Ping responses cannot mask unavailable
+history or bootstrap work. A still-busy peer gets another attempt after redial,
+then rotates again until it successfully serves that request type.
+
+Pending requests are cleared before rotation so later transport failures are
+stale. An incoming reconnect during the redial delay is closed before recording
+dial success or dispatching work. A planned-close marker survives the ordering
+where the transport has closed but its close event is still queued. The configured
+connection limit permits only one established connection per peer. Non-rate-limit
+error codes keep their existing handling.
+
+The initial one-second-only deferral passed its isolated controls but failed a
+later scheduling review: capable peers repeatedly replying Busy could occupy
+all connection slots indefinitely. The finite attempt policy corrects that gap;
+initial gate results are retained separately from final revised-source acceptance.
 
 Admission adds a bounded metadata scan and atomic reservation per response. There
 is no new disk write, fsync or waiting for quota while holding response bodies.
@@ -73,12 +90,19 @@ handling. Encoder output is compared byte-for-byte with the pinned original
 FrameEncoder over deterministic data across frame boundaries. No real peers,
 production data, remote tests or performance measurements are used.
 
-Source `e19a15e5` passes all 298 consensus tests (one ignored) and independent
-final review. Three original-function controls reproduce missing writer admission,
-oversized singleton output and encoded Vec excess. Network controls reproduce
-payload-sized diagnostics and rate-limit fault attribution. These restore isolated
-original paths in candidate harnesses, not full baseline checkouts. Exact source
-bindings and results are recorded in the [validation record](baselines/2026-09-15-consensus-serving-memory.json).
-All seven local gates pass on the committed source: vendor integrity, formatting,
-workspace check, strict Clippy, 1,376 workspace tests (23 ignored), documentation
-tests and the node release build. PR/CI and merge remain pending.
+The revised source `c10d4bef` passes all 300 consensus tests (one ignored) and
+independent review. Three original-function controls reproduce missing writer
+admission, oversized singleton output and encoded Vec excess. Network controls
+reproduce payload-sized diagnostics and rate-limit fault attribution. The late
+liveness control restores the exact initial rate-limit arm and fails at the
+missing planned rotation after the third Busy reply. These restore isolated
+original paths in candidate harnesses, not full baseline checkouts. Tests model
+connection events and enqueue an alternative dial without polling a real socket;
+they establish the scheduler transition, not live-network availability.
+
+Exact source bindings and results are recorded in the
+[validation record](baselines/2026-09-15-consensus-serving-memory.json). The initial
+source and its successful gates/CI are retained separately. The revised source
+passes all seven local gates: vendor integrity, formatting, workspace check,
+strict Clippy, 1,378 workspace tests (23 ignored), documentation tests and the node
+release build. Revised-head CI and merge remain pending.
