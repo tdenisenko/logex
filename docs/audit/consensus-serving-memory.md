@@ -105,4 +105,5 @@ Exact source bindings and results are recorded in the
 source and its successful gates/CI are retained separately. The revised source
 passes all seven local gates: vendor integrity, formatting, workspace check,
 strict Clippy, 1,378 workspace tests (23 ignored), documentation tests and the node
-release build. Revised-head CI and merge remain pending.
+release build. All six CI jobs passed on head `98c7241d` in run `34976091249`. PR #168
+merged as `a9126a61` after exact head/base verification.

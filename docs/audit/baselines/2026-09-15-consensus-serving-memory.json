@@ -257,7 +257,7 @@
       "limits": "Commands sequential with no environment overrides. Only pre-existing dependency future-incompatibility notices. This is bounded Busy retry/rotation, not universal peer progress assurance. Existing bounded lifecycle pruning and process restart can discard ephemeral history. No source edits outside network.rs. Source and Cargo released for parent final review/gates."
     }
   ],
-  "publication_status": "PR168 awaits revised-head CI and merge.",
+  "publication_status": "Merged after all six CI jobs passed on exact head98c7241d and verified base.",
   "limits": [
     "Serving payload capacities only; no total RSS bound. Fixed synchronous compressor scratch, allocator/reallocation transients and transport/collection metadata remain outside quota.",
     "One synchronous LC response construction before admission remains bounded by128 requests and26936-byte validated cached update bodies, about3.29MiB plus metadata.",
@@ -714,5 +714,90 @@
         "log": "/private/tmp/logex-serving-memory-0_hnmwvr/gates-final/release-build.log"
       }
     ]
+  },
+  "publication": {
+    "ci_run": 34976091249,
+    "before_merge": {
+      "baseRefOid": "16b69ec975f4853448d8c7c56ed2ff6c076b29eb",
+      "headRefOid": "98c7241d195d2f681fca75563a79227062ec2355",
+      "isDraft": false,
+      "mergeStateStatus": "CLEAN",
+      "number": 168,
+      "state": "OPEN",
+      "statusCheckRollup": [
+        {
+          "__typename": "CheckRun",
+          "completedAt": "2026-09-15T13:37:25Z",
+          "conclusion": "SUCCESS",
+          "detailsUrl": "https://github.com/tdenisenko/logex/actions/runs/34976091249/job/104404049386",
+          "name": "Check",
+          "startedAt": "2026-09-15T13:36:33Z",
+          "status": "COMPLETED",
+          "workflowName": "CI"
+        },
+        {
+          "__typename": "CheckRun",
+          "completedAt": "2026-09-15T13:36:52Z",
+          "conclusion": "SUCCESS",
+          "detailsUrl": "https://github.com/tdenisenko/logex/actions/runs/34976091249/job/104404049554",
+          "name": "Format",
+          "startedAt": "2026-09-15T13:36:33Z",
+          "status": "COMPLETED",
+          "workflowName": "CI"
+        },
+        {
+          "__typename": "CheckRun",
+          "completedAt": "2026-09-15T13:37:36Z",
+          "conclusion": "SUCCESS",
+          "detailsUrl": "https://github.com/tdenisenko/logex/actions/runs/34976091249/job/104404049154",
+          "name": "Clippy",
+          "startedAt": "2026-09-15T13:36:33Z",
+          "status": "COMPLETED",
+          "workflowName": "CI"
+        },
+        {
+          "__typename": "CheckRun",
+          "completedAt": "2026-09-15T13:40:53Z",
+          "conclusion": "SUCCESS",
+          "detailsUrl": "https://github.com/tdenisenko/logex/actions/runs/34976091249/job/104404049424",
+          "name": "Test",
+          "startedAt": "2026-09-15T13:36:33Z",
+          "status": "COMPLETED",
+          "workflowName": "CI"
+        },
+        {
+          "__typename": "CheckRun",
+          "completedAt": "2026-09-15T13:42:33Z",
+          "conclusion": "SUCCESS",
+          "detailsUrl": "https://github.com/tdenisenko/logex/actions/runs/34976091249/job/104404049377",
+          "name": "macOS Test",
+          "startedAt": "2026-09-15T13:36:40Z",
+          "status": "COMPLETED",
+          "workflowName": "CI"
+        },
+        {
+          "__typename": "CheckRun",
+          "completedAt": "2026-09-15T13:39:47Z",
+          "conclusion": "SUCCESS",
+          "detailsUrl": "https://github.com/tdenisenko/logex/actions/runs/34976091249/job/104404049458",
+          "name": "Release Build",
+          "startedAt": "2026-09-15T13:36:33Z",
+          "status": "COMPLETED",
+          "workflowName": "CI"
+        }
+      ],
+      "url": "https://github.com/tdenisenko/logex/pull/168"
+    },
+    "merge": {
+      "baseRefOid": "16b69ec975f4853448d8c7c56ed2ff6c076b29eb",
+      "headRefOid": "98c7241d195d2f681fca75563a79227062ec2355",
+      "mergeCommit": {
+        "oid": "a9126a6155c02526d56e4b4580f5ffd4560a722c"
+      },
+      "mergedAt": "2026-09-15T13:43:22Z",
+      "number": 168,
+      "state": "MERGED",
+      "url": "https://github.com/tdenisenko/logex/pull/168"
+    }
   }
 }
