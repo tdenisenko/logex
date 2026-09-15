@@ -75,7 +75,6 @@ type ParallelChunkError = (ParallelChunkFailures, RequestStats);
 type RawBlockBodies = Vec<<LogexNetworkPrimitives as NetworkPrimitives>::BlockBody>;
 type ParallelBodies = (Vec<SourcedBlockBody>, RequestStats, ParallelChunkFailures);
 type ParallelSourcedReceipts = (Vec<SourcedReceiptSet>, RequestStats, ParallelChunkFailures);
-type ParallelReceipts = (PeerId, ReceiptBatch, RequestStats, ParallelChunkFailures);
 
 #[derive(Debug, Clone, Copy)]
 struct RequestStat {
@@ -2787,21 +2786,12 @@ impl PeerManager {
         bail!("no peers available to handle header request");
     }
 
-    /// Request receipts for the given block hashes.
+    /// Request receipts in hash order, preserving each block's actual supplier.
     pub async fn get_receipts(
         &mut self,
         hashes: Vec<B256>,
         required_block: u64,
-    ) -> Result<(
-        PeerId,
-        Vec<
-            Vec<
-                alloy_consensus::ReceiptWithBloom<
-                    <LogexNetworkPrimitives as NetworkPrimitives>::Receipt,
-                >,
-            >,
-        >,
-    )> {
+    ) -> Result<Vec<SourcedReceiptSet>> {
         self.get_receipts_inner(hashes, required_block, &[], None, None)
             .await
     }
@@ -2813,16 +2803,7 @@ impl PeerManager {
         hashes: Vec<B256>,
         required_block: u64,
         preferred_peers: &[PeerId],
-    ) -> Result<(
-        PeerId,
-        Vec<
-            Vec<
-                alloy_consensus::ReceiptWithBloom<
-                    <LogexNetworkPrimitives as NetworkPrimitives>::Receipt,
-                >,
-            >,
-        >,
-    )> {
+    ) -> Result<Vec<SourcedReceiptSet>> {
         self.get_receipts_inner(hashes, required_block, preferred_peers, None, None)
             .await
     }
@@ -2837,16 +2818,7 @@ impl PeerManager {
         preferred_peers: &[PeerId],
         request_timeout: Duration,
         max_attempts: usize,
-    ) -> Result<(
-        PeerId,
-        Vec<
-            Vec<
-                alloy_consensus::ReceiptWithBloom<
-                    <LogexNetworkPrimitives as NetworkPrimitives>::Receipt,
-                >,
-            >,
-        >,
-    )> {
+    ) -> Result<Vec<SourcedReceiptSet>> {
         self.get_receipts_inner(
             hashes,
             required_block,
@@ -2864,19 +2836,10 @@ impl PeerManager {
         preferred_peers: &[PeerId],
         request_timeout: Option<Duration>,
         max_attempts: Option<usize>,
-    ) -> Result<(
-        PeerId,
-        Vec<
-            Vec<
-                alloy_consensus::ReceiptWithBloom<
-                    <LogexNetworkPrimitives as NetworkPrimitives>::Receipt,
-                >,
-            >,
-        >,
-    )> {
+    ) -> Result<Vec<SourcedReceiptSet>> {
         self.drain_events_now();
         if hashes.is_empty() {
-            return Ok((PeerId::ZERO, Vec::new()));
+            return Ok(Vec::new());
         }
 
         let mut peer_ids = self
@@ -2890,10 +2853,10 @@ impl PeerManager {
         // The optional bulk scheduler has independent retries and deadlines.
         if request_timeout.is_none() && max_attempts.is_none() {
             match self
-                .request_receipts_parallel_chunks(&peer_ids, hashes.clone())
+                .request_sourced_receipts_parallel_chunks(&peer_ids, hashes.clone())
                 .await
             {
-                Ok(Some((peer_id, receipts, stats, failures))) => {
+                Ok(Some((receipts, stats, failures))) => {
                     for stat in stats {
                         self.record_peer_request_success(
                             stat.peer_id,
@@ -2906,7 +2869,7 @@ impl PeerManager {
                     self.apply_parallel_chunk_failures("receipts", failures, &mut dead_peers);
                     self.remove_dead_peers(&dead_peers);
                     self.advance_request_cursor();
-                    return Ok((peer_id, receipts));
+                    return Ok(receipts);
                 }
                 Ok(None) => {}
                 Err((failures, stats)) => {
@@ -2981,7 +2944,10 @@ impl PeerManager {
                         );
                         self.record_p2p_download_payload(payload_bytes, elapsed);
                         self.advance_request_cursor();
-                        return Ok((peer_id, receipts));
+                        return Ok(receipts
+                            .into_iter()
+                            .map(|receipts| (peer_id, receipts))
+                            .collect());
                     }
                     Err(error) => {
                         let should_drop =
@@ -3031,8 +2997,10 @@ impl PeerManager {
                                 );
                                 self.record_p2p_download_payload(payload_bytes, elapsed);
                                 self.advance_request_cursor();
-                                collected.extend(receipts);
-                                return Ok((peer_id, collected));
+                                collected.extend(
+                                    receipts.into_iter().map(|receipts| (peer_id, receipts)),
+                                );
+                                return Ok(collected);
                             }
                             ResponseProgress::Partial { returned } => {
                                 let elapsed = started_at.elapsed();
@@ -3051,7 +3019,9 @@ impl PeerManager {
                                     request_hashes.len(),
                                     returned,
                                 );
-                                collected.extend(receipts);
+                                collected.extend(
+                                    receipts.into_iter().map(|receipts| (peer_id, receipts)),
+                                );
                                 remaining_hashes = request_hashes[returned..].to_vec();
                             }
                             ResponseProgress::Empty => {
@@ -3406,30 +3376,6 @@ impl PeerManager {
             Ok(None)
         } else {
             Err((failures, stats))
-        }
-    }
-
-    async fn request_receipts_parallel_chunks(
-        &self,
-        peer_ids: &[PeerId],
-        hashes: Vec<B256>,
-    ) -> std::result::Result<Option<ParallelReceipts>, ParallelChunkError> {
-        match self
-            .request_sourced_receipts_parallel_chunks(peer_ids, hashes)
-            .await
-        {
-            Ok(Some((sourced_receipts, stats, failures))) => {
-                let Some(first_peer) = sourced_receipts.first().map(|(peer_id, _)| *peer_id) else {
-                    return Ok(None);
-                };
-                let receipts = sourced_receipts
-                    .into_iter()
-                    .map(|(_, receipts)| receipts)
-                    .collect();
-                Ok(Some((first_peer, receipts, stats, failures)))
-            }
-            Ok(None) => Ok(None),
-            Err(error) => Err(error),
         }
     }
 
@@ -8792,3 +8738,6 @@ mod deadline_tests;
 
 #[cfg(test)]
 mod limit_tests;
+
+#[cfg(test)]
+mod source_tests;

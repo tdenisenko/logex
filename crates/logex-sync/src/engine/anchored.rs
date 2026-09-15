@@ -2881,14 +2881,11 @@ impl SyncEngine {
                 ),
             )
             .await;
-            let (receipt_peer, receipts) = match receipt_result {
-                Some(Ok((peer_id, receipts))) if receipts.len() == chunk_headers.len() => {
-                    (peer_id, receipts)
-                }
-                Some(Ok((peer_id, receipts))) => {
+            let receipts = match receipt_result {
+                Some(Ok(receipts)) if receipts.len() == chunk_headers.len() => receipts,
+                Some(Ok(receipts)) => {
                     tracing::warn!(
                         headers = chunk_headers.len(),
-                        receipt_peer = %peer_id,
                         returned_receipt_sets = receipts.len(),
                         "checkpoint gap tail receipt request returned an unexpected response"
                     );
@@ -2904,14 +2901,7 @@ impl SyncEngine {
                 }
             };
 
-            let blocks: Vec<SourcedBodyReceipts> = bodies
-                .into_iter()
-                .zip(
-                    receipts
-                        .into_iter()
-                        .map(|receipt_set| (receipt_peer, receipt_set)),
-                )
-                .collect();
+            let blocks: Vec<SourcedBodyReceipts> = bodies.into_iter().zip(receipts).collect();
             let chunk = ForwardGapFetchedChunk {
                 sequence: 0,
                 header_peer,
@@ -3295,14 +3285,11 @@ impl SyncEngine {
                 ),
             )
             .await;
-            let (receipt_peer, receipts) = match receipt_result {
-                Some(Ok((peer_id, receipts))) if receipts.len() == chunk_headers.len() => {
-                    (peer_id, receipts)
-                }
-                Some(Ok((peer_id, receipts))) => {
+            let receipts = match receipt_result {
+                Some(Ok(receipts)) if receipts.len() == chunk_headers.len() => receipts,
+                Some(Ok(receipts)) => {
                     tracing::warn!(
                         headers = chunk_headers.len(),
-                        receipt_peer = %peer_id,
                         returned_receipt_sets = receipts.len(),
                         "anchored receipt request returned an unexpected response"
                     );
@@ -3323,22 +3310,23 @@ impl SyncEngine {
                 let block_hash = chunk_hashes[i];
                 let block_number = header.number();
                 let (body_peer, body) = &bodies[i];
+                let (receipt_peer, block_receipts) = &receipts[i];
 
-                if !receipts_match_transaction_count(body, &receipts[i]) {
+                if !receipts_match_transaction_count(body, block_receipts) {
                     tracing::warn!(
                         block_number,
                         %block_hash,
                         receipt_peer = %receipt_peer,
                         transactions = body.transaction_count(),
-                        receipts = receipts[i].len(),
+                        receipts = block_receipts.len(),
                         "anchored block body / receipt count mismatch"
                     );
                     self.peers
-                        .report_invalid_block_data(receipt_peer, "receipts");
+                        .report_invalid_block_data(*receipt_peer, "receipts");
                     return Ok(progressed);
                 }
 
-                if let Err(error) = validate_receipts_for_header(header, &receipts[i]) {
+                if let Err(error) = validate_receipts_for_header(header, block_receipts) {
                     tracing::warn!(
                         block_number,
                         %block_hash,
@@ -3347,25 +3335,25 @@ impl SyncEngine {
                         "anchored receipt validation failed"
                     );
                     self.peers
-                        .report_invalid_block_data(receipt_peer, "receipts");
+                        .report_invalid_block_data(*receipt_peer, "receipts");
                     return Ok(progressed);
                 }
 
-                let txs = assemble_txs(body, &receipts[i]);
+                let txs = assemble_txs(body, block_receipts);
                 if let Some(reorg) = self.head_tracker.track(header.clone()) {
                     self.handle_reorg(reorg).await?;
                 }
 
                 let recent_headers = self.head_tracker.snapshot();
                 self.peers
-                    .cache_canonical_block(header.clone(), body.clone(), &receipts[i]);
+                    .cache_canonical_block(header.clone(), body.clone(), block_receipts);
                 let log_count = self
                     .ingest_block(header, block_hash, &txs, &recent_headers, Some(&anchor))
                     .await?;
                 self.progress.record_block(block_number, log_count);
                 self.note_serving_peer(header_peer, &mut newly_serving_peers);
                 self.note_serving_peer(*body_peer, &mut newly_serving_peers);
-                self.note_serving_peer(receipt_peer, &mut newly_serving_peers);
+                self.note_serving_peer(*receipt_peer, &mut newly_serving_peers);
                 last_validated_header = Some(header.clone());
                 last_head = Some(execution_head(block_number, block_hash, header.timestamp()));
                 progressed = true;
@@ -6412,7 +6400,7 @@ impl SyncEngine {
         };
 
         let receipt_peer_preference = preferred_body_peers(&bodies, header_peer);
-        let (receipt_peer, receipts) = match cancelable(
+        let receipts = match cancelable(
             &mut self.shutdown,
             self.peers.get_receipts_prefer_peers(
                 hashes.to_vec(),
@@ -6422,11 +6410,10 @@ impl SyncEngine {
         )
         .await
         {
-            Some(Ok((peer_id, receipts))) if receipts.len() == headers.len() => (peer_id, receipts),
-            Some(Ok((peer_id, receipts))) => {
+            Some(Ok(receipts)) if receipts.len() == headers.len() => receipts,
+            Some(Ok(receipts)) => {
                 tracing::debug!(
                     headers = headers.len(),
-                    receipt_peer = %peer_id,
                     receipts = receipts.len(),
                     "historical residual sequential tail receipt response count mismatch"
                 );
@@ -6448,11 +6435,7 @@ impl SyncEngine {
         };
         let body_receipt_elapsed = body_receipt_started.elapsed();
 
-        let blocks: Vec<SourcedBodyReceipts> = bodies
-            .into_iter()
-            .zip(receipts)
-            .map(|((body_peer, body), receipts)| ((body_peer, body), (receipt_peer, receipts)))
-            .collect();
+        let blocks: Vec<SourcedBodyReceipts> = bodies.into_iter().zip(receipts).collect();
 
         match validate_and_extract_historical_blocks_streaming(headers, hashes, blocks).await? {
             Ok((
@@ -6626,7 +6609,7 @@ impl SyncEngine {
 
             let receipt_peer_preference = preferred_body_peers(&bodies, header_peer);
 
-            let (receipt_peer, receipts) = match cancelable(
+            let receipts = match cancelable(
                 &mut self.shutdown,
                 self.peers.get_receipts_prefer_peers(
                     chunk_hashes.clone(),
@@ -6636,10 +6619,8 @@ impl SyncEngine {
             )
             .await
             {
-                Some(Ok((peer_id, receipts))) if receipts.len() == chunk_headers.len() => {
-                    (peer_id, receipts)
-                }
-                Some(Ok((_peer_id, receipts))) => {
+                Some(Ok(receipts)) if receipts.len() == chunk_headers.len() => receipts,
+                Some(Ok(receipts)) => {
                     tracing::debug!(
                         headers = chunk_headers.len(),
                         receipts = receipts.len(),
@@ -6657,11 +6638,7 @@ impl SyncEngine {
                 }
             };
 
-            let blocks: Vec<SourcedBodyReceipts> = bodies
-                .into_iter()
-                .zip(receipts)
-                .map(|((body_peer, body), receipts)| ((body_peer, body), (receipt_peer, receipts)))
-                .collect();
+            let blocks: Vec<SourcedBodyReceipts> = bodies.into_iter().zip(receipts).collect();
             let validated =
                 match validate_historical_blocks_parallel(&chunk_headers, &chunk_hashes, blocks)
                     .await?
@@ -7049,6 +7026,66 @@ mod tests {
                     .unwrap();
             assert_eq!(failure.peer, expected_peer);
             assert_eq!(failure.response_kind, expected_kind);
+        }
+    }
+
+    #[tokio::test]
+    async fn mixed_receipt_sources_survive_validation_and_extraction() {
+        let (first_header, first_block) = single_transaction_validation_fixture();
+        let mut second_header = first_header.clone();
+        second_header.number += 1;
+        second_header.parent_hash = first_header.hash_slow();
+        let mut second_block = first_block.clone();
+        second_block.1.0 = PeerId::repeat_byte(3);
+        let expected_sources = vec![first_block.1.0, second_block.1.0];
+        let headers = vec![first_header, second_header];
+        let hashes = headers.iter().map(Header::hash_slow).collect::<Vec<_>>();
+        let blocks = vec![first_block, second_block];
+
+        let validated = validate_historical_blocks_parallel(&headers, &hashes, blocks.clone())
+            .await
+            .unwrap()
+            .ok()
+            .unwrap();
+        assert_eq!(
+            validated
+                .iter()
+                .map(|block| block.receipt_peer)
+                .collect::<Vec<_>>(),
+            expected_sources
+        );
+        let (_, peer_notes, _, _, block_count, _, _) =
+            validate_and_extract_historical_blocks_streaming(&headers, &hashes, blocks.clone())
+                .await
+                .unwrap()
+                .ok()
+                .unwrap();
+        assert_eq!(block_count, 2);
+        for peer in &expected_sources {
+            assert!(peer_notes.contains(peer));
+        }
+
+        // The second supplier returns a receipt that disagrees with its header.
+        // Both consumers must attribute the failure to that block's supplier.
+        let mut supplied = blocks;
+        supplied[1].1.1[0].receipt.cumulative_gas_used = 1;
+        let parallel_failure =
+            validate_historical_blocks_parallel(&headers, &hashes, supplied.clone())
+                .await
+                .unwrap()
+                .err()
+                .unwrap();
+        let streaming_failure =
+            validate_and_extract_historical_blocks_streaming(&headers, &hashes, supplied)
+                .await
+                .unwrap()
+                .err()
+                .unwrap();
+        for failure in [parallel_failure, streaming_failure] {
+            assert_eq!(failure.peer, expected_sources[1]);
+            assert_eq!(failure.block_number, headers[1].number());
+            assert_eq!(failure.block_hash, hashes[1]);
+            assert_eq!(failure.response_kind, "receipts");
         }
     }
 
