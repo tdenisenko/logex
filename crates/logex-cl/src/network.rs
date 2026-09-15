@@ -32,6 +32,8 @@ use thiserror::Error;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
+use crate::beacon_cache::{BeaconPayloadCache, CachedBeaconPayload};
+
 use crate::light_client::{
     GossipUpdateMetadata, apply_finality_update_payload_at_slot,
     apply_optimistic_update_payload_at_slot, gossip_update_metadata,
@@ -640,7 +642,7 @@ struct ConsensusNetwork {
     last_response_send_failure: Option<String>,
     verified_beacon_blocks: HashMap<B256, VerifiedBeaconBlock>,
     verified_beacon_block_children: HashMap<B256, Vec<VerifiedBeaconBlock>>,
-    verified_beacon_block_payloads: HashMap<B256, RawRpcResponse>,
+    verified_beacon_block_payloads: BeaconPayloadCache,
     active_history_target: Option<HistorySyncTarget>,
     head_recovery_attempts: u64,
 }
@@ -1141,8 +1143,8 @@ fn cached_target_lineage_roots(
 
 fn cached_beacon_block_payloads_by_root(
     roots: &[B256],
-    payloads: &HashMap<B256, RawRpcResponse>,
-) -> Vec<RawRpcResponse> {
+    payloads: &BeaconPayloadCache,
+) -> Vec<CachedBeaconPayload> {
     roots
         .iter()
         .filter_map(|root| payloads.get(root).cloned())
@@ -1152,8 +1154,8 @@ fn cached_beacon_block_payloads_by_root(
 fn cached_beacon_block_payloads_by_range(
     request: BeaconBlocksByRangeRequest,
     canonical_blocks: &[VerifiedBeaconBlock],
-    payloads: &HashMap<B256, RawRpcResponse>,
-) -> Vec<RawRpcResponse> {
+    payloads: &BeaconPayloadCache,
+) -> Vec<CachedBeaconPayload> {
     if request.count == 0 || request.step == 0 {
         return Vec::new();
     }
@@ -1169,7 +1171,7 @@ fn cached_beacon_block_payloads_by_range(
                 && block.slot <= end_slot
                 && (block.slot - request.start_slot).is_multiple_of(request.step)
         })
-        .filter_map(|block| payloads.get(&block.beacon_root).cloned())
+        .map_while(|block| payloads.get(&block.beacon_root).cloned())
         .collect()
 }
 
@@ -1362,6 +1364,11 @@ fn consensus_response_payload_bytes(response: &Eth2RpcResponse) -> u64 {
         | Eth2RpcResponse::BeaconBlocksByRoot(payloads) => {
             raw_rpc_response_payloads_bytes(payloads)
         }
+        Eth2RpcResponse::CachedBeaconBlocksByRange(payloads)
+        | Eth2RpcResponse::CachedBeaconBlocksByRoot(payloads) => payloads
+            .iter()
+            .map(|payload| raw_rpc_response_payload_bytes(payload.as_raw()))
+            .sum(),
         Eth2RpcResponse::Error(error) => usize_to_u64(error.message.len()),
     }
 }
@@ -2173,7 +2180,7 @@ impl ConsensusNetwork {
             last_response_send_failure: None,
             verified_beacon_blocks,
             verified_beacon_block_children,
-            verified_beacon_block_payloads: HashMap::new(),
+            verified_beacon_block_payloads: BeaconPayloadCache::default(),
             active_history_target: None,
             head_recovery_attempts: 0,
         })
@@ -3052,12 +3059,12 @@ impl ConsensusNetwork {
                             }
                         }
                         Eth2RpcRequest::BeaconBlocksByRange(request) => {
-                            Eth2RpcResponse::BeaconBlocksByRange(
+                            Eth2RpcResponse::CachedBeaconBlocksByRange(
                                 self.cached_verified_beacon_blocks_by_range(request),
                             )
                         }
                         Eth2RpcRequest::BeaconBlocksByRoot(roots) => {
-                            Eth2RpcResponse::BeaconBlocksByRoot(
+                            Eth2RpcResponse::CachedBeaconBlocksByRoot(
                                 self.cached_verified_beacon_blocks_by_root(&roots),
                             )
                         }
@@ -4831,7 +4838,13 @@ impl ConsensusNetwork {
         block: VerifiedBeaconBlock,
         payload: Option<RawRpcResponse>,
     ) -> bool {
-        if let Some(payload) = payload {
+        if let Some(mut payload) = payload {
+            // Decoding already checked any supplied context. V1 carries none;
+            // retain the canonical context so the same body can serve V2.
+            payload.context_bytes.get_or_insert_with(|| {
+                MAINNET_CONSENSUS_CHAIN_SPEC
+                    .fork_digest_for_epoch(MAINNET_CONSENSUS_CHAIN_SPEC.epoch_for_slot(block.slot))
+            });
             self.verified_beacon_block_payloads
                 .insert(block.beacon_root, payload);
         }
@@ -4881,14 +4894,14 @@ impl ConsensusNetwork {
         inserted
     }
 
-    fn cached_verified_beacon_blocks_by_root(&self, roots: &[B256]) -> Vec<RawRpcResponse> {
+    fn cached_verified_beacon_blocks_by_root(&self, roots: &[B256]) -> Vec<CachedBeaconPayload> {
         cached_beacon_block_payloads_by_root(roots, &self.verified_beacon_block_payloads)
     }
 
     fn cached_verified_beacon_blocks_by_range(
         &self,
         request: BeaconBlocksByRangeRequest,
-    ) -> Vec<RawRpcResponse> {
+    ) -> Vec<CachedBeaconPayload> {
         let canonical_blocks = self.canonical_serving_blocks();
         cached_beacon_block_payloads_by_range(
             request,
@@ -11128,10 +11141,13 @@ mod tests {
             context_bytes: Some([byte; 4]),
             bytes: vec![byte],
         };
-        let payloads = HashMap::from([
+        let mut payloads = BeaconPayloadCache::default();
+        for (root, raw) in [
             (B256::repeat_byte(0x11), payload(0x11)),
             (B256::repeat_byte(0x22), payload(0x22)),
-        ]);
+        ] {
+            payloads.insert(root, raw);
+        }
 
         let responses = cached_beacon_block_payloads_by_root(
             &[
@@ -11142,7 +11158,13 @@ mod tests {
             &payloads,
         );
 
-        assert_eq!(responses, vec![payload(0x22), payload(0x11)]);
+        assert_eq!(
+            responses
+                .iter()
+                .map(|body| body.as_raw().clone())
+                .collect::<Vec<_>>(),
+            vec![payload(0x22), payload(0x11)]
+        );
     }
 
     #[test]
@@ -11170,12 +11192,15 @@ mod tests {
             block(101, 0x11, 0x10),
             block(103, 0x13, 0x11),
         ];
-        let payloads = HashMap::from([
+        let mut payloads = BeaconPayloadCache::default();
+        for (root, raw) in [
             (B256::repeat_byte(0x10), payload(0x10)),
             (B256::repeat_byte(0x11), payload(0x11)),
             (B256::repeat_byte(0x12), payload(0x12)),
             (B256::repeat_byte(0x13), payload(0x13)),
-        ]);
+        ] {
+            payloads.insert(root, raw);
+        }
 
         let responses = cached_beacon_block_payloads_by_range(
             BeaconBlocksByRangeRequest {
@@ -11187,7 +11212,135 @@ mod tests {
             &payloads,
         );
 
-        assert_eq!(responses, vec![payload(0x10), payload(0x11), payload(0x13)]);
+        assert_eq!(
+            responses
+                .iter()
+                .map(|body| body.as_raw().clone())
+                .collect::<Vec<_>>(),
+            vec![payload(0x10), payload(0x11), payload(0x13)]
+        );
+        // A missing body is not an empty slot: never serve past a canonical hole.
+        let mut sparse = BeaconPayloadCache::default();
+        sparse.insert(B256::repeat_byte(0x10), payload(0x10));
+        sparse.insert(B256::repeat_byte(0x13), payload(0x13));
+        let request = BeaconBlocksByRangeRequest {
+            start_slot: 100,
+            count: 4,
+            step: 1,
+        };
+        let prefix = cached_beacon_block_payloads_by_range(request, &canonical_blocks, &sparse);
+        assert_eq!(prefix.len(), 1);
+        assert_eq!(prefix[0].as_raw(), &payload(0x10));
+        let missing_first = BeaconBlocksByRangeRequest {
+            start_slot: 101,
+            ..request
+        };
+        assert!(
+            cached_beacon_block_payloads_by_range(missing_first, &canonical_blocks, &sparse)
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn beacon_cache_v1_first_body_supports_v2_after_duplicate() {
+        let temp = TempDir::new().unwrap();
+        let (mut network, _) = request_lifecycle_fixture(&temp);
+        let raw = RawRpcResponse {
+            bytes: include_bytes!("../tests/fixtures/beacon_block_14132042.ssz").to_vec(),
+            context_bytes: None,
+        };
+        let block = decode_verified_beacon_block(&raw).unwrap();
+        assert!(network.record_verified_beacon_block(block, Some(raw)));
+        let first = network
+            .verified_beacon_block_payloads
+            .get(&block.beacon_root)
+            .unwrap()
+            .clone();
+        let context = MAINNET_CONSENSUS_CHAIN_SPEC.fork_digest_for_epoch(block.slot / 32);
+        assert_eq!(first.as_raw().context_bytes, Some(context));
+        let duplicate = first.as_raw().clone();
+        assert_eq!(decode_verified_beacon_block(&duplicate).unwrap(), block);
+        assert!(!network.record_verified_beacon_block(block, Some(duplicate)));
+        let cached = network.cached_verified_beacon_blocks_by_root(&[block.beacon_root]);
+        assert!(std::ptr::eq(first.as_raw(), cached[0].as_raw()));
+        let mut wire = futures::io::Cursor::new(Vec::new());
+        let protocol = crate::rpc::Eth2RpcProtocol::BeaconBlocksByRootV2;
+        let mut codec = crate::rpc::Eth2RpcCodec;
+        request_response::Codec::write_response(
+            &mut codec,
+            &protocol,
+            &mut wire,
+            Eth2RpcResponse::CachedBeaconBlocksByRoot(cached),
+        )
+        .await
+        .unwrap();
+        wire.set_position(0);
+        let response = request_response::Codec::read_response(&mut codec, &protocol, &mut wire)
+            .await
+            .unwrap();
+        assert_eq!(
+            response,
+            Eth2RpcResponse::BeaconBlocksByRoot(vec![first.as_raw().clone()])
+        );
+        let mut wrong = first.as_raw().clone();
+        wrong.context_bytes = Some([0xff; 4]);
+        assert!(decode_verified_beacon_block(&wrong).is_err());
+    }
+
+    #[tokio::test]
+    async fn beacon_cache_eviction_preserves_verified_metadata_and_ancestry() {
+        let temp = TempDir::new().unwrap();
+        let (mut network, _) = request_lifecycle_fixture(&temp);
+        network.verified_beacon_block_payloads = BeaconPayloadCache::with_limits(1, 1);
+        let make_block = |slot, root, parent| VerifiedBeaconBlock {
+            fork: logex_types::ConsensusDataFork::Electra,
+            beacon_root: root,
+            parent_root: parent,
+            slot,
+            execution_anchor: logex_types::ExecutionAnchor {
+                beacon_root: root,
+                beacon_slot: slot,
+                block_number: slot,
+                block_hash: root,
+                receipts_root: root,
+            },
+        };
+        let first = make_block(100, B256::repeat_byte(1), B256::ZERO);
+        let second = make_block(101, B256::repeat_byte(2), first.beacon_root);
+        let payload = || RawRpcResponse {
+            context_bytes: Some([0; 4]),
+            bytes: vec![1],
+        };
+        assert!(network.record_verified_beacon_block(first, Some(payload())));
+        let held = network
+            .verified_beacon_block_payloads
+            .get(&first.beacon_root)
+            .unwrap()
+            .clone();
+        assert!(network.record_verified_beacon_block(second, Some(payload())));
+        assert!(
+            network
+                .verified_beacon_block_payloads
+                .get(&second.beacon_root)
+                .is_none()
+        );
+        assert_eq!(
+            network.verified_beacon_blocks.get(&first.beacon_root),
+            Some(&first)
+        );
+        assert_eq!(
+            network.verified_beacon_blocks.get(&second.beacon_root),
+            Some(&second)
+        );
+        assert!(network.verified_beacon_block_children[&first.beacon_root].contains(&second));
+        drop(held);
+        assert!(!network.record_verified_beacon_block(second, Some(payload())));
+        assert!(
+            network
+                .verified_beacon_block_payloads
+                .get(&second.beacon_root)
+                .is_some()
+        );
     }
 
     #[test]

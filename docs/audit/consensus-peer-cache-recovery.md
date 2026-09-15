@@ -4,7 +4,7 @@ Source `7771ddfe` makes the derived consensus peer cache recoverable after conte
 damage and replaces shared staging with privately owned temporary files. It keeps
 trusted consensus snapshots, discovery identity and peer validation unchanged.
 Nine focused controls, independent final review and all seven local workspace
-gates pass. PR/CI completion remains pending.
+gates pass. All six Linux/macOS CI jobs passed before PR #165 merged as `82c5dfce`.
 
 ## Findings
 
@@ -84,7 +84,9 @@ doc tests and release build. The consensus suite includes 262 passing tests with
 one ignored. Independent final review binds the committed source's SHA256.
 Commands, source bindings and hashed logs are retained in the
 [validation record](baselines/2026-09-15-consensus-peer-cache-recovery.json).
-PR/CI completion remains pending before merge.
+All six exact-head Linux/macOS CI jobs passed in run `34963809892`; PR #165
+merged as `82c5dfce` after exact head/base verification. See the
+[CI/merge record](baselines/2026-09-15-consensus-peer-cache-recovery-ci.json).
 
 Tests use temporary files and unpolled network objects. No discovery, peer contact,
 benchmark, Mac mini work or production-data operation was performed. The change

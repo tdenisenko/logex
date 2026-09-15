@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 mod beacon_block;
+mod beacon_cache;
 mod chain;
 mod light_client;
 mod network;
