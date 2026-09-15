@@ -57,8 +57,10 @@ confirms that a second-block receipt/header disagreement is attributed to that
 block's supplier in both parallel validation and streaming extraction.
 
 See [the validation record](baselines/2026-09-16-execution-receipt-sources.json).
-Final independent review passes; workspace gates and CI remain required before
-merge. Aggregate
+Final independent review and all seven local gates pass on source `35750c2d`:
+vendor verification, formatting, workspace check, strict Clippy, 1,468 workspace
+tests (23 ignored), documentation tests and release node linking. PR and CI remain
+pending. Aggregate
 salvage/ETH70 budgets and the telemetry encoding-cost lead remain separate review
 items. The broader offline audit, external-volume supervision, verified repair
 and later live/staging acceptance remain incomplete. Mac-mini testing and owned
