@@ -11,6 +11,8 @@ use std::sync::{
 // decoded. These account for payload buffers, not all process allocations.
 const BEACON_BYTES: usize = 256 * 1024 * 1024;
 const CONTROL_BYTES: usize = 8 * 1024 * 1024;
+const SERVING_BEACON_BYTES: usize = 128 * 1024 * 1024;
+const SERVING_CONTROL_BYTES: usize = 8 * 1024 * 1024;
 pub(crate) const RESPONSE_DECODED_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Debug, thiserror::Error)]
@@ -45,6 +47,8 @@ pub(crate) fn allocation_error(error: TryReserveError) -> io::Error {
 pub(crate) struct RpcResponseBudgets {
     beacon: RpcMemoryPool,
     control: RpcMemoryPool,
+    serving_beacon: RpcMemoryPool,
+    serving_control: RpcMemoryPool,
     max_decoded: usize,
 }
 impl Default for RpcResponseBudgets {
@@ -61,6 +65,8 @@ impl RpcResponseBudgets {
         Self {
             beacon: RpcMemoryPool::new(beacon_bytes),
             control: RpcMemoryPool::new(control_bytes),
+            serving_beacon: RpcMemoryPool::new(SERVING_BEACON_BYTES),
+            serving_control: RpcMemoryPool::new(SERVING_CONTROL_BYTES),
             max_decoded,
         }
     }
@@ -73,6 +79,19 @@ impl RpcResponseBudgets {
     }
     pub(crate) fn max_decoded(&self) -> usize {
         self.max_decoded
+    }
+    pub(crate) fn serving_pool(&self, beacon: bool) -> RpcMemoryPool {
+        if beacon {
+            self.serving_beacon.clone()
+        } else {
+            self.serving_control.clone()
+        }
+    }
+    #[cfg(test)]
+    pub(crate) fn with_serving_limits(mut self, beacon: usize, control: usize) -> Self {
+        self.serving_beacon = RpcMemoryPool::new(beacon);
+        self.serving_control = RpcMemoryPool::new(control);
+        self
     }
 }
 

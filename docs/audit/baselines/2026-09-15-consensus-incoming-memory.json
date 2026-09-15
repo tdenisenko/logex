@@ -115,7 +115,7 @@
     ]
   },
   "validation_status": "All seven local gates passed: 1366 workspace tests, 23 ignored; 288 consensus tests, 1 ignored.",
-  "publication_status": "pending",
+  "publication_status": "merged after all six CI jobs passed",
   "limits": [
     "Payload Vec capacities only; fixed synchronous Snappy decoder scratch, typed Beacon decoding, transport/event metadata, allocator overhead and outgoing encoded concurrency excluded.",
     "Batch reduction can add historical requests; useful complete success restores caps gradually, future larger bodies may require another reduction.",
@@ -324,5 +324,78 @@
         "log": "/private/tmp/logex-incoming-memory-hl6xlb89/gates/release-build.log"
       }
     ]
+  },
+  "pr": {
+    "baseRefOid": "a4cb10857a1eab982b58e3190dd07375df4add91",
+    "headRefOid": "5ad8df9ca4c7ecbcb4095d40591b16d693160c3a",
+    "mergeCommit": {
+      "oid": "16b69ec975f4853448d8c7c56ed2ff6c076b29eb"
+    },
+    "mergedAt": "2026-09-15T12:51:52Z",
+    "number": 167,
+    "state": "MERGED",
+    "statusCheckRollup": [
+      {
+        "__typename": "CheckRun",
+        "completedAt": "2026-09-15T12:47:07Z",
+        "conclusion": "SUCCESS",
+        "detailsUrl": "https://github.com/tdenisenko/logex/actions/runs/34970808886/job/104386355071",
+        "name": "Check",
+        "startedAt": "2026-09-15T12:46:10Z",
+        "status": "COMPLETED",
+        "workflowName": "CI"
+      },
+      {
+        "__typename": "CheckRun",
+        "completedAt": "2026-09-15T12:46:29Z",
+        "conclusion": "SUCCESS",
+        "detailsUrl": "https://github.com/tdenisenko/logex/actions/runs/34970808886/job/104386355108",
+        "name": "Format",
+        "startedAt": "2026-09-15T12:46:09Z",
+        "status": "COMPLETED",
+        "workflowName": "CI"
+      },
+      {
+        "__typename": "CheckRun",
+        "completedAt": "2026-09-15T12:46:59Z",
+        "conclusion": "SUCCESS",
+        "detailsUrl": "https://github.com/tdenisenko/logex/actions/runs/34970808886/job/104386355232",
+        "name": "Clippy",
+        "startedAt": "2026-09-15T12:46:09Z",
+        "status": "COMPLETED",
+        "workflowName": "CI"
+      },
+      {
+        "__typename": "CheckRun",
+        "completedAt": "2026-09-15T12:50:41Z",
+        "conclusion": "SUCCESS",
+        "detailsUrl": "https://github.com/tdenisenko/logex/actions/runs/34970808886/job/104386355115",
+        "name": "Test",
+        "startedAt": "2026-09-15T12:46:10Z",
+        "status": "COMPLETED",
+        "workflowName": "CI"
+      },
+      {
+        "__typename": "CheckRun",
+        "completedAt": "2026-09-15T12:50:36Z",
+        "conclusion": "SUCCESS",
+        "detailsUrl": "https://github.com/tdenisenko/logex/actions/runs/34970808886/job/104386355330",
+        "name": "macOS Test",
+        "startedAt": "2026-09-15T12:46:13Z",
+        "status": "COMPLETED",
+        "workflowName": "CI"
+      },
+      {
+        "__typename": "CheckRun",
+        "completedAt": "2026-09-15T12:50:09Z",
+        "conclusion": "SUCCESS",
+        "detailsUrl": "https://github.com/tdenisenko/logex/actions/runs/34970808886/job/104386354783",
+        "name": "Release Build",
+        "startedAt": "2026-09-15T12:46:09Z",
+        "status": "COMPLETED",
+        "workflowName": "CI"
+      }
+    ],
+    "url": "https://github.com/tdenisenko/logex/pull/167"
   }
 }
