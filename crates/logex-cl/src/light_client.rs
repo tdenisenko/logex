@@ -11,7 +11,7 @@ use logex_types::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use ssz::Decode;
+use ssz::{Decode, Encode};
 use ssz_derive::{Decode, Encode};
 use thiserror::Error;
 use tree_hash::{TreeHash as _, merkle_root, mix_in_length};
@@ -461,6 +461,20 @@ pub(crate) fn test_cached_light_client_fixture(slot: u64) -> TestLightClientCach
     tests::cached_light_client_fixture(slot)
 }
 
+#[cfg(test)]
+pub(crate) fn test_gossip_payloads(slot: u64, participants: usize) -> (Vec<u8>, Vec<u8>) {
+    tests::gossip_payloads(slot, participants)
+}
+
+#[cfg(test)]
+pub(crate) fn test_gossip_boundary_optimistic(
+    slot: u64,
+    attested_slot: u64,
+    signature_slot: u64,
+) -> Vec<u8> {
+    tests::gossip_boundary_optimistic(slot, attested_slot, signature_slot)
+}
+
 #[derive(Debug, Clone)]
 enum DecodedBootstrap {
     Capella(LightClientBootstrapCapella),
@@ -550,6 +564,89 @@ pub fn decode_optimistic_update(
     bytes: &[u8],
 ) -> Result<LightClientOptimisticUpdateStatus, LightClientDecodeError> {
     Ok(decode_optimistic_update_payload(bytes)?.status())
+}
+
+/// Fields needed for gossip admission and forwarding, without authenticating a payload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GossipUpdateMetadata {
+    pub attested_slot: u64,
+    pub signature_slot: u64,
+    pub finalized_slot: Option<u64>,
+    pub participants: usize,
+    // Exact corresponding optimistic fields, including the entire header and aggregate.
+    pub optimistic_bytes: Vec<u8>,
+}
+
+pub(crate) fn gossip_update_metadata(
+    bytes: &[u8],
+    finality: bool,
+) -> Result<GossipUpdateMetadata, LightClientDecodeError> {
+    let (attested_slot, signature_slot, finalized_slot, participants, optimistic_bytes, wire_fork) =
+        if finality {
+            let decoded = decode_finality_update_payload(bytes)?;
+            let status = decoded.status();
+            let optimistic_bytes = match &decoded {
+                DecodedFinalityUpdate::Capella(p) => LightClientOptimisticUpdateCapella {
+                    attested_header: p.attested_header.clone(),
+                    sync_aggregate: p.sync_aggregate.clone(),
+                    signature_slot: p.signature_slot,
+                }
+                .as_ssz_bytes(),
+                DecodedFinalityUpdate::Deneb(p) => LightClientOptimisticUpdateDeneb {
+                    attested_header: p.attested_header.clone(),
+                    sync_aggregate: p.sync_aggregate.clone(),
+                    signature_slot: p.signature_slot,
+                }
+                .as_ssz_bytes(),
+                DecodedFinalityUpdate::Electra(p) => LightClientOptimisticUpdateDeneb {
+                    attested_header: p.attested_header.clone(),
+                    sync_aggregate: p.sync_aggregate.clone(),
+                    signature_slot: p.signature_slot,
+                }
+                .as_ssz_bytes(),
+            };
+            (
+                status.attested_header.beacon_slot,
+                status.signature_slot,
+                Some(status.finalized_header.beacon_slot),
+                status.sync_committee_participants,
+                optimistic_bytes,
+                status.fork,
+            )
+        } else {
+            let decoded = decode_optimistic_update_payload(bytes)?;
+            let wire_fork = match &decoded {
+                DecodedOptimisticUpdate::Capella(_) => ConsensusDataFork::Capella,
+                DecodedOptimisticUpdate::Deneb(_) => ConsensusDataFork::Deneb,
+            };
+            let status = decoded.status();
+            (
+                status.attested_header.beacon_slot,
+                status.signature_slot,
+                None,
+                status.sync_committee_participants,
+                bytes.to_vec(),
+                wire_fork,
+            )
+        };
+    let expected = fork_for_slot(attested_slot);
+    let layout_matches = wire_fork == expected
+        || (!finality
+            && wire_fork == ConsensusDataFork::Deneb
+            && expected == ConsensusDataFork::Electra);
+    if !layout_matches || fork_version_at_slot(attested_slot) < CAPELLA_FORK_VERSION {
+        return Err(LightClientDecodeError::UnsupportedFork {
+            payload_kind: "gossip light-client update",
+            details: "wire layout does not match attested-slot fork".to_owned(),
+        });
+    }
+    Ok(GossipUpdateMetadata {
+        attested_slot,
+        signature_slot,
+        finalized_slot,
+        participants,
+        optimistic_bytes,
+    })
 }
 
 /// Validate locally persisted cache commitments without replaying historical
@@ -746,6 +843,22 @@ pub(crate) fn apply_finality_update_payload(
     ),
     LightClientVerificationError,
 > {
+    apply_finality_update_payload_at_slot(bytes, store, wall_clock_slot())
+}
+
+pub(crate) fn apply_finality_update_payload_at_slot(
+    bytes: &[u8],
+    store: &VerifiedLightClientStore,
+    current_slot: u64,
+) -> Result<
+    (
+        LightClientFinalityUpdateStatus,
+        VerifiedLightClientStore,
+        VerifiedLightClientHeader,
+        VerifiedLightClientHeader,
+    ),
+    LightClientVerificationError,
+> {
     let decoded = decode_finality_update_payload(bytes)?;
     let attested_header = decoded.attested_verified_header()?;
     let finalized_header = decoded.finalized_verified_header()?;
@@ -758,12 +871,13 @@ pub(crate) fn apply_finality_update_payload(
     };
     let applied = process_light_client_update(
         store,
-        verify_valid_light_client_update(
+        verify_valid_light_client_update_at_slot(
             store,
             update,
             decoded.finality_branch_for_verification(),
             None,
             decoded.sync_aggregate(),
+            current_slot,
         )?,
     )?;
     Ok((
@@ -789,6 +903,21 @@ pub(crate) fn apply_optimistic_update_payload(
     ),
     LightClientVerificationError,
 > {
+    apply_optimistic_update_payload_at_slot(bytes, store, wall_clock_slot())
+}
+
+pub(crate) fn apply_optimistic_update_payload_at_slot(
+    bytes: &[u8],
+    store: &VerifiedLightClientStore,
+    current_slot: u64,
+) -> Result<
+    (
+        LightClientOptimisticUpdateStatus,
+        VerifiedLightClientStore,
+        VerifiedLightClientHeader,
+    ),
+    LightClientVerificationError,
+> {
     let decoded = decode_optimistic_update_payload(bytes)?;
     let attested_header = decoded.attested_verified_header()?;
     let update = VerifiedLightClientUpdate {
@@ -800,7 +929,14 @@ pub(crate) fn apply_optimistic_update_payload(
     };
     let applied = process_light_client_update(
         store,
-        verify_valid_light_client_update(store, update, None, None, decoded.sync_aggregate())?,
+        verify_valid_light_client_update_at_slot(
+            store,
+            update,
+            None,
+            None,
+            decoded.sync_aggregate(),
+            current_slot,
+        )?,
     )?;
     Ok((applied.optimistic_status, applied.store, attested_header))
 }
@@ -1471,6 +1607,24 @@ fn verify_valid_light_client_update(
     next_sync_committee_branch: Option<Vec<B256>>,
     sync_aggregate: &SyncAggregateRaw,
 ) -> Result<VerifiedLightClientUpdate, LightClientVerificationError> {
+    verify_valid_light_client_update_at_slot(
+        store,
+        update,
+        finality_branch,
+        next_sync_committee_branch,
+        sync_aggregate,
+        wall_clock_slot(),
+    )
+}
+
+fn verify_valid_light_client_update_at_slot(
+    store: &VerifiedLightClientStore,
+    update: VerifiedLightClientUpdate,
+    finality_branch: Option<Vec<B256>>,
+    next_sync_committee_branch: Option<Vec<B256>>,
+    sync_aggregate: &SyncAggregateRaw,
+    current_slot: u64,
+) -> Result<VerifiedLightClientUpdate, LightClientVerificationError> {
     if update.participants < MIN_SYNC_COMMITTEE_PARTICIPANTS {
         return Err(LightClientVerificationError::NoSyncCommitteeParticipants);
     }
@@ -1481,7 +1635,6 @@ fn verify_valid_light_client_update(
         .map(|header| header.beacon.slot)
         .unwrap_or(0);
     let attested_slot = update.attested_header.beacon.slot;
-    let current_slot = wall_clock_slot();
     if update.signature_slot > current_slot {
         return Err(LightClientVerificationError::SignatureFromFuture {
             signature_slot: update.signature_slot,
@@ -2267,7 +2420,17 @@ mod tests {
         assert!(slot >= 364_032 * 32);
         assert!(slot % 8192 <= 8188);
         let sk = SecretKey::key_gen(&[7u8; 32], &[]).unwrap();
-        let committee = sync_committee_from_secret_key(&sk);
+        let mut committee = sync_committee_from_secret_key(&sk);
+        // Every member is the same local test key so multi-participant gossip
+        // controls can aggregate valid signatures without additional fixtures.
+        committee.pubkeys = FixedBytes::from_slice(&sk.sk_to_pk().compress().repeat(512));
+        let public_key = sk.sk_to_pk();
+        committee.aggregate_pubkey = FixedBytes::from_slice(
+            &blst::min_pk::AggregatePublicKey::aggregate(&vec![&public_key; 512], false)
+                .unwrap()
+                .to_public_key()
+                .compress(),
+        );
         let execution = deneb_execution(22_000_000, 0x21);
         let execution_branch = ExecutionBranch::repeat_byte(0xb1);
         let mut header = LightClientHeaderDeneb {
@@ -2856,6 +3019,63 @@ mod tests {
         }
     }
 
+    pub(super) fn gossip_boundary_optimistic(
+        slot: u64,
+        attested_slot: u64,
+        signature_slot: u64,
+    ) -> Vec<u8> {
+        let (_, bytes) = gossip_payloads(slot, 1);
+        let mut payload = LightClientOptimisticUpdateDeneb::from_ssz_bytes(&bytes).unwrap();
+        payload.attested_header.beacon.slot = attested_slot;
+        payload.signature_slot = signature_slot;
+        payload.sync_aggregate = signed_sync_aggregate(
+            &SecretKey::key_gen(&[7u8; 32], &[]).unwrap(),
+            &payload.attested_header.beacon,
+            signature_slot,
+        );
+        payload.as_ssz_bytes()
+    }
+
+    pub(super) fn gossip_payloads(slot: u64, participants: usize) -> (Vec<u8>, Vec<u8>) {
+        assert!((1..=512).contains(&participants));
+        let fixture = cached_light_client_fixture(slot);
+        let mut payload = LightClientFinalityUpdateElectra::from_ssz_bytes(
+            &fixture.payloads.finality_update.unwrap().bytes,
+        )
+        .unwrap();
+        payload.finalized_header.beacon.slot = slot + 1;
+        payload.attested_header.beacon.slot = slot + 2;
+        payload.attested_header.beacon.state_root = branch_root(
+            beacon_block_header_root(&payload.finalized_header.beacon),
+            &branch_from_fixed(&payload.finality_branch),
+            subtree_index(ELECTRA_FINALIZED_ROOT_GINDEX),
+        );
+        payload.signature_slot = slot + 3;
+        let sk = SecretKey::key_gen(&[7u8; 32], &[]).unwrap();
+        let aggregate =
+            signed_sync_aggregate(&sk, &payload.attested_header.beacon, payload.signature_slot);
+        let signature =
+            BlstSignature::from_bytes(aggregate.sync_committee_signature.as_slice()).unwrap();
+        let signatures = vec![&signature; participants];
+        let signature = blst::min_pk::AggregateSignature::aggregate(&signatures, false)
+            .unwrap()
+            .to_signature();
+        let mut bits = [0u8; 64];
+        for index in 0..participants {
+            bits[index / 8] |= 1 << (index % 8);
+        }
+        payload.sync_aggregate = SyncAggregateRaw {
+            sync_committee_bits: FixedBytes::from(bits),
+            sync_committee_signature: FixedBytes::from_slice(&signature.compress()),
+        };
+        let optimistic = LightClientOptimisticUpdateDeneb {
+            attested_header: payload.attested_header.clone(),
+            sync_aggregate: payload.sync_aggregate.clone(),
+            signature_slot: payload.signature_slot,
+        };
+        (payload.as_ssz_bytes(), optimistic.as_ssz_bytes())
+    }
+
     fn signed_sync_aggregate(
         sk: &SecretKey,
         attested_header: &BeaconBlockHeaderSsz,
@@ -3309,6 +3529,43 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn gossip_metadata_rejects_upgraded_outer_wire_but_rpc_verifier_preserves_header_support() {
+        let slot = 194_048 * 32 + 16;
+        let sk = SecretKey::key_gen(&[7u8; 32], &[]).unwrap();
+        let header = capella_header(slot);
+        let verified = verify_capella_header(&header).unwrap();
+        let store = VerifiedLightClientStore {
+            checkpoint_root: beacon_block_header_root(&header.beacon),
+            bootstrap_slot: slot,
+            current_sync_committee: sync_committee_from_secret_key(&sk).to_persisted(),
+            next_sync_committee: None,
+            finalized_header: verified.clone(),
+            optimistic_header: verified,
+            best_valid_update: None,
+            previous_max_active_participants: 0,
+            current_max_active_participants: 0,
+        };
+        let mut attested = header;
+        attested.beacon.slot += 1;
+        let aggregate = signed_sync_aggregate(&sk, &attested.beacon, slot + 2);
+        let canonical = LightClientOptimisticUpdateCapella {
+            attested_header: attested.clone(),
+            sync_aggregate: aggregate.clone(),
+            signature_slot: slot + 2,
+        }
+        .as_ssz_bytes();
+        let upgraded = LightClientOptimisticUpdateDeneb {
+            attested_header: upgrade_capella_header(attested),
+            sync_aggregate: aggregate,
+            signature_slot: slot + 2,
+        }
+        .as_ssz_bytes();
+        assert!(apply_optimistic_update_payload(&upgraded, &store).is_ok());
+        assert!(gossip_update_metadata(&canonical, false).is_ok());
+        assert!(gossip_update_metadata(&upgraded, false).is_err());
     }
 
     fn capella_header(slot: u64) -> LightClientHeaderCapella {
