@@ -1,0 +1,195 @@
+{
+  "commit": "2556fad6a3a2fa0bd1319c591403670271bfb95d",
+  "rustc": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+  "gates": [
+    {
+      "name": "vendor",
+      "command": [
+        "python3",
+        "tools/verify_datafusion_vendor.py"
+      ],
+      "exit_code": 0,
+      "started": "2026-09-15T04:22:55.601434+00:00",
+      "finished": "2026-09-15T04:22:55.666786+00:00",
+      "sha256": "d8d80949d6f3378c14456842b531f0cade514179e4c94781b95ff9abb6447675",
+      "log": "/private/tmp/logex-rpc-participation.2exa66si/gates/vendor.log"
+    },
+    {
+      "name": "format",
+      "command": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "exit_code": 0,
+      "started": "2026-09-15T04:22:55.667232+00:00",
+      "finished": "2026-09-15T04:22:56.663085+00:00",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "log": "/private/tmp/logex-rpc-participation.2exa66si/gates/format.log"
+    },
+    {
+      "name": "check",
+      "command": [
+        "cargo",
+        "check",
+        "--workspace",
+        "--all-targets",
+        "--locked",
+        "--offline",
+        "-j",
+        "2"
+      ],
+      "exit_code": 0,
+      "started": "2026-09-15T04:22:56.663797+00:00",
+      "finished": "2026-09-15T04:23:08.506451+00:00",
+      "sha256": "18c40a83e11dbaaf5fe53e11a4b655b035adb76b652279c1006bfdd472019eb7",
+      "log": "/private/tmp/logex-rpc-participation.2exa66si/gates/check.log"
+    },
+    {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--locked",
+        "--offline",
+        "-j",
+        "2",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit_code": 0,
+      "started": "2026-09-15T04:23:08.507572+00:00",
+      "finished": "2026-09-15T04:23:19.373774+00:00",
+      "sha256": "92687117ba71cb0580296854815277f3ee825666d2ce395015f54dae1f919dfa",
+      "log": "/private/tmp/logex-rpc-participation.2exa66si/gates/clippy.log"
+    },
+    {
+      "name": "test",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace",
+        "--all-targets",
+        "--locked",
+        "--offline",
+        "-j",
+        "2"
+      ],
+      "exit_code": 0,
+      "started": "2026-09-15T04:23:19.374498+00:00",
+      "finished": "2026-09-15T04:26:34.508796+00:00",
+      "sha256": "694ccbff55b59e21156e0ac31d3df2ef4f6f10a4db8bda7fdb0a4af8fa65ef47",
+      "log": "/private/tmp/logex-rpc-participation.2exa66si/gates/test.log"
+    },
+    {
+      "name": "doc",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace",
+        "--doc",
+        "--locked",
+        "--offline",
+        "-j",
+        "2"
+      ],
+      "exit_code": 0,
+      "started": "2026-09-15T04:26:34.510017+00:00",
+      "finished": "2026-09-15T04:26:56.724854+00:00",
+      "sha256": "fd252fb415ec72808cae1828d0762ab60537321ad4c60418ad95535d0aa2c9b5",
+      "log": "/private/tmp/logex-rpc-participation.2exa66si/gates/doc.log"
+    },
+    {
+      "name": "release-build",
+      "command": [
+        "cargo",
+        "build",
+        "-p",
+        "logex-node",
+        "--release",
+        "--locked",
+        "--offline",
+        "-j",
+        "2"
+      ],
+      "exit_code": 0,
+      "started": "2026-09-15T04:26:56.725767+00:00",
+      "finished": "2026-09-15T04:28:24.993127+00:00",
+      "sha256": "46b2dba2d395da5f37ab17daf8f9b3c635a5bd5b94a724af952ad63072587729",
+      "log": "/private/tmp/logex-rpc-participation.2exa66si/gates/release-build.log"
+    }
+  ],
+  "workspace_test_summary": {
+    "groups": 25,
+    "passed": 1327,
+    "failed": 0,
+    "ignored": 23
+  },
+  "branch": "audit/consensus-rpc-participation",
+  "base": "b72c8a01840ef64c2ded41bf6a8db1cbb45f7953",
+  "source_sha256": {
+    "crates/logex-cl/src/lib.rs": "6ab6d715a29973627c3fd721840ae2df7d6cf4e4ac978b09a991aeedcb54541d",
+    "crates/logex-cl/src/network.rs": "b40d295c46c99ce84efda9f9e9536216add9f71666ed534a9fae3af304d8dfb6",
+    "crates/logex-cl/src/light_client.rs": "beff139c84233d4b7e41d47e70bbfd0ea740fe3372be2ecb55343e209a4e115f"
+  },
+  "focused_evidence": {
+    "source_commit": "2556fad6a3a2fa0bd1319c591403670271bfb95d",
+    "source_sha256": {
+      "crates/logex-cl/src/lib.rs": "6ab6d715a29973627c3fd721840ae2df7d6cf4e4ac978b09a991aeedcb54541d",
+      "crates/logex-cl/src/network.rs": "b40d295c46c99ce84efda9f9e9536216add9f71666ed534a9fae3af304d8dfb6",
+      "crates/logex-cl/src/light_client.rs": "beff139c84233d4b7e41d47e70bbfd0ea740fe3372be2ecb55343e209a4e115f"
+    },
+    "base": "b72c8a01840ef64c2ded41bf6a8db1cbb45f7953",
+    "logs": {
+      "/private/tmp/logex-rpc-participation.2exa66si/implementation/after-controls.log": "d62fc2c93d244d4c6eba403aae0c71fe012afaac10cdbf4c6cb15b76dcb2aead",
+      "/private/tmp/logex-rpc-participation.2exa66si/implementation/after-focused.log": "5dfa6b87836ffd1ac6b528caf5ac66a26e818b59fefe5b794c0d5b96f4ad14ce",
+      "/private/tmp/logex-rpc-participation.2exa66si/implementation/all-cl.log": "01229d5840719b2a49a22721aeeb1eea8c8bb0074b6e9b2c25273241efd5681e",
+      "/private/tmp/logex-rpc-participation.2exa66si/implementation/before.log": "7670f476ba5ded7f7cd241d446ce1c329a71118c580341404b05e07885fae32b",
+      "/private/tmp/logex-rpc-participation.2exa66si/implementation/cache-ranking-before.log": "dd1e03adfbcacb4798be7996491544a566bc1e2f04f653a6ffabf270a7d5e525",
+      "/private/tmp/logex-rpc-participation.2exa66si/implementation/clippy.log": "dbef208b60232a61e448572938a6a56e0c9a18830fa77a34e32dabc495ae302e",
+      "/private/tmp/logex-rpc-participation.2exa66si/implementation/notes.txt": "68967b3edf300648f540a3358063521fd7b4db0269e2f1f2c478c06709b15952"
+    },
+    "review": {
+      "commit": "2556fad6a3a2fa0bd1319c591403670271bfb95d",
+      "base": "b72c8a01840ef64c2ded41bf6a8db1cbb45f7953",
+      "source_sha256": {
+        "crates/logex-cl/src/lib.rs": "6ab6d715a29973627c3fd721840ae2df7d6cf4e4ac978b09a991aeedcb54541d",
+        "crates/logex-cl/src/network.rs": "b40d295c46c99ce84efda9f9e9536216add9f71666ed534a9fae3af304d8dfb6",
+        "crates/logex-cl/src/light_client.rs": "beff139c84233d4b7e41d47e70bbfd0ea740fe3372be2ecb55343e209a4e115f"
+      },
+      "review_sha256": "473b9ec40e90852a06579a31e36ee878f92b7d8b000b619bf443cdaf8facdf8c",
+      "outcome": "All reviewed source bytes match immutable source commit; no actionable finding."
+    },
+    "root_review": {
+      "base": "b72c8a01840ef64c2ded41bf6a8db1cbb45f7953",
+      "pinned_specification_sha256": {
+        "/private/tmp/logex-gossip-admission.ytg0v60d/specs-altair-light-client-sync-protocol.md-v1.6.0": "d54fd1d8843a36140aeef91c15a905805789506bcb3568b42f72eedb1aee9841",
+        "/private/tmp/logex-gossip-admission.ytg0v60d/altair-lc-p2p-v1.6.0.md": "25cb678e5e37c0f3dfa815a1cc978670442b05f3b1241a3550e8b89c6f59a4ff"
+      },
+      "interpretation": [
+        "Every relevant verified update contributes to maximum participation and best-update selection before optimistic advancement.",
+        "Singleton RPC context is attested-slot fork digest; gossip propagation timing is not an RPC requirement.",
+        "Global decoded status summaries may originate from range responses; they are not identity metadata for singleton cached bytes.",
+        "Success credit reflects authenticated peer response health, not local durable publication.",
+        "drive_rpc_requests internally seeds current headers; guard avoids explicit materialization for unchanged headers, and unchanged transactions skip scheduling entirely."
+      ],
+      "limits": [
+        "Source review and pinned specifications; implementation test evidence recorded separately.",
+        "No new memory budget, retention policy, benchmark or remote work."
+      ]
+    }
+  },
+  "scope": [
+    "Constructed signed objects and temporary state only; no discovery, swarm polling, live peers, remote host or user data.",
+    "No benchmark or throughput claim. Necessary verification remains; no-op state/cache/summary avoids snapshot clone and write.",
+    "Two baseline participation failures; subsequent cache-ranking failure after removal of stale filters; initial post-fix reopen failure caused by old fixture dates.",
+    "Peer success credits authenticated response health before local persistence; local failure does not publish candidate state.",
+    "Changed request scheduling still seeds headers internally; direct materialization is gated on changed verified headers.",
+    "Aggregate response memory, retention and whole-history persistence cost remain open."
+  ]
+}

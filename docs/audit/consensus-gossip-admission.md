@@ -71,7 +71,10 @@ initially ran out of disk space; its unchanged-command retry passed after
 cleanup of only the repository's disposable Cargo debug incremental cache.
 All seven required local gates passed on `d3aeb891`. See the [gate and review
 record](baselines/2026-09-15-consensus-gossip-admission-gates.json) for commands,
-source binding, log hashes and retained attempts. PR/CI remains pending.
+source binding, log hashes and retained attempts. All six Linux/macOS CI jobs
+passed at head `537f23c4` in run `34926988735`. [PR #161](https://github.com/tdenisenko/logex/pull/161)
+merged as `b72c8a01` on September 15 at 04:05:34 UTC; see the [CI and merge
+record](baselines/2026-09-15-consensus-gossip-admission-ci.json).
 The first gate attempt on `4bb4c30a` was deliberately stopped during tests for
 the availability correction after vendor, format, check and Clippy passed.
 Its interrupted logs remain recorded separately from final validation.
@@ -100,7 +103,9 @@ Early messages are ignored without a replay queue. RPC recovery remains availabl
 Forwarding history is bounded to the latest finality correspondence and an
 optimistic slot, plus one pending acceptance; successful library reporting means
 forwarding was invoked, not acknowledged by remote recipients. History is local
-to the running process. Unknown/inactive topics skip application decompression;
+to the running process. LogEx does not enable optional library gossip peer
+scoring; the committee correction changes validation outcomes and counters,
+without claiming an observed peer score reduction or ban. Unknown/inactive topics skip application decompression;
 message-ID decoding before duplicate lookup remains globally bounded as in PR #160.
 
 Whole consensus snapshot integrity/retention, complete network memory accounting,
@@ -119,3 +124,8 @@ no-op transactions. Removed duplicate gossip-handler success/error branches;
 existing raw-Snappy ID handling remains required. Static call-site review and
 strict CL Clippy found no additional obsolete caller in the touched paths. The controlled-clock wrappers preserve original
 RPC wall-clock entry points.
+
+The subsequent [RPC participation pass](consensus-rpc-participation.md) shares
+conditional recording across transports and separates actual cached-payload
+priority from diagnostic summaries after range responses. Its validation and
+merge status are recorded separately.
