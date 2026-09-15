@@ -48,13 +48,13 @@ use crate::rpc::{
     LIGHT_CLIENT_BOOTSTRAP_PROTOCOL_ID, LIGHT_CLIENT_FINALITY_UPDATE_PROTOCOL_ID,
     LIGHT_CLIENT_OPTIMISTIC_UPDATE_PROTOCOL_ID, LIGHT_CLIENT_UPDATES_BY_RANGE_PROTOCOL_ID,
     LightClientUpdatesByRangeRequest, METADATA_V1_PROTOCOL_ID, METADATA_V2_PROTOCOL_ID,
-    METADATA_V3_PROTOCOL_ID, MetaData, PING_PROTOCOL_ID, RawRpcResponse, STATUS_V1_PROTOCOL_ID,
-    STATUS_V2_PROTOCOL_ID, StatusMessage, build_beacon_blocks_by_range_behaviour,
-    build_beacon_blocks_by_root_behaviour, build_goodbye_behaviour,
-    build_light_client_bootstrap_behaviour, build_light_client_finality_update_behaviour,
-    build_light_client_optimistic_update_behaviour, build_light_client_updates_by_range_behaviour,
-    build_metadata_behaviour, build_ping_behaviour, build_status_behaviour, invalid_request,
-    rate_limited, resource_unavailable,
+    METADATA_V3_PROTOCOL_ID, MetaData, PING_PROTOCOL_ID, RATE_LIMITED_CODE, RawRpcResponse,
+    STATUS_V1_PROTOCOL_ID, STATUS_V2_PROTOCOL_ID, StatusMessage,
+    build_beacon_blocks_by_range_behaviour, build_beacon_blocks_by_root_behaviour,
+    build_goodbye_behaviour, build_light_client_bootstrap_behaviour,
+    build_light_client_finality_update_behaviour, build_light_client_optimistic_update_behaviour,
+    build_light_client_updates_by_range_behaviour, build_metadata_behaviour, build_ping_behaviour,
+    build_status_behaviour, invalid_request, rate_limited, resource_unavailable,
 };
 use crate::{
     ConsensusStore, LightClientVerificationError, MAINNET_CONSENSUS_CHAIN_SPEC,
@@ -586,6 +586,7 @@ async fn stop_for_consensus_storage_failure(
 }
 
 struct ConsensusNetwork {
+    response_budgets: RpcResponseBudgets,
     config: ConsensusNetworkConfig,
     consensus: Arc<ConsensusStore>,
     storage_failure: watch::Receiver<Option<Arc<str>>>,
@@ -1397,6 +1398,61 @@ fn consensus_response_payload_bytes(response: &Eth2RpcResponse) -> u64 {
     }
 }
 
+struct RpcResponseSummary {
+    kind: &'static str,
+    chunks: usize,
+    payload_bytes: u64,
+    error_code: Option<u8>,
+}
+
+impl std::fmt::Debug for RpcResponseSummary {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RpcResponseSummary")
+            .field("kind", &self.kind)
+            .field("chunks", &self.chunks)
+            .field("payload_bytes", &self.payload_bytes)
+            .field("error_code", &self.error_code)
+            .finish()
+    }
+}
+
+fn rpc_response_summary(response: &Eth2RpcResponse) -> RpcResponseSummary {
+    let (kind, chunks, error_code) = match response {
+        Eth2RpcResponse::Status(_) => ("status", 1, None),
+        Eth2RpcResponse::Goodbye(_) => ("goodbye", 1, None),
+        Eth2RpcResponse::MetaData(_) => ("metadata", 1, None),
+        Eth2RpcResponse::Ping(_) => ("ping", 1, None),
+        Eth2RpcResponse::LightClientBootstrap(_) => ("light_client_bootstrap", 1, None),
+        Eth2RpcResponse::LightClientFinalityUpdate(_) => ("light_client_finality_update", 1, None),
+        Eth2RpcResponse::LightClientOptimisticUpdate(_) => {
+            ("light_client_optimistic_update", 1, None)
+        }
+        Eth2RpcResponse::LightClientUpdatesByRange(values) => {
+            ("light_client_updates_by_range", values.len(), None)
+        }
+        Eth2RpcResponse::BeaconBlocksByRange(values) => {
+            ("beacon_blocks_by_range", values.len(), None)
+        }
+        Eth2RpcResponse::BeaconBlocksByRoot(values) => {
+            ("beacon_blocks_by_root", values.len(), None)
+        }
+        Eth2RpcResponse::CachedBeaconBlocksByRange(values) => {
+            ("cached_beacon_blocks_by_range", values.len(), None)
+        }
+        Eth2RpcResponse::CachedBeaconBlocksByRoot(values) => {
+            ("cached_beacon_blocks_by_root", values.len(), None)
+        }
+        Eth2RpcResponse::Error(error) => ("error", 1, Some(error.code)),
+    };
+    RpcResponseSummary {
+        kind,
+        chunks,
+        payload_bytes: consensus_response_payload_bytes(response),
+        error_code,
+    }
+}
+
 #[derive(Debug)]
 struct DiscoveryQueryResult {
     target: NodeId,
@@ -1697,6 +1753,7 @@ struct PeerLifecycleState {
     rpc_failures: u32,
     disconnects: u32,
     cooldown_until: Option<Instant>,
+    remote_busy_until: Option<Instant>,
     ignored_for_run: bool,
     deferred_until_post_bootstrap: bool,
 }
@@ -1715,6 +1772,7 @@ impl PeerLifecycleState {
             rpc_failures: 0,
             disconnects: 0,
             cooldown_until: None,
+            remote_busy_until: None,
             ignored_for_run: false,
             deferred_until_post_bootstrap: false,
         }
@@ -1735,6 +1793,7 @@ impl PeerLifecycleState {
     }
 
     fn record_success(&mut self, kind: RpcRequestKind) {
+        self.remote_busy_until = None;
         let useful_rpc = matches!(
             kind,
             RpcRequestKind::LightClientBootstrap
@@ -1812,6 +1871,7 @@ impl PeerLifecycleState {
     }
 
     fn record_disconnect(&mut self, now: Instant) -> Duration {
+        self.remote_busy_until = None;
         self.disconnects = self.disconnects.saturating_add(1);
         let attempts = self.transport_failures.max(self.disconnects);
         let delay = peer_backoff_delay(attempts);
@@ -2134,7 +2194,8 @@ impl ConsensusNetwork {
             }
         }
 
-        let swarm = build_rpc_swarm(local_keypair, config.max_peers)?;
+        let response_budgets = RpcResponseBudgets::default();
+        let swarm = build_rpc_swarm(local_keypair, config.max_peers, response_budgets.clone())?;
         let mut verified_beacon_blocks =
             verified_beacon_blocks_from_anchor_records(&consensus.ordered_anchors());
         if let Some(store) = consensus.light_client_store() {
@@ -2205,6 +2266,7 @@ impl ConsensusNetwork {
             last_peer_policy_event: None,
             last_rpc_failure: None,
             last_response_send_failure: None,
+            response_budgets,
             verified_beacon_blocks,
             verified_beacon_block_children,
             verified_beacon_block_payloads: BeaconPayloadCache::default(),
@@ -3098,14 +3160,15 @@ impl ConsensusNetwork {
                         },
                     };
                     if let Err(response) = self.send_rpc_response(kind, channel, response) {
+                        let response_summary = rpc_response_summary(response.response());
                         let peer_context = self.peer_context(peer);
                         self.last_response_send_failure = Some(format!(
-                            "{peer_context} request={} response={response:?}",
+                            "{peer_context} request={} response={response_summary:?}",
                             kind.as_str()
                         ));
                         tracing::debug!(
                             %peer,
-                            error = ?response,
+                            error = ?response_summary,
                             "failed to send consensus RPC response"
                         );
                     }
@@ -3378,24 +3441,17 @@ impl ConsensusNetwork {
                             _ => resource_unavailable("unsupported request on metadata RPC family"),
                         },
                     };
-                    let payload_bytes = consensus_response_payload_bytes(&response);
-                    let result = self
-                        .swarm
-                        .behaviour_mut()
-                        .metadata_rpc
-                        .inner
-                        .send_response(channel, response.into());
-                    if result.is_ok() {
-                        self.record_p2p_upload_payload(payload_bytes);
-                    }
+                    let result =
+                        self.send_rpc_response(RpcRequestKind::MetaData, channel, response);
                     if let Err(response) = result {
+                        let response_summary = rpc_response_summary(response.response());
                         let peer_context = self.peer_context(peer);
                         self.last_response_send_failure = Some(format!(
-                            "{peer_context} request=metadata response={response:?}"
+                            "{peer_context} request=metadata response={response_summary:?}"
                         ));
                         tracing::debug!(
                             %peer,
-                            error = ?response,
+                            error = ?response_summary,
                             "failed to send consensus metadata RPC response"
                         );
                     }
@@ -4081,6 +4137,20 @@ impl ConsensusNetwork {
                     self.drive_rpc_requests();
                 }
             }
+            (kind, Eth2RpcResponse::Error(error)) if error.code == RATE_LIMITED_CODE => {
+                self.peer_lifecycle
+                    .entry(peer)
+                    .or_default()
+                    .remote_busy_until = Some(Instant::now() + Duration::from_secs(1));
+                self.last_rpc_failure = Some(format!(
+                    "{} request={} temporarily unavailable error_code={}",
+                    self.peer_context(peer),
+                    kind.as_str(),
+                    error.code,
+                ));
+                tracing::debug!(%peer, request = kind.as_str(), error_code = error.code,
+                    "deferring requests to temporarily busy consensus peer");
+            }
             (kind, Eth2RpcResponse::Error(error)) => {
                 self.request_failures.increment(kind);
                 let peer_failures = self.record_peer_failure(peer, kind);
@@ -4128,6 +4198,7 @@ impl ConsensusNetwork {
                 }
             }
             (kind, response) => {
+                let response = rpc_response_summary(&response);
                 let peer_context = self.peer_context(peer);
                 self.last_rpc_failure = Some(format!(
                     "{peer_context} request={} unexpected_response={response:?}",
@@ -4304,7 +4375,7 @@ impl ConsensusNetwork {
                 .then_with(|| left.cmp(right))
         });
         for peer in connected {
-            if self.closing_peers.contains(&peer) {
+            if self.closing_peers.contains(&peer) || self.peer_remote_busy(peer, now) {
                 continue;
             }
             if self
@@ -4413,79 +4484,92 @@ impl ConsensusNetwork {
         }
     }
 
+    fn prepare_rpc_response(
+        &self,
+        kind: RpcRequestKind,
+        response: Eth2RpcResponse,
+    ) -> BudgetedRpcResponse {
+        let beacon = matches!(
+            kind,
+            RpcRequestKind::BeaconBlocksByRange | RpcRequestKind::BeaconBlocksByRoot
+        );
+        BudgetedRpcResponse::from(response).prepare_for_send(&self.response_budgets, beacon)
+    }
+
     fn send_rpc_response(
         &mut self,
         kind: RpcRequestKind,
         channel: request_response::ResponseChannel<BudgetedRpcResponse>,
         response: Eth2RpcResponse,
-    ) -> Result<(), Eth2RpcResponse> {
-        let payload_bytes = consensus_response_payload_bytes(&response);
+    ) -> Result<(), Box<BudgetedRpcResponse>> {
+        let response = self.prepare_rpc_response(kind, response);
+        let payload_bytes = consensus_response_payload_bytes(response.response());
         let result = match kind {
             RpcRequestKind::Status => self
                 .swarm
                 .behaviour_mut()
                 .status_rpc
                 .inner
-                .send_response(channel, response.into()),
+                .send_response(channel, response),
             RpcRequestKind::Goodbye => self
                 .swarm
                 .behaviour_mut()
                 .goodbye_rpc
                 .inner
-                .send_response(channel, response.into()),
+                .send_response(channel, response),
             RpcRequestKind::MetaData => self
                 .swarm
                 .behaviour_mut()
                 .metadata_rpc
                 .inner
-                .send_response(channel, response.into()),
+                .send_response(channel, response),
             RpcRequestKind::Ping => self
                 .swarm
                 .behaviour_mut()
                 .ping_rpc
                 .inner
-                .send_response(channel, response.into()),
+                .send_response(channel, response),
             RpcRequestKind::LightClientBootstrap => self
                 .swarm
                 .behaviour_mut()
                 .light_client_bootstrap_rpc
                 .inner
-                .send_response(channel, response.into()),
+                .send_response(channel, response),
             RpcRequestKind::LightClientUpdatesByRange => self
                 .swarm
                 .behaviour_mut()
                 .light_client_updates_by_range_rpc
                 .inner
-                .send_response(channel, response.into()),
+                .send_response(channel, response),
             RpcRequestKind::LightClientFinalityUpdate => self
                 .swarm
                 .behaviour_mut()
                 .light_client_finality_update_rpc
                 .inner
-                .send_response(channel, response.into()),
+                .send_response(channel, response),
             RpcRequestKind::LightClientOptimisticUpdate => self
                 .swarm
                 .behaviour_mut()
                 .light_client_optimistic_update_rpc
                 .inner
-                .send_response(channel, response.into()),
+                .send_response(channel, response),
             RpcRequestKind::BeaconBlocksByRange => self
                 .swarm
                 .behaviour_mut()
                 .beacon_blocks_by_range_rpc
                 .inner
-                .send_response(channel, response.into()),
+                .send_response(channel, response),
             RpcRequestKind::BeaconBlocksByRoot => self
                 .swarm
                 .behaviour_mut()
                 .beacon_blocks_by_root_rpc
                 .inner
-                .send_response(channel, response.into()),
+                .send_response(channel, response),
         };
         if result.is_ok() {
             self.record_p2p_upload_payload(payload_bytes);
         }
-        result.map_err(|response| response.into_parts().0)
+        result.map_err(Box::new)
     }
 
     fn record_p2p_download_payload(&mut self, payload_bytes: u64) {
@@ -4551,7 +4635,8 @@ impl ConsensusNetwork {
     }
 
     fn ensure_request(&mut self, peer: PeerId, kind: RpcRequestKind) {
-        if !self.local_rpc_retry_ready(kind, Instant::now())
+        if self.peer_remote_busy(peer, Instant::now())
+            || !self.local_rpc_retry_ready(kind, Instant::now())
             || self.is_request_satisfied(peer, kind)
             || self.is_request_pending(peer, kind)
         {
@@ -5595,6 +5680,20 @@ impl ConsensusNetwork {
         }
     }
 
+    fn peer_remote_busy(&mut self, peer: PeerId, now: Instant) -> bool {
+        let Some(lifecycle) = self.peer_lifecycle.get_mut(&peer) else {
+            return false;
+        };
+        if lifecycle
+            .remote_busy_until
+            .is_some_and(|deadline| now < deadline)
+        {
+            return true;
+        }
+        lifecycle.remote_busy_until = None;
+        false
+    }
+
     fn local_rpc_retry_ready(&self, kind: RpcRequestKind, now: Instant) -> bool {
         self.local_rpc_retry_after
             .get(&kind)
@@ -6022,6 +6121,7 @@ fn build_libp2p_keypair(enr_key: &CombinedKey) -> Result<identity::Keypair, Cons
 fn build_rpc_swarm(
     keypair: identity::Keypair,
     max_peers: usize,
+    response_budgets: RpcResponseBudgets,
 ) -> Result<Swarm<ConsensusBehaviour>, ConsensusNetworkError> {
     let public_key = keypair.public();
     let transport = build_rpc_transport(&keypair)?;
@@ -6031,7 +6131,6 @@ fn build_rpc_swarm(
         .map_err(|error| ConsensusNetworkError::ConstructRpcTransport(error.to_string()))?
         .with_behaviour(move |_| {
             let gossip = build_gossip_behaviour()?;
-            let response_budgets = RpcResponseBudgets::default();
             let identify = identify::Behaviour::new(
                 identify::Config::new(IDENTIFY_PROTOCOL_VERSION.into(), public_key.clone())
                     .with_agent_version(IDENTIFY_AGENT_VERSION.to_owned())
@@ -11887,6 +11986,208 @@ mod tests {
                 .get(&second.beacon_root)
                 .is_some()
         );
+    }
+
+    #[tokio::test]
+    async fn serving_memory_network_preparation_retains_queued_lc_quota() {
+        let temp = TempDir::new().unwrap();
+        let (mut network, _) = request_lifecycle_fixture(&temp);
+        network.response_budgets = RpcResponseBudgets::default().with_serving_limits(128, 128);
+        let pool = network.response_budgets.serving_pool(false);
+        let response = || {
+            Eth2RpcResponse::LightClientBootstrap(RawRpcResponse {
+                context_bytes: Some([1; 4]),
+                bytes: vec![7; 24],
+            })
+        };
+        let queued = network.prepare_rpc_response(RpcRequestKind::LightClientBootstrap, response());
+        assert_eq!(pool.used(), 99);
+        let busy = network.prepare_rpc_response(RpcRequestKind::LightClientBootstrap, response());
+        assert!(
+            matches!(busy.response(), Eth2RpcResponse::Error(error) if error.message.is_empty())
+        );
+        assert_eq!(consensus_response_payload_bytes(busy.response()), 0);
+        assert_eq!(pool.used(), 99);
+        // Metadata takes the same preparation route and shares encoded-work quota.
+        let metadata = network.prepare_rpc_response(
+            RpcRequestKind::MetaData,
+            Eth2RpcResponse::MetaData(network.local_metadata()),
+        );
+        assert!(
+            matches!(metadata.response(), Eth2RpcResponse::Error(error) if error.message.is_empty())
+        );
+        assert_eq!(pool.used(), 99);
+        assert_eq!(network.response_budgets.serving_pool(true).used(), 0);
+        assert_eq!(network.response_budgets.pool(false).used(), 0);
+        drop(queued);
+        assert_eq!(pool.used(), 0);
+        let metadata = network.prepare_rpc_response(
+            RpcRequestKind::MetaData,
+            Eth2RpcResponse::MetaData(network.local_metadata()),
+        );
+        assert!(matches!(metadata.response(), Eth2RpcResponse::MetaData(_)));
+        assert!(pool.used() > 0);
+        drop(metadata);
+        assert_eq!(pool.used(), 0);
+        let retry = network.prepare_rpc_response(RpcRequestKind::LightClientBootstrap, response());
+        assert!(matches!(
+            retry.response(),
+            Eth2RpcResponse::LightClientBootstrap(_)
+        ));
+        assert_eq!(pool.used(), 99);
+        drop(retry);
+        assert_eq!(pool.used(), 0);
+    }
+
+    #[tokio::test]
+    async fn serving_memory_remote_busy_defers_only_that_peer_without_fault() {
+        for kind in [
+            RpcRequestKind::Status,
+            RpcRequestKind::LightClientBootstrap,
+            RpcRequestKind::BeaconBlocksByRoot,
+        ] {
+            let temp = TempDir::new().unwrap();
+            let (mut network, _) = request_lifecycle_fixture(&temp);
+            let peer = PeerId::random();
+            let key = if kind == RpcRequestKind::BeaconBlocksByRoot {
+                memory_root_request(&mut network, peer, vec![B256::repeat_byte(1)])
+            } else {
+                network.ensure_request(peer, kind);
+                *network.pending_requests.keys().next().unwrap()
+            };
+            network.handle_rpc_response(
+                kind,
+                peer,
+                key.request_id,
+                crate::rpc::rate_limited("busy"),
+            );
+            assert!(network.peer_failures.is_empty());
+            let lifecycle = &network.peer_lifecycle[&peer];
+            assert_eq!(lifecycle.rpc_failures, 0);
+            assert!(lifecycle.cooldown_until.is_none());
+            assert!(!lifecycle.ignored_for_run);
+            assert!(network.closing_peers.is_empty());
+            assert!(network.pending_requests.is_empty());
+            assert!(network.pending_history_root_requests.is_empty());
+            assert_eq!(network.request_failures.status, 0);
+            assert_eq!(network.request_failures.bootstrap, 0);
+            assert_eq!(network.request_failures.beacon_blocks_by_root, 0);
+            let deadline = lifecycle.remote_busy_until.unwrap();
+            network.handle_rpc_response(
+                kind,
+                peer,
+                key.request_id,
+                crate::rpc::rate_limited("stale"),
+            );
+            assert_eq!(
+                network.peer_lifecycle[&peer].remote_busy_until,
+                Some(deadline)
+            );
+            network.ensure_request(peer, RpcRequestKind::Status);
+            assert!(network.pending_requests.is_empty());
+            let other = PeerId::random();
+            network.ensure_request(other, RpcRequestKind::Status);
+            assert!(network.is_request_pending(other, RpcRequestKind::Status));
+            assert!(network.peer_remote_busy(peer, deadline - Duration::from_nanos(1)));
+            assert!(!network.peer_remote_busy(peer, deadline));
+            assert!(network.peer_lifecycle[&peer].remote_busy_until.is_none());
+            network.ensure_request(peer, RpcRequestKind::Status);
+            assert!(network.is_request_pending(peer, RpcRequestKind::Status));
+        }
+    }
+
+    #[tokio::test]
+    async fn serving_memory_remote_busy_scheduler_and_other_errors_keep_distinct_policy() {
+        let temp = TempDir::new().unwrap();
+        let (mut network, _) = request_lifecycle_fixture(&temp);
+        let busy = PeerId::random();
+        let other = PeerId::random();
+        for peer in [busy, other] {
+            network.connected_peers.insert(peer);
+            network.peer_support.insert(
+                peer,
+                PeerRpcSupport {
+                    status: true,
+                    ..Default::default()
+                },
+            );
+        }
+        network
+            .peer_lifecycle
+            .entry(busy)
+            .or_default()
+            .remote_busy_until = Some(Instant::now() + Duration::from_secs(1));
+        network.drive_rpc_requests();
+        assert!(!network.is_request_pending(busy, RpcRequestKind::Status));
+        assert!(network.is_request_pending(other, RpcRequestKind::Status));
+        assert!(!network.closing_peers.contains(&busy));
+        network
+            .peer_lifecycle
+            .get_mut(&busy)
+            .unwrap()
+            .record_success(RpcRequestKind::Status);
+        assert!(network.peer_lifecycle[&busy].remote_busy_until.is_none());
+        let key = memory_root_request(&mut network, busy, vec![B256::repeat_byte(1)]);
+        network.handle_rpc_response(
+            key.kind,
+            busy,
+            key.request_id,
+            resource_unavailable("missing"),
+        );
+        assert_eq!(network.peer_lifecycle[&busy].rpc_failures, 1);
+        assert!(network.peer_lifecycle[&busy].cooldown_until.is_some());
+        assert_eq!(network.request_failures.beacon_blocks_by_root, 1);
+    }
+
+    #[test]
+    fn serving_memory_response_diagnostics_are_bounded_metadata_only() {
+        for size in [8, 4096] {
+            let response = Eth2RpcResponse::LightClientUpdatesByRange(vec![
+                RawRpcResponse {
+                    context_bytes: Some([1; 4]),
+                    bytes: vec![255; size],
+                };
+                2
+            ]);
+            let summary = rpc_response_summary(&response);
+            assert_eq!(summary.kind, "light_client_updates_by_range");
+            assert_eq!(summary.chunks, 2);
+            assert_eq!(summary.payload_bytes, 2 * (size as u64 + 4));
+            let text = format!("{summary:?}");
+            assert!(text.len() < 180);
+            assert!(!text.contains("255"));
+        }
+        let response = Eth2RpcResponse::Error(crate::rpc::Eth2RpcErrorResponse {
+            code: 3,
+            message: b"private diagnostic content".to_vec(),
+        });
+        let summary = rpc_response_summary(&response);
+        assert_eq!(summary.error_code, Some(3));
+        assert_eq!(summary.payload_bytes, 26);
+        assert!(!format!("{summary:?}").contains("private"));
+    }
+
+    #[tokio::test]
+    async fn serving_memory_unexpected_response_retains_only_summary() {
+        let temp = TempDir::new().unwrap();
+        let (mut network, _) = request_lifecycle_fixture(&temp);
+        let peer = PeerId::random();
+        network.ensure_request(peer, RpcRequestKind::Status);
+        let key = *network.pending_requests.keys().next().unwrap();
+        network.handle_rpc_response(
+            key.kind,
+            peer,
+            key.request_id,
+            Eth2RpcResponse::LightClientBootstrap(RawRpcResponse {
+                context_bytes: None,
+                bytes: vec![255; 4096],
+            }),
+        );
+        let message = network.last_rpc_failure.unwrap();
+        assert!(message.len() < 320);
+        assert!(message.contains("light_client_bootstrap"));
+        assert!(message.contains("4096"));
+        assert!(!message.contains("255"));
     }
 
     #[test]
