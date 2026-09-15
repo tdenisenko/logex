@@ -63,8 +63,10 @@ test). Independent source review found no actionable issue; the reviewed source 
 passes. All seven required local gates pass: format, workspace check, strict workspace
 Clippy, 1,327 workspace tests (23 ignored), documentation tests, release build and
 vendor verification. The [validation record](baselines/2026-09-15-consensus-rpc-participation-gates.json)
-binds commands, results and review hashes to the source. PR/CI completion remains
-pending before merge.
+binds commands, results and review hashes to the source. All six Linux/macOS CI
+jobs passed at head `c68a8829` in run `34956178786`.
+[PR #162](https://github.com/tdenisenko/logex/pull/162) merged as `6e1bb320` on
+September 15 at 10:15:59 UTC; see the [CI and merge record](baselines/2026-09-15-consensus-rpc-participation-ci.json).
 
 The controls cover equal-slot participation and later threshold behavior, normal
 finality advancement, missing local committees, invalid signatures and context,

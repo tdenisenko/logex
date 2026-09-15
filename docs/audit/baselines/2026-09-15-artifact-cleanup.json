@@ -1,0 +1,156 @@
+{
+  "schema_version": 1,
+  "date": "2026-09-15",
+  "scope": "Requested cleanup of obsolete LogEx audit artifacts; no production data or runtime behavior changes.",
+  "source_merge": "6e1bb320f981636e64433ba761a5ba0be5076841",
+  "local_evidence_root": "/private/tmp/logex-artifact-cleanup-20260915.d4guhroa",
+  "space_reporting": "Sum of observed before/after filesystem free-space deltas; approximate because of APFS sharing and unrelated host activity.",
+  "local": {
+    "observed_free_bytes_gain": 159192051712,
+    "workspace_cargo_clean_profiles": [
+      "debug",
+      "release"
+    ],
+    "temporary_target_trees_removed": 12,
+    "standalone_binaries_removed": 496,
+    "detached_test_images_removed": 1,
+    "tar_archives_losslessly_compressed": 28,
+    "final_verification": {
+      "verified_utc": "2026-09-15T10:26:48.949198+00:00",
+      "removed_paths_absent": 509,
+      "compressed_archives_present": 28,
+      "archives_content_verification": "Full decompressed SHA256 verified before each original was removed; final check verified replacement existence and recorded size.",
+      "release_sha256_verified": "3b61d61c2dd1ae3ebcab06d78f4914d4285da2f1bbe6d5741506741e3b1a6bc5",
+      "free_bytes_now": 205755150336,
+      "protected_rpc_gates_present": true
+    },
+    "retained_release": {
+      "source": "/Users/tdenisenko/code/logex/target/release/logex",
+      "retained": "/private/tmp/logex-artifact-cleanup-20260915.d4guhroa/retained-current-release/logex",
+      "sha256": "3b61d61c2dd1ae3ebcab06d78f4914d4285da2f1bbe6d5741506741e3b1a6bc5",
+      "bytes": 148169920,
+      "source_mtime": "2026-09-15T04:28:24.874842+00:00",
+      "preserved_at": "2026-09-15T10:11:26.246304+00:00",
+      "head": "c68a8829bbe47083c26a4c5da18c483c2dfb7429"
+    }
+  },
+  "local_receipts": [
+    {
+      "file": "cargo-clean-result.json",
+      "bytes": 384,
+      "sha256": "f79e35101456c651d12478368d921295ccabf20fd62079b18f86ae9a4ffd92d9"
+    },
+    {
+      "file": "cargo-release-clean-result.json",
+      "bytes": 302,
+      "sha256": "23fa1e8bb119d54e3ab7129f372a4f899aa8ddb27a0db18905e66cd2bddb3ca5"
+    },
+    {
+      "file": "local-tmp-cleanup-result.json",
+      "bytes": 369,
+      "sha256": "e813e00f0a8349e9270fb18841aa01be003b710aad35687d336659749e18a31c"
+    },
+    {
+      "file": "local-standalone-cleanup-result.json",
+      "bytes": 35103,
+      "sha256": "28084002cb4ab582bb1e8de686fda12bd3f67d8844001274a4d22efe2d351365"
+    },
+    {
+      "file": "local-final-verification.json",
+      "bytes": 463,
+      "sha256": "9f4f53a9da0ff0c0478acc0957df50bbc6b0ef4a668dc29ffd45c1926bdedc18"
+    },
+    {
+      "file": "retained-current-release.json",
+      "bytes": 434,
+      "sha256": "4820c166fe8362ce8241fab46e94383e4a2e9caf30d7e2ed6d4dd177d18301cc"
+    },
+    {
+      "file": "removed-local-binary-hashes.json",
+      "bytes": 93520,
+      "sha256": "96d69db13d63c8becfe12dc9215bd34a3ade4170f86b3ade0889d0ab03f3a8db"
+    },
+    {
+      "file": "standalone-cleanup-selection.json",
+      "bytes": 63670,
+      "sha256": "dac21d02c63b8ef74d8b13b4fd5928a0d653a1c1008796cd9d1fe8183e907c2b"
+    },
+    {
+      "file": "logex-tmp-proposed-deletions.json",
+      "bytes": 208508,
+      "sha256": "05d50c8ed83d375ce66ccd2f93ea7852beb0a6416e852a91dba578f1a718673d"
+    },
+    {
+      "file": "mac-mini-cleanup-receipt.jsonl",
+      "bytes": 24053,
+      "sha256": "dd639aee69ddb7ea8b21b23230a3d23c4e4cd4870662932fad6a550cbdb07e36"
+    },
+    {
+      "file": "mac-mini-cleanup-summary.json",
+      "bytes": 3606,
+      "sha256": "831bfb24c99b1b58f3d63772f1d61e44628391474b1b11e047c83ca51d5bc17b"
+    },
+    {
+      "file": "mac-mini-inventory-cache-proof-summary.json",
+      "bytes": 240,
+      "sha256": "27af7ae16c97ddfdd90c003dc653dddfb0c58d3e4f6366d07138bf71c821d3b0"
+    },
+    {
+      "file": "mac-mini-inventory-cache-archive-verification.jsonl",
+      "bytes": 6114682,
+      "sha256": "8a9f2cd3e361ab55cdb989833d750ea2d24f4021e01eb9466f87ff33d51a1aed"
+    },
+    {
+      "file": "mac-mini-cache-cleanup-receipt.jsonl",
+      "bytes": 3062867,
+      "sha256": "b115680a49ff959a2a195b5f1e926202525b0573b20e235ee2999a641d21c062"
+    },
+    {
+      "file": "mac-mini-cleanup-final-summary.json",
+      "bytes": 7336,
+      "sha256": "7af503ed6c44c23f0e3cf62e8f4cdf1b3d672e65640f8ef3ee0c8c65ff620cb9"
+    },
+    {
+      "file": "mac-mini-inventory-after.json",
+      "bytes": 5825,
+      "sha256": "90d2c4bc2cfa48d417ba3c8d494e89de6a63101917ec5cfdf28ab3a6b3c10b38"
+    },
+    {
+      "file": "mac-mini-cleanup-notes.txt",
+      "bytes": 3847,
+      "sha256": "376d5fe8bcbdceae04a18d06c9608867deb98dbb59eda590d72e94ff44f1f5cb"
+    }
+  ],
+  "mac_mini": {
+    "status": "complete; all remote cleanup commands exited",
+    "observed_free_bytes_gain": 16105324544,
+    "phase_free_bytes_gains": [
+      15715942400,
+      389382144
+    ],
+    "temporary_build_roots_pruned": 12,
+    "standalone_binaries_removed": 55,
+    "detached_test_images_removed": 5,
+    "retained_reports": 19,
+    "retained_reports_allocated_kib": 604,
+    "cargo_homes_partially_cleaned": 10,
+    "verified_registry_source_copies_removed": 7863,
+    "verified_crate_archives_removed": 7863,
+    "verified_git_checkouts_removed": 10,
+    "unproven_package_entries_retained": 150,
+    "other_preserved": "Bare Git databases, index/config metadata, unique sources/evidence and all unlisted contents.",
+    "proof": "Registry source byte comparison with crate archive matching retained Cargo.lock SHA256; clean Git checkout at locked revision.",
+    "skipped_verified_removals": 0,
+    "final_free_bytes": 111021527040,
+    "final_checks": {
+      "matching_open_files": [],
+      "lsof_exit": 0,
+      "lsof_stderr": "",
+      "attached_images": [],
+      "mounts_under_roots": [],
+      "matching_temporary_audit_jobs": []
+    },
+    "remaining_roots_allocated_kib": 6815160,
+    "remaining_cache_allocated_kib": 2057276
+  }
+}
