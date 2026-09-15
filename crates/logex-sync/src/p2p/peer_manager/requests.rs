@@ -939,6 +939,9 @@ impl PeerManager {
             .await
     }
 
+    /// Request with a per-exchange timeout and a peer-selection limit (at least one).
+    /// Positive partial responses may continue on the selected peer; these limits
+    /// do not establish a whole-batch deadline or a cap on wire exchanges.
     pub async fn get_bodies_prefer_peers_with_limits(
         &mut self,
         hashes: Vec<B256>,
@@ -979,43 +982,50 @@ impl PeerManager {
         self.sort_peer_ids_by_request_performance(&mut peer_ids, PeerRequestKind::Bodies);
         let mut dead_peers = HashSet::new();
 
-        match self
-            .request_bodies_parallel_chunks(&peer_ids, remaining_hashes.clone())
-            .await
-        {
-            Ok(Some((bodies, stats, failures))) => {
-                for stat in stats {
-                    self.record_peer_request_success(
-                        stat.peer_id,
-                        PeerRequestKind::Bodies,
-                        stat.blocks,
-                        stat.elapsed,
-                    );
-                    self.record_p2p_download_payload(stat.payload_bytes, stat.elapsed);
+        // Explicit limits apply to the complete peer-selection loop below.
+        // The optional bulk scheduler has independent retries and deadlines.
+        if request_timeout.is_none() && max_attempts.is_none() {
+            match self
+                .request_bodies_parallel_chunks(&peer_ids, remaining_hashes.clone())
+                .await
+            {
+                Ok(Some((bodies, stats, failures))) => {
+                    for stat in stats {
+                        self.record_peer_request_success(
+                            stat.peer_id,
+                            PeerRequestKind::Bodies,
+                            stat.blocks,
+                            stat.elapsed,
+                        );
+                        self.record_p2p_download_payload(stat.payload_bytes, stat.elapsed);
+                    }
+                    self.apply_parallel_chunk_failures("block bodies", failures, &mut dead_peers);
+                    self.remove_dead_peers(&dead_peers);
+                    self.advance_request_cursor();
+                    return Ok(bodies);
                 }
-                self.apply_parallel_chunk_failures("block bodies", failures, &mut dead_peers);
-                self.remove_dead_peers(&dead_peers);
-                self.advance_request_cursor();
-                return Ok(bodies);
-            }
-            Ok(None) => {}
-            Err((failures, stats)) => {
-                for stat in stats {
-                    self.record_peer_request_success(
-                        stat.peer_id,
+                Ok(None) => {}
+                Err((failures, stats)) => {
+                    for stat in stats {
+                        self.record_peer_request_success(
+                            stat.peer_id,
+                            PeerRequestKind::Bodies,
+                            stat.blocks,
+                            stat.elapsed,
+                        );
+                        self.record_p2p_download_payload(stat.payload_bytes, stat.elapsed);
+                    }
+                    self.apply_parallel_chunk_failures("block bodies", failures, &mut dead_peers);
+                    self.remove_dead_peers(&dead_peers);
+                    peer_ids = self
+                        .peer_ids_for_block_requests(Some(required_block), preferred_peers)
+                        .await;
+                    self.filter_paused_request_peers(&mut peer_ids, PeerRequestKind::Bodies);
+                    self.sort_peer_ids_by_request_performance(
+                        &mut peer_ids,
                         PeerRequestKind::Bodies,
-                        stat.blocks,
-                        stat.elapsed,
                     );
-                    self.record_p2p_download_payload(stat.payload_bytes, stat.elapsed);
                 }
-                self.apply_parallel_chunk_failures("block bodies", failures, &mut dead_peers);
-                self.remove_dead_peers(&dead_peers);
-                peer_ids = self
-                    .peer_ids_for_block_requests(Some(required_block), preferred_peers)
-                    .await;
-                self.filter_paused_request_peers(&mut peer_ids, PeerRequestKind::Bodies);
-                self.sort_peer_ids_by_request_performance(&mut peer_ids, PeerRequestKind::Bodies);
             }
         }
 
@@ -2817,6 +2827,9 @@ impl PeerManager {
             .await
     }
 
+    /// Request with a per-exchange timeout and a peer-selection limit (at least one).
+    /// Positive partial responses may continue on the selected peer; these limits
+    /// do not establish a whole-batch deadline or a cap on wire exchanges.
     pub async fn get_receipts_prefer_peers_with_limits(
         &mut self,
         hashes: Vec<B256>,
@@ -2873,43 +2886,50 @@ impl PeerManager {
         self.sort_peer_ids_by_request_performance(&mut peer_ids, PeerRequestKind::Receipts);
         let mut dead_peers = HashSet::new();
 
-        match self
-            .request_receipts_parallel_chunks(&peer_ids, hashes.clone())
-            .await
-        {
-            Ok(Some((peer_id, receipts, stats, failures))) => {
-                for stat in stats {
-                    self.record_peer_request_success(
-                        stat.peer_id,
-                        PeerRequestKind::Receipts,
-                        stat.blocks,
-                        stat.elapsed,
-                    );
-                    self.record_p2p_download_payload(stat.payload_bytes, stat.elapsed);
+        // Explicit limits apply to the complete peer-selection loop below.
+        // The optional bulk scheduler has independent retries and deadlines.
+        if request_timeout.is_none() && max_attempts.is_none() {
+            match self
+                .request_receipts_parallel_chunks(&peer_ids, hashes.clone())
+                .await
+            {
+                Ok(Some((peer_id, receipts, stats, failures))) => {
+                    for stat in stats {
+                        self.record_peer_request_success(
+                            stat.peer_id,
+                            PeerRequestKind::Receipts,
+                            stat.blocks,
+                            stat.elapsed,
+                        );
+                        self.record_p2p_download_payload(stat.payload_bytes, stat.elapsed);
+                    }
+                    self.apply_parallel_chunk_failures("receipts", failures, &mut dead_peers);
+                    self.remove_dead_peers(&dead_peers);
+                    self.advance_request_cursor();
+                    return Ok((peer_id, receipts));
                 }
-                self.apply_parallel_chunk_failures("receipts", failures, &mut dead_peers);
-                self.remove_dead_peers(&dead_peers);
-                self.advance_request_cursor();
-                return Ok((peer_id, receipts));
-            }
-            Ok(None) => {}
-            Err((failures, stats)) => {
-                for stat in stats {
-                    self.record_peer_request_success(
-                        stat.peer_id,
+                Ok(None) => {}
+                Err((failures, stats)) => {
+                    for stat in stats {
+                        self.record_peer_request_success(
+                            stat.peer_id,
+                            PeerRequestKind::Receipts,
+                            stat.blocks,
+                            stat.elapsed,
+                        );
+                        self.record_p2p_download_payload(stat.payload_bytes, stat.elapsed);
+                    }
+                    self.apply_parallel_chunk_failures("receipts", failures, &mut dead_peers);
+                    self.remove_dead_peers(&dead_peers);
+                    peer_ids = self
+                        .peer_ids_for_receipt_requests(required_block, preferred_peers)
+                        .await;
+                    self.filter_paused_request_peers(&mut peer_ids, PeerRequestKind::Receipts);
+                    self.sort_peer_ids_by_request_performance(
+                        &mut peer_ids,
                         PeerRequestKind::Receipts,
-                        stat.blocks,
-                        stat.elapsed,
                     );
-                    self.record_p2p_download_payload(stat.payload_bytes, stat.elapsed);
                 }
-                self.apply_parallel_chunk_failures("receipts", failures, &mut dead_peers);
-                self.remove_dead_peers(&dead_peers);
-                peer_ids = self
-                    .peer_ids_for_receipt_requests(required_block, preferred_peers)
-                    .await;
-                self.filter_paused_request_peers(&mut peer_ids, PeerRequestKind::Receipts);
-                self.sort_peer_ids_by_request_performance(&mut peer_ids, PeerRequestKind::Receipts);
             }
         }
 
@@ -8769,3 +8789,6 @@ mod ownership_tests;
 
 #[cfg(test)]
 mod deadline_tests;
+
+#[cfg(test)]
+mod limit_tests;
