@@ -16,6 +16,7 @@ mod beacon_block;
 mod beacon_cache;
 mod candidate_metadata;
 mod chain;
+mod discovery_key;
 mod history_range_scan;
 mod light_client;
 mod network;
@@ -28,6 +29,7 @@ pub use chain::{
     CONSENSUS_HEAD_FRESHNESS_TOLERANCE_SLOTS, MAINNET_CONSENSUS_CHAIN_SPEC,
     optimistic_head_is_fresh_at, optimistic_head_lag_slots,
 };
+pub use discovery_key::load_or_create_discovery_key;
 pub(crate) use light_client::{
     AppliedLightClientUpdate, VerifiedLightClientStore, apply_finality_update_payload,
     apply_light_client_update_payload, apply_optimistic_update_payload,

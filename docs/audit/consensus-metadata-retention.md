@@ -115,7 +115,9 @@ or regression percentage is inferred from these implementation observations.
 The focused consensus suite passes 333 tests with one existing test ignored.
 Source `6772c7fa` passes final independent review, strict Clippy and all
 seven local gates: vendor integrity, formatting, workspace check, Clippy, 1,417
-workspace tests (23 ignored), documentation tests and the release node build. CI and merge remain pending. Results and source
+workspace tests (23 ignored), documentation tests and the release node build. All six CI jobs passed in run `34991505077` on head `e4a06c33`;
+[PR #172](https://github.com/tdenisenko/logex/pull/172) merged as `5df5b2f5` after
+exact head/base verification. Results and source
 hashes are recorded in the [validation record](baselines/2026-09-15-consensus-metadata-retention.json).
 
 ## Remaining scope
