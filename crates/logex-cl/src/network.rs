@@ -5634,76 +5634,57 @@ impl ConsensusNetwork {
         }
     }
 
-    fn persist_known_peers(&mut self) -> Result<(), ConsensusNetworkError> {
+    fn selected_known_peers(&self, enrs: Vec<Enr>) -> Vec<PersistedPeer> {
         let bootstrap_needed = self.consensus.light_client_status().bootstrap.is_none();
         let head_progression_needed = !bootstrap_needed
             && live_head_progression_needed(
                 self.latest_history_sync_target(),
                 current_wall_clock_slot(),
             );
-        let mut peers = self
-            .discv5
-            .table_entries_enr()
+        let mut peers = enrs
             .into_iter()
             .filter(|enr| enr_is_relevant_consensus_peer(enr, &self.fork_digest))
-            .filter(|enr| {
-                enr.tcp4().is_some()
-                    || enr.tcp6().is_some()
-                    || enr_quic4(enr).is_some()
-                    || enr_quic6(enr).is_some()
-            })
-            .map(|enr| {
-                let peer_state = peer_id_from_enr(&enr)
-                    .ok()
-                    .and_then(|peer| self.peer_lifecycle.get(&peer).cloned());
-                PersistedPeer {
+            .filter_map(|enr| {
+                let (peer_id, _) = enr_multiaddrs_for_families(self.config.dial_families, &enr)?;
+                let peer_state = self.peer_lifecycle.get(&peer_id);
+                let support = peer_state.and_then(PeerLifecycleState::persisted_support);
+                if support.is_some_and(|support| !support.status) {
+                    return None;
+                }
+                let peer = PersistedPeer {
                     enr: enr.to_base64(),
-                    support: peer_state
-                        .as_ref()
-                        .and_then(PeerLifecycleState::persisted_support),
+                    support,
                     status_successes: peer_state
-                        .as_ref()
                         .map(|state| state.status_successes)
                         .unwrap_or_default(),
                     bootstrap_successes: peer_state
-                        .as_ref()
                         .map(|state| state.bootstrap_successes)
                         .unwrap_or_default(),
                     useful_successes: peer_state
-                        .as_ref()
                         .map(|state| state.useful_successes)
                         .unwrap_or_default(),
-                    dial_stats: peer_state
-                        .as_ref()
-                        .map(|state| state.dial_stats)
-                        .unwrap_or_default(),
-                }
+                    dial_stats: peer_state.map(|state| state.dial_stats).unwrap_or_default(),
+                };
+                // The routing table already holds decoded, verified records.
+                // Compute priority once instead of reparsing and reverifying the
+                // serialized ENR for both sides of every sort comparison.
+                Some((
+                    self.peer_priority(peer_id, bootstrap_needed, head_progression_needed),
+                    peer,
+                ))
             })
-            .filter(|peer| peer.support.is_none_or(|support| support.status))
             .collect::<Vec<_>>();
-
-        peers.sort_by(|left, right| {
-            let left_priority = left
-                .enr
-                .parse::<Enr>()
-                .ok()
-                .and_then(|enr| peer_id_from_enr(&enr).ok())
-                .map(|peer| self.peer_priority(peer, bootstrap_needed, head_progression_needed))
-                .unwrap_or_default();
-            let right_priority = right
-                .enr
-                .parse::<Enr>()
-                .ok()
-                .and_then(|enr| peer_id_from_enr(&enr).ok())
-                .map(|peer| self.peer_priority(peer, bootstrap_needed, head_progression_needed))
-                .unwrap_or_default();
+        peers.sort_by(|(left_priority, left), (right_priority, right)| {
             right_priority
-                .cmp(&left_priority)
+                .cmp(left_priority)
                 .then_with(|| left.enr.cmp(&right.enr))
         });
-        if peers.len() > MAX_PERSISTED_KNOWN_PEERS {
-            peers.truncate(MAX_PERSISTED_KNOWN_PEERS);
-        }
+        peers.truncate(MAX_PERSISTED_KNOWN_PEERS);
+        peers.into_iter().map(|(_, peer)| peer).collect()
+    }
+
+    fn persist_known_peers(&mut self) -> Result<(), ConsensusNetworkError> {
+        let peers = self.selected_known_peers(self.discv5.table_entries_enr());
 
         if peers == self.last_persisted {
             return Ok(());
@@ -5972,13 +5953,18 @@ fn observe_dialable_peer_for_families(
     families: ConsensusDialAddressFamilies,
     enr: &Enr,
 ) -> Option<PeerId> {
-    let (peer_id, mut addrs) = enr_multiaddrs(enr)?;
-    retain_dial_addresses_for_families(families, &mut addrs);
-    if addrs.is_empty() {
-        return None;
-    }
+    let (peer_id, addrs) = enr_multiaddrs_for_families(families, enr)?;
     peers.insert(peer_id, addrs);
     Some(peer_id)
+}
+
+fn enr_multiaddrs_for_families(
+    families: ConsensusDialAddressFamilies,
+    enr: &Enr,
+) -> Option<(PeerId, Vec<Multiaddr>)> {
+    let (peer_id, mut addrs) = enr_multiaddrs(enr)?;
+    retain_dial_addresses_for_families(families, &mut addrs);
+    (!addrs.is_empty()).then_some((peer_id, addrs))
 }
 
 fn enr_has_discv5_endpoint_for_families(families: ConsensusDialAddressFamilies, enr: &Enr) -> bool {
@@ -6372,6 +6358,107 @@ mod tests {
             .unwrap()
             .public()
             .to_peer_id()
+    }
+
+    #[tokio::test]
+    async fn peer_retention_saved_cache_requires_compatible_rpc_endpoint() {
+        let temp = TempDir::new().unwrap();
+        let mut network = peer_retention_fixture(&temp);
+        let key = CombinedKey::generate_secp256k1();
+        let mut fork_id = [0; 16];
+        fork_id[..4].copy_from_slice(&network.fork_digest);
+        fork_id[8..].copy_from_slice(&u64::MAX.to_le_bytes());
+        // Discovery works over IPv4, while this record offers RPC only over
+        // IPv6. A node configured for IPv4 cannot use it for sync requests.
+        let enr = Enr::builder()
+            .ip4(Ipv4Addr::LOCALHOST)
+            .udp4(9000)
+            .ip6(Ipv6Addr::LOCALHOST)
+            .tcp6(9000)
+            .add_value("eth2", &fork_id)
+            .build(&key)
+            .unwrap();
+        network.discv5.add_enr(enr.clone()).unwrap();
+        network.persist_known_peers().unwrap();
+        assert!(
+            !load_known_peers(&network.known_peers_path)
+                .unwrap()
+                .iter()
+                .any(|peer| peer.enr == enr.to_base64())
+        );
+        network.config.dial_families = ConsensusDialAddressFamilies::IPV6;
+        network.persist_known_peers().unwrap();
+        assert!(
+            load_known_peers(&network.known_peers_path)
+                .unwrap()
+                .iter()
+                .any(|peer| peer.enr == enr.to_base64())
+        );
+    }
+
+    #[tokio::test]
+    async fn peer_retention_saved_selection_preserves_priority_ties_and_limit() {
+        let temp = TempDir::new().unwrap();
+        let mut network = peer_retention_fixture(&temp);
+        let mut fork_id = [0; 16];
+        fork_id[..4].copy_from_slice(&network.fork_digest);
+        fork_id[8..].copy_from_slice(&u64::MAX.to_le_bytes());
+        let mut enrs = Vec::new();
+        let mut ordinary = Vec::new();
+        for index in 0..MAX_PERSISTED_KNOWN_PEERS + 3 {
+            let key = CombinedKey::generate_secp256k1();
+            let enr = Enr::builder()
+                .ip4(Ipv4Addr::LOCALHOST)
+                .tcp4(9000)
+                .add_value("eth2", &fork_id)
+                .build(&key)
+                .unwrap();
+            let peer = peer_id_from_enr(&enr).unwrap();
+            match index {
+                0 => {
+                    network.peer_lifecycle.insert(
+                        peer,
+                        PeerLifecycleState {
+                            status_successes: 3,
+                            bootstrap_successes: 2,
+                            useful_successes: 5,
+                            ..Default::default()
+                        },
+                    );
+                }
+                1 => {
+                    network.peer_lifecycle.insert(
+                        peer,
+                        PeerLifecycleState {
+                            remembered_support: Some(PeerRpcSupport::default()),
+                            ..Default::default()
+                        },
+                    );
+                }
+                _ => ordinary.push(enr.to_base64()),
+            }
+            enrs.push(enr);
+        }
+        // One useful peer ranks first; a peer known to lack Status is excluded.
+        // Every other peer ties, so ENR text alone decides the retained suffix.
+        ordinary.sort();
+        let expected = std::iter::once(enrs[0].to_base64())
+            .chain(ordinary.into_iter().take(MAX_PERSISTED_KNOWN_PEERS - 1))
+            .collect::<Vec<_>>();
+        let selected = network.selected_known_peers(enrs.clone());
+        assert_eq!(
+            selected
+                .iter()
+                .map(|peer| peer.enr.clone())
+                .collect::<Vec<_>>(),
+            expected
+        );
+        assert_eq!(selected[0].status_successes, 3);
+        assert_eq!(selected[0].bootstrap_successes, 2);
+        assert_eq!(selected[0].useful_successes, 5);
+        enrs.reverse();
+        assert_eq!(network.selected_known_peers(enrs), selected);
+        assert!(network.selected_known_peers(Vec::new()).is_empty());
     }
 
     fn peer_retention_fixture(temp: &TempDir) -> ConsensusNetwork {
