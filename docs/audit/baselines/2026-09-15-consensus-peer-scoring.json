@@ -1,0 +1,192 @@
+{
+  "base_commit": "0d5bec37815b5df671781a5139c7ac374515d065",
+  "source_sha256": "08a6548b5ca439403c943426217f857f1ed795afe6f576b718b20ae43678666a",
+  "before": {
+    "exit_code": 101,
+    "passed": 0,
+    "failed": 4
+  },
+  "focused": {
+    "exit_code": 0,
+    "passed": 4,
+    "failed": 0
+  },
+  "consensus": {
+    "exit_code": 0,
+    "passed": 253,
+    "ignored": 1
+  },
+  "clippy": {
+    "exit_code": 0
+  },
+  "files": [
+    {
+      "file": "before.log",
+      "sha256": "af8f147c60d91fabb9fcaa47b8dd9c8d2a9330953ab3a67b256d969ffd3c06fb"
+    },
+    {
+      "file": "after.log",
+      "sha256": "99409d32ad3a6b4bb57a97a82a31bcc3be9a2aee08475f12cbdfcacd8f959df2"
+    },
+    {
+      "file": "consensus.log",
+      "sha256": "4173e0789cd6e031896bafd314d6e1a1df814ef1f6a99a52d7000f7b41878026"
+    },
+    {
+      "file": "clippy.log",
+      "sha256": "e4beda756fbc335ac6af0655ec8f0920d9ae1f775ab773a742c0c2249e04a4c4"
+    },
+    {
+      "file": "network-baseline.rs",
+      "sha256": "b40d295c46c99ce84efda9f9e9536216add9f71666ed534a9fae3af304d8dfb6"
+    },
+    {
+      "file": "regression-tests.rs",
+      "sha256": "dc20ac6fd54404a044da87f569865ca46a726d42326abba2752114edc79cce17"
+    }
+  ],
+  "test_typing_note": "Three i64::from test wrappers used with baseline i32 result removed when result widened to i64; assertions and expected values unchanged.",
+  "source_commit": "a134d127189674fdd114acdedaf0f74624c8088c",
+  "review_binding": {
+    "commit": "a134d127189674fdd114acdedaf0f74624c8088c",
+    "source_file": "crates/logex-cl/src/network.rs",
+    "source_sha256": "08a6548b5ca439403c943426217f857f1ed795afe6f576b718b20ae43678666a",
+    "review_file": "/private/tmp/logex-peer-scoring-review/final-1/review.json",
+    "review_sha256": "358956e639e9d697fe8c2d1c8592e2c903d46a207a19d1e64e0f522fef22866e",
+    "disposition": "REVIEWED_NO_ACTIONABLE_FINDING"
+  },
+  "workspace_gates": {
+    "commit": "a134d127189674fdd114acdedaf0f74624c8088c",
+    "rustc": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+    "gates": [
+      {
+        "name": "vendor",
+        "command": [
+          "python3",
+          "tools/verify_datafusion_vendor.py"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T10:47:43.228250+00:00",
+        "finished": "2026-09-15T10:47:43.284840+00:00",
+        "sha256": "d8d80949d6f3378c14456842b531f0cade514179e4c94781b95ff9abb6447675",
+        "log": "/private/tmp/logex-peer-scoring.i1dopu96/gates/vendor.log"
+      },
+      {
+        "name": "format",
+        "command": [
+          "cargo",
+          "fmt",
+          "--all",
+          "--",
+          "--check"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T10:47:43.285215+00:00",
+        "finished": "2026-09-15T10:47:44.141202+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-peer-scoring.i1dopu96/gates/format.log"
+      },
+      {
+        "name": "check",
+        "command": [
+          "cargo",
+          "check",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T10:47:44.141569+00:00",
+        "finished": "2026-09-15T10:48:01.206302+00:00",
+        "sha256": "0849d78181529f9179ec881c8b5ecc0acbeac4a4851d99e4de028a0661ea0a2e",
+        "log": "/private/tmp/logex-peer-scoring.i1dopu96/gates/check.log"
+      },
+      {
+        "name": "clippy",
+        "command": [
+          "cargo",
+          "clippy",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T10:48:01.207283+00:00",
+        "finished": "2026-09-15T10:48:17.869618+00:00",
+        "sha256": "f7956bfd28113a70bfcffd6f2c07bf805d60b848972d95c1de96ff5a028e5da5",
+        "log": "/private/tmp/logex-peer-scoring.i1dopu96/gates/clippy.log"
+      },
+      {
+        "name": "test",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T10:48:17.870451+00:00",
+        "finished": "2026-09-15T10:53:18.687409+00:00",
+        "sha256": "549c85403d5ec5de67a9a92547fe4931d50fea4c15af1b73fcbdc2c458575f54",
+        "log": "/private/tmp/logex-peer-scoring.i1dopu96/gates/test.log"
+      },
+      {
+        "name": "doc",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--doc",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T10:53:18.689189+00:00",
+        "finished": "2026-09-15T10:53:43.578101+00:00",
+        "sha256": "7f7caee17bc40f96597e61b02beeab35929516c1583186682b8a22a2dc6aa9e3",
+        "log": "/private/tmp/logex-peer-scoring.i1dopu96/gates/doc.log"
+      },
+      {
+        "name": "release-build",
+        "command": [
+          "cargo",
+          "build",
+          "-p",
+          "logex-node",
+          "--release",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T10:53:43.578909+00:00",
+        "finished": "2026-09-15T10:55:50.911115+00:00",
+        "sha256": "1c37687c32bbc794f57a30906de30113db51add1fbeb796c3df06684c44235af",
+        "log": "/private/tmp/logex-peer-scoring.i1dopu96/gates/release-build.log"
+      }
+    ]
+  },
+  "workspace_test_totals": {
+    "groups": 25,
+    "passed": 1331,
+    "failed": 0,
+    "ignored": 23
+  },
+  "pr_status": "pending"
+}
