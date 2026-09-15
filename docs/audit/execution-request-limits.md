@@ -52,7 +52,10 @@ both chosen sequential-continuation controls also fail because bulk dispatch
 starts multiple chunks. Both default concurrency controls already pass. All
 eight controls and all 358 sync tests pass after the fix (one ignored).
 
-Final independent review passes. Workspace gates are pending. See the
+Final independent review and all seven local gates pass on source `9f921a9a`:
+vendor verification, formatting, workspace check, strict Clippy, 1,462 workspace
+tests (23 ignored), documentation tests and release node linking. PR and CI
+remain pending. See the
 [validation record](baselines/2026-09-16-execution-request-limits.json).
 
 Aggregate salvage/ETH70 continuation budgets remain separate review items. A
