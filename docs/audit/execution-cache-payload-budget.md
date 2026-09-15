@@ -81,8 +81,11 @@ guard; actual evictions and map updates stay inside it. No benchmark or quantifi
 speedup is claimed. The 128 MiB policy is a deliberate fixed operational default,
 not a measured optimal cache size.
 
-Independent implementation review found no actionable defect. Seven local gates,
-CI and merge remain pending. Evidence is recorded in
+Independent implementation and final review found no actionable defect. All
+seven local gates pass on source `e9e83ef8`: vendor verification, formatting,
+workspace check, strict Clippy, 1,505 workspace tests (23 ignored), documentation
+tests and release node linking. PR, exact-head CI and merge remain pending.
+Evidence is recorded in
 [the validation record](baselines/2026-09-16-execution-cache-payload-budget.json).
 The broader offline audit remains open. Mac-mini tests and obsolete-artifact
 cleanup are complete; no new remote work was needed.
