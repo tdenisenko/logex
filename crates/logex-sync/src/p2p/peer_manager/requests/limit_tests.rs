@@ -4,15 +4,15 @@ use std::task::Poll;
 /// Reth requires a real listener to construct its public handle. This manager is
 /// retained but never polled. A TCP listener is bound on localhost:0, but no
 /// connection task is started; discovery, DNS and network service tasks are disabled.
-struct Fixture {
-    manager: PeerManager,
+pub(super) struct Fixture {
+    pub(super) manager: PeerManager,
     _network: NetworkManager<LogexNetworkPrimitives>,
     _directory: tempfile::TempDir,
-    receivers: Vec<mpsc::Receiver<PeerRequest<LogexNetworkPrimitives>>>,
+    pub(super) receivers: Vec<mpsc::Receiver<PeerRequest<LogexNetworkPrimitives>>>,
 }
 
 impl Fixture {
-    async fn new() -> Self {
+    pub(super) async fn new() -> Self {
         let serve_cache = Arc::new(ServeCacheProvider::new());
         let config = NetworkConfigBuilder::<LogexNetworkPrimitives>::new(
             SecretKey::from_slice(&[1; 32]).unwrap(),
@@ -91,7 +91,7 @@ impl Fixture {
     }
 }
 
-fn hashes() -> Vec<B256> {
+pub(super) fn hashes() -> Vec<B256> {
     (0..64).map(|byte| B256::repeat_byte(byte + 1)).collect()
 }
 
@@ -108,16 +108,16 @@ async fn fetch(manager: &mut PeerManager, kind: PeerRequestKind, limited: bool) 
         (PeerRequestKind::Receipts, true) => manager
             .get_receipts_prefer_peers_with_limits(hashes(), 1, &[], Duration::from_secs(2), 2)
             .await
-            .map(|(_, receipts)| receipts.len()),
+            .map(|receipts| receipts.len()),
         (PeerRequestKind::Receipts, false) => manager
             .get_receipts(hashes(), 1)
             .await
-            .map(|(_, receipts)| receipts.len()),
+            .map(|receipts| receipts.len()),
         _ => unreachable!(),
     }
 }
 
-fn take_requests(
+pub(super) fn take_requests(
     receivers: &mut [mpsc::Receiver<PeerRequest<LogexNetworkPrimitives>>],
 ) -> Vec<(usize, PeerRequest<LogexNetworkPrimitives>)> {
     let mut requests = Vec::new();

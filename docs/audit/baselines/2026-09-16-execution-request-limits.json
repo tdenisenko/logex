@@ -1,5 +1,5 @@
 {
-  "status": "All seven local gates and final review pass; PR and exact-head CI pending",
+  "status": "Merged after all seven local gates and six exact-head CI jobs passed",
   "branch": "audit/execution-request-limits",
   "base": "19f8c139f3519f41ff120c948e23321cdb02fc46",
   "source_sha256": {
@@ -220,5 +220,21 @@
         "log": "/private/tmp/logex-execution-request-limits-fk0t8jwc/gates/release-build.log"
       }
     ]
+  },
+  "ci": {
+    "run_id": 35015718354,
+    "head": "1861d48ab51ea5c2817d0be9d23b3e0eeca1353e",
+    "checks": 6,
+    "conclusion": "SUCCESS"
+  },
+  "merge": {
+    "headRefOid": "1861d48ab51ea5c2817d0be9d23b3e0eeca1353e",
+    "mergeCommit": {
+      "oid": "231572a7296063eaf027ca3bce7f58fe2f4f8d4f"
+    },
+    "mergedAt": "2026-09-15T19:54:41Z",
+    "number": 179,
+    "state": "MERGED",
+    "url": "https://github.com/tdenisenko/logex/pull/179"
   }
 }

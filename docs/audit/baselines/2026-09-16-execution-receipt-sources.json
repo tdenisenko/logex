@@ -1,0 +1,102 @@
+{
+  "status": "Implemented; original reproduction, final sync suite and independent review pass; workspace gates pending",
+  "branch": "audit/execution-receipt-sources",
+  "base": "231572a7296063eaf027ca3bce7f58fe2f4f8d4f",
+  "source_sha256": {
+    "crates/logex-sync/src/engine/anchored.rs": "a66b9ad551df26396df3e3fc2ccf9a073cb2bea11cb7208ac285fd90cc50346a",
+    "crates/logex-sync/src/engine/historical.rs": "49e8ce72c29058167e6f71223066777fe9b637093e1d10d3cc058269019581b1",
+    "crates/logex-sync/src/engine/live.rs": "97a63e3de2d2a75093c8b8d97bf72c1751442e0099c7e9ec4df924b05ede2c07",
+    "crates/logex-sync/src/p2p/peer_manager/requests.rs": "ba20a5f47e1912afd0740095042a5ed68a7dee7be25b07d0c9005a27265bad18",
+    "crates/logex-sync/src/p2p/peer_manager/requests/limit_tests.rs": "0ceb72685a834358a94f113a1d07a5646e600e032568d69914dda57fd25fb506",
+    "crates/logex-sync/src/p2p/peer_manager/requests/source_tests.rs": "60fa3feb28dc5464e93c2dd74733bbf4bd5dc0782d2fd0840d75563333413995"
+  },
+  "finding": {
+    "id": "B4-15",
+    "severity": "medium",
+    "effect": "Standalone parallel receipt adapter labels every block with first supplier, causing wrong validation attribution and successful-serving credit",
+    "correction": "Preserve existing SourcedReceiptSet tuples through APIs and all six consumers"
+  },
+  "evidence_directory": "/private/tmp/logex-execution-receipt-sources-7zb7lknq",
+  "evidence": {
+    "cleanup-review.json": {
+      "sha256": "f6d84a6ebf2e3b37854ea74b293aab0bd547c98281b6ef2124de46841714d15d",
+      "bytes": 562
+    },
+    "engine-review.json": {
+      "sha256": "74f2dd93b776fcc646c689d275805bc6d31ae80f66b225946ce1b24ba39f33de",
+      "bytes": 2295
+    },
+    "final-review-before-direct-prefix-tagging.json": {
+      "sha256": "298dcff1f5a43c6da44c5f8f315f8a9395c3713b13595cd867354d0ff8e652bf",
+      "bytes": 5063
+    },
+    "final-review-before-distinct-retry-strengthening.json": {
+      "sha256": "8268720d82f096eb4deb2e0606810405c3257ffc746637e82f24a6258304c459",
+      "bytes": 4508
+    },
+    "final-review.json": {
+      "sha256": "237452b940f71b2e5237c72b66643b7765b78f97780856e99d560c7ace39e877",
+      "bytes": 5509
+    },
+    "initial-source-review.json": {
+      "sha256": "85fe5099fa5720bea85b5a773b6f62b1dc7c148398e8192a5ed5482618b05764",
+      "bytes": 6479
+    },
+    "original-first-test.rs": {
+      "sha256": "b03c7351297e6bc1d74d808f5c79d66cb93341cf8af783c4a858fbbf5c606d52",
+      "bytes": 2157
+    },
+    "original-ordered-source-control.log": {
+      "sha256": "4680d0f888a1d819a0462e0e49cb1aa0eb2d9e704cf2a14c781c737f311a6af2",
+      "bytes": 1823
+    },
+    "original-source-control.json": {
+      "sha256": "4d452de4d1d002ba4785e8934d5ef4c0d1d024fb5c4d5e0a2fdc877ac0a0f240",
+      "bytes": 659
+    },
+    "original-source-control.log": {
+      "sha256": "cdcfb65f62934376935570920fed9eeaf7a47edabec0a094dfd9e3a43dac52e0",
+      "bytes": 1822
+    },
+    "original-source-diff.patch": {
+      "sha256": "f30500362a7c22b29a7a10029af11b2de75583e3a1d87e840c09e645af25c88b",
+      "bytes": 2133
+    },
+    "original-source-tests.rs": {
+      "sha256": "01048bdbb51e1119b5f9bb8a00674bae00e23d1e64230ccadf79cdfad4c5e742",
+      "bytes": 2533
+    },
+    "receipt-api-uses.log": {
+      "sha256": "4c6919cac75fe0b019bd7aeb2fba13905b0e75e11823df94458ac9044cd9e1c0",
+      "bytes": 2133
+    },
+    "source-tests-final.log": {
+      "sha256": "4ef0b0a3f7e2375ba495524b954d7de9d473b599ce09a6939a51731d8a5d6929",
+      "bytes": 1280
+    },
+    "sync-tests-final.log": {
+      "sha256": "87c31db61da9c3c2a78f9028affc8cddc12f6aa2862883707b03e8c0b3777099",
+      "bytes": 36336
+    },
+    "sync-tests-first.log": {
+      "sha256": "1ad819d573def886dfd1fac7c3e49d03a707351d0dbe305bb720858fbc0895a3",
+      "bytes": 36337
+    }
+  },
+  "focused_sync_tests": {
+    "passed": 364,
+    "failed": 0,
+    "ignored": 1
+  },
+  "new_tests": 6,
+  "contract": {
+    "ordering": "Request hash order and per-block successful supplier preserved across out-of-order and replacement replies",
+    "validation": "Body-before-receipt checks retained; no demonstrated invalid-data ingestion from original attribution bug",
+    "cost": "Remove parallel source-stripping conversion; tag sequential accepted prefixes directly without another full-batch conversion; no receipt-payload clones",
+    "scheduling": "Parallel, sequential, retry/salvage, timeout and ETH70 merge behavior unchanged",
+    "testing": "Five source controls plus two-block consumer control; original public-API test fails after payload order passes; dormant localhost fixture",
+    "remaining": "Aggregate continuation budgets, telemetry encoding cost and broader offline audit/volume/repair",
+    "benchmark": "None under current user policy",
+    "remote": "No remote work; mac-mini cleanup complete"
+  }
+}

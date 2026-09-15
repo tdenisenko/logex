@@ -263,7 +263,7 @@ impl SyncEngine {
                 }
 
                 let receipt_peer_preference = preferred_body_peers(&bodies, header_peer);
-                let (receipt_peer, receipts) = match cancelable(
+                let receipts = match cancelable(
                     &mut self.shutdown,
                     self.peers.get_receipts_prefer_peers(
                         chunk_hashes.clone(),
@@ -298,23 +298,24 @@ impl SyncEngine {
                     let block_number = header.number();
                     let timestamp = header.timestamp();
                     let (body_peer, body) = &bodies[i];
+                    let (receipt_peer, block_receipts) = &receipts[i];
 
-                    if !receipts_match_transaction_count(body, &receipts[i]) {
+                    if !receipts_match_transaction_count(body, block_receipts) {
                         tracing::warn!(
                             block_number,
                             %block_hash,
                             receipt_peer = %receipt_peer,
                             transactions = body.transaction_count(),
-                            receipts = receipts[i].len(),
+                            receipts = block_receipts.len(),
                             "block body / receipt count mismatch — retrying from last ingested block"
                         );
                         self.peers
-                            .report_invalid_block_data(receipt_peer, "receipts");
+                            .report_invalid_block_data(*receipt_peer, "receipts");
                         chunk_failed = true;
                         break;
                     }
 
-                    if let Err(error) = validate_receipts_for_header(header, &receipts[i]) {
+                    if let Err(error) = validate_receipts_for_header(header, block_receipts) {
                         tracing::warn!(
                             block_number,
                             %block_hash,
@@ -323,12 +324,12 @@ impl SyncEngine {
                             "receipt validation failed — retrying from last ingested block"
                         );
                         self.peers
-                            .report_invalid_block_data(receipt_peer, "receipts");
+                            .report_invalid_block_data(*receipt_peer, "receipts");
                         chunk_failed = true;
                         break;
                     }
 
-                    let txs = assemble_txs(body, &receipts[i]);
+                    let txs = assemble_txs(body, block_receipts);
 
                     if let Some(reorg) = self.head_tracker.track(header.clone()) {
                         self.handle_reorg(reorg).await?;
@@ -336,14 +337,14 @@ impl SyncEngine {
 
                     let recent_headers = self.head_tracker.snapshot();
                     self.peers
-                        .cache_canonical_block(header.clone(), body.clone(), &receipts[i]);
+                        .cache_canonical_block(header.clone(), body.clone(), block_receipts);
                     let log_count = self
                         .ingest_block(header, block_hash, &txs, &recent_headers, None)
                         .await?;
                     self.progress.record_block(block_number, log_count);
                     self.note_serving_peer(header_peer, &mut newly_serving_peers);
                     self.note_serving_peer(*body_peer, &mut newly_serving_peers);
-                    self.note_serving_peer(receipt_peer, &mut newly_serving_peers);
+                    self.note_serving_peer(*receipt_peer, &mut newly_serving_peers);
                     next_block = block_number + 1;
                     last_ingested_head = Some(execution_head(block_number, block_hash, timestamp));
                 }

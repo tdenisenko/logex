@@ -54,8 +54,8 @@ eight controls and all 358 sync tests pass after the fix (one ignored).
 
 Final independent review and all seven local gates pass on source `9f921a9a`:
 vendor verification, formatting, workspace check, strict Clippy, 1,462 workspace
-tests (23 ignored), documentation tests and release node linking. PR and CI
-remain pending. See the
+tests (23 ignored), documentation tests and release node linking. All six CI jobs passed on head `1861d48a` (run `35015718354`); PR #179
+merged as `231572a7` after fresh exact-head/base verification. See the
 [validation record](baselines/2026-09-16-execution-request-limits.json).
 
 Aggregate salvage/ETH70 continuation budgets remain separate review items. A
