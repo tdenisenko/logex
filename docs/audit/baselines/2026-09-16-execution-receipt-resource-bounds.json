@@ -1,5 +1,5 @@
 {
-  "status": "All seven local gates pass; PR/CI/merge pending",
+  "status": "Merged after all seven local gates and six exact-head CI jobs passed",
   "branch": "audit/execution-receipt-resource-bounds",
   "base": "1dac15e21f4db6d01da5ce08da6fe8e89416a644",
   "finding": {
@@ -84,6 +84,18 @@
     "gates/test-summary.json": {
       "sha256": "e057a02593970a794dd2680744d899149b7fe85b3a17b0360fdddf5c45e7034d",
       "bytes": 69
+    },
+    "premerge.json": {
+      "sha256": "dd2c7b18057e486c1eb3376468229d9fc16b89c15c86fd071bf19309674d33a0",
+      "bytes": 1894
+    },
+    "merged.json": {
+      "sha256": "499f6a9835358d12abb9b85404c3af2563cd5d3c133fe9fd71f179202684e746",
+      "bytes": 240
+    },
+    "ci-watch.log": {
+      "sha256": "cd2a6367567894d9e49ac2a3661495216e1d9b87bbd9a2125cde7a3473954490",
+      "bytes": 14129
     }
   },
   "proof": {
@@ -354,5 +366,51 @@
     "passed": 1532,
     "failed": 0,
     "ignored": 23
+  },
+  "pull_request": {
+    "headRefOid": "995b64e936fe4aa31019868cf76e4ef597f6d3f2",
+    "mergeCommit": {
+      "oid": "9317c42a6ae050553d64ea34d9755b8bf010ef5e"
+    },
+    "mergedAt": "2026-09-15T23:16:54Z",
+    "number": 186,
+    "state": "MERGED",
+    "url": "https://github.com/tdenisenko/logex/pull/186"
+  },
+  "ci": {
+    "run": 35034322361,
+    "head": "995b64e936fe4aa31019868cf76e4ef597f6d3f2",
+    "checks": [
+      {
+        "name": "Check",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS"
+      },
+      {
+        "name": "Format",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS"
+      },
+      {
+        "name": "Clippy",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS"
+      },
+      {
+        "name": "Test",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS"
+      },
+      {
+        "name": "macOS Test",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS"
+      },
+      {
+        "name": "Release Build",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS"
+      }
+    ]
   }
 }

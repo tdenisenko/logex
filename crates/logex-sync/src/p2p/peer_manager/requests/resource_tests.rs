@@ -406,7 +406,10 @@ fn receipt_resource_legacy_shape_precedes_raw_and_bloomed_weight() {
     let raw = vec![vec![receipt(1)], Vec::new()];
     assert!(matches!(
         check_raw_receipt_resources(&blocks, &raw),
-        Err(RequestAttempt::ReceiptResponseOverflow { returned: 2 })
+        Err(RequestAttempt::ReceiptResponseOverflow {
+            requested: 1,
+            returned: 2
+        })
     ));
     let bloomed = raw
         .into_iter()
@@ -422,7 +425,10 @@ fn receipt_resource_legacy_shape_precedes_raw_and_bloomed_weight() {
         .collect();
     assert!(matches!(
         check_bloomed_receipt_resources(&blocks, &bloomed),
-        Err(RequestAttempt::ReceiptResponseOverflow { returned: 2 })
+        Err(RequestAttempt::ReceiptResponseOverflow {
+            requested: 1,
+            returned: 2
+        })
     ));
 }
 
@@ -455,7 +461,13 @@ async fn receipt_resource_legacy_collectors_preserve_overflow_failure_policy() {
                 std::task::Poll::Ready(result) => result.unwrap_err(),
                 std::task::Poll::Pending => panic!("outer overflow must fail immediately"),
             };
-            assert!(matches!(kind, ChunkFailureKind::Incomplete { returned: 2 }));
+            assert!(matches!(
+                kind,
+                ChunkFailureKind::ResponseOverflow {
+                    requested: 1,
+                    returned: 2
+                }
+            ));
             let failure = ChunkRequestFailure {
                 peer_id: id,
                 role: ChunkRequestRole::Receipts,
@@ -468,7 +480,10 @@ async fn receipt_resource_legacy_collectors_preserve_overflow_failure_policy() {
                 fixture.manager.on_request_error(
                     id,
                     PeerRequestKind::Receipts,
-                    &RequestAttempt::ReceiptResponseOverflow { returned: 2 }
+                    &RequestAttempt::ReceiptResponseOverflow {
+                        requested: 1,
+                        returned: 2
+                    }
                 ),
                 "direct sequential handler must retain bad-protocol removal decision"
             );

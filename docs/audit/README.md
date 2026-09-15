@@ -82,10 +82,16 @@ baseline prerequisite. `PartitionManager` is the current public storage facade.
 
 The [standalone execution continuation review](execution-continuation-bounds.md)
 records merged PR #185 (`1dac15e2`) for B4-22 elapsed limits
-and the separate, still-open B4-23 resource follow-up.
+and the separate B4-23 resource correction below.
 
 The [receipt resource review](execution-receipt-resource-bounds.md) records B4-23
-mandatory header contexts and cumulative logical resource checks.
+mandatory header contexts and cumulative logical resource checks, merged in
+PR #186 (`9317c42a`) after all local and CI gates.
+
+The [execution progress review](execution-partial-progress.md) records B4-24–27:
+useful partial-response accounting, exact tail failure context and receipt retry
+cleanup. All 247 focused tests, final review and seven local gates pass; CI/merge
+remain pending.
 
 ## Baseline findings
 

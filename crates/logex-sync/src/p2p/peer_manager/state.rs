@@ -446,17 +446,20 @@ impl PeerManager {
         );
     }
 
-    pub(super) fn on_partial_response(
+    pub(super) fn record_peer_partial_response(
         &mut self,
         peer_id: PeerId,
         kind: PeerRequestKind,
         response_kind: &'static str,
         requested: usize,
         returned: usize,
+        elapsed: Duration,
     ) {
+        // A smaller reply can reflect the remote response-size limit. Record
+        // useful progress, then adapt once for its size, without a second
+        // latency adjustment or a failure penalty.
+        self.record_peer_request_progress(peer_id, kind, returned, elapsed);
         self.reduce_peer_request_limit(peer_id, kind);
-        self.pause_peer_requests(peer_id, kind, REQUEST_KIND_PAUSE_DURATION);
-        self.record_soft_failure(peer_id);
         trace!(
             peer = %peer_id,
             response_kind,
@@ -584,12 +587,22 @@ impl PeerManager {
         blocks: usize,
         elapsed: Duration,
     ) {
+        self.record_peer_request_progress(peer_id, kind, blocks, elapsed);
+        self.adjust_peer_request_limit_after_success(peer_id, kind, blocks, elapsed);
+    }
+
+    fn record_peer_request_progress(
+        &mut self,
+        peer_id: PeerId,
+        kind: PeerRequestKind,
+        blocks: usize,
+        elapsed: Duration,
+    ) {
         self.reset_peer_timeout(peer_id);
         if matches!(kind, PeerRequestKind::Receipts) {
             self.receipt_quarantined_peers.remove(&peer_id);
         }
         self.clear_peer_request_pause(peer_id, kind);
-        self.adjust_peer_request_limit_after_success(peer_id, kind, blocks, elapsed);
         if blocks == 0 || elapsed.is_zero() {
             return;
         }
@@ -671,7 +684,10 @@ impl PeerManager {
         let Some(peer) = self.peers.get_mut(&peer_id) else {
             return MAX_CONSECUTIVE_TIMEOUTS;
         };
-        peer.consecutive_timeouts += 1;
+        peer.consecutive_timeouts = peer
+            .consecutive_timeouts
+            .saturating_add(1)
+            .min(MAX_CONSECUTIVE_TIMEOUTS);
         let consecutive_timeouts = peer.consecutive_timeouts;
         let _ = peer;
         self.demote_peer(peer_id);

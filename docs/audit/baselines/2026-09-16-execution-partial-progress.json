@@ -1,0 +1,266 @@
+{
+  "base_commit": "9317c42a6ae050553d64ea34d9755b8bf010ef5e",
+  "branch": "audit/execution-partial-progress",
+  "findings": [
+    "B4-24",
+    "B4-25",
+    "B4-26",
+    "B4-27"
+  ],
+  "status": "All seven local gates pass; PR/CI/merge pending",
+  "original_controls": {
+    "passed": 3,
+    "failed": 19,
+    "total": 22
+  },
+  "final_new_controls": 26,
+  "evidence_directory": "/private/tmp/logex-execution-partial-progress-j7z1hyfa",
+  "evidence": {
+    "compile-attempt-original-test-preparation.json": {
+      "sha256": "b4af6a2520f25302ffa08b1d6a70e07fb8345eabf91f5dae719c18b09b78e29c",
+      "bytes": 1164
+    },
+    "original-failure_context_tests.rs": {
+      "sha256": "93f8f91a172d14507d24f6f8601281089a3fdb3bb9d254bdcfabf713e939c942",
+      "bytes": 8082
+    },
+    "original-partial_progress_tests.rs": {
+      "sha256": "0b1c8bdafa2a6bc818c00bcc4aa8a142c8dcec961004be6df280ad929b3977af",
+      "bytes": 7777
+    },
+    "compile-attempt-original-partial_progress_tests.log": {
+      "sha256": "c7b4f3e9044c9e94e4cec18e01baf17020e3d3eb2911456216a4deec74b3f705",
+      "bytes": 1097
+    },
+    "compile-attempt-original-failure_context_tests.log": {
+      "sha256": "c7b4f3e9044c9e94e4cec18e01baf17020e3d3eb2911456216a4deec74b3f705",
+      "bytes": 1097
+    },
+    "original-controls.json": {
+      "sha256": "9b5e3c446bc614dc63c6606298ad572818d17148bceb6e01cb06f20b2b6affc1",
+      "bytes": 697
+    },
+    "proposed-fix-review.json": {
+      "sha256": "149d8825f06b6bee2f52232be844dd46e499f1818dfd0327210d3dbe3e34b4f8",
+      "bytes": 3145
+    },
+    "final-review-before-saturation-oracle-correction.json": {
+      "sha256": "11e63400582f055ddb33eb619d99ce0bd560f200277855270dca28add239e501",
+      "bytes": 3525
+    },
+    "final-focused-first-attempt.log": {
+      "sha256": "4f7eef6371695bf1548e33d2ae77a372f2344026b5cd93e7f1bdee2bd2055636",
+      "bytes": 27435
+    },
+    "initial-policy-original-partial_progress_tests.rs": {
+      "sha256": "d40b0f77c8b2c86c4cd4d793400d70d861f5a623daccd69132a4b67499c4e6ce",
+      "bytes": 7773
+    },
+    "partial-progress-restoration-tests.rs": {
+      "sha256": "1e0c72e5956c6d0fd26df935159d0b4f2f932bccffa262be9166ef74138473d3",
+      "bytes": 3732
+    },
+    "final-review.json": {
+      "sha256": "61003e7d459d1df571c2208df984db2efdadd874ca0ca99009dcc2d42f08d869",
+      "bytes": 3425
+    },
+    "compile-attempt-original-partial_progress_tests.rs": {
+      "sha256": "f837d6c7c5a86f063d15d379cee0e0d4358ef6a6487c565fd57e4519a38a79b6",
+      "bytes": 7765
+    },
+    "final-focused.log": {
+      "sha256": "a76e2a28d1a509b72c1bc49f7ed44932d26dad204f3285bcfb76de017725d2f6",
+      "bytes": 26888
+    },
+    "initial-policy-original-partial_progress_tests.log": {
+      "sha256": "ba3b65c50da61ee9c84a24eac6a9c113b8fff73bfa83e6c17286041accb33be1",
+      "bytes": 5515
+    },
+    "original-partial_progress_tests.log": {
+      "sha256": "f538ebbe55e31f3a3317f48023653cf7970c06d4cc153d8531453c202262cb2f",
+      "bytes": 3952
+    },
+    "partial-policy-review.json": {
+      "sha256": "a5ad70738bb8ace88da6dbe33a45eaab8907ccdec37c4a5443a17dcb4d4f925e",
+      "bytes": 7205
+    },
+    "initial-policy-original-controls.json": {
+      "sha256": "5b26fb08d13b57ad4a12b5f8d5e83b6d3f64f12b0309229e0e2b2e2a40f98162",
+      "bytes": 697
+    },
+    "compile-attempt-original-failure_context_tests.rs": {
+      "sha256": "93f8f91a172d14507d24f6f8601281089a3fdb3bb9d254bdcfabf713e939c942",
+      "bytes": 8082
+    },
+    "compile-attempt-original-partial-progress-tests.rs": {
+      "sha256": "a58465222da15057cdd5d06d5ecf87092f43bf97ceececbe108332a59fb4177a",
+      "bytes": 7000
+    },
+    "compile-attempt-original-controls.json": {
+      "sha256": "ceaab11fc064c272ee9cb22f39ad2de2fdf740d3316d6bd9ecb979191a9e3f60",
+      "bytes": 697
+    },
+    "original-failure_context_tests.log": {
+      "sha256": "492d604b85976bfc99ced3e8520e24d84dde94b7137b07344b8fcb4009d92254",
+      "bytes": 8999
+    },
+    "gates/results.json": {
+      "sha256": "ca5c46c89d97f36249cdc629170dd26ad728362fb34debe7b59113f30d55d4ae",
+      "bytes": 3800
+    },
+    "gates/test-summary.json": {
+      "sha256": "191cfd86a539cb14df345f02a06409ad5b34edca1dda5a901d9ab6bc96947d39",
+      "bytes": 69
+    }
+  },
+  "scope_limits": [
+    "No throughput benchmark or gain claim",
+    "Transport fixtures do not prove content/root validation",
+    "No practical timeout counter overflow reproduction",
+    "Offline audit incomplete; volume supervision and verified repair remain"
+  ],
+  "harness_corrections": [
+    "Use matches! for PeerRequestKind (no PartialEq)",
+    "Existing limit decrease is ceil(2*n/3), not half",
+    "Defensive saturation expects existing threshold8, not integer max"
+  ],
+  "focused_tests": {
+    "passed": 247,
+    "failed": 0,
+    "ignored": 0
+  },
+  "source_commit": "764dbe5e1ecc605aa8c01a18f7092d8f57d14347",
+  "gates": {
+    "commit": "764dbe5e1ecc605aa8c01a18f7092d8f57d14347",
+    "rustc": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+    "gates": [
+      {
+        "name": "vendor",
+        "command": [
+          "python3",
+          "tools/verify_datafusion_vendor.py"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T23:35:30.931446+00:00",
+        "finished": "2026-09-15T23:35:30.985718+00:00",
+        "sha256": "d8d80949d6f3378c14456842b531f0cade514179e4c94781b95ff9abb6447675",
+        "log": "/private/tmp/logex-execution-partial-progress-j7z1hyfa/gates/vendor.log"
+      },
+      {
+        "name": "format",
+        "command": [
+          "cargo",
+          "fmt",
+          "--all",
+          "--",
+          "--check"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T23:35:30.986069+00:00",
+        "finished": "2026-09-15T23:35:31.945294+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-execution-partial-progress-j7z1hyfa/gates/format.log"
+      },
+      {
+        "name": "check",
+        "command": [
+          "cargo",
+          "check",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T23:35:31.945649+00:00",
+        "finished": "2026-09-15T23:35:37.448234+00:00",
+        "sha256": "454adc0e69a23de3401e322c3a6269df8ca288984fb57dc1a6635bb469c7036d",
+        "log": "/private/tmp/logex-execution-partial-progress-j7z1hyfa/gates/check.log"
+      },
+      {
+        "name": "clippy",
+        "command": [
+          "cargo",
+          "clippy",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T23:35:37.448866+00:00",
+        "finished": "2026-09-15T23:35:41.892549+00:00",
+        "sha256": "3671b2dac7b7ee9537a817307cf8f0d82f2de8f84b486109a21a29770e32334d",
+        "log": "/private/tmp/logex-execution-partial-progress-j7z1hyfa/gates/clippy.log"
+      },
+      {
+        "name": "test",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T23:35:41.893008+00:00",
+        "finished": "2026-09-15T23:38:30.313800+00:00",
+        "sha256": "350c030733c088879c57c080a19ae92188b6c7d9b9d8a2a9cae85be58277a3cf",
+        "log": "/private/tmp/logex-execution-partial-progress-j7z1hyfa/gates/test.log"
+      },
+      {
+        "name": "doc",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--doc",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T23:38:30.317319+00:00",
+        "finished": "2026-09-15T23:38:39.499779+00:00",
+        "sha256": "4a08a2ae68322d9cd5272f61e8ecd50786d45f104cc2a1f822fb45d7b7f685b9",
+        "log": "/private/tmp/logex-execution-partial-progress-j7z1hyfa/gates/doc.log"
+      },
+      {
+        "name": "release-build",
+        "command": [
+          "cargo",
+          "build",
+          "-p",
+          "logex-node",
+          "--release",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T23:38:39.500488+00:00",
+        "finished": "2026-09-15T23:39:23.546122+00:00",
+        "sha256": "d47e415c27967f2504cc8b0a566d5972579fa4fff5273c3387b9990ca16e53a9",
+        "log": "/private/tmp/logex-execution-partial-progress-j7z1hyfa/gates/release-build.log"
+      }
+    ]
+  },
+  "workspace_tests": {
+    "groups": 25,
+    "passed": 1558,
+    "failed": 0,
+    "ignored": 23
+  }
+}

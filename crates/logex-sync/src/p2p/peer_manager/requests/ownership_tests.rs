@@ -207,7 +207,7 @@ fn feedback(owner: u64, peer_id: PeerId) -> BodyReceiptRequestAccounting {
             role: ChunkRequestRole::Receipts,
             peer_id,
             requested: 2,
-            kind: ChunkFailureKind::Incomplete { returned: 0 },
+            kind: ChunkFailureKind::EmptyResponse,
         }],
         ..Default::default()
     }
