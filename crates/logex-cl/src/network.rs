@@ -93,6 +93,8 @@ const MAX_STATUS_FAILURES_BEFORE_DISCONNECT: u32 = 2;
 const IDENTIFY_GRACE_PERIOD: Duration = Duration::from_secs(8);
 const PEER_BACKOFF_BASE: Duration = Duration::from_secs(15);
 const PEER_BACKOFF_MAX: Duration = Duration::from_secs(15 * 60);
+const REMOTE_BUSY_ATTEMPT_LIMIT: u8 = 3;
+const REMOTE_BUSY_REDIAL_DELAY: Duration = Duration::from_secs(30);
 const GOODBYE_REASON_IRRELEVANT_NETWORK: u64 = 2;
 const GOODBYE_REASON_FAULT: u64 = 3;
 const IDENTIFY_PROTOCOL_VERSION: &str = "eth2/1.0.0";
@@ -1754,6 +1756,8 @@ struct PeerLifecycleState {
     disconnects: u32,
     cooldown_until: Option<Instant>,
     remote_busy_until: Option<Instant>,
+    remote_busy_attempts: HashMap<RpcRequestKind, u8>,
+    remote_busy_redial_until: Option<Instant>,
     ignored_for_run: bool,
     deferred_until_post_bootstrap: bool,
 }
@@ -1773,6 +1777,8 @@ impl PeerLifecycleState {
             disconnects: 0,
             cooldown_until: None,
             remote_busy_until: None,
+            remote_busy_attempts: HashMap::new(),
+            remote_busy_redial_until: None,
             ignored_for_run: false,
             deferred_until_post_bootstrap: false,
         }
@@ -1793,7 +1799,10 @@ impl PeerLifecycleState {
     }
 
     fn record_success(&mut self, kind: RpcRequestKind) {
-        self.remote_busy_until = None;
+        if self.remote_busy_attempts.remove(&kind).is_some() && self.remote_busy_attempts.is_empty()
+        {
+            self.remote_busy_until = None;
+        }
         let useful_rpc = matches!(
             kind,
             RpcRequestKind::LightClientBootstrap
@@ -2615,6 +2624,14 @@ impl ConsensusNetwork {
                 peer_id, endpoint, ..
             } => {
                 tracing::debug!(%peer_id, endpoint = ?endpoint, "consensus libp2p connection established");
+                if self.peer_busy_redial_deferred(peer_id, Instant::now()) {
+                    self.dialing_peers.remove(&peer_id);
+                    self.clear_pending_requests_for_peer(peer_id);
+                    // The established event can already have a closure queued behind it.
+                    self.connected_peers.insert(peer_id);
+                    self.disconnect_busy_peer(peer_id);
+                    return;
+                }
                 let dial_class = match &endpoint {
                     ConnectedPoint::Dialer { address, .. } => dial_address_class(address),
                     ConnectedPoint::Listener { .. } => None,
@@ -4138,18 +4155,7 @@ impl ConsensusNetwork {
                 }
             }
             (kind, Eth2RpcResponse::Error(error)) if error.code == RATE_LIMITED_CODE => {
-                self.peer_lifecycle
-                    .entry(peer)
-                    .or_default()
-                    .remote_busy_until = Some(Instant::now() + Duration::from_secs(1));
-                self.last_rpc_failure = Some(format!(
-                    "{} request={} temporarily unavailable error_code={}",
-                    self.peer_context(peer),
-                    kind.as_str(),
-                    error.code,
-                ));
-                tracing::debug!(%peer, request = kind.as_str(), error_code = error.code,
-                    "deferring requests to temporarily busy consensus peer");
+                self.record_remote_busy(peer, kind, Instant::now());
             }
             (kind, Eth2RpcResponse::Error(error)) => {
                 self.request_failures.increment(kind);
@@ -4227,6 +4233,12 @@ impl ConsensusNetwork {
         let now = Instant::now();
         for lifecycle in self.peer_lifecycle.values_mut() {
             lifecycle.clear_expired_cooldown(now);
+            if lifecycle
+                .remote_busy_redial_until
+                .is_some_and(|deadline| now >= deadline)
+            {
+                lifecycle.remote_busy_redial_until = None;
+            }
         }
         let mut dialable = self
             .dialable_peers
@@ -5276,7 +5288,7 @@ impl ConsensusNetwork {
         let Some(lifecycle) = self.peer_lifecycle.get(&peer) else {
             return true;
         };
-        if lifecycle.ignored_for_run {
+        if lifecycle.ignored_for_run || self.peer_busy_redial_deferred(peer, now) {
             return false;
         }
         if bootstrap_needed && lifecycle.deferred_until_post_bootstrap {
@@ -5680,7 +5692,55 @@ impl ConsensusNetwork {
         }
     }
 
+    fn record_remote_busy(&mut self, peer: PeerId, kind: RpcRequestKind, now: Instant) {
+        let lifecycle = self.peer_lifecycle.entry(peer).or_default();
+        let attempts = lifecycle.remote_busy_attempts.entry(kind).or_default();
+        *attempts = attempts.saturating_add(1).min(REMOTE_BUSY_ATTEMPT_LIMIT);
+        let rotate = *attempts >= REMOTE_BUSY_ATTEMPT_LIMIT;
+        lifecycle.remote_busy_until = Some(now + Duration::from_secs(1));
+        if rotate {
+            lifecycle.remote_busy_redial_until = Some(now + REMOTE_BUSY_REDIAL_DELAY);
+        }
+        self.last_rpc_failure = Some(format!(
+            "{} request={} temporarily unavailable error_code={RATE_LIMITED_CODE}",
+            self.peer_context(peer),
+            kind.as_str(),
+        ));
+        if rotate {
+            self.last_peer_policy_event = Some(format!(
+                "{} policy=rotate_busy_peer request={} redial_delay_secs={}",
+                self.peer_context(peer),
+                kind.as_str(),
+                REMOTE_BUSY_REDIAL_DELAY.as_secs(),
+            ));
+            // This is availability rotation, not a transport/protocol fault.
+            self.clear_pending_requests_for_peer(peer);
+            self.disconnect_busy_peer(peer);
+        }
+    }
+
+    fn disconnect_busy_peer(&mut self, peer: PeerId) {
+        let awaiting_close = self.connected_peers.contains(&peer);
+        self.disconnect_now(peer);
+        // A recorded connection may already be closed in the swarm with its
+        // ConnectionClosed event queued. Preserve planned-close classification.
+        if awaiting_close {
+            self.closing_peers.insert(peer);
+        }
+    }
+
+    fn peer_busy_redial_deferred(&self, peer: PeerId, now: Instant) -> bool {
+        self.peer_lifecycle.get(&peer).is_some_and(|lifecycle| {
+            lifecycle
+                .remote_busy_redial_until
+                .is_some_and(|deadline| now < deadline)
+        })
+    }
+
     fn peer_remote_busy(&mut self, peer: PeerId, now: Instant) -> bool {
+        if self.peer_busy_redial_deferred(peer, now) {
+            return true;
+        }
         let Some(lifecycle) = self.peer_lifecycle.get_mut(&peer) else {
             return false;
         };
@@ -12040,6 +12100,143 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn serving_memory_repeated_busy_rotates_without_fault_and_allows_alternative() {
+        for kind in [
+            RpcRequestKind::LightClientBootstrap,
+            RpcRequestKind::BeaconBlocksByRoot,
+        ] {
+            let temp = TempDir::new().unwrap();
+            let (mut network, _) = request_lifecycle_fixture(&temp);
+            network.config.max_peers = 1;
+            let peer = PeerId::random();
+            let other = PeerId::random();
+            network.connected_peers.insert(peer);
+            network.peer_support.insert(
+                peer,
+                PeerRpcSupport {
+                    status: true,
+                    light_client_bootstrap: true,
+                    beacon_blocks_by_root: true,
+                    ..Default::default()
+                },
+            );
+            network.dialable_peers.clear();
+            network
+                .dialable_peers
+                .insert(other, vec!["/ip4/127.0.0.1/tcp/19001".parse().unwrap()]);
+            for attempt in 1..=REMOTE_BUSY_ATTEMPT_LIMIT {
+                let key = if kind == RpcRequestKind::BeaconBlocksByRoot {
+                    memory_root_request(&mut network, peer, vec![B256::repeat_byte(1)])
+                } else {
+                    network.ensure_request(peer, kind);
+                    *network.pending_requests.keys().next().unwrap()
+                };
+                network.handle_rpc_response(
+                    kind,
+                    peer,
+                    key.request_id,
+                    crate::rpc::rate_limited("busy"),
+                );
+                network.record_peer_success(peer, RpcRequestKind::Status);
+                network.record_peer_success(peer, RpcRequestKind::Ping);
+                if attempt < REMOTE_BUSY_ATTEMPT_LIMIT {
+                    let deadline = network.peer_lifecycle[&peer].remote_busy_until.unwrap();
+                    assert!(!network.peer_remote_busy(peer, deadline));
+                    assert!(
+                        network.peer_lifecycle[&peer]
+                            .remote_busy_redial_until
+                            .is_none()
+                    );
+                }
+            }
+            assert!(network.closing_peers.contains(&peer));
+            assert_eq!(
+                network.peer_lifecycle[&peer].remote_busy_attempts[&kind],
+                REMOTE_BUSY_ATTEMPT_LIMIT
+            );
+            assert!(network.pending_requests.is_empty());
+            let deadline = network.peer_lifecycle[&peer]
+                .remote_busy_redial_until
+                .unwrap();
+            assert!(!network.peer_is_dialable(peer, false, deadline - Duration::from_nanos(1)));
+            assert!(network.peer_is_dialable(peer, false, deadline));
+            network.drive_peer_connections();
+            assert!(!network.dialing_peers.contains(&other)); // Recorded slot awaits its queued close event.
+            let closed = || SwarmEvent::ConnectionClosed {
+                peer_id: peer,
+                connection_id: libp2p::swarm::ConnectionId::new_unchecked(1),
+                endpoint: ConnectedPoint::Listener {
+                    local_addr: "/memory/1".parse().unwrap(),
+                    send_back_addr: "/memory/2".parse().unwrap(),
+                },
+                num_established: 0,
+                cause: None,
+            };
+            // No live swarm is polled: disconnect_peer_id returned Err, modelling
+            // a transport already closed with ConnectionClosed still queued.
+            network.handle_swarm_event(closed());
+            assert_eq!(network.peer_lifecycle[&peer].disconnects, 0);
+            assert_eq!(network.peer_lifecycle[&peer].transport_failures, 0);
+            assert_eq!(network.peer_lifecycle[&peer].rpc_failures, 0);
+            assert!(!network.peer_lifecycle[&peer].ignored_for_run);
+            network.drive_peer_connections();
+            assert!(network.dialing_peers.contains(&other)); // Enqueued only; no socket is polled.
+            network.handle_swarm_event(SwarmEvent::ConnectionEstablished {
+                peer_id: peer,
+                connection_id: libp2p::swarm::ConnectionId::new_unchecked(1),
+                endpoint: ConnectedPoint::Listener {
+                    local_addr: "/memory/1".parse().unwrap(),
+                    send_back_addr: "/memory/2".parse().unwrap(),
+                },
+                num_established: std::num::NonZeroU32::new(1).unwrap(),
+                concurrent_dial_errors: None,
+                established_in: Duration::ZERO,
+            });
+            assert!(network.closing_peers.contains(&peer));
+            assert!(
+                !network
+                    .pending_peer_kinds
+                    .iter()
+                    .any(|(owner, _)| *owner == peer)
+            );
+            assert_eq!(
+                network.peer_lifecycle[&peer].remote_busy_redial_until,
+                Some(deadline)
+            );
+            network.handle_swarm_event(closed());
+            assert_eq!(network.peer_lifecycle[&peer].disconnects, 0);
+            network.record_peer_success(peer, kind);
+            assert!(
+                !network.peer_lifecycle[&peer]
+                    .remote_busy_attempts
+                    .contains_key(&kind)
+            );
+        }
+    }
+
+    #[test]
+    fn serving_memory_busy_attempts_reset_only_matching_kind() {
+        let mut lifecycle = PeerLifecycleState::default();
+        lifecycle
+            .remote_busy_attempts
+            .insert(RpcRequestKind::LightClientBootstrap, 2);
+        lifecycle
+            .remote_busy_attempts
+            .insert(RpcRequestKind::BeaconBlocksByRoot, 1);
+        lifecycle.remote_busy_until = Some(Instant::now() + Duration::from_secs(1));
+        lifecycle.record_success(RpcRequestKind::Status);
+        lifecycle.record_success(RpcRequestKind::Ping);
+        assert_eq!(lifecycle.remote_busy_attempts.len(), 2);
+        assert!(lifecycle.remote_busy_until.is_some());
+        lifecycle.record_success(RpcRequestKind::LightClientBootstrap);
+        assert_eq!(lifecycle.remote_busy_attempts.len(), 1);
+        assert!(lifecycle.remote_busy_until.is_some());
+        lifecycle.record_success(RpcRequestKind::BeaconBlocksByRoot);
+        assert!(lifecycle.remote_busy_attempts.is_empty());
+        assert!(lifecycle.remote_busy_until.is_none());
+    }
+
+    #[tokio::test]
     async fn serving_memory_remote_busy_defers_only_that_peer_without_fault() {
         for kind in [
             RpcRequestKind::Status,
@@ -12121,6 +12318,12 @@ mod tests {
         assert!(!network.is_request_pending(busy, RpcRequestKind::Status));
         assert!(network.is_request_pending(other, RpcRequestKind::Status));
         assert!(!network.closing_peers.contains(&busy));
+        network
+            .peer_lifecycle
+            .get_mut(&busy)
+            .unwrap()
+            .remote_busy_attempts
+            .insert(RpcRequestKind::Status, 1);
         network
             .peer_lifecycle
             .get_mut(&busy)
