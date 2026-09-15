@@ -98,4 +98,5 @@ Source and gate results are recorded in the
 The focused consensus suite passes 305 tests (one ignored) and strict CL Clippy.
 Source `331c97fa` passes all seven local gates: vendor integrity, formatting,
 workspace check, strict Clippy, 1,383 workspace tests (23 ignored), documentation
-tests and the release node build. PR publication and Linux/macOS CI remain pending.
+tests and the release node build. All six Linux/macOS CI jobs passed in run `34978618567` on head
+`fa8a79e5`. PR #169 merged as `2bf55c4a` after exact head/base verification.
