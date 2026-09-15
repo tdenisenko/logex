@@ -1,0 +1,219 @@
+{
+  "status": "All seven local gates, eight focused controls and independent final review pass; PR, CI and merge pending",
+  "branch": "audit/execution-salvage-deadlines",
+  "base": "76ecd1849c4cfc4dffb547fa2663d8328d730ecb",
+  "finding": {
+    "id": "B4-20",
+    "severity": "medium",
+    "effect": "Partial replies and receipt continuation can extend the fallback past its intended twelve-second salvage window",
+    "correction": "One pinned deadline-prioritized Tokio timer shared across roles, retries, continuation and both rounds"
+  },
+  "source_sha256": {
+    "crates/logex-sync/src/p2p/peer_manager/requests.rs": "fdd2399687542f69682dbfeccb5587ee05d4f5371f75f87dfcf3992d0f32374c",
+    "crates/logex-sync/src/p2p/peer_manager/requests/salvage_tests.rs": "9c626a7bd9ecf77ab31fc115d823a727a63c3290761dac9525d4bb30fdd52e6e"
+  },
+  "evidence_directory": "/private/tmp/logex-execution-salvage-deadlines-sd0h1nga",
+  "evidence": {
+    "salvage-deadline-review.json": {
+      "sha256": "2b114133c6181401c7eb54ae0c1a61c7b1af890041c07fefc95cb424551258d6",
+      "bytes": 6304
+    },
+    "original-controls.json": {
+      "sha256": "a98c67fd3addf1add5d0b84abf36afafff9f84edc4a1593f4a8b7f527e47c27b",
+      "bytes": 352
+    },
+    "original-salvage-tests.rs": {
+      "sha256": "7345d1f2ce2e7f24575ad9d54cc6ac0f7ae23f5e6ed77d5e03474f1ec7513269",
+      "bytes": 12490
+    },
+    "original-requests-diff.patch": {
+      "sha256": "b86fa392bfd6f02295c2c8c52c5009d161013098150e14fa5b7ee74eeac68001",
+      "bytes": 375
+    },
+    "original-salvage-controls.log": {
+      "sha256": "cc006f60479d1572bbf599503a69cd7ef394ff5ffd9eb6d22f6d7755f1413ac7",
+      "bytes": 4423
+    },
+    "fixed-salvage-controls.log": {
+      "sha256": "07bd9291780fc461bdce30a386006eaa192c5379c66a647aa5e7c664718240e2",
+      "bytes": 1558
+    },
+    "early-timeout-test-notes.json": {
+      "sha256": "0be96861fd3ad00baec38b2be4b517a9437ab3519a19f5d051b85ecd28c30405",
+      "bytes": 961
+    },
+    "implementation-review.json": {
+      "sha256": "7dee5edd2fad23b23cdd4e5f6a7363500c1e71e00d1b66b86815bfd4d5067c14",
+      "bytes": 3244
+    },
+    "final-review.json": {
+      "sha256": "a3ece382349680b34abfe635dabd4e6f794a83009df04b9c5ae1afca701f222b",
+      "bytes": 4239
+    },
+    "cleanup-review.json": {
+      "sha256": "be5e0f0f0ae67a677e63b07bfbb62bbe1dc9d827f2dc795f6a9b725a40cf7a5d",
+      "bytes": 424
+    },
+    "gates/results.json": {
+      "sha256": "8e5eadf13a9d41ee7a399f6971a01314954bb0a3c0e447c7ae610d0a95cff07d",
+      "bytes": 3807
+    },
+    "gates/test-summary.json": {
+      "sha256": "d84ec804d8c540e4254ca052b8b6e7c81a87e664eaf76d3e39a347af306fda34",
+      "bytes": 69
+    }
+  },
+  "original_controls": {
+    "production_unchanged": true,
+    "passed": 1,
+    "failed": 6,
+    "test_count": 7
+  },
+  "corrected_controls": {
+    "passed": 8,
+    "failed": 0,
+    "ignored": 0,
+    "additional_positive_control": "Genuine earlier wire timeout remains recorded and next body peer plus receipt peer complete before local deadline"
+  },
+  "limits": [
+    "Cooperative cancellation cannot preempt synchronous work within one poll",
+    "Already-admitted upstream requests may continue after response receiver is closed",
+    "Standalone ETH70 aggregate policy unchanged"
+  ],
+  "performance": "One timer per salvage invocation, no new per-block clones or writes; no benchmark or quantified gain",
+  "remote": "None; mac-mini tests and obsolete-artifact cleanup remain complete",
+  "source_commit": "2894e2b5a6cf032e2d7aded6d6a920cc287e8172",
+  "gates": {
+    "commit": "2894e2b5a6cf032e2d7aded6d6a920cc287e8172",
+    "rustc": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+    "gates": [
+      {
+        "name": "vendor",
+        "command": [
+          "python3",
+          "tools/verify_datafusion_vendor.py"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T21:37:48.625528+00:00",
+        "finished": "2026-09-15T21:37:48.680992+00:00",
+        "sha256": "d8d80949d6f3378c14456842b531f0cade514179e4c94781b95ff9abb6447675",
+        "log": "/private/tmp/logex-execution-salvage-deadlines-sd0h1nga/gates/vendor.log"
+      },
+      {
+        "name": "format",
+        "command": [
+          "cargo",
+          "fmt",
+          "--all",
+          "--",
+          "--check"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T21:37:48.681342+00:00",
+        "finished": "2026-09-15T21:37:49.598145+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-execution-salvage-deadlines-sd0h1nga/gates/format.log"
+      },
+      {
+        "name": "check",
+        "command": [
+          "cargo",
+          "check",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T21:37:49.598538+00:00",
+        "finished": "2026-09-15T21:37:54.205064+00:00",
+        "sha256": "02964d24834126e317e9e5a92cc83089603f2ea6a3a46328476856c2d226e723",
+        "log": "/private/tmp/logex-execution-salvage-deadlines-sd0h1nga/gates/check.log"
+      },
+      {
+        "name": "clippy",
+        "command": [
+          "cargo",
+          "clippy",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T21:37:54.205691+00:00",
+        "finished": "2026-09-15T21:37:58.318289+00:00",
+        "sha256": "80ced4691c92e8e7ebd95dfc3bd9f49c3a5460d1f17bcf6031f63b7228bc6acb",
+        "log": "/private/tmp/logex-execution-salvage-deadlines-sd0h1nga/gates/clippy.log"
+      },
+      {
+        "name": "test",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T21:37:58.318924+00:00",
+        "finished": "2026-09-15T21:40:45.221067+00:00",
+        "sha256": "1ecfe6bd12ea247c4a42fc2bcc8ddb84d112d3cf0f855aae45d127445fb875af",
+        "log": "/private/tmp/logex-execution-salvage-deadlines-sd0h1nga/gates/test.log"
+      },
+      {
+        "name": "doc",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--doc",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T21:40:45.223572+00:00",
+        "finished": "2026-09-15T21:40:52.864938+00:00",
+        "sha256": "375a18d6440be878d8757c0e433d86e13bccd593717f8923fb805a2cbb89787d",
+        "log": "/private/tmp/logex-execution-salvage-deadlines-sd0h1nga/gates/doc.log"
+      },
+      {
+        "name": "release-build",
+        "command": [
+          "cargo",
+          "build",
+          "-p",
+          "logex-node",
+          "--release",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T21:40:52.865437+00:00",
+        "finished": "2026-09-15T21:41:40.076608+00:00",
+        "sha256": "d0a517026b5654008f6eb5198217aa379a4e3b7c32ab559aa16587163a0afaaf",
+        "log": "/private/tmp/logex-execution-salvage-deadlines-sd0h1nga/gates/release-build.log"
+      }
+    ]
+  },
+  "workspace_tests": {
+    "groups": 25,
+    "passed": 1497,
+    "failed": 0,
+    "ignored": 23
+  }
+}

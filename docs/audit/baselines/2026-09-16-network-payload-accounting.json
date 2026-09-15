@@ -1,5 +1,5 @@
 {
-  "status": "All seven local gates and independent review pass; PR, CI and merge pending",
+  "status": "Merged after all seven local gates and six exact-head CI jobs passed",
   "branch": "audit/network-payload-accounting",
   "base": "a56470af0a49f0b6b3a8ebcc01fe1cc387f8145a",
   "source_sha256": {
@@ -105,6 +105,18 @@
     "gates/test-summary.json": {
       "sha256": "0b86a6e0f4dcc9a094b356d2de6f86d26ef40dbd828785425185b022bb30ee26",
       "bytes": 69
+    },
+    "premerge.json": {
+      "sha256": "f512830b4afc33251c2c4a52705a611d2aa0397e2dbc6c0ccbd322bc2a593c34",
+      "bytes": 1894
+    },
+    "merged.json": {
+      "sha256": "f73c3163d6d45f198445b36910bdb26aba3f5fe677213a9a04bc1d56f8a6df4c",
+      "bytes": 240
+    },
+    "ci-watch.log": {
+      "sha256": "b04754cde3bec1d99311d0595cd068daa530092dd08b371fba40d3e4b8b93a1d",
+      "bytes": 14167
     }
   },
   "original_controls": {
@@ -261,6 +273,52 @@
         "finished": "2026-09-15T21:10:43.585705+00:00",
         "sha256": "cda5cfda9cfdcf10ad8ff62d105f2cc4b82524622ffc59999e2efaa7007a2eec",
         "log": "/private/tmp/logex-network-payload-accounting-2jt7elcj/gates/release-build.log"
+      }
+    ]
+  },
+  "pull_request": {
+    "headRefOid": "e32fda5ede0366de9fb70cacb0dede38c6e5324f",
+    "mergeCommit": {
+      "oid": "76ecd1849c4cfc4dffb547fa2663d8328d730ecb"
+    },
+    "mergedAt": "2026-09-15T21:19:57Z",
+    "number": 182,
+    "state": "MERGED",
+    "url": "https://github.com/tdenisenko/logex/pull/182"
+  },
+  "ci": {
+    "run": 35024210393,
+    "head": "e32fda5ede0366de9fb70cacb0dede38c6e5324f",
+    "checks": [
+      {
+        "name": "Check",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS"
+      },
+      {
+        "name": "Format",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS"
+      },
+      {
+        "name": "Clippy",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS"
+      },
+      {
+        "name": "Test",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS"
+      },
+      {
+        "name": "macOS Test",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS"
+      },
+      {
+        "name": "Release Build",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS"
       }
     ]
   }
