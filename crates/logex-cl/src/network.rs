@@ -608,6 +608,8 @@ struct ConsensusNetwork {
     beacon_blocks_by_range_peers: HashSet<PeerId>,
     beacon_blocks_by_root_peers: HashSet<PeerId>,
     pending_requests: HashMap<PendingRequestKey, PeerId>,
+    pending_light_client_range_requests:
+        HashMap<PendingRequestKey, LightClientUpdatesByRangeRequest>,
     pending_history_root_requests: HashMap<PendingRequestKey, Vec<B256>>,
     pending_history_range_requests: HashMap<PendingRequestKey, BeaconBlocksByRangeRequest>,
     pending_peer_kinds: HashSet<(PeerId, RpcRequestKind)>,
@@ -927,6 +929,37 @@ fn range_request_contains_slot(request: BeaconBlocksByRangeRequest, slot: u64) -
     };
 
     relative_slot <= max_relative_slot && relative_slot % request.step == 0
+}
+
+fn light_client_range_contains_next_period(
+    request: LightClientUpdatesByRangeRequest,
+    previous: Option<u64>,
+    period: u64,
+) -> bool {
+    period
+        .checked_sub(request.start_period)
+        .is_some_and(|offset| offset < request.count)
+        && previous.is_none_or(|previous| previous.checked_add(1) == Some(period))
+}
+
+fn valid_history_range_sequence<'a>(
+    request: BeaconBlocksByRangeRequest,
+    blocks: impl Iterator<Item = &'a VerifiedBeaconBlock>,
+) -> bool {
+    let mut previous: Option<&VerifiedBeaconBlock> = None;
+    let mut roots = HashSet::new();
+    for block in blocks {
+        if !roots.insert(block.beacon_root)
+            || previous.is_some_and(|previous| {
+                block.slot <= previous.slot
+                    || (request.step == 1 && block.parent_root != previous.beacon_root)
+            })
+        {
+            return false;
+        }
+        previous = Some(block);
+    }
+    true
 }
 
 fn push_missing_history_root(
@@ -2079,6 +2112,7 @@ impl ConsensusNetwork {
             beacon_blocks_by_range_peers: HashSet::new(),
             beacon_blocks_by_root_peers: HashSet::new(),
             pending_requests: HashMap::new(),
+            pending_light_client_range_requests: HashMap::new(),
             pending_history_root_requests: HashMap::new(),
             pending_history_range_requests: HashMap::new(),
             pending_peer_kinds: HashSet::new(),
@@ -2984,7 +3018,11 @@ impl ConsensusNetwork {
                 error,
                 ..
             } => {
-                let _ = self.take_pending_request(kind, request_id);
+                if self.take_pending_request(kind, request_id).is_none() {
+                    return;
+                }
+                self.pending_light_client_range_requests
+                    .remove(&PendingRequestKey { kind, request_id });
                 if kind == RpcRequestKind::BeaconBlocksByRoot {
                     self.take_pending_history_root_request(request_id);
                 }
@@ -3139,7 +3177,12 @@ impl ConsensusNetwork {
                 error,
                 ..
             } => {
-                let _ = self.take_pending_request(RpcRequestKind::Goodbye, request_id);
+                if self
+                    .take_pending_request(RpcRequestKind::Goodbye, request_id)
+                    .is_none()
+                {
+                    return;
+                }
                 let expected_no_response =
                     matches!(
                         &error,
@@ -3239,7 +3282,12 @@ impl ConsensusNetwork {
                 error,
                 ..
             } => {
-                let _ = self.take_pending_request(RpcRequestKind::MetaData, request_id);
+                if self
+                    .take_pending_request(RpcRequestKind::MetaData, request_id)
+                    .is_none()
+                {
+                    return;
+                }
                 self.request_failures.increment(RpcRequestKind::MetaData);
                 self.record_peer_failure(peer, RpcRequestKind::MetaData);
                 let peer_context = self.peer_context(peer);
@@ -3274,6 +3322,9 @@ impl ConsensusNetwork {
             tracing::warn!(%peer, request = kind.as_str(), ?request_id, "received consensus RPC response for an unknown request");
             return;
         };
+        let requested_light_client_range = self
+            .pending_light_client_range_requests
+            .remove(&PendingRequestKey { kind, request_id });
         let requested_history_roots = if kind == RpcRequestKind::BeaconBlocksByRoot {
             self.take_pending_history_root_request(request_id)
         } else {
@@ -3398,11 +3449,28 @@ impl ConsensusNetwork {
                 RpcRequestKind::LightClientUpdatesByRange,
                 Eth2RpcResponse::LightClientUpdatesByRange(chunks),
             ) => {
+                let Some(request) = requested_light_client_range else {
+                    tracing::warn!(%peer, ?request_id, "missing light-client range request metadata");
+                    return;
+                };
+                if chunks.len() as u64 > request.count {
+                    self.record_invalid_light_client_response(
+                        peer,
+                        kind,
+                        format!(
+                            "range response has {} chunks for count {}",
+                            chunks.len(),
+                            request.count
+                        ),
+                    );
+                    return;
+                }
+                let chunk_count = chunks.len();
                 let total_bytes = chunks.iter().map(|chunk| chunk.bytes.len()).sum::<usize>();
                 let Some(mut store) = self.consensus.light_client_store() else {
                     tracing::debug!(
                         %peer,
-                        chunks = chunks.len(),
+                        chunks = chunk_count,
                         total_bytes,
                         "ignoring light-client updates by range response until a verified bootstrap exists"
                     );
@@ -3410,19 +3478,29 @@ impl ConsensusNetwork {
                 };
                 let mut applied = None;
                 let mut verified_updates_by_period = Vec::new();
-                let mut peer_fault = None;
-                for chunk in &chunks {
+                let mut previous_period = None;
+                for chunk in chunks {
                     match apply_light_client_update_payload(&chunk.bytes, &store) {
                         Ok(next) => {
                             let attested_slot = next.optimistic_status.attested_header.beacon_slot;
-                            if !rpc_context_matches_slot(chunk, attested_slot) {
-                                peer_fault = Some(format!(
+                            if !rpc_context_matches_slot(&chunk, attested_slot) {
+                                self.record_invalid_light_client_response(peer, kind, format!(
                                     "fork context {:?} does not match update attested slot {attested_slot}",
                                     chunk.context_bytes
                                 ));
-                                continue;
+                                return;
                             }
                             let period = sync_committee_period_for_slot(attested_slot);
+                            if !light_client_range_contains_next_period(
+                                request,
+                                previous_period,
+                                period,
+                            ) {
+                                self.record_invalid_light_client_response(peer, kind,
+                                    format!("invalid range response period {period} after {previous_period:?} for {request:?}"));
+                                return;
+                            }
+                            previous_period = Some(period);
                             tracing::debug!(
                                 %peer,
                                 bytes = chunk.bytes.len(),
@@ -3436,7 +3514,7 @@ impl ConsensusNetwork {
                                 "received and verified light-client update payload"
                             );
                             store = next.store.clone();
-                            verified_updates_by_period.push((period, chunk.clone()));
+                            verified_updates_by_period.push((period, chunk));
                             applied = Some(next);
                         }
                         Err(error) => {
@@ -3447,8 +3525,16 @@ impl ConsensusNetwork {
                                 "failed to verify light-client update payload"
                             );
                             if light_client_verification_error_is_peer_fault(&error) {
-                                peer_fault = Some(error.to_string());
+                                self.record_invalid_light_client_response(
+                                    peer,
+                                    kind,
+                                    error.to_string(),
+                                );
                             }
+                            // A concurrently advanced store can make a response
+                            // unusable without peer fault. Stop without publishing
+                            // an incomplete sequence or blaming stale responses.
+                            return;
                         }
                     }
                 }
@@ -3472,17 +3558,10 @@ impl ConsensusNetwork {
                 } else {
                     tracing::warn!(
                         %peer,
-                        chunks = chunks.len(),
+                        chunks = chunk_count,
                         total_bytes,
                         "light-client updates by range stream did not yield a usable verified update"
                     );
-                    if let Some(detail) = peer_fault {
-                        self.record_invalid_light_client_response(
-                            peer,
-                            RpcRequestKind::LightClientUpdatesByRange,
-                            detail,
-                        );
-                    }
                 }
             }
             (
@@ -3647,21 +3726,36 @@ impl ConsensusNetwork {
                 }
             }
             (RpcRequestKind::BeaconBlocksByRange, Eth2RpcResponse::BeaconBlocksByRange(chunks)) => {
+                let Some(request) = requested_history_range else {
+                    tracing::warn!(%peer, ?request_id, "missing beacon range request metadata");
+                    return;
+                };
+                if chunks.len() as u64 > request.count {
+                    self.disconnect_faulty_history_peer(
+                        peer,
+                        kind,
+                        format!(
+                            "range response has {} chunks for count {}",
+                            chunks.len(),
+                            request.count
+                        ),
+                    );
+                    return;
+                }
+                let chunk_count = chunks.len();
                 let total_bytes = chunks.iter().map(|chunk| chunk.bytes.len()).sum::<usize>();
                 tracing::debug!(
                     %peer,
-                    chunks = chunks.len(),
+                    chunks = chunk_count,
                     total_bytes,
                     "received beacon blocks by range response stream"
                 );
                 let mut decoded_blocks = Vec::new();
                 let mut invalid_response = false;
-                for chunk in &chunks {
-                    match decode_verified_beacon_block(chunk) {
+                for chunk in chunks {
+                    match decode_verified_beacon_block(&chunk) {
                         Ok(block) => {
-                            if requested_history_range.is_some_and(|request| {
-                                !range_request_contains_slot(request, block.slot)
-                            }) {
+                            if !range_request_contains_slot(request, block.slot) {
                                 invalid_response = true;
                                 tracing::warn!(
                                     %peer,
@@ -3673,7 +3767,7 @@ impl ConsensusNetwork {
                                 );
                                 continue;
                             }
-                            decoded_blocks.push((block, chunk.clone()));
+                            decoded_blocks.push((block, chunk));
                         }
                         Err(error) => {
                             tracing::warn!(
@@ -3682,8 +3776,15 @@ impl ConsensusNetwork {
                                 %error,
                                 "failed to decode or verify beacon block from range response"
                             );
+                            invalid_response = true;
                         }
                     }
+                }
+                if !valid_history_range_sequence(
+                    request,
+                    decoded_blocks.iter().map(|(block, _)| block),
+                ) {
+                    invalid_response = true;
                 }
                 if invalid_response {
                     self.disconnect_faulty_history_peer(
@@ -3701,7 +3802,7 @@ impl ConsensusNetwork {
                         RpcRequestKind::BeaconBlocksByRange,
                         format!(
                             "no_decodable_blocks chunks={} total_bytes={} requested_range={requested_history_range:?}",
-                            chunks.len(),
+                            chunk_count,
                             total_bytes
                         ),
                     );
@@ -3723,21 +3824,36 @@ impl ConsensusNetwork {
                 }
             }
             (RpcRequestKind::BeaconBlocksByRoot, Eth2RpcResponse::BeaconBlocksByRoot(chunks)) => {
+                if requested_history_roots.is_empty() {
+                    tracing::warn!(%peer, ?request_id, "missing beacon root request metadata");
+                    return;
+                }
+                if chunks.len() > requested_history_roots.len() {
+                    self.disconnect_faulty_history_peer(
+                        peer,
+                        kind,
+                        format!(
+                            "root response has {} chunks for {} requested roots",
+                            chunks.len(),
+                            requested_history_roots.len()
+                        ),
+                    );
+                    return;
+                }
+                let chunk_count = chunks.len();
                 let total_bytes = chunks.iter().map(|chunk| chunk.bytes.len()).sum::<usize>();
                 tracing::debug!(
                     %peer,
-                    chunks = chunks.len(),
+                    chunks = chunk_count,
                     total_bytes,
                     "received beacon blocks by root response stream"
                 );
                 let mut decoded_blocks = Vec::new();
                 let mut invalid_response = false;
-                for chunk in &chunks {
-                    match decode_verified_beacon_block(chunk) {
+                for chunk in chunks {
+                    match decode_verified_beacon_block(&chunk) {
                         Ok(block) => {
-                            if !requested_history_roots.is_empty()
-                                && !requested_history_roots.contains(&block.beacon_root)
-                            {
+                            if !requested_history_roots.contains(&block.beacon_root) {
                                 invalid_response = true;
                                 tracing::warn!(
                                     %peer,
@@ -3749,7 +3865,7 @@ impl ConsensusNetwork {
                                 );
                                 continue;
                             }
-                            decoded_blocks.push((block, chunk.clone()));
+                            decoded_blocks.push((block, chunk));
                         }
                         Err(error) => {
                             tracing::warn!(
@@ -3758,8 +3874,16 @@ impl ConsensusNetwork {
                                 %error,
                                 "failed to decode or verify beacon block from root response"
                             );
+                            invalid_response = true;
                         }
                     }
+                }
+                let mut seen_roots = HashSet::new();
+                if decoded_blocks
+                    .iter()
+                    .any(|(block, _)| !seen_roots.insert(block.beacon_root))
+                {
+                    invalid_response = true;
                 }
                 if invalid_response {
                     let requested_roots = requested_history_roots
@@ -3780,7 +3904,7 @@ impl ConsensusNetwork {
                         RpcRequestKind::BeaconBlocksByRoot,
                         format!(
                             "no_decodable_blocks chunks={} total_bytes={} requested_roots={requested_history_roots:?}",
-                            chunks.len(),
+                            chunk_count,
                             total_bytes
                         ),
                     );
@@ -4024,6 +4148,9 @@ impl ConsensusNetwork {
                 .then_with(|| left.cmp(right))
         });
         for peer in connected {
+            if self.closing_peers.contains(&peer) {
+                continue;
+            }
             if self
                 .peer_lifecycle
                 .get(&peer)
@@ -4276,6 +4403,10 @@ impl ConsensusNetwork {
             return;
         };
         let payload_bytes = consensus_request_payload_bytes(&request);
+        let requested_light_client_range = match &request {
+            Eth2RpcRequest::LightClientUpdatesByRange(request) => Some(*request),
+            _ => None,
+        };
         let requested_history_roots = match &request {
             Eth2RpcRequest::BeaconBlocksByRoot(roots) => Some(roots.clone()),
             _ => None,
@@ -4350,6 +4481,10 @@ impl ConsensusNetwork {
         self.record_p2p_upload_payload(payload_bytes);
         let key = PendingRequestKey { kind, request_id };
         self.pending_requests.insert(key, peer);
+        if let Some(request) = requested_light_client_range {
+            self.pending_light_client_range_requests
+                .insert(key, request);
+        }
         if let Some(roots) = requested_history_roots {
             self.pending_history_root_requests.insert(key, roots);
         }
@@ -5161,7 +5296,11 @@ impl ConsensusNetwork {
 
     fn disconnect_now(&mut self, peer: PeerId) {
         self.closing_peers.insert(peer);
-        let _ = self.swarm.disconnect_peer_id(peer);
+        if self.swarm.disconnect_peer_id(peer).is_err() {
+            // No connection remains, so no later ConnectionClosed event will
+            // clear this marker (e.g. a queued inbound Goodbye failure).
+            self.closing_peers.remove(&peer);
+        }
     }
 
     fn take_pending_history_root_request(
@@ -5207,6 +5346,7 @@ impl ConsensusNetwork {
             .collect::<Vec<_>>();
         for key in stale {
             let _ = self.take_pending_request(key.kind, key.request_id);
+            self.pending_light_client_range_requests.remove(&key);
             self.pending_history_root_requests.remove(&key);
             self.pending_history_range_requests.remove(&key);
         }
@@ -6226,6 +6366,494 @@ mod tests {
     use alloy_primitives::b256;
     use libp2p::StreamProtocol;
     use tempfile::TempDir;
+
+    fn request_lifecycle_fixture(temp: &TempDir) -> (ConsensusNetwork, RawRpcResponse) {
+        let fixture = crate::light_client::test_cached_light_client_fixture(419_072 * 32 + 16);
+        let consensus = Arc::new(
+            ConsensusStore::open(
+                temp.path(),
+                Some(&format!("{:#x}", fixture.checkpoint.beacon_root)),
+            )
+            .unwrap(),
+        );
+        let bootstrap = fixture.payloads.bootstrap.unwrap();
+        let (status, store) =
+            verify_bootstrap_payload(&bootstrap.bytes, fixture.checkpoint).unwrap();
+        consensus
+            .record_verified_bootstrap(status, bootstrap, store)
+            .unwrap();
+        let network = ConsensusNetwork::new(
+            ConsensusNetworkConfig {
+                data_dir: temp.path().to_owned(),
+                checkpoint: fixture.checkpoint,
+                bind_ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
+                dial_families: ConsensusDialAddressFamilies::IPV4,
+                external_ip: None,
+                discovery_port: 0,
+                p2p_port: 0,
+                max_peers: 1,
+            },
+            consensus,
+            Arc::new(Mutex::new(SyncStatus::default())),
+        )
+        .unwrap();
+        // Construction and send_request only enqueue work. Never start discovery
+        // or poll the swarm: these tests open no listener and contact no peer.
+        (
+            network,
+            fixture
+                .payloads
+                .updates_by_period
+                .into_values()
+                .next()
+                .unwrap(),
+        )
+    }
+
+    #[tokio::test]
+    async fn request_lifecycle_stale_signed_response_is_dropped_without_peer_blame() {
+        let temp = TempDir::new().unwrap();
+        let (mut network, _) = request_lifecycle_fixture(&temp);
+        let peer = PeerId::random();
+        let original = network.consensus.light_client_store().unwrap();
+        let historical =
+            crate::light_client::test_cached_light_client_fixture(419_072 * 32 - 8192 + 8);
+        let update = historical
+            .payloads
+            .updates_by_period
+            .into_values()
+            .next()
+            .unwrap();
+        assert!(matches!(
+            apply_light_client_update_payload(&update.bytes, &original),
+            Err(LightClientVerificationError::UnknownSyncCommitteePeriod { .. })
+        ));
+        let kind = RpcRequestKind::LightClientUpdatesByRange;
+        network.ensure_request(peer, kind);
+        let key = *network.pending_requests.keys().next().unwrap();
+        network.handle_rpc_response(
+            kind,
+            peer,
+            key.request_id,
+            Eth2RpcResponse::LightClientUpdatesByRange(vec![update]),
+        );
+        assert_eq!(network.consensus.light_client_store().unwrap(), original);
+        assert!(!network.peer_failures.contains_key(&peer));
+        assert!(network.last_rpc_failure.is_none());
+        assert!(network.pending_light_client_range_requests.is_empty());
+    }
+
+    #[tokio::test]
+    async fn request_lifecycle_invalid_chunk_after_valid_update_publishes_nothing() {
+        for invalid_kind in [0, 1, 2] {
+            let temp = TempDir::new().unwrap();
+            let (mut network, update) = request_lifecycle_fixture(&temp);
+            let peer = PeerId::random();
+            let original = network.consensus.light_client_store().unwrap();
+            let request = LightClientUpdatesByRangeRequest {
+                start_period: sync_committee_period_for_slot(original.bootstrap_slot()),
+                count: 2,
+            };
+            let kind = RpcRequestKind::LightClientUpdatesByRange;
+            let request_id = network
+                .swarm
+                .behaviour_mut()
+                .light_client_updates_by_range_rpc
+                .inner
+                .send_request(&peer, Eth2RpcRequest::LightClientUpdatesByRange(request));
+            let key = PendingRequestKey { kind, request_id };
+            network.pending_requests.insert(key, peer);
+            network.pending_peer_kinds.insert((peer, kind));
+            network
+                .pending_light_client_range_requests
+                .insert(key, request);
+            let mut invalid = update.clone();
+            match invalid_kind {
+                0 => invalid.bytes = vec![0],
+                1 => invalid.context_bytes = Some([0xff; 4]),
+                _ => {} // A second valid update in the same period is not consecutive.
+            }
+            network.handle_rpc_response(
+                kind,
+                peer,
+                request_id,
+                Eth2RpcResponse::LightClientUpdatesByRange(vec![update, invalid]),
+            );
+            assert_eq!(network.consensus.light_client_store().unwrap(), original);
+            assert_eq!(network.peer_lifecycle[&peer].rpc_failures, 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn request_lifecycle_rejects_signed_update_outside_requested_period() {
+        let temp = TempDir::new().unwrap();
+        let (mut network, update) = request_lifecycle_fixture(&temp);
+        let peer = PeerId::random();
+        let original = network.consensus.light_client_store().unwrap();
+        // The signed update is valid for the store; only request correlation
+        // disqualifies it from this otherwise ordinary count-one response.
+        assert!(apply_light_client_update_payload(&update.bytes, &original).is_ok());
+        let request = LightClientUpdatesByRangeRequest {
+            start_period: sync_committee_period_for_slot(original.bootstrap_slot()) + 1,
+            count: 1,
+        };
+        let kind = RpcRequestKind::LightClientUpdatesByRange;
+        let request_id = network
+            .swarm
+            .behaviour_mut()
+            .light_client_updates_by_range_rpc
+            .inner
+            .send_request(&peer, Eth2RpcRequest::LightClientUpdatesByRange(request));
+        let key = PendingRequestKey { kind, request_id };
+        network.pending_requests.insert(key, peer);
+        network.pending_peer_kinds.insert((peer, kind));
+        network
+            .pending_light_client_range_requests
+            .insert(key, request);
+        network.handle_rpc_response(
+            kind,
+            peer,
+            request_id,
+            Eth2RpcResponse::LightClientUpdatesByRange(vec![update]),
+        );
+        assert_eq!(network.consensus.light_client_store().unwrap(), original);
+        assert!(network.pending_light_client_range_requests.is_empty());
+    }
+
+    #[test]
+    fn request_lifecycle_range_shapes_allow_partial_results_and_skipped_slots() {
+        let request = LightClientUpdatesByRangeRequest {
+            start_period: 10,
+            count: 4,
+        };
+        assert!(light_client_range_contains_next_period(request, None, 11));
+        assert!(light_client_range_contains_next_period(
+            request,
+            Some(11),
+            12
+        ));
+        for (previous, period) in [
+            (None, 9),
+            (None, 14),
+            (Some(11), 11),
+            (Some(11), 13),
+            (Some(12), 11),
+        ] {
+            assert!(!light_client_range_contains_next_period(
+                request, previous, period
+            ));
+        }
+        assert!(light_client_range_contains_next_period(
+            LightClientUpdatesByRangeRequest {
+                start_period: u64::MAX,
+                count: 1
+            },
+            None,
+            u64::MAX
+        ));
+        assert!(!light_client_range_contains_next_period(
+            LightClientUpdatesByRangeRequest {
+                start_period: u64::MAX,
+                count: 1
+            },
+            Some(u64::MAX),
+            0
+        ));
+
+        let request = BeaconBlocksByRangeRequest {
+            start_slot: 10,
+            count: 8,
+            step: 1,
+        };
+        let first = ancestry_test_block(10, 1, 0);
+        let second = ancestry_test_block(13, 2, 1);
+        let fork = ancestry_test_block(14, 3, 0);
+        assert!(valid_history_range_sequence(request, [].iter()));
+        assert!(valid_history_range_sequence(request, [first].iter()));
+        assert!(valid_history_range_sequence(
+            request,
+            [first, second].iter()
+        ));
+        for blocks in [[second, first], [first, first], [first, fork]] {
+            assert!(!valid_history_range_sequence(request, blocks.iter()));
+        }
+        // For step > 1, omitted intervening blocks prevent direct parent checks.
+        assert!(valid_history_range_sequence(
+            BeaconBlocksByRangeRequest { step: 2, ..request },
+            [first, fork].iter()
+        ));
+    }
+
+    #[tokio::test]
+    async fn request_lifecycle_timeout_releases_metadata_and_late_response_is_ignored() {
+        let temp = TempDir::new().unwrap();
+        let (mut network, update) = request_lifecycle_fixture(&temp);
+        let peer = PeerId::random();
+        let original = network.consensus.light_client_store().unwrap();
+        let kind = RpcRequestKind::LightClientUpdatesByRange;
+        network.ensure_request(peer, kind);
+        let key = *network.pending_requests.keys().next().unwrap();
+        network.handle_rpc_event(
+            kind,
+            request_response::Event::OutboundFailure {
+                peer,
+                connection_id: libp2p::swarm::ConnectionId::new_unchecked(1),
+                request_id: key.request_id,
+                error: request_response::OutboundFailure::Timeout,
+            },
+        );
+        assert!(network.pending_requests.is_empty());
+        assert!(network.pending_light_client_range_requests.is_empty());
+        assert!(network.pending_peer_kinds.is_empty());
+        assert_eq!(network.peer_lifecycle[&peer].rpc_failures, 1);
+        network.handle_rpc_response(
+            kind,
+            peer,
+            key.request_id,
+            Eth2RpcResponse::LightClientUpdatesByRange(vec![update]),
+        );
+        assert_eq!(network.consensus.light_client_store().unwrap(), original);
+        assert_eq!(network.peer_lifecycle[&peer].rpc_failures, 1);
+    }
+
+    #[tokio::test]
+    async fn request_lifecycle_closing_peer_gets_no_new_scheduler_work() {
+        for closing in [true, false] {
+            let temp = TempDir::new().unwrap();
+            let (mut network, _) = request_lifecycle_fixture(&temp);
+            let peer = PeerId::random();
+            network.connected_peers.insert(peer);
+            network.peer_support.insert(
+                peer,
+                PeerRpcSupport {
+                    status: true,
+                    goodbye: true,
+                    light_client_updates_by_range: true,
+                    ..Default::default()
+                },
+            );
+            if closing {
+                network.disconnect_peer_with_reason(peer, GOODBYE_REASON_FAULT);
+                assert!(network.is_request_pending(peer, RpcRequestKind::Goodbye));
+            }
+            network.drive_rpc_requests();
+            assert_eq!(
+                network.is_request_pending(peer, RpcRequestKind::Status),
+                !closing
+            );
+            assert_eq!(network.pending_requests.len(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn request_lifecycle_rejects_extra_signed_lc_chunks_before_publication() {
+        for count in [2, 1] {
+            let temp = TempDir::new().unwrap();
+            let (mut network, update) = request_lifecycle_fixture(&temp);
+            let peer = PeerId::random();
+            let original = network.consensus.light_client_store().unwrap();
+            network.ensure_request(peer, RpcRequestKind::LightClientUpdatesByRange);
+            let key = *network.pending_requests.keys().next().unwrap();
+            network.handle_rpc_response(
+                key.kind,
+                peer,
+                key.request_id,
+                Eth2RpcResponse::LightClientUpdatesByRange(vec![update; count]),
+            );
+            let actual = network.consensus.light_client_store().unwrap();
+            assert_eq!(actual == original, count > 1);
+            assert!(network.pending_requests.is_empty());
+            assert!(network.pending_peer_kinds.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn request_lifecycle_ignores_failures_after_pending_cancellation() {
+        for kind in [
+            RpcRequestKind::LightClientUpdatesByRange,
+            RpcRequestKind::MetaData,
+            RpcRequestKind::Goodbye,
+        ] {
+            let temp = TempDir::new().unwrap();
+            let (mut network, _) = request_lifecycle_fixture(&temp);
+            let peer = PeerId::random();
+            network.ensure_request(peer, kind);
+            let key = *network.pending_requests.keys().next().unwrap();
+            network.connected_peers.insert(peer);
+            network.closing_peers.insert(peer);
+            network.handle_swarm_event(SwarmEvent::ConnectionClosed {
+                peer_id: peer,
+                connection_id: libp2p::swarm::ConnectionId::new_unchecked(1),
+                endpoint: ConnectedPoint::Listener {
+                    local_addr: "/memory/1".parse().unwrap(),
+                    send_back_addr: "/memory/2".parse().unwrap(),
+                },
+                num_established: 0,
+                cause: None,
+            });
+            assert!(network.pending_requests.is_empty());
+            assert!(network.pending_light_client_range_requests.is_empty());
+            let event = request_response::Event::OutboundFailure {
+                peer,
+                connection_id: libp2p::swarm::ConnectionId::new_unchecked(1),
+                request_id: key.request_id,
+                error: request_response::OutboundFailure::ConnectionClosed,
+            };
+            match kind {
+                RpcRequestKind::MetaData => network.handle_metadata_rpc_event(event),
+                RpcRequestKind::Goodbye => network.handle_goodbye_rpc_event(event),
+                _ => network.handle_rpc_event(kind, event),
+            }
+            assert!(network.peer_failures.is_empty());
+            assert!(network.last_rpc_failure.is_none());
+            assert!(!network.closing_peers.contains(&peer));
+            assert!(
+                network
+                    .peer_lifecycle
+                    .get(&peer)
+                    .is_none_or(|state| state.rpc_failures == 0)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn request_lifecycle_disconnect_of_absent_peer_leaves_no_closing_marker() {
+        let temp = TempDir::new().unwrap();
+        let (mut network, _) = request_lifecycle_fixture(&temp);
+        let peer = PeerId::random();
+        network.disconnect_now(peer);
+        assert!(!network.closing_peers.contains(&peer));
+    }
+
+    #[tokio::test]
+    async fn request_lifecycle_history_partial_empty_and_invalid_tail_controls() {
+        for range in [false, true] {
+            for case in [0, 1, 2, 3] {
+                let temp = TempDir::new().unwrap();
+                let (mut network, _) = request_lifecycle_fixture(&temp);
+                let peer = PeerId::random();
+                let raw = RawRpcResponse {
+                    bytes: include_bytes!("../tests/fixtures/beacon_block_14132042.ssz").to_vec(),
+                    context_bytes: Some(
+                        MAINNET_CONSENSUS_CHAIN_SPEC.fork_digest_for_epoch(14132042 / 32),
+                    ),
+                };
+                let block = decode_verified_beacon_block(&raw).unwrap();
+                let kind = if range {
+                    RpcRequestKind::BeaconBlocksByRange
+                } else {
+                    RpcRequestKind::BeaconBlocksByRoot
+                };
+                let roots = vec![block.beacon_root, B256::repeat_byte(0xff)];
+                let request = BeaconBlocksByRangeRequest {
+                    start_slot: block.slot,
+                    count: 2,
+                    step: 1,
+                };
+                let request_id = if range {
+                    network
+                        .swarm
+                        .behaviour_mut()
+                        .beacon_blocks_by_range_rpc
+                        .inner
+                        .send_request(&peer, Eth2RpcRequest::BeaconBlocksByRange(request))
+                } else {
+                    network
+                        .swarm
+                        .behaviour_mut()
+                        .beacon_blocks_by_root_rpc
+                        .inner
+                        .send_request(&peer, Eth2RpcRequest::BeaconBlocksByRoot(roots.clone()))
+                };
+                let key = PendingRequestKey { kind, request_id };
+                network.pending_requests.insert(key, peer);
+                network.pending_peer_kinds.insert((peer, kind));
+                if range {
+                    network.pending_history_range_requests.insert(key, request);
+                } else {
+                    network.pending_history_root_requests.insert(key, roots);
+                }
+                let chunks = match case {
+                    0 => vec![],
+                    1 => vec![raw],
+                    2 => vec![
+                        raw,
+                        RawRpcResponse {
+                            bytes: vec![0],
+                            context_bytes: None,
+                        },
+                    ],
+                    _ => vec![raw.clone(), raw],
+                };
+                let response = if range {
+                    Eth2RpcResponse::BeaconBlocksByRange(chunks)
+                } else {
+                    Eth2RpcResponse::BeaconBlocksByRoot(chunks)
+                };
+                network.handle_rpc_response(kind, peer, request_id, response);
+                assert_eq!(
+                    network
+                        .verified_beacon_blocks
+                        .contains_key(&block.beacon_root),
+                    case == 1
+                );
+                assert!(network.pending_history_root_requests.is_empty());
+                assert!(network.pending_history_range_requests.is_empty());
+                assert_eq!(
+                    network
+                        .peer_lifecycle
+                        .get(&peer)
+                        .is_some_and(|state| state.ignored_for_run),
+                    case >= 2
+                );
+                if case == 0 {
+                    assert!(
+                        network
+                            .last_rpc_failure
+                            .as_ref()
+                            .unwrap()
+                            .contains("no_decodable_blocks")
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn request_lifecycle_rejects_duplicate_history_root_response() {
+        let temp = TempDir::new().unwrap();
+        let (mut network, _) = request_lifecycle_fixture(&temp);
+        let peer = PeerId::random();
+        let raw = RawRpcResponse {
+            bytes: include_bytes!("../tests/fixtures/beacon_block_14132042.ssz").to_vec(),
+            context_bytes: Some(MAINNET_CONSENSUS_CHAIN_SPEC.fork_digest_for_epoch(14132042 / 32)),
+        };
+        let block = decode_verified_beacon_block(&raw).unwrap();
+        let roots = vec![block.beacon_root];
+        let kind = RpcRequestKind::BeaconBlocksByRoot;
+        let request_id = network
+            .swarm
+            .behaviour_mut()
+            .beacon_blocks_by_root_rpc
+            .inner
+            .send_request(&peer, Eth2RpcRequest::BeaconBlocksByRoot(roots.clone()));
+        let key = PendingRequestKey { kind, request_id };
+        network.pending_requests.insert(key, peer);
+        network.pending_peer_kinds.insert((peer, kind));
+        network.pending_history_root_requests.insert(key, roots);
+        network.handle_rpc_response(
+            kind,
+            peer,
+            request_id,
+            Eth2RpcResponse::BeaconBlocksByRoot(vec![raw.clone(), raw]),
+        );
+        assert!(
+            !network
+                .verified_beacon_blocks
+                .contains_key(&block.beacon_root)
+        );
+        assert!(network.pending_history_root_requests.is_empty());
+    }
 
     #[tokio::test]
     async fn consensus_storage_failure_stops_network_until_global_shutdown() {
