@@ -1,5 +1,5 @@
 {
-  "status": "Implementation,341sync tests and final independent review pass; full gates, CI and merge pending",
+  "status": "All seven local gates and final independent review pass; PR/CI/merge pending",
   "branch": "audit/execution-request-ownership",
   "base": "ae9da21eb7028d2fb55508a8cd41cdc0a042b0df",
   "source_sha256": {
@@ -68,6 +68,10 @@
     "sync-tests-first.log": {
       "sha256": "54412f4eef8aa455acb73dddd0b61998f1672921a95895bf7b9b8599ef56c0c5",
       "bytes": 33749
+    },
+    "gates/results.json": {
+      "sha256": "cc176800cba22d8f886c0464a27d7de3b6489e573f823522813445730cba0875",
+      "bytes": 3807
     }
   },
   "focused_sync_tests": {
@@ -85,5 +89,139 @@
     "cost": "Live plan ledger and captured senders; preserve batched feedback and avoid extra session map in streamed outcomes. No additional disk writes, format/dependency changes or benchmark.",
     "remaining": "Receipt-count source attribution and send-before-response-timeout review remain separate; offline audit, volume supervision and verified repair unfinished.",
     "remote": "No remote work; prior mac-mini cleanup complete."
+  },
+  "source_commit": "36db2d3d73ab339a70943022325c3cfde69bfc8c",
+  "workspace_tests": {
+    "groups": 25,
+    "passed": 1445,
+    "failed": 0,
+    "ignored": 23
+  },
+  "gates": {
+    "commit": "36db2d3d73ab339a70943022325c3cfde69bfc8c",
+    "rustc": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+    "gates": [
+      {
+        "name": "vendor",
+        "command": [
+          "python3",
+          "tools/verify_datafusion_vendor.py"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T18:13:39.640393+00:00",
+        "finished": "2026-09-15T18:13:39.696010+00:00",
+        "sha256": "d8d80949d6f3378c14456842b531f0cade514179e4c94781b95ff9abb6447675",
+        "log": "/private/tmp/logex-execution-request-ownership-kpzg98xi/gates/vendor.log"
+      },
+      {
+        "name": "format",
+        "command": [
+          "cargo",
+          "fmt",
+          "--all",
+          "--",
+          "--check"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T18:13:39.696349+00:00",
+        "finished": "2026-09-15T18:13:40.559867+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-execution-request-ownership-kpzg98xi/gates/format.log"
+      },
+      {
+        "name": "check",
+        "command": [
+          "cargo",
+          "check",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T18:13:40.560220+00:00",
+        "finished": "2026-09-15T18:13:45.377518+00:00",
+        "sha256": "92400f1204bd18dd3885124dc90052e3956b1597578c86005acc9e25247a118c",
+        "log": "/private/tmp/logex-execution-request-ownership-kpzg98xi/gates/check.log"
+      },
+      {
+        "name": "clippy",
+        "command": [
+          "cargo",
+          "clippy",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T18:13:45.378077+00:00",
+        "finished": "2026-09-15T18:13:51.488703+00:00",
+        "sha256": "e22014e80889bc0841dd36e83208c9b60fbcd0fe3281f99caae663a603b33bb1",
+        "log": "/private/tmp/logex-execution-request-ownership-kpzg98xi/gates/clippy.log"
+      },
+      {
+        "name": "test",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T18:13:51.489449+00:00",
+        "finished": "2026-09-15T18:16:39.442473+00:00",
+        "sha256": "297971280bc675e0be364d83fb80465405a0405ba1cff6b9d1f04101f73c8f99",
+        "log": "/private/tmp/logex-execution-request-ownership-kpzg98xi/gates/test.log"
+      },
+      {
+        "name": "doc",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--doc",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T18:16:39.443595+00:00",
+        "finished": "2026-09-15T18:16:50.215165+00:00",
+        "sha256": "62aa9ae83012b41af6916e1e9dc941f59315584c5bd3b17fca7708b3301687af",
+        "log": "/private/tmp/logex-execution-request-ownership-kpzg98xi/gates/doc.log"
+      },
+      {
+        "name": "release-build",
+        "command": [
+          "cargo",
+          "build",
+          "-p",
+          "logex-node",
+          "--release",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T18:16:50.215934+00:00",
+        "finished": "2026-09-15T18:17:34.356523+00:00",
+        "sha256": "959892e74f984424555be81ddb24b585943eb073be061380345838fa64cb64c1",
+        "log": "/private/tmp/logex-execution-request-ownership-kpzg98xi/gates/release-build.log"
+      }
+    ]
   }
 }
