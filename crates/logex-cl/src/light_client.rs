@@ -905,7 +905,7 @@ impl DecodedFinalityUpdate {
     fn finalized_verified_header(
         &self,
     ) -> Result<Option<VerifiedLightClientHeader>, LightClientVerificationError> {
-        let header = match self {
+        match self {
             Self::Capella(payload) => verified_optional_capella_header(
                 &payload.finalized_header,
                 branch_has_nonzero(payload.finality_branch.as_slice()),
@@ -918,16 +918,7 @@ impl DecodedFinalityUpdate {
                 &payload.finalized_header,
                 branch_has_nonzero(payload.finality_branch.as_slice()),
             ),
-        }?;
-        Ok(header.map(|mut header| {
-            // Retain the standalone family's existing schema metadata.
-            header.fork = match self {
-                Self::Capella(_) => ConsensusDataFork::Capella,
-                Self::Deneb(_) => ConsensusDataFork::Deneb,
-                Self::Electra(_) => ConsensusDataFork::Electra,
-            };
-            header
-        }))
+        }
     }
 
     fn sync_aggregate(&self) -> &SyncAggregateRaw {
@@ -1672,7 +1663,9 @@ fn process_light_client_update(
             .finalized_header
             .as_ref()
             .map(|finalized_header| LightClientFinalityUpdateStatus {
-                fork: finalized_header.fork,
+                // This describes the update, whose finalized header can be
+                // from an earlier fork or the default genesis checkpoint.
+                fork: update.attested_header.fork,
                 attested_header: header_summary_verified(&update.attested_header),
                 finalized_header: header_summary_verified(finalized_header),
                 signature_slot: update.signature_slot,
@@ -3212,10 +3205,22 @@ mod tests {
         for schema in 0..3 {
             for has_branch in [true, false] {
                 let (finality, range, store) = genesis_finality_fixture(schema, has_branch, None);
-                let (_, finality_store, _, finalized) =
+                let (summary, finality_store, _, finalized) =
                     apply_finality_update_payload(&finality, &store).unwrap();
+                let expected_fork = [
+                    ConsensusDataFork::Capella,
+                    ConsensusDataFork::Deneb,
+                    ConsensusDataFork::Electra,
+                ][schema];
+                assert_eq!(summary.fork, expected_fork);
                 assert_eq!(finalized.beacon.slot, 0);
                 let applied = apply_light_client_update_payload(&range, &store).unwrap();
+                if let Some(status) = &applied.finality_status {
+                    assert_eq!(
+                        status.fork, expected_fork,
+                        "finality summary describes the update, including genesis finality"
+                    );
+                }
                 for result in [&finality_store, &applied.store] {
                     assert_eq!(result.finalized_header, store.finalized_header);
                     assert_eq!(

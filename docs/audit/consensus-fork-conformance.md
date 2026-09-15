@@ -11,6 +11,12 @@ retention or stored-state integrity audit.
 | --- | --- | --- |
 | B1-23 | P2, historical interoperability | The epoch-dependent digest applied Fulu's blob-parameter shift to every epoch. Exact context checks consequently rejected compliant pre-Fulu responses and derived incorrect missing cache contexts. Return the plain digest before the explicit Fulu activation epoch; retain the existing shifted rule afterward. |
 | B1-24 | P2, update conformance | Genesis finality and absent finality were confused with ordinary finalized headers. A valid genesis proof uses the zero leaf and a completely default header. A nonzero finality branch identifies presence, including genesis; an absent branch requires the default header and no proof check. Preserve presence in update selection and reject inconsistent headers. |
+| B1-25 | P2, update conformance | A nondefault next committee with an all-zero branch could be treated as present if the signed fixture header committed to that constructed proof. The branch now determines presence; an absent branch requires the default committee. Existing valid committee proofs continue to verify. |
+
+Finality status reports the attested update's fork, including when the finalized
+header is genesis or from an earlier fork. A before-fix control reproduced a
+Deneb update labeled Capella. Shared summary construction now uses the attested
+header; the standalone finalized-header metadata override is removed.
 
 ## Authoritative rules and schedule
 
@@ -73,6 +79,12 @@ adds no durability barrier, network round trip or new signature verification.
 No benchmark or percentage performance claim is needed for these correctness
 changes.
 
+Committee presence follows the same branch-based rule. Reject inconsistent raw
+committee/branch pairs before creating an optional verified committee, and report
+the actual attested slot in shape errors. Existing rejection of a default
+all-zero committee with a nonzero branch is retained. No wider acceptance of
+invalid committee keys is introduced.
+
 ## Validation and remaining work
 
 Independent SHA256 vectors cover the epoch before, at and after each mainnet
@@ -86,7 +98,16 @@ Valid absent-finality controls use an attested state root independent of an
 all-zero proof reconstruction. Invalid controls retain correctly formed local
 signatures while varying header/proof consistency.
 
-Published SSZ vectors, focused validation, full workspace gates and CI/merge
-records are being completed. Random official SSZ vectors establish serialization
-conformance; they do not represent authenticated mainnet blocks or committee
-signatures. Live sync and the staging soak remain later gates.
+The [13 published SSZ fixtures](../../crates/logex-cl/tests/fixtures/consensus-spec-tests/README.md)
+exercise all four payload families for Capella, Deneb and Electra, plus Fulu's
+inherited range layout. Tests call the production decoders, compare decoded
+fields and independently calculated beacon-header roots, reencode the exact
+bytes, and check pinned upstream file hashes. Random official SSZ vectors
+establish serialization conformance; they do not represent authenticated mainnet
+blocks or committee signatures. The fixture README states which fields and roots
+are asserted and which are retained only as source evidence.
+
+The completed integrated consensus-crate run passes 179 tests (one ignored),
+including the official fixtures and committee controls; focused strict Clippy
+also passes. Full workspace gates and CI/merge records are being completed. Live sync and the
+staging soak remain later gates.
