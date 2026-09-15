@@ -1,5 +1,5 @@
 {
-  "status": "Implementation and focused tests/review pass; final gates/CI/merge pending",
+  "status": "All seven local gates and final independent review pass; CI/merge pending",
   "branch": "audit/consensus-discovery-key",
   "base": "5df5b2f52bf8d63dfe154372fd593eebf9018c8e",
   "source_sha256": {
@@ -64,6 +64,10 @@
     "exfat-probe.log": {
       "sha256": "01f9c7a20f59882c4e5d40820ce10846075fbf1d4e1f2d2353e48aca9c62f9a0",
       "bytes": 266
+    },
+    "gates/results.json": {
+      "sha256": "5572fc8fd5aacaddfe8b4232e7e73e7189ffe6ca2c34873ceaf3632282ad5355",
+      "bytes": 3709
     }
   },
   "focused_consensus_tests": {
@@ -84,5 +88,139 @@
     "existing_modes": "Preserved; per-file POSIX enforcement unavailable on ExFAT",
     "performance": "Startup/restart only; no additional ingestion work, no benchmark or timing percentage claimed",
     "scope": "No physical power-loss simulation or entire Rust helper execution on ExFAT; no expected-volume supervision implementation"
+  },
+  "source_commit": "b966f25226a8c521400c4a44afb009a42e515e7d",
+  "workspace_tests": {
+    "groups": 25,
+    "passed": 1427,
+    "failed": 0,
+    "ignored": 23
+  },
+  "gates": {
+    "commit": "b966f25226a8c521400c4a44afb009a42e515e7d",
+    "rustc": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+    "gates": [
+      {
+        "name": "vendor",
+        "command": [
+          "python3",
+          "tools/verify_datafusion_vendor.py"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T16:35:38.050652+00:00",
+        "finished": "2026-09-15T16:35:38.104640+00:00",
+        "sha256": "d8d80949d6f3378c14456842b531f0cade514179e4c94781b95ff9abb6447675",
+        "log": "/private/tmp/logex-discovery-key-2ntzzfok/gates/vendor.log"
+      },
+      {
+        "name": "format",
+        "command": [
+          "cargo",
+          "fmt",
+          "--all",
+          "--",
+          "--check"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T16:35:38.104996+00:00",
+        "finished": "2026-09-15T16:35:38.948554+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-discovery-key-2ntzzfok/gates/format.log"
+      },
+      {
+        "name": "check",
+        "command": [
+          "cargo",
+          "check",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T16:35:38.948922+00:00",
+        "finished": "2026-09-15T16:35:48.677277+00:00",
+        "sha256": "14873076c7a7ca8357ff8c11acbde23da22b48a48885f96d69842129fa8c4086",
+        "log": "/private/tmp/logex-discovery-key-2ntzzfok/gates/check.log"
+      },
+      {
+        "name": "clippy",
+        "command": [
+          "cargo",
+          "clippy",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T16:35:48.678018+00:00",
+        "finished": "2026-09-15T16:35:58.049478+00:00",
+        "sha256": "e4eb7702fd6aa87e58baeaeb36bc7b5defc0e1922d500c052d02e23b6c1a1324",
+        "log": "/private/tmp/logex-discovery-key-2ntzzfok/gates/clippy.log"
+      },
+      {
+        "name": "test",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T16:35:58.050076+00:00",
+        "finished": "2026-09-15T16:39:00.414890+00:00",
+        "sha256": "6e9dc93ab21e468bc8ecce782827c7d7e85198ee556e556dc43df0ee3e591262",
+        "log": "/private/tmp/logex-discovery-key-2ntzzfok/gates/test.log"
+      },
+      {
+        "name": "doc",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--doc",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T16:39:00.416580+00:00",
+        "finished": "2026-09-15T16:39:16.779590+00:00",
+        "sha256": "f7156fe89541a66973e0b41139073e262fa6ed39b7bdf9f7f1fe7ed9a9c64c71",
+        "log": "/private/tmp/logex-discovery-key-2ntzzfok/gates/doc.log"
+      },
+      {
+        "name": "release-build",
+        "command": [
+          "cargo",
+          "build",
+          "-p",
+          "logex-node",
+          "--release",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T16:39:16.780488+00:00",
+        "finished": "2026-09-15T16:40:21.254935+00:00",
+        "sha256": "39b86993675e4ac8ad5c56870c84711e827930e97150cc7f07793a25b24ab3be",
+        "log": "/private/tmp/logex-discovery-key-2ntzzfok/gates/release-build.log"
+      }
+    ]
   }
 }
