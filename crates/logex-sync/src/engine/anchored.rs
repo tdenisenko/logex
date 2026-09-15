@@ -2869,22 +2869,16 @@ impl SyncEngine {
                 }
             };
 
-            let expected_receipt_counts: Vec<usize> = bodies
-                .iter()
-                .map(|(_peer_id, body)| body.transaction_count())
-                .collect();
             let receipt_peer_preference = preferred_body_peers(&bodies, header_peer);
             let receipt_result = cancelable(
                 &mut self.shutdown,
-                self.peers
-                    .get_receipts_matching_counts_prefer_peers_with_limits(
-                        chunk_hashes.clone(),
-                        required_block,
-                        &expected_receipt_counts,
-                        &receipt_peer_preference,
-                        request_timeout,
-                        request_attempts,
-                    ),
+                self.peers.get_receipts_prefer_peers_with_limits(
+                    chunk_hashes.clone(),
+                    required_block,
+                    &receipt_peer_preference,
+                    request_timeout,
+                    request_attempts,
+                ),
             )
             .await;
             let (receipt_peer, receipts) = match receipt_result {
@@ -3289,22 +3283,16 @@ impl SyncEngine {
                 }
             }
 
-            let expected_receipt_counts: Vec<usize> = bodies
-                .iter()
-                .map(|(_peer_id, body)| body.transaction_count())
-                .collect();
             let receipt_peer_preference = preferred_body_peers(&bodies, header_peer);
             let receipt_result = cancelable(
                 &mut self.shutdown,
-                self.peers
-                    .get_receipts_matching_counts_prefer_peers_with_limits(
-                        chunk_hashes.clone(),
-                        required_block,
-                        &expected_receipt_counts,
-                        &receipt_peer_preference,
-                        payload_timeout,
-                        payload_attempts,
-                    ),
+                self.peers.get_receipts_prefer_peers_with_limits(
+                    chunk_hashes.clone(),
+                    required_block,
+                    &receipt_peer_preference,
+                    payload_timeout,
+                    payload_attempts,
+                ),
             )
             .await;
             let (receipt_peer, receipts) = match receipt_result {
@@ -6423,17 +6411,12 @@ impl SyncEngine {
             }
         };
 
-        let expected_receipt_counts: Vec<usize> = bodies
-            .iter()
-            .map(|(_peer_id, body)| body.transaction_count())
-            .collect();
         let receipt_peer_preference = preferred_body_peers(&bodies, header_peer);
         let (receipt_peer, receipts) = match cancelable(
             &mut self.shutdown,
-            self.peers.get_receipts_matching_counts_prefer_peers(
+            self.peers.get_receipts_prefer_peers(
                 hashes.to_vec(),
                 required_block,
-                &expected_receipt_counts,
                 &receipt_peer_preference,
             ),
         )
@@ -6641,18 +6624,13 @@ impl SyncEngine {
                 }
             };
 
-            let expected_receipt_counts: Vec<usize> = bodies
-                .iter()
-                .map(|(_peer_id, body)| body.transaction_count())
-                .collect();
             let receipt_peer_preference = preferred_body_peers(&bodies, header_peer);
 
             let (receipt_peer, receipts) = match cancelable(
                 &mut self.shutdown,
-                self.peers.get_receipts_matching_counts_prefer_peers(
+                self.peers.get_receipts_prefer_peers(
                     chunk_hashes.clone(),
                     required_block,
-                    &expected_receipt_counts,
                     &receipt_peer_preference,
                 ),
             )
@@ -6980,6 +6958,98 @@ mod tests {
             ..Default::default()
         };
         (header, ((PeerId::ZERO, body), (PeerId::ZERO, vec![])))
+    }
+
+    fn single_transaction_validation_fixture() -> (Header, SourcedBodyReceipts) {
+        use alloy_consensus::{SignableTransaction, TxLegacy, proofs};
+        use alloy_primitives::{Signature, U256};
+
+        // Structural data only: this transaction is never submitted or executed.
+        let mut body = reth_ethereum_primitives::BlockBody::default();
+        body.transactions.push(
+            TxLegacy::default()
+                .into_signed(Signature::new(U256::from(1), U256::from(2), false))
+                .into(),
+        );
+        let receipt = crate::primitives::LogexReceipt::default();
+        let receipt = ReceiptWithBloom {
+            logs_bloom: receipt.bloom(),
+            receipt,
+        };
+        let header = Header {
+            number: 4_370_000,
+            transactions_root: body.calculate_tx_root(),
+            ommers_hash: body.calculate_ommers_root(),
+            withdrawals_root: body.calculate_withdrawals_root(),
+            receipts_root: proofs::calculate_receipt_root(std::slice::from_ref(&receipt)),
+            logs_bloom: receipt.logs_bloom,
+            ..Default::default()
+        };
+        (
+            header,
+            (
+                (PeerId::repeat_byte(1), body),
+                (PeerId::repeat_byte(2), vec![receipt]),
+            ),
+        )
+    }
+
+    #[tokio::test]
+    async fn receipt_disagreement_is_attributed_after_body_commitment_validation() {
+        let (header, complete) = single_transaction_validation_fixture();
+        let headers = vec![header.clone()];
+        let hashes = vec![header.hash_slow()];
+        let validated =
+            validate_historical_blocks_parallel(&headers, &hashes, vec![complete.clone()])
+                .await
+                .unwrap()
+                .ok()
+                .unwrap();
+        assert_eq!(validated.len(), 1);
+        let extracted = validate_and_extract_historical_blocks_streaming(
+            &headers,
+            &hashes,
+            vec![complete.clone()],
+        )
+        .await
+        .unwrap();
+        assert!(extracted.is_ok());
+
+        for (incorrect_body, supplied_count) in [(true, 0), (true, 2), (false, 0), (false, 2)] {
+            let mut supplied = complete.clone();
+            let expected_peer = if incorrect_body {
+                supplied
+                    .0
+                    .1
+                    .transactions
+                    .resize(supplied_count, complete.0.1.transactions[0].clone());
+                supplied.0.0
+            } else {
+                supplied.1.1.resize(supplied_count, complete.1.1[0].clone());
+                supplied.1.0
+            };
+            let expected_kind = if incorrect_body {
+                "block bodies"
+            } else {
+                "receipts"
+            };
+            let failure =
+                validate_historical_blocks_parallel(&headers, &hashes, vec![supplied.clone()])
+                    .await
+                    .unwrap()
+                    .err()
+                    .unwrap();
+            assert_eq!(failure.peer, expected_peer);
+            assert_eq!(failure.response_kind, expected_kind);
+            let failure =
+                validate_and_extract_historical_blocks_streaming(&headers, &hashes, vec![supplied])
+                    .await
+                    .unwrap()
+                    .err()
+                    .unwrap();
+            assert_eq!(failure.peer, expected_peer);
+            assert_eq!(failure.response_kind, expected_kind);
+        }
     }
 
     #[tokio::test]

@@ -79,7 +79,7 @@ accounting. Three obsolete scalar-only tests are removed. The complete sync libr
 passes: 341 tests, one ignored. Final independent review approves the implementation within B4-09 through B4-11
 with no remaining actionable finding. Source hashes and controls are bound in
 [the validation record](baselines/2026-09-16-execution-request-ownership.json).
-Source `36db2d3d` passes all seven local gates: vendor verification, formatting, workspace check, strict Clippy, 1,445 workspace tests (23 ignored), documentation tests and release node linking. CI and merge remain pending. No benchmark, throughput
+Source `36db2d3d` passes all seven local gates: vendor verification, formatting, workspace check, strict Clippy, 1,445 workspace tests (23 ignored), documentation tests and release node linking. All six CI jobs passed on head `49b1c56e` (run `35006614456`); PR #176 merged as `99128441` after exact head/base verification. No benchmark, throughput
 percentage, additional disk write or format change is proposed.
 
 ## Follow-up dispositions

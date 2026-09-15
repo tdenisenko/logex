@@ -1,0 +1,102 @@
+{
+  "status": "Implementation and focused sync tests, original helper controls, final review pass; full gates and CI/merge pending",
+  "branch": "audit/execution-response-attribution",
+  "base": "9912844170251f26b6a54752fdaa4f3c329aab9d",
+  "source_sha256": {
+    "crates/logex-sync/src/p2p/peer_manager/requests.rs": "60613fb2ac67ecc4aa0730a689f9117fcfe041234486e79f4042196dffbd1ea8",
+    "crates/logex-sync/src/engine/live.rs": "6ca997f0527ded5802b19a276d7c2850f9443cad8612ae97428181c36422d75f",
+    "crates/logex-sync/src/engine/historical.rs": "f72586fc19e0d50defcd2f67d817def726d93585bfa0aa896db1d80607e8e261",
+    "crates/logex-sync/src/engine/anchored.rs": "6bc24149e6e1e4aa8a717220a2e2e5e9018f5669e458896678261ea0c0831f5e",
+    "crates/logex-sync/src/validation.rs": "13ee33b67364deef2d7195cea8ca8dfe3b7de1295c1c11281a7b2939074b5fd6"
+  },
+  "findings": {
+    "B4-12": {
+      "severity": "medium",
+      "effect": "An unvalidated body count can cause unsupported receipt-peer protocol penalties or receipt-role quarantine",
+      "disposition": "Remove unverified count hints; retain source pairing and established body-first content validation before ingestion"
+    }
+  },
+  "evidence_directory": "/private/tmp/logex-execution-response-attribution-kfydwarx",
+  "evidence": {
+    "receipt-plan-design.json": {
+      "sha256": "bd8c8247d860822b7e9d9c91a442e6f58945a6afbc7e74e027a0a79848487770",
+      "bytes": 5412
+    },
+    "receipt-attribution-review.json": {
+      "sha256": "97158002057ca8b1f11a5b3a5321b1e0838fc4f67f14a0d405cbfcbf3044ca61",
+      "bytes": 6539
+    },
+    "engine-review.json": {
+      "sha256": "2b55c2a5dac26ec18a868f085ee872da89547a14cbfa21a5cfc40e0e3094934b",
+      "bytes": 2531
+    },
+    "consumer-review.json": {
+      "sha256": "305c9aa2d5d41e538fb58ba509810d13246e776574abed746a4614b89f8b890e",
+      "bytes": 1259
+    },
+    "request-implementation.json": {
+      "sha256": "13d73bbce8410f2431fa2bfad71494fc45564bec10ec79b832269c75c9badf4c",
+      "bytes": 1929
+    },
+    "final-review.json": {
+      "sha256": "3957477f5e89bbaff23a72d4ec19964fa218e5f87ae5271803042e6e53b89ccf",
+      "bytes": 4604
+    },
+    "original-count-controls.json": {
+      "sha256": "7615809349ad798a021ed73b5c0a6b9465548f2d196de6fd19114aefa52e8812",
+      "bytes": 707
+    },
+    "original-count-controls.log": {
+      "sha256": "0ce324d20e1a32165466815118e11627b4420f4cf5c4488dd63abf4285427e9e",
+      "bytes": 2214
+    },
+    "original-count-module.rs": {
+      "sha256": "e7eaf580f79c50c0a96d84fb59d1fb908b34883d9a182b375b0ef9e7e5b270ac",
+      "bytes": 2916
+    },
+    "sync-tests-first.log": {
+      "sha256": "316766cac04cbda97ba028dd96d5300bf85c2947f953312700c11aa67f8a16b9",
+      "bytes": 34076
+    },
+    "cleanup-review.json": {
+      "sha256": "42397c7f89535124786f4065c2f35716c34cbc2dce92a2dc0dc6c5b3b8e8be19",
+      "bytes": 1215
+    },
+    "obsolete-count-identifiers-exact.log": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    "retained-count-validation.log": {
+      "sha256": "49f6dbc190f2c4f0894afcdaf472ee035a3de9b632cea42a678b92080107850c",
+      "bytes": 857
+    },
+    "pairing-callers.log": {
+      "sha256": "05dd8d983776737524e19cbe249962deae792217585f388f1a25c3f9761f1c83",
+      "bytes": 1181
+    }
+  },
+  "focused_sync_tests": {
+    "passed": 344,
+    "failed": 0,
+    "ignored": 1
+  },
+  "new_tests": 3,
+  "original_helper_controls": {
+    "base": "9912844170251f26b6a54752fdaa4f3c329aab9d",
+    "scope": "Exact original count validator and two peer-classification helpers in a temporary test module, using real receipt types and body-derived count inputs 0/2 against one receipt. Not a full baseline checkout or network-peer test.",
+    "original_requests_sha256": "c28028c398e6b5c1dbc7773667626c36ac6cda366207b1bc4360c019058810a6",
+    "candidate_sha256": "60613fb2ac67ecc4aa0730a689f9117fcfe041234486e79f4042196dffbd1ea8",
+    "restored_sha256": "60613fb2ac67ecc4aa0730a689f9117fcfe041234486e79f4042196dffbd1ea8",
+    "module_sha256": "e7eaf580f79c50c0a96d84fb59d1fb908b34883d9a182b375b0ef9e7e5b270ac",
+    "expected_failures": 2,
+    "exit_code": 101
+  },
+  "contract": {
+    "assembly": "Complete outer responses only; exact complete-body internal invariant before zip; preserve all receipt entries and both sources",
+    "validation": "Body commitment first, then receipt count and gas/root/bloom, before ingestion",
+    "eth70": "Merge, cursor, incomplete-last-block, overflow and no-progress semantics preserved",
+    "cost": "Remove per-block vectors and premature comparisons; no extra hashing, storage write, format or dependency change; no benchmark",
+    "remaining": "Send-queue deadlines and continuation memory budgets remain separate; offline audit, volume supervision and verified repair incomplete",
+    "remote": "No remote work; mac-mini cleanup complete"
+  }
+}
