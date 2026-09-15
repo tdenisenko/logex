@@ -235,9 +235,8 @@ impl ConsensusStore {
             .lock()
             .unwrap()
             .ordered_anchors
-            .iter()
-            .rev()
-            .find(|record| record.anchor.block_number >= start_block)
+            .last()
+            .filter(|record| record.anchor.block_number >= start_block)
             .map(|record| record.anchor.block_number)
     }
 
@@ -294,23 +293,19 @@ impl ConsensusStore {
     }
 
     pub fn next_anchor_after(&self, block_number: u64) -> Option<ExecutionAnchor> {
-        self.inner
-            .lock()
-            .unwrap()
-            .ordered_anchors
-            .iter()
-            .find(|record| record.anchor.block_number > block_number)
-            .map(|record| record.anchor)
+        let snapshot = self.inner.lock().unwrap();
+        let anchors = &snapshot.ordered_anchors;
+        let index = anchors.partition_point(|record| record.anchor.block_number <= block_number);
+        anchors.get(index).map(|record| record.anchor)
     }
 
     pub fn anchor_at(&self, block_number: u64) -> Option<ExecutionAnchor> {
-        self.inner
-            .lock()
-            .unwrap()
-            .ordered_anchors
-            .iter()
-            .find(|record| record.anchor.block_number == block_number)
-            .map(|record| record.anchor)
+        let snapshot = self.inner.lock().unwrap();
+        let anchors = &snapshot.ordered_anchors;
+        anchors
+            .binary_search_by_key(&block_number, |record| record.anchor.block_number)
+            .ok()
+            .map(|index| anchors[index].anchor)
     }
 
     pub fn replace_anchors(&self, anchors: Vec<AnchorRecord>) -> Result<(), ConsensusStateError> {
@@ -335,15 +330,45 @@ impl ConsensusStore {
         end_block: u64,
         anchors: Vec<AnchorRecord>,
     ) -> Result<(), ConsensusStateError> {
-        self.update(|snapshot| {
-            snapshot.ordered_anchors.retain(|record| {
-                record.anchor.block_number < start_block || record.anchor.block_number > end_block
-            });
-            snapshot.ordered_anchors.extend(anchors);
-            let ordered = std::mem::take(&mut snapshot.ordered_anchors);
-            snapshot.ordered_anchors = normalize_anchor_records(ordered);
-            recompute_snapshot_anchors(snapshot);
-        })
+        let anchors = normalize_anchor_records(anchors);
+        let contained = start_block <= end_block
+            && anchors
+                .iter()
+                .all(|record| (start_block..=end_block).contains(&record.anchor.block_number));
+        self.update_if_with_writer(
+            move |current| {
+                let range = contained.then(|| {
+                    let existing = &current.ordered_anchors;
+                    let start = existing.partition_point(|r| r.anchor.block_number < start_block);
+                    let end = existing.partition_point(|r| r.anchor.block_number <= end_block);
+                    start..end
+                });
+                if range
+                    .as_ref()
+                    .is_some_and(|range| current.ordered_anchors[range.clone()] == anchors)
+                {
+                    return Ok(None);
+                }
+                Ok(Some(move |snapshot: &mut ConsensusSnapshot| {
+                    if let Some(range) = range {
+                        snapshot.ordered_anchors.splice(range, anchors);
+                    } else {
+                        // Preserve the public method's merge behavior when supplied
+                        // records lie outside the replaced interval.
+                        snapshot.ordered_anchors.retain(|record| {
+                            record.anchor.block_number < start_block
+                                || record.anchor.block_number > end_block
+                        });
+                        snapshot.ordered_anchors.extend(anchors);
+                        let ordered = std::mem::take(&mut snapshot.ordered_anchors);
+                        snapshot.ordered_anchors = normalize_anchor_records(ordered);
+                    }
+                    recompute_snapshot_anchors(snapshot);
+                }))
+            },
+            write_snapshot,
+        )
+        .map(|_| ())
     }
 
     pub(crate) fn record_verified_bootstrap(
@@ -850,6 +875,12 @@ fn weak_subjectivity_trusted_slot(snapshot: &ConsensusSnapshot) -> Option<u64> {
 }
 
 fn normalize_anchor_records(mut anchors: Vec<AnchorRecord>) -> Vec<AnchorRecord> {
+    if anchors
+        .windows(2)
+        .all(|pair| pair[0].anchor.block_number < pair[1].anchor.block_number)
+    {
+        return anchors;
+    }
     let mut deduped = BTreeMap::new();
     for record in anchors.drain(..) {
         deduped.insert(record.anchor.block_number, record);
@@ -1193,6 +1224,179 @@ mod tests {
             finalized: false,
             parent_beacon_root: None,
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retained_anchors_unchanged_range_keeps_the_published_file() {
+        use std::os::unix::fs::MetadataExt;
+
+        let temp = TempDir::new().unwrap();
+        let store = ConsensusStore::open(
+            temp.path(),
+            Some("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        )
+        .unwrap();
+        let anchors = vec![test_anchor(2), test_anchor(4), test_anchor(6)];
+        store.replace_anchors(anchors.clone()).unwrap();
+        // Keep the original inode alive so a replacement cannot reuse it.
+        let published = fs::File::open(store.state_path()).unwrap();
+        let original = published.metadata().unwrap();
+        store.replace_anchor_range(2, 6, anchors.clone()).unwrap();
+        store
+            .replace_anchor_range(2, 6, anchors.iter().rev().copied().collect())
+            .unwrap();
+        store.replace_anchor_range(7, u64::MAX, vec![]).unwrap();
+        let unchanged = fs::metadata(store.state_path()).unwrap();
+        assert_eq!(
+            (unchanged.dev(), unchanged.ino()),
+            (original.dev(), original.ino())
+        );
+        assert_eq!(
+            ConsensusStore::open(temp.path(), None)
+                .unwrap()
+                .ordered_anchors(),
+            anchors
+        );
+
+        let mut changed = test_anchor(4);
+        changed.finalized = !changed.finalized;
+        store.replace_anchor_range(4, 4, vec![changed]).unwrap();
+        let replaced = fs::metadata(store.state_path()).unwrap();
+        assert_ne!(
+            (replaced.dev(), replaced.ino()),
+            (original.dev(), original.ino())
+        );
+        assert_eq!(
+            ConsensusStore::open(temp.path(), None)
+                .unwrap()
+                .ordered_anchors()[1],
+            changed
+        );
+
+        store
+            .storage_failure
+            .send_replace(Some("previous save failed".into()));
+        assert!(matches!(
+            store.replace_anchor_range(4, 4, vec![changed]),
+            Err(ConsensusStateError::StorageFailed(_))
+        ));
+    }
+
+    #[test]
+    fn retained_anchors_replacements_match_last_record_wins_reference() {
+        let base = vec![
+            test_anchor(0),
+            test_anchor(3),
+            test_anchor(4),
+            test_anchor(9),
+            test_anchor(u64::MAX),
+        ];
+        let mut changed = test_anchor(4);
+        changed.parent_beacon_root = Some(B256::repeat_byte(7));
+        let cases = [
+            (3, 9, vec![test_anchor(9), test_anchor(3), changed]),
+            (3, 9, vec![]),
+            (1, 2, vec![test_anchor(2)]),
+            (0, u64::MAX, vec![]),
+            (4, 4, vec![test_anchor(4), changed]),
+            (3, 4, vec![test_anchor(12), test_anchor(9), changed]),
+            (9, 3, vec![changed]),
+            (u64::MAX, u64::MAX, vec![test_anchor(u64::MAX)]),
+        ];
+        for (start, end, incoming) in cases {
+            let mut combined = base
+                .iter()
+                .copied()
+                .filter(|r| r.anchor.block_number < start || r.anchor.block_number > end)
+                .collect::<Vec<_>>();
+            combined.extend(&incoming);
+            let mut expected = combined.iter().rev().copied().fold(
+                Vec::<AnchorRecord>::new(),
+                |mut result, record| {
+                    if !result
+                        .iter()
+                        .any(|old| old.anchor.block_number == record.anchor.block_number)
+                    {
+                        result.push(record);
+                    }
+                    result
+                },
+            );
+            expected.sort_by_key(|r| r.anchor.block_number);
+            let temp = TempDir::new().unwrap();
+            let store = ConsensusStore::open(
+                temp.path(),
+                Some("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            )
+            .unwrap();
+            store.replace_anchors(base.clone()).unwrap();
+            store.replace_anchor_range(start, end, incoming).unwrap();
+            assert_eq!(store.ordered_anchors(), expected);
+            assert_eq!(
+                ConsensusStore::open(temp.path(), None)
+                    .unwrap()
+                    .ordered_anchors(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn retained_anchors_lookups_match_scan_at_gaps_and_integer_bounds() {
+        let temp = TempDir::new().unwrap();
+        let store = ConsensusStore::open(
+            temp.path(),
+            Some("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        )
+        .unwrap();
+        for anchors in [
+            vec![],
+            vec![
+                test_anchor(0),
+                test_anchor(3),
+                test_anchor(8),
+                test_anchor(u64::MAX),
+            ],
+        ] {
+            store.replace_anchors(anchors.clone()).unwrap();
+            for block in [0, 1, 2, 3, 4, 7, 8, 9, u64::MAX - 1, u64::MAX] {
+                assert_eq!(
+                    store.anchor_at(block),
+                    anchors
+                        .iter()
+                        .find(|r| r.anchor.block_number == block)
+                        .map(|r| r.anchor)
+                );
+                assert_eq!(
+                    store.next_anchor_after(block),
+                    anchors
+                        .iter()
+                        .find(|r| r.anchor.block_number > block)
+                        .map(|r| r.anchor)
+                );
+                assert_eq!(
+                    store.highest_anchor_block_from(block),
+                    anchors
+                        .iter()
+                        .rev()
+                        .find(|r| r.anchor.block_number >= block)
+                        .map(|r| r.anchor.block_number)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn retained_anchors_sorted_normalization_reuses_input_allocation() {
+        let anchors = vec![test_anchor(0), test_anchor(2), test_anchor(u64::MAX)];
+        let address = anchors.as_ptr();
+        let normalized = normalize_anchor_records(anchors);
+        assert_eq!(normalized.as_ptr(), address);
+        assert_eq!(
+            normalized,
+            vec![test_anchor(0), test_anchor(2), test_anchor(u64::MAX)]
+        );
     }
 
     #[test]
