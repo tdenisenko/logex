@@ -90,4 +90,4 @@ recorded in [the validation record](baselines/2026-09-16-execution-peer-retentio
 Removing the unbounded clone and capping retained work are implementation-level
 cost improvements. No benchmark or ingestion-throughput percentage is claimed.
 There is no file-format change, additional disk write or durability barrier.
-Source `999cac68` passes all seven local gates: vendor verification, formatting, workspace check, strict Clippy, 1,440 workspace tests (23 ignored), documentation tests and release node linking. CI and merge remain pending.
+Source `999cac68` passes all seven local gates: vendor verification, formatting, workspace check, strict Clippy, 1,440 workspace tests (23 ignored), documentation tests and release node linking. All six CI jobs passed on head `4702fba8` (run `35003071495`). PR #175 merged as `ae9da21e` after exact head/base verification.

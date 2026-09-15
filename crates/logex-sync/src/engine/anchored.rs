@@ -2734,10 +2734,14 @@ impl SyncEngine {
         else {
             return Ok(false);
         };
-        let plan = plan
+        let mut plan = plan
             .with_full_priority()
-            .with_peer_rotation_offset(sequence as usize)
-            .with_accounting_tx(self.historical_request_accounting_tx.clone());
+            .with_peer_rotation_offset(sequence as usize);
+        self.peers.register_body_receipt_plan(
+            &mut plan,
+            self.historical_request_accounting_tx.clone(),
+            false,
+        );
         active_fetches.spawn(async move {
             let started = std::time::Instant::now();
             let outcome = plan.execute().await;
@@ -3554,8 +3558,7 @@ impl SyncEngine {
         self.historical_fetch_ready_plans.clear();
         for (_, fetch) in self.historical_fetch_handles.drain() {
             for (_, attempt) in fetch.attempts {
-                self.peers
-                    .release_body_receipt_request_reservations(&attempt.reservations);
+                self.peers.retire_body_receipt_owner(attempt.owner);
                 attempt.handle.abort();
             }
         }
@@ -3626,9 +3629,8 @@ impl SyncEngine {
             return;
         };
         for (attempt_id, attempt) in fetch.attempts {
-            self.peers
-                .release_body_receipt_request_reservations(&attempt.reservations);
             if attempt_id != outcome.attempt {
+                self.peers.retire_body_receipt_owner(attempt.owner);
                 attempt.handle.abort();
             }
         }
@@ -3651,8 +3653,7 @@ impl SyncEngine {
     fn discard_historical_fetch_attempt(&mut self, sequence: u64, attempt: u64) -> Option<usize> {
         let fetch = self.historical_fetch_handles.get_mut(&sequence)?;
         if let Some(attempt) = fetch.attempts.remove(&attempt) {
-            self.peers
-                .release_body_receipt_request_reservations(&attempt.reservations);
+            self.peers.retire_body_receipt_owner(attempt.owner);
             attempt.handle.abort();
         }
         let remaining_attempts = fetch.attempts.len();
@@ -3718,8 +3719,7 @@ impl SyncEngine {
                 continue;
             };
             for (_, attempt) in fetch.attempts {
-                self.peers
-                    .release_body_receipt_request_reservations(&attempt.reservations);
+                self.peers.retire_body_receipt_owner(attempt.owner);
                 attempt.handle.abort();
                 aborted = aborted.saturating_add(1);
             }
@@ -4433,10 +4433,11 @@ impl SyncEngine {
         };
         self.peers
             .refresh_bodies_and_receipts_request_plan(&mut plan.body_receipt_plan);
-        let reservations = plan.body_receipt_plan.reservations();
-        if !reservations.is_empty() {
-            self.peers.reserve_body_receipt_requests(&reservations);
-        }
+        let owner = self.peers.register_body_receipt_plan(
+            &mut plan.body_receipt_plan,
+            self.historical_request_accounting_tx.clone(),
+            true,
+        );
         let child_header = plan.header_batch.child_header.clone();
         let tx = self.historical_fetch_tx.clone();
         let handle = tokio::spawn(async move {
@@ -4455,8 +4456,7 @@ impl SyncEngine {
         if replace_existing && let Some(previous) = self.historical_fetch_handles.remove(&sequence)
         {
             for (_, previous_attempt) in previous.attempts {
-                self.peers
-                    .release_body_receipt_request_reservations(&previous_attempt.reservations);
+                self.peers.retire_body_receipt_owner(previous_attempt.owner);
                 previous_attempt.handle.abort();
             }
         }
@@ -4471,12 +4471,11 @@ impl SyncEngine {
             attempt,
             HistoricalFetchAttemptHandle {
                 child_header,
-                reservations,
+                owner,
                 handle,
             },
         ) {
-            self.peers
-                .release_body_receipt_request_reservations(&previous.reservations);
+            self.peers.retire_body_receipt_owner(previous.owner);
             previous.handle.abort();
         }
     }
@@ -5291,8 +5290,7 @@ impl SyncEngine {
 
         Ok(body_receipt_plan.map(|body_receipt_plan| {
             let body_receipt_plan = body_receipt_plan
-                .with_peer_rotation_offset(self.historical_fetch_next_sequence as usize)
-                .with_accounting_tx(self.historical_request_accounting_tx.clone());
+                .with_peer_rotation_offset(self.historical_fetch_next_sequence as usize);
             let planned_next_child_header = body_receipt_plan
                 .planned_prefix_blocks()
                 .min(header_batch.headers.len())

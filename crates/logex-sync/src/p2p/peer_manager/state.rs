@@ -577,76 +577,8 @@ impl PeerManager {
         load_adjusted_peer_rate(base_rate, active_requests) + serving_bonus - timeout_penalty
     }
 
-    pub(super) fn apply_body_receipt_active_request_deltas(
-        &mut self,
-        deltas: Vec<BodyReceiptActiveRequest>,
-    ) {
-        for delta in deltas {
-            let Some(peer) = self.peers.get_mut(&delta.peer_id) else {
-                continue;
-            };
-            let (active_requests, reserved_requests) = match delta.kind {
-                PeerRequestKind::Headers => continue,
-                PeerRequestKind::Bodies => (
-                    &mut peer.body_active_requests,
-                    &mut peer.body_reserved_requests,
-                ),
-                PeerRequestKind::Receipts => (
-                    &mut peer.receipt_active_requests,
-                    &mut peer.receipt_reserved_requests,
-                ),
-            };
-            apply_body_receipt_active_request_delta_counts(
-                active_requests,
-                reserved_requests,
-                delta.delta,
-            );
-        }
-    }
-
-    pub(crate) fn reserve_body_receipt_requests(
-        &mut self,
-        reservations: &BodyReceiptRequestReservations,
-    ) {
-        self.apply_body_receipt_request_reservations(reservations, true);
-    }
-
-    pub(crate) fn release_body_receipt_request_reservations(
-        &mut self,
-        reservations: &BodyReceiptRequestReservations,
-    ) {
-        self.apply_body_receipt_request_reservations(reservations, false);
-    }
-
-    fn apply_body_receipt_request_reservations(
-        &mut self,
-        reservations: &BodyReceiptRequestReservations,
-        reserve: bool,
-    ) {
-        for reservation in reservations.entries() {
-            let Some(peer) = self.peers.get_mut(&reservation.peer_id) else {
-                continue;
-            };
-            let reserved_requests = match reservation.kind {
-                PeerRequestKind::Headers => continue,
-                PeerRequestKind::Bodies => &mut peer.body_reserved_requests,
-                PeerRequestKind::Receipts => &mut peer.receipt_reserved_requests,
-            };
-            if reserve {
-                *reserved_requests = reserved_requests.saturating_add(reservation.count);
-            } else {
-                *reserved_requests = reserved_requests.saturating_sub(reservation.count);
-            }
-        }
-    }
-
     pub(crate) fn clear_body_receipt_active_requests(&mut self) {
-        for peer in self.peers.values_mut() {
-            peer.body_active_requests = 0;
-            peer.receipt_active_requests = 0;
-            peer.body_reserved_requests = 0;
-            peer.receipt_reserved_requests = 0;
-        }
+        self.body_receipt_owners.reset(&mut self.peers);
     }
 
     pub(super) fn record_peer_request_success(
@@ -1538,22 +1470,6 @@ fn load_adjusted_peer_rate(base_rate: f64, active_requests: usize) -> f64 {
     base_rate / (1.0 + active_requests as f64)
 }
 
-fn apply_body_receipt_active_request_delta_counts(
-    active_requests: &mut usize,
-    reserved_requests: &mut usize,
-    delta: BodyReceiptActiveRequestDelta,
-) {
-    match delta {
-        BodyReceiptActiveRequestDelta::Started => {
-            *reserved_requests = reserved_requests.saturating_sub(1);
-            *active_requests = active_requests.saturating_add(1);
-        }
-        BodyReceiptActiveRequestDelta::Finished => {
-            *active_requests = active_requests.saturating_sub(1);
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1967,51 +1883,6 @@ mod tests {
             ),
             2
         );
-    }
-
-    #[test]
-    fn active_request_start_consumes_matching_reservation() {
-        let mut active = 0usize;
-        let mut reserved = 3usize;
-
-        apply_body_receipt_active_request_delta_counts(
-            &mut active,
-            &mut reserved,
-            BodyReceiptActiveRequestDelta::Started,
-        );
-
-        assert_eq!(active, 1);
-        assert_eq!(reserved, 2);
-    }
-
-    #[test]
-    fn active_request_start_without_reservation_counts_active_only() {
-        let mut active = 0usize;
-        let mut reserved = 0usize;
-
-        apply_body_receipt_active_request_delta_counts(
-            &mut active,
-            &mut reserved,
-            BodyReceiptActiveRequestDelta::Started,
-        );
-
-        assert_eq!(active, 1);
-        assert_eq!(reserved, 0);
-    }
-
-    #[test]
-    fn active_request_finish_does_not_restore_consumed_reservation() {
-        let mut active = 1usize;
-        let mut reserved = 2usize;
-
-        apply_body_receipt_active_request_delta_counts(
-            &mut active,
-            &mut reserved,
-            BodyReceiptActiveRequestDelta::Finished,
-        );
-
-        assert_eq!(active, 0);
-        assert_eq!(reserved, 2);
     }
 
     #[test]
