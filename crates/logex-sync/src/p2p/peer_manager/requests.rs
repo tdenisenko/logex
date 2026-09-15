@@ -311,7 +311,7 @@ pub(crate) struct BodyReceiptRequestPlan {
     peer_rotation: usize,
     priority: BodyReceiptRequestPriority,
     peers: HashMap<PeerId, RequestPeerSnapshot>,
-    accounting_tx: Option<mpsc::UnboundedSender<BodyReceiptRequestAccounting>>,
+    accounting_tx: Option<ScopedAccountingSender>,
 }
 
 #[derive(Clone, Default)]
@@ -334,13 +334,278 @@ pub(crate) struct BodyReceiptRequestOutcome {
     failures: ParallelChunkFailures,
     stats: TypedRequestStats,
     accounting_forwarded: bool,
+    sessions: HashMap<PeerId, PeerRequestSender<PeerRequest<LogexNetworkPrimitives>>>,
 }
 
+#[derive(Default)]
 pub(crate) struct BodyReceiptRequestAccounting {
+    owner: u64,
+    retired: bool,
     stats: TypedRequestStats,
     failures: ParallelChunkFailures,
     active_requests: Vec<BodyReceiptActiveRequest>,
     scheduler: BodyReceiptSchedulerAccounting,
+}
+
+#[derive(Clone)]
+struct ScopedAccountingSender(std::sync::Arc<AccountingScope>);
+
+struct AccountingScope {
+    tx: mpsc::UnboundedSender<BodyReceiptRequestAccounting>,
+    owner: u64,
+}
+
+impl ScopedAccountingSender {
+    fn new(tx: mpsc::UnboundedSender<BodyReceiptRequestAccounting>, owner: u64) -> Self {
+        Self(std::sync::Arc::new(AccountingScope { tx, owner }))
+    }
+
+    fn send(
+        &self,
+        mut event: BodyReceiptRequestAccounting,
+    ) -> Result<(), mpsc::error::SendError<BodyReceiptRequestAccounting>> {
+        event.owner = self.0.owner;
+        self.0.tx.send(event)
+    }
+}
+
+impl Drop for AccountingScope {
+    fn drop(&mut self) {
+        let _ = self.tx.send(BodyReceiptRequestAccounting {
+            owner: self.owner,
+            retired: true,
+            ..Default::default()
+        });
+    }
+}
+
+#[derive(Default)]
+pub(super) struct BodyReceiptOwnerLedger {
+    next_owner: u64,
+    owners: HashMap<u64, HashMap<PeerId, OwnedPeerRequests>>,
+}
+
+impl BodyReceiptOwnerLedger {
+    fn register(
+        &mut self,
+        peers: &mut HashMap<PeerId, ActivePeer>,
+        plan: &mut BodyReceiptRequestPlan,
+        tx: mpsc::UnboundedSender<BodyReceiptRequestAccounting>,
+        reserve: bool,
+    ) -> u64 {
+        assert!(
+            plan.accounting_tx.is_none(),
+            "request plan already registered"
+        );
+        let owner = self.next_owner;
+        self.next_owner = owner
+            .checked_add(1)
+            .expect("body/receipt owner ID space exhausted");
+        let mut sessions: HashMap<_, _> = plan
+            .peers
+            .iter()
+            .map(|(id, peer)| {
+                (
+                    *id,
+                    OwnedPeerRequests {
+                        sender: peer.sender.clone(),
+                        body_reserved: 0,
+                        receipt_reserved: 0,
+                        body_active: 0,
+                        receipt_active: 0,
+                    },
+                )
+            })
+            .collect();
+        if reserve {
+            for entry in plan.reservations().entries() {
+                if let Some(owned) = sessions.get_mut(&entry.peer_id)
+                    && same_request_session(peers.get(&entry.peer_id), &owned.sender)
+                {
+                    let peer = peers.get_mut(&entry.peer_id).expect("matching session");
+                    match entry.kind {
+                        PeerRequestKind::Bodies => {
+                            owned.body_reserved += entry.count;
+                            peer.body_reserved_requests += entry.count;
+                        }
+                        PeerRequestKind::Receipts => {
+                            owned.receipt_reserved += entry.count;
+                            peer.receipt_reserved_requests += entry.count;
+                        }
+                        PeerRequestKind::Headers => {}
+                    }
+                }
+            }
+        }
+        self.owners.insert(owner, sessions);
+        plan.accounting_tx = Some(ScopedAccountingSender::new(tx, owner));
+        owner
+    }
+
+    fn retire(&mut self, peers: &mut HashMap<PeerId, ActivePeer>, owner: u64) {
+        let Some(sessions) = self.owners.remove(&owner) else {
+            return;
+        };
+        for (id, owned) in sessions {
+            if !same_request_session(peers.get(&id), &owned.sender) {
+                continue;
+            }
+            let peer = peers.get_mut(&id).expect("matching session");
+            peer.body_reserved_requests = peer
+                .body_reserved_requests
+                .saturating_sub(owned.body_reserved);
+            peer.receipt_reserved_requests = peer
+                .receipt_reserved_requests
+                .saturating_sub(owned.receipt_reserved);
+            peer.body_active_requests = peer.body_active_requests.saturating_sub(owned.body_active);
+            peer.receipt_active_requests = peer
+                .receipt_active_requests
+                .saturating_sub(owned.receipt_active);
+        }
+    }
+
+    pub(super) fn reset(&mut self, peers: &mut HashMap<PeerId, ActivePeer>) {
+        let owners: Vec<_> = self.owners.keys().copied().collect();
+        for owner in owners {
+            self.retire(peers, owner);
+        }
+    }
+
+    fn filter_accounting(
+        &self,
+        peers: &HashMap<PeerId, ActivePeer>,
+        accounting: &mut BodyReceiptRequestAccounting,
+    ) -> bool {
+        let Some(sessions) = self.owners.get(&accounting.owner) else {
+            return false;
+        };
+        filter_request_accounting(&mut accounting.stats, &mut accounting.failures, |id| {
+            sessions
+                .get(&id)
+                .is_some_and(|owned| same_request_session(peers.get(&id), &owned.sender))
+        });
+        true
+    }
+
+    fn apply_delta(
+        &mut self,
+        peers: &mut HashMap<PeerId, ActivePeer>,
+        owner: u64,
+        delta: BodyReceiptActiveRequest,
+    ) {
+        let Some(owned) = self
+            .owners
+            .get_mut(&owner)
+            .and_then(|sessions| sessions.get_mut(&delta.peer_id))
+        else {
+            return;
+        };
+        let Some(peer) = peers.get_mut(&delta.peer_id) else {
+            return;
+        };
+        let Some((consumed, started, finished)) =
+            owned.apply(delta.kind, delta.delta, &peer.sender)
+        else {
+            return;
+        };
+        let (reserved, active) = match delta.kind {
+            PeerRequestKind::Bodies => (
+                &mut peer.body_reserved_requests,
+                &mut peer.body_active_requests,
+            ),
+            PeerRequestKind::Receipts => (
+                &mut peer.receipt_reserved_requests,
+                &mut peer.receipt_active_requests,
+            ),
+            PeerRequestKind::Headers => return,
+        };
+        *reserved = reserved.saturating_sub(consumed);
+        *active = active.saturating_add(started).saturating_sub(finished);
+    }
+}
+
+struct OwnedPeerRequests {
+    sender: PeerRequestSender<PeerRequest<LogexNetworkPrimitives>>,
+    body_reserved: usize,
+    receipt_reserved: usize,
+    body_active: usize,
+    receipt_active: usize,
+}
+
+impl OwnedPeerRequests {
+    fn apply(
+        &mut self,
+        kind: PeerRequestKind,
+        delta: BodyReceiptActiveRequestDelta,
+        current: &PeerRequestSender<PeerRequest<LogexNetworkPrimitives>>,
+    ) -> Option<(usize, usize, usize)> {
+        if !self
+            .sender
+            .to_session_tx
+            .same_channel(&current.to_session_tx)
+        {
+            return None;
+        }
+        let (reserved, active) = match kind {
+            PeerRequestKind::Bodies => (&mut self.body_reserved, &mut self.body_active),
+            PeerRequestKind::Receipts => (&mut self.receipt_reserved, &mut self.receipt_active),
+            PeerRequestKind::Headers => return None,
+        };
+        match delta {
+            BodyReceiptActiveRequestDelta::Started => {
+                let consumed = usize::from(*reserved > 0);
+                *reserved -= consumed;
+                *active += 1;
+                Some((consumed, 1, 0))
+            }
+            BodyReceiptActiveRequestDelta::Finished => {
+                let finished = usize::from(*active > 0);
+                *active -= finished;
+                Some((0, 0, finished))
+            }
+        }
+    }
+}
+
+fn captured_session_is_current(
+    peers: &HashMap<PeerId, ActivePeer>,
+    sessions: &HashMap<PeerId, PeerRequestSender<PeerRequest<LogexNetworkPrimitives>>>,
+    id: PeerId,
+) -> bool {
+    sessions
+        .get(&id)
+        .is_some_and(|sender| same_request_session(peers.get(&id), sender))
+}
+
+fn filter_request_accounting(
+    stats: &mut TypedRequestStats,
+    failures: &mut ParallelChunkFailures,
+    current: impl Fn(PeerId) -> bool,
+) {
+    stats.retain(|stat| current(stat.peer_id));
+    failures.retain(|failure| current(failure.peer_id));
+}
+
+fn filter_session_accounting(
+    peers: &HashMap<PeerId, ActivePeer>,
+    sessions: &HashMap<PeerId, PeerRequestSender<PeerRequest<LogexNetworkPrimitives>>>,
+    stats: &mut TypedRequestStats,
+    failures: &mut ParallelChunkFailures,
+) {
+    filter_request_accounting(stats, failures, |id| {
+        captured_session_is_current(peers, sessions, id)
+    });
+}
+
+fn same_request_session(
+    peer: Option<&ActivePeer>,
+    sender: &PeerRequestSender<PeerRequest<LogexNetworkPrimitives>>,
+) -> bool {
+    peer.is_some_and(|peer| {
+        peer.sender
+            .to_session_tx
+            .same_channel(&sender.to_session_tx)
+    })
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -363,10 +628,9 @@ pub(super) enum BodyReceiptActiveRequestDelta {
 }
 
 struct BodyReceiptActiveRequestGuard {
-    accounting_tx: Option<mpsc::UnboundedSender<BodyReceiptRequestAccounting>>,
+    accounting_tx: Option<ScopedAccountingSender>,
     peer_id: PeerId,
     kind: PeerRequestKind,
-    active: bool,
 }
 
 pub(crate) struct BodyReceiptRequestCompletion {
@@ -435,6 +699,7 @@ struct HeaderPageRequestPlan {
 
 pub(crate) struct ReverseHeaderPagesRequestOutcome {
     page_results: Vec<HeaderPageResult>,
+    sessions: HashMap<PeerId, PeerRequestSender<PeerRequest<LogexNetworkPrimitives>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -563,6 +828,9 @@ impl PeerManager {
         let mut pages = Vec::new();
         for result in outcome.page_results {
             for (peer_id, error) in result.failures {
+                if !captured_session_is_current(&self.peers, &outcome.sessions, peer_id) {
+                    continue;
+                }
                 let should_drop = self.on_request_error(peer_id, PeerRequestKind::Headers, &error);
                 debug!(peer = %peer_id, ?error, "reverse header page request failed");
                 if should_drop {
@@ -573,32 +841,40 @@ impl PeerManager {
             let Some((peer_id, headers, elapsed)) = result.success else {
                 break;
             };
+            let current_session =
+                captured_session_is_current(&self.peers, &outcome.sessions, peer_id);
             if headers.len() > result.requested as usize {
-                self.on_invalid_response_length(
-                    peer_id,
-                    "headers",
-                    result.requested as usize,
-                    headers.len(),
-                );
-                dead_peers.insert(peer_id);
+                if current_session {
+                    self.on_invalid_response_length(
+                        peer_id,
+                        "headers",
+                        result.requested as usize,
+                        headers.len(),
+                    );
+                    dead_peers.insert(peer_id);
+                }
                 break;
             }
             if headers.is_empty() && result.requested > 0 {
                 saw_empty_response = true;
-                self.on_zero_progress_response(
-                    peer_id,
-                    PeerRequestKind::Headers,
-                    "headers",
-                    result.requested as usize,
-                );
+                if current_session {
+                    self.on_zero_progress_response(
+                        peer_id,
+                        PeerRequestKind::Headers,
+                        "headers",
+                        result.requested as usize,
+                    );
+                }
                 break;
             }
-            self.record_peer_request_success(
-                peer_id,
-                PeerRequestKind::Headers,
-                headers.len(),
-                elapsed,
-            );
+            if current_session {
+                self.record_peer_request_success(
+                    peer_id,
+                    PeerRequestKind::Headers,
+                    headers.len(),
+                    elapsed,
+                );
+            }
             self.record_p2p_download_payload(headers_payload_bytes(&headers), elapsed);
             pages.push((peer_id, headers));
         }
@@ -1116,6 +1392,7 @@ impl PeerManager {
             failures: _,
             stats: _,
             accounting_forwarded: _,
+            sessions: _,
         } = outcome;
 
         let completion_return_blocks = body_receipt_completion_return_blocks(
@@ -1157,8 +1434,23 @@ impl PeerManager {
         if outcome.accounting_forwarded {
             return;
         }
-        let (stats, failures) = take_body_receipt_request_accounting(outcome);
+        let (mut stats, mut failures) = take_body_receipt_request_accounting(outcome);
+        filter_session_accounting(&self.peers, &outcome.sessions, &mut stats, &mut failures);
         self.apply_body_receipt_request_accounting_parts(stats, failures);
+    }
+
+    pub(crate) fn register_body_receipt_plan(
+        &mut self,
+        plan: &mut BodyReceiptRequestPlan,
+        tx: mpsc::UnboundedSender<BodyReceiptRequestAccounting>,
+        reserve: bool,
+    ) -> u64 {
+        self.body_receipt_owners
+            .register(&mut self.peers, plan, tx, reserve)
+    }
+
+    pub(crate) fn retire_body_receipt_owner(&mut self, owner: u64) {
+        self.body_receipt_owners.retire(&mut self.peers, owner);
     }
 
     pub(crate) fn apply_body_receipt_request_accounting_events(
@@ -1167,24 +1459,32 @@ impl PeerManager {
     ) {
         let mut stats = Vec::new();
         let mut failures = Vec::new();
-        for accounting in accountings {
-            let BodyReceiptRequestAccounting {
-                stats: event_stats,
-                failures: event_failures,
-                active_requests,
-                scheduler,
-            } = accounting;
-            self.apply_body_receipt_active_request_deltas(active_requests);
+        for mut accounting in accountings {
+            if accounting.retired {
+                self.retire_body_receipt_owner(accounting.owner);
+                continue;
+            }
+            if !self
+                .body_receipt_owners
+                .filter_accounting(&self.peers, &mut accounting)
+            {
+                continue;
+            }
+            for delta in accounting.active_requests {
+                self.body_receipt_owners
+                    .apply_delta(&mut self.peers, accounting.owner, delta);
+            }
+
             self.body_receipt_scheduler_metrics.stale_role_retries = self
                 .body_receipt_scheduler_metrics
                 .stale_role_retries
-                .saturating_add(scheduler.stale_role_retries);
+                .saturating_add(accounting.scheduler.stale_role_retries);
             self.body_receipt_scheduler_metrics.prefix_reassignments = self
                 .body_receipt_scheduler_metrics
                 .prefix_reassignments
-                .saturating_add(scheduler.prefix_reassignments);
-            stats.extend(event_stats);
-            failures.extend(event_failures);
+                .saturating_add(accounting.scheduler.prefix_reassignments);
+            stats.extend(accounting.stats);
+            failures.extend(accounting.failures);
         }
         self.apply_body_receipt_request_accounting_parts(stats, failures);
     }
@@ -1258,7 +1558,7 @@ fn take_body_receipt_request_accounting(
 
 impl BodyReceiptActiveRequestGuard {
     fn new(
-        accounting_tx: &Option<mpsc::UnboundedSender<BodyReceiptRequestAccounting>>,
+        accounting_tx: &Option<ScopedAccountingSender>,
         peer_id: PeerId,
         kind: PeerRequestKind,
     ) -> Self {
@@ -1272,27 +1572,23 @@ impl BodyReceiptActiveRequestGuard {
             accounting_tx: accounting_tx.clone(),
             peer_id,
             kind,
-            active: true,
         }
     }
 }
 
 impl Drop for BodyReceiptActiveRequestGuard {
     fn drop(&mut self) {
-        if self.active {
-            emit_body_receipt_active_request_delta(
-                &self.accounting_tx,
-                self.peer_id,
-                self.kind,
-                BodyReceiptActiveRequestDelta::Finished,
-            );
-            self.active = false;
-        }
+        emit_body_receipt_active_request_delta(
+            &self.accounting_tx,
+            self.peer_id,
+            self.kind,
+            BodyReceiptActiveRequestDelta::Finished,
+        );
     }
 }
 
 fn emit_body_receipt_active_request_delta(
-    accounting_tx: &Option<mpsc::UnboundedSender<BodyReceiptRequestAccounting>>,
+    accounting_tx: &Option<ScopedAccountingSender>,
     peer_id: PeerId,
     kind: PeerRequestKind,
     delta: BodyReceiptActiveRequestDelta,
@@ -1302,6 +1598,8 @@ fn emit_body_receipt_active_request_delta(
     };
 
     let _ = accounting_tx.send(BodyReceiptRequestAccounting {
+        owner: 0,
+        retired: false,
         stats: Vec::new(),
         failures: Vec::new(),
         active_requests: vec![BodyReceiptActiveRequest {
@@ -1314,7 +1612,7 @@ fn emit_body_receipt_active_request_delta(
 }
 
 fn emit_body_receipt_request_accounting(
-    accounting_tx: &Option<mpsc::UnboundedSender<BodyReceiptRequestAccounting>>,
+    accounting_tx: &Option<ScopedAccountingSender>,
     stats: TypedRequestStats,
     failures: ParallelChunkFailures,
 ) {
@@ -1327,6 +1625,8 @@ fn emit_body_receipt_request_accounting(
     };
 
     let _ = accounting_tx.send(BodyReceiptRequestAccounting {
+        owner: 0,
+        retired: false,
         stats,
         failures,
         active_requests: Vec::new(),
@@ -1335,7 +1635,7 @@ fn emit_body_receipt_request_accounting(
 }
 
 fn emit_body_receipt_scheduler_accounting(
-    accounting_tx: &Option<mpsc::UnboundedSender<BodyReceiptRequestAccounting>>,
+    accounting_tx: &Option<ScopedAccountingSender>,
     scheduler: BodyReceiptSchedulerAccounting,
 ) {
     if scheduler.stale_role_retries == 0 && scheduler.prefix_reassignments == 0 {
@@ -1347,6 +1647,8 @@ fn emit_body_receipt_scheduler_accounting(
     };
 
     let _ = accounting_tx.send(BodyReceiptRequestAccounting {
+        owner: 0,
+        retired: false,
         stats: Vec::new(),
         failures: Vec::new(),
         active_requests: Vec::new(),
@@ -1355,7 +1657,7 @@ fn emit_body_receipt_scheduler_accounting(
 }
 
 fn emit_body_receipt_role_success(
-    accounting_tx: &Option<mpsc::UnboundedSender<BodyReceiptRequestAccounting>>,
+    accounting_tx: &Option<ScopedAccountingSender>,
     peer_id: PeerId,
     kind: PeerRequestKind,
     blocks: usize,
@@ -1376,7 +1678,7 @@ fn emit_body_receipt_role_success(
 }
 
 fn emit_body_receipt_role_failure(
-    accounting_tx: &Option<mpsc::UnboundedSender<BodyReceiptRequestAccounting>>,
+    accounting_tx: &Option<ScopedAccountingSender>,
     failure: ChunkRequestFailure,
 ) {
     emit_body_receipt_request_accounting(accounting_tx, Vec::new(), vec![failure]);
@@ -1394,14 +1696,6 @@ impl BodyReceiptRequestPlan {
 
     pub(crate) fn reservations(&self) -> BodyReceiptRequestReservations {
         self.paired_initial_reservations()
-    }
-
-    pub(crate) fn with_accounting_tx(
-        mut self,
-        accounting_tx: mpsc::UnboundedSender<BodyReceiptRequestAccounting>,
-    ) -> Self {
-        self.accounting_tx = Some(accounting_tx);
-        self
     }
 
     pub(crate) fn with_peer_rotation_offset(mut self, offset: usize) -> Self {
@@ -1914,6 +2208,14 @@ impl BodyReceiptRequestPlan {
             failures,
             stats,
             accounting_forwarded,
+            sessions: if accounting_forwarded {
+                HashMap::new()
+            } else {
+                self.peers
+                    .into_iter()
+                    .map(|(id, peer)| (id, peer.sender))
+                    .collect()
+            },
         }
     }
 
@@ -4148,10 +4450,6 @@ fn body_receipt_remove_exhausted_prefix_chunks<T>(
 }
 
 impl BodyReceiptRequestReservations {
-    pub(crate) fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
-
     pub(super) fn entries(&self) -> &[BodyReceiptRequestReservation] {
         &self.entries
     }
@@ -4588,7 +4886,7 @@ fn apply_body_receipt_plan_role_attempt(
     failures: &mut ParallelChunkFailures,
     stats: &mut TypedRequestStats,
     attempt: BodyReceiptPlanRoleAttempt,
-    accounting_tx: &Option<mpsc::UnboundedSender<BodyReceiptRequestAccounting>>,
+    accounting_tx: &Option<ScopedAccountingSender>,
 ) {
     match attempt {
         BodyReceiptPlanRoleAttempt::Bodies {
@@ -5191,6 +5489,12 @@ fn release_body_receipt_attempt_peer(
 
 impl ReverseHeaderPagesRequestPlan {
     pub(crate) async fn execute(self) -> ReverseHeaderPagesRequestOutcome {
+        let sessions = self
+            .pages
+            .iter()
+            .flat_map(|page| page.candidates.iter())
+            .map(|(id, sender)| (*id, sender.clone()))
+            .collect();
         let mut attempts = futures_util::stream::FuturesUnordered::new();
         for page in self.pages {
             attempts.push(
@@ -5204,7 +5508,10 @@ impl ReverseHeaderPagesRequestPlan {
             page_results.push(result);
         }
 
-        ReverseHeaderPagesRequestOutcome { page_results }
+        ReverseHeaderPagesRequestOutcome {
+            page_results,
+            sessions,
+        }
     }
 }
 
@@ -8029,6 +8336,7 @@ mod tests {
                 1024,
             )],
             accounting_forwarded: false,
+            sessions: HashMap::new(),
         };
 
         let (stats, failures) = take_body_receipt_request_accounting(&mut outcome);
@@ -8055,7 +8363,7 @@ mod tests {
         };
 
         emit_body_receipt_request_accounting(
-            &Some(tx),
+            &Some(ScopedAccountingSender::new(tx, 0)),
             vec![TypedRequestStat::new(
                 peer,
                 PeerRequestKind::Receipts,
@@ -8185,14 +8493,202 @@ mod tests {
         }));
     }
 
+    fn owner_test_sender(peer: PeerId) -> PeerRequestSender<PeerRequest<LogexNetworkPrimitives>> {
+        let (sender, _receiver) = mpsc::channel(1);
+        PeerRequestSender::new(peer, sender)
+    }
+
+    fn owner_test_entry(
+        sender: &PeerRequestSender<PeerRequest<LogexNetworkPrimitives>>,
+        reserved: usize,
+    ) -> OwnedPeerRequests {
+        OwnedPeerRequests {
+            sender: sender.clone(),
+            body_reserved: reserved,
+            receipt_reserved: 0,
+            body_active: 0,
+            receipt_active: 0,
+        }
+    }
+
+    #[test]
+    fn request_owners_do_not_consume_or_release_other_plan_reservations() {
+        let peer = PeerId::repeat_byte(1);
+        let sender = owner_test_sender(peer);
+        let mut ledger = BodyReceiptOwnerLedger::default();
+        ledger
+            .owners
+            .insert(1, HashMap::from([(peer, owner_test_entry(&sender, 1))]));
+        ledger
+            .owners
+            .insert(2, HashMap::from([(peer, owner_test_entry(&sender, 1))]));
+        let first = ledger.owners.get_mut(&1).unwrap().get_mut(&peer).unwrap();
+        assert_eq!(
+            first.apply(
+                PeerRequestKind::Bodies,
+                BodyReceiptActiveRequestDelta::Started,
+                &sender
+            ),
+            Some((1, 1, 0))
+        );
+        assert_eq!(
+            first.apply(
+                PeerRequestKind::Bodies,
+                BodyReceiptActiveRequestDelta::Finished,
+                &sender
+            ),
+            Some((0, 0, 1))
+        );
+        let retired = ledger.owners.remove(&1).unwrap();
+        assert_eq!(
+            (retired[&peer].body_reserved, retired[&peer].body_active),
+            (0, 0)
+        );
+        assert!(ledger.owners.remove(&1).is_none());
+        assert_eq!(ledger.owners[&2][&peer].body_reserved, 1);
+        let second = ledger.owners.get_mut(&2).unwrap().get_mut(&peer).unwrap();
+        assert_eq!(
+            second.apply(
+                PeerRequestKind::Bodies,
+                BodyReceiptActiveRequestDelta::Finished,
+                &sender
+            ),
+            Some((0, 0, 0))
+        );
+        assert_eq!(second.body_reserved, 1);
+        second.apply(
+            PeerRequestKind::Bodies,
+            BodyReceiptActiveRequestDelta::Started,
+            &sender,
+        );
+        // Extra roles/hedges consume only this owner's remaining reservation.
+        assert_eq!(
+            second.apply(
+                PeerRequestKind::Bodies,
+                BodyReceiptActiveRequestDelta::Started,
+                &sender
+            ),
+            Some((0, 1, 0))
+        );
+        let retired = ledger.owners.remove(&2).unwrap();
+        assert_eq!(
+            (retired[&peer].body_reserved, retired[&peer].body_active),
+            (0, 2)
+        );
+        assert!(ledger.owners.is_empty());
+    }
+
+    #[test]
+    fn request_owner_reset_and_reconnect_fence_old_work() {
+        let peer = PeerId::repeat_byte(2);
+        let original = owner_test_sender(peer);
+        let replacement = owner_test_sender(peer);
+        let mut entry = owner_test_entry(&original, 1);
+        assert_eq!(
+            entry.apply(
+                PeerRequestKind::Bodies,
+                BodyReceiptActiveRequestDelta::Started,
+                &replacement
+            ),
+            None
+        );
+        assert_eq!((entry.body_reserved, entry.body_active), (1, 0));
+        entry.apply(
+            PeerRequestKind::Bodies,
+            BodyReceiptActiveRequestDelta::Started,
+            &original,
+        );
+        assert_eq!(
+            entry.apply(
+                PeerRequestKind::Bodies,
+                BodyReceiptActiveRequestDelta::Finished,
+                &replacement
+            ),
+            None
+        );
+        assert_eq!(entry.body_active, 1);
+        let mut ledger = BodyReceiptOwnerLedger {
+            next_owner: 3,
+            owners: HashMap::from([(2, HashMap::from([(peer, entry)]))]),
+        };
+        ledger.reset(&mut HashMap::new());
+        assert_eq!(ledger.next_owner, 3);
+        ledger.owners.insert(
+            3,
+            HashMap::from([(peer, owner_test_entry(&replacement, 1))]),
+        );
+        assert!(!ledger.owners.contains_key(&2));
+        assert_eq!(ledger.owners[&3][&peer].body_reserved, 1);
+    }
+
+    #[tokio::test]
+    async fn request_scope_abort_and_unpolled_drop_retire_without_losing_terminal_order() {
+        let peer = PeerId::repeat_byte(3);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let scope = ScopedAccountingSender::new(tx.clone(), 7);
+        let (started_tx, started_rx) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _guard =
+                BodyReceiptActiveRequestGuard::new(&Some(scope), peer, PeerRequestKind::Bodies);
+            started_tx.send(()).unwrap();
+            std::future::pending::<()>().await;
+        });
+        started_rx.await.unwrap();
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        let started = rx.try_recv().unwrap();
+        let finished = rx.try_recv().unwrap();
+        let retired = rx.try_recv().unwrap();
+        assert!(matches!(
+            started.active_requests[0].delta,
+            BodyReceiptActiveRequestDelta::Started
+        ));
+        assert!(matches!(
+            finished.active_requests[0].delta,
+            BodyReceiptActiveRequestDelta::Finished
+        ));
+        assert!(retired.retired);
+        assert_eq!((started.owner, finished.owner, retired.owner), (7, 7, 7));
+        let scope = ScopedAccountingSender::new(tx.clone(), 8);
+        let unpolled = async move {
+            let _scope = scope;
+            std::future::pending::<()>().await;
+        };
+        drop(unpolled);
+        let retired = rx.try_recv().unwrap();
+        assert!(retired.retired && retired.owner == 8);
+        let scope = Some(ScopedAccountingSender::new(tx, 9));
+        emit_body_receipt_request_accounting(
+            &scope,
+            vec![TypedRequestStat::new(
+                peer,
+                PeerRequestKind::Bodies,
+                1,
+                Duration::from_millis(1),
+                1,
+            )],
+            Vec::new(),
+        );
+        drop(scope);
+        let success = rx.try_recv().unwrap();
+        assert_eq!(success.stats.len(), 1);
+        assert_eq!(success.owner, 9);
+        let retired = rx.try_recv().unwrap();
+        assert!(retired.retired && retired.owner == 9);
+        assert!(rx.try_recv().is_err());
+    }
+
     #[test]
     fn body_receipt_active_request_guard_emits_start_and_finish() {
         let peer = PeerId::repeat_byte(0x11);
         let (tx, mut rx) = mpsc::unbounded_channel();
 
         {
-            let _guard =
-                BodyReceiptActiveRequestGuard::new(&Some(tx), peer, PeerRequestKind::Receipts);
+            let _guard = BodyReceiptActiveRequestGuard::new(
+                &Some(ScopedAccountingSender::new(tx, 0)),
+                peer,
+                PeerRequestKind::Receipts,
+            );
             let accounting = rx.try_recv().expect("start event should be emitted");
             assert!(accounting.stats.is_empty());
             assert!(accounting.failures.is_empty());
@@ -8420,3 +8916,6 @@ mod tests {
         assert_eq!(error, Receipts70MergeError::EmptyResponse);
     }
 }
+
+#[cfg(test)]
+mod ownership_tests;

@@ -1,5 +1,5 @@
 {
-  "status": "All seven local gates and final independent review pass; PR/CI/merge pending",
+  "status": "Merged after all seven local gates and all six exact-head CI jobs passed",
   "branch": "audit/execution-peer-retention",
   "base": "556b988c11542e9d385f9fc3041b7afe15cb05e7",
   "source_sha256": {
@@ -232,5 +232,21 @@
         "log": "/private/tmp/logex-execution-peer-retention-_thsqidq/gates/release-build.log"
       }
     ]
+  },
+  "ci": {
+    "run_id": 35003071495,
+    "head": "4702fba88a2f5dda322f61bbbbf8da398543f89c",
+    "checks": 6,
+    "conclusion": "SUCCESS"
+  },
+  "merge": {
+    "headRefOid": "4702fba88a2f5dda322f61bbbbf8da398543f89c",
+    "mergeCommit": {
+      "oid": "ae9da21eb7028d2fb55508a8cd41cdc0a042b0df"
+    },
+    "mergedAt": "2026-09-15T17:50:32Z",
+    "number": 175,
+    "state": "MERGED",
+    "url": "https://github.com/tdenisenko/logex/pull/175"
   }
 }

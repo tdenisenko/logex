@@ -1,0 +1,227 @@
+{
+  "status": "All seven local gates and final independent review pass; PR/CI/merge pending",
+  "branch": "audit/execution-request-ownership",
+  "base": "ae9da21eb7028d2fb55508a8cd41cdc0a042b0df",
+  "source_sha256": {
+    "crates/logex-sync/src/p2p/peer_manager/mod.rs": "f471a4cc5ef8479e2f937b5f6bec0d6cb4a23ea1caad251c9580b982674be117",
+    "crates/logex-sync/src/p2p/peer_manager/state.rs": "e476b3470ed2b6ffb681ae7cf145e3ed1df8827459da405afdbb26ceb96a8222",
+    "crates/logex-sync/src/p2p/peer_manager/requests.rs": "c28028c398e6b5c1dbc7773667626c36ac6cda366207b1bc4360c019058810a6",
+    "crates/logex-sync/src/p2p/peer_manager/requests/ownership_tests.rs": "0abad64096f6a740d24936c5a766ab329569257e364ebfb3098b7c0ac7e14ffa",
+    "crates/logex-sync/src/engine/mod.rs": "d006b5d3f3fda45b35d903cd58aa6a414a4587fb24451ab691ced6cb81e1d790",
+    "crates/logex-sync/src/engine/anchored.rs": "596cb3254ec54757d8414616e873414930517b71021630f4228ecf3db1e29911"
+  },
+  "findings": {
+    "B4-09": "Original reservation counts released after shared consumption can remove another plan capacity",
+    "B4-10": "Unscoped late accounting can affect replacement work after attempt retirement or reset",
+    "B4-11": "Old session effects applied by PeerId can mutate replacement connection"
+  },
+  "evidence_directory": "/private/tmp/logex-execution-request-ownership-kpzg98xi",
+  "evidence": {
+    "cleanup-review.json": {
+      "sha256": "38818b12e0ba2193565b4c20cfe7b05dd33172681ea878861b3ba5f12321bd3f",
+      "bytes": 1722
+    },
+    "final-review.json": {
+      "sha256": "14fd52b79061100f0e8909a5b180057b2c015dbc228d36375bfdb33a91fa2606",
+      "bytes": 3958
+    },
+    "lifecycle-review-checklist.json": {
+      "sha256": "eec033f3ca92530ad975e8e686b57becf021c67790fa537a7bf91397a79e0536",
+      "bytes": 4035
+    },
+    "original-counter-controls.json": {
+      "sha256": "57c1ea6400d8bbaed222038bcedb71dd33faebf3c13245caf0f1a3ede1c4b070",
+      "bytes": 605
+    },
+    "original-counter-controls.log": {
+      "sha256": "435895c479c38a8b6977639eaea0c565f76eedc3e7cb9b604cd110ca075666e3",
+      "bytes": 981
+    },
+    "owner-lifecycle-design-review.json": {
+      "sha256": "f65f824e8a0a2ae6b0c713ae57b39448ba9b10b250a85bcde1b62866466bd4b8",
+      "bytes": 2295
+    },
+    "ownership-references-0.log": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    "ownership-references-1.log": {
+      "sha256": "526737439bdf03ac8b9f494b6234f0f3e66381089b008eb6173d3464dc83dc3d",
+      "bytes": 6996
+    },
+    "ownership-references-2.log": {
+      "sha256": "689b589a0666a5e0293c7228914ce5d72917ad1a03cca0de9fb4ddf85c14cf05",
+      "bytes": 7574
+    },
+    "request-plan-review.json": {
+      "sha256": "5fb55551829cd0bbb5e7bd58b9198b0b2e25188e387cb2b020c92b4d9ce9926b",
+      "bytes": 7883
+    },
+    "response-correlation-review.json": {
+      "sha256": "0d795f75608f4ac6922744a76d69ff2fadd00c5b971ee26e33814bd7f4eccfaf",
+      "bytes": 4936
+    },
+    "session-identity-source.json": {
+      "sha256": "115128e08169b6951580265de776fbcc06180c34af0c360604153677d10a2401",
+      "bytes": 648
+    },
+    "sync-tests-first.log": {
+      "sha256": "54412f4eef8aa455acb73dddd0b61998f1672921a95895bf7b9b8599ef56c0c5",
+      "bytes": 33749
+    },
+    "gates/results.json": {
+      "sha256": "cc176800cba22d8f886c0464a27d7de3b6489e573f823522813445730cba0875",
+      "bytes": 3807
+    }
+  },
+  "focused_sync_tests": {
+    "passed": 341,
+    "failed": 0,
+    "ignored": 1
+  },
+  "new_regressions": 8,
+  "superseded_scalar_tests_removed": 3,
+  "contract": {
+    "identity": "Checked monotonically allocated owner IDs; exhausted ID space fails invariant before registration, never wraps. Captured existing session sender.same_channel.",
+    "ledger": "Exact per-owner/session/role remaining reservations and active charges; owner retirement idempotent with no tombstones.",
+    "scope": "Registration at execution after refresh. Scope exists before first task poll. Last scope clone emits FIFO retirement after terminal accounting; explicit canceled/losing owners retired immediately.",
+    "outcomes": "Streamed effects applied once via owned channel; direct/body and reverse-header session-local effects filtered against captured channel; content validation remains separate.",
+    "cost": "Live plan ledger and captured senders; preserve batched feedback and avoid extra session map in streamed outcomes. No additional disk writes, format/dependency changes or benchmark.",
+    "remaining": "Receipt-count source attribution and send-before-response-timeout review remain separate; offline audit, volume supervision and verified repair unfinished.",
+    "remote": "No remote work; prior mac-mini cleanup complete."
+  },
+  "source_commit": "36db2d3d73ab339a70943022325c3cfde69bfc8c",
+  "workspace_tests": {
+    "groups": 25,
+    "passed": 1445,
+    "failed": 0,
+    "ignored": 23
+  },
+  "gates": {
+    "commit": "36db2d3d73ab339a70943022325c3cfde69bfc8c",
+    "rustc": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+    "gates": [
+      {
+        "name": "vendor",
+        "command": [
+          "python3",
+          "tools/verify_datafusion_vendor.py"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T18:13:39.640393+00:00",
+        "finished": "2026-09-15T18:13:39.696010+00:00",
+        "sha256": "d8d80949d6f3378c14456842b531f0cade514179e4c94781b95ff9abb6447675",
+        "log": "/private/tmp/logex-execution-request-ownership-kpzg98xi/gates/vendor.log"
+      },
+      {
+        "name": "format",
+        "command": [
+          "cargo",
+          "fmt",
+          "--all",
+          "--",
+          "--check"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T18:13:39.696349+00:00",
+        "finished": "2026-09-15T18:13:40.559867+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-execution-request-ownership-kpzg98xi/gates/format.log"
+      },
+      {
+        "name": "check",
+        "command": [
+          "cargo",
+          "check",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T18:13:40.560220+00:00",
+        "finished": "2026-09-15T18:13:45.377518+00:00",
+        "sha256": "92400f1204bd18dd3885124dc90052e3956b1597578c86005acc9e25247a118c",
+        "log": "/private/tmp/logex-execution-request-ownership-kpzg98xi/gates/check.log"
+      },
+      {
+        "name": "clippy",
+        "command": [
+          "cargo",
+          "clippy",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T18:13:45.378077+00:00",
+        "finished": "2026-09-15T18:13:51.488703+00:00",
+        "sha256": "e22014e80889bc0841dd36e83208c9b60fbcd0fe3281f99caae663a603b33bb1",
+        "log": "/private/tmp/logex-execution-request-ownership-kpzg98xi/gates/clippy.log"
+      },
+      {
+        "name": "test",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T18:13:51.489449+00:00",
+        "finished": "2026-09-15T18:16:39.442473+00:00",
+        "sha256": "297971280bc675e0be364d83fb80465405a0405ba1cff6b9d1f04101f73c8f99",
+        "log": "/private/tmp/logex-execution-request-ownership-kpzg98xi/gates/test.log"
+      },
+      {
+        "name": "doc",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--doc",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T18:16:39.443595+00:00",
+        "finished": "2026-09-15T18:16:50.215165+00:00",
+        "sha256": "62aa9ae83012b41af6916e1e9dc941f59315584c5bd3b17fca7708b3301687af",
+        "log": "/private/tmp/logex-execution-request-ownership-kpzg98xi/gates/doc.log"
+      },
+      {
+        "name": "release-build",
+        "command": [
+          "cargo",
+          "build",
+          "-p",
+          "logex-node",
+          "--release",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T18:16:50.215934+00:00",
+        "finished": "2026-09-15T18:17:34.356523+00:00",
+        "sha256": "959892e74f984424555be81ddb24b585943eb073be061380345838fa64cb64c1",
+        "log": "/private/tmp/logex-execution-request-ownership-kpzg98xi/gates/release-build.log"
+      }
+    ]
+  }
+}

@@ -50,13 +50,9 @@ mod lifecycle;
 mod requests;
 mod state;
 
-use self::requests::{
-    BodyReceiptActiveRequest, BodyReceiptActiveRequestDelta, BodyReceiptRequestReservations,
-    RequestAttempt,
-};
+use self::requests::RequestAttempt;
 pub(crate) use self::requests::{
     BodyReceiptRequestAccounting, BodyReceiptRequestOutcome, BodyReceiptRequestPlan,
-    BodyReceiptRequestReservations as BodyReceiptPeerReservations,
     ReverseHeaderPagesRequestOutcome, ReverseHeaderPagesRequestPlan,
 };
 use self::state::{
@@ -155,6 +151,7 @@ pub struct PeerManager {
     known_peers: Vec<NodeRecord>,
     configured_peer_ids: HashSet<PeerId>,
     known_scan_cursor: usize,
+    body_receipt_owners: requests::BodyReceiptOwnerLedger,
     known_peers_path: PathBuf,
     persisted_known_peers: Vec<NodeRecord>,
     serve_cache: Arc<ServeCacheProvider>,
@@ -636,6 +633,7 @@ impl PeerManager {
             known_peers,
             configured_peer_ids,
             known_scan_cursor: 0,
+            body_receipt_owners: requests::BodyReceiptOwnerLedger::default(),
             known_peers_path,
             persisted_known_peers,
             serve_cache,
