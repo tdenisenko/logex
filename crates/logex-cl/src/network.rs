@@ -1608,8 +1608,16 @@ impl PeerDialAddressStats {
     }
 }
 
+#[derive(Debug, Clone)]
+struct RetainedPeerEnr {
+    enr: Enr,
+    bootstrap: bool,
+}
+
 #[derive(Debug, Clone, Default)]
 struct PeerLifecycleState {
+    latest_enr: Option<RetainedPeerEnr>,
+    seen_in_discovery: bool,
     remembered_support: Option<PeerRpcSupport>,
     status_successes: u32,
     bootstrap_successes: u32,
@@ -1626,6 +1634,8 @@ struct PeerLifecycleState {
 impl PeerLifecycleState {
     fn from_persisted(peer: &PersistedPeer) -> Self {
         Self {
+            latest_enr: None,
+            seen_in_discovery: false,
             remembered_support: peer.support,
             status_successes: peer.status_successes,
             bootstrap_successes: peer.bootstrap_successes,
@@ -1983,7 +1993,6 @@ impl ConsensusNetwork {
             .map_err(|error| ConsensusNetworkError::ConstructDiscovery(error.to_string()))?;
 
         let known_peers = load_known_peers(&known_peers_path)?;
-        let mut retained_known_peers = Vec::new();
         let mut dialable_peers = HashMap::new();
         let mut peer_lifecycle = HashMap::new();
         let mut bootnode_peers = HashSet::new();
@@ -2000,8 +2009,14 @@ impl ConsensusNetwork {
             } else {
                 skipped_bootnodes = skipped_bootnodes.saturating_add(1);
             }
-            if let Some(peer_id) =
-                observe_dialable_peer_for_families(&mut dialable_peers, config.dial_families, enr)
+            if let Some((peer_id, _)) = retain_peer_enr(
+                &mut peer_lifecycle,
+                &mut dialable_peers,
+                config.dial_families,
+                &fork_digest,
+                enr,
+                true,
+            ) && dialable_peers.contains_key(&peer_id)
             {
                 bootnode_peers.insert(peer_id);
             }
@@ -2015,53 +2030,34 @@ impl ConsensusNetwork {
             );
         }
 
+        let mut restored_metadata = HashSet::new();
         for peer in &known_peers {
-            if peer.support.is_some_and(|support| !support.status) {
-                tracing::debug!(
-                    enr = %peer.enr,
-                    "ignoring cached consensus peer that previously identified without beacon status support"
-                );
-                continue;
-            }
             match peer.enr.parse::<Enr>() {
                 Ok(enr) => {
-                    if !enr_is_relevant_consensus_peer(&enr, &fork_digest) {
-                        tracing::debug!(
-                            enr = %peer.enr,
-                            "ignoring cached consensus peer ENR that is not relevant to the expected beacon network"
-                        );
-                        continue;
-                    }
-                    let Some(peer_id) = observe_dialable_peer_for_families(
+                    let Some(peer_id) = retain_cached_peer_enr(
+                        &mut peer_lifecycle,
                         &mut dialable_peers,
+                        &mut restored_metadata,
                         config.dial_families,
+                        &fork_digest,
                         &enr,
+                        peer,
                     ) else {
-                        tracing::debug!(
-                            enr = %peer.enr,
-                            ?config.dial_families,
-                            "ignoring cached consensus peer without a dialable address for configured families"
-                        );
                         continue;
                     };
-                    if enr_has_discv5_endpoint_for_families(config.dial_families, &enr)
-                        && let Err(error) = discv5.add_enr(enr.clone())
-                    {
-                        tracing::debug!(
-                            %error,
-                            enr = %peer.enr,
-                            "skipping cached consensus peer that could not be inserted"
-                        );
+                    let state = peer_lifecycle.get(&peer_id).expect("retained peer");
+                    if !dialable_peers.contains_key(&peer_id) {
+                        continue;
                     }
-                    peer_lifecycle.insert(peer_id, PeerLifecycleState::from_persisted(peer));
-                    retained_known_peers.push(peer.clone());
+                    let canonical = &state.latest_enr.as_ref().expect("retained ENR").enr;
+                    if enr_has_discv5_endpoint_for_families(config.dial_families, canonical)
+                        && let Err(error) = discv5.add_enr(canonical.clone())
+                    {
+                        tracing::debug!(%error, "skipping cached consensus peer that could not be inserted");
+                    }
                 }
                 Err(error) => {
-                    tracing::warn!(
-                        %error,
-                        enr = %peer.enr,
-                        "ignoring invalid cached consensus peer ENR"
-                    );
+                    tracing::warn!(%error, enr = %peer.enr, "ignoring invalid cached consensus peer ENR")
                 }
             }
         }
@@ -2088,7 +2084,8 @@ impl ConsensusNetwork {
             bootnode_peers,
             fork_digest,
             known_peers_path,
-            last_persisted: retained_known_peers,
+            // Compare future saves with the actual file, including stale entries.
+            last_persisted: known_peers,
             observed: HashSet::new(),
             dialable_peers,
             dialing_peers: HashSet::new(),
@@ -2382,22 +2379,40 @@ impl ConsensusNetwork {
     }
 
     fn observe_enr(&mut self, enr: &Enr) {
-        if !enr_is_relevant_consensus_peer(enr, &self.fork_digest) {
-            let remote_fork_digest = enr_fork_digest(enr).map(hex::encode);
-            tracing::debug!(
-                node_id = %enr.node_id(),
-                local_fork_digest = %hex::encode(self.fork_digest),
-                remote_fork_digest = remote_fork_digest.as_deref().unwrap_or("missing"),
-                "ignoring discovered ENR that is not relevant to the expected beacon network"
-            );
-            return;
-        }
-        if let Some(peer) = observe_dialable_peer_for_families(
+        if let Some((peer, _)) = retain_peer_enr(
+            &mut self.peer_lifecycle,
             &mut self.dialable_peers,
             self.config.dial_families,
+            &self.fork_digest,
             enr,
+            false,
         ) {
-            self.observed.insert(peer);
+            self.peer_lifecycle
+                .get_mut(&peer)
+                .expect("retained peer")
+                .seen_in_discovery = true;
+            if self.dialable_peers.contains_key(&peer) {
+                self.observed.insert(peer);
+            } else {
+                self.observed.remove(&peer);
+            }
+        }
+    }
+
+    fn refresh_retained_peer_inventory(&mut self) {
+        for (peer, state) in &self.peer_lifecycle {
+            refresh_peer_enr_addresses(
+                &mut self.dialable_peers,
+                self.config.dial_families,
+                &self.fork_digest,
+                *peer,
+                state,
+            );
+            if state.seen_in_discovery && self.dialable_peers.contains_key(peer) {
+                self.observed.insert(*peer);
+            } else {
+                self.observed.remove(peer);
+            }
         }
     }
 
@@ -2677,6 +2692,7 @@ impl ConsensusNetwork {
             let new_topics = build_gossip_topics(expected_digest);
             self.subscribe_gossip_topic_set(&new_topics);
             self.fork_digest = expected_digest;
+            self.refresh_retained_peer_inventory();
             self.gossip_topics = new_topics;
             self.pre_subscribed_fork_digest = None;
             self.retiring_gossip_topics.push(RetiringGossipTopics {
@@ -5643,6 +5659,15 @@ impl ConsensusNetwork {
             );
         let mut peers = enrs
             .into_iter()
+            .map(|enr| {
+                peer_id_from_enr(&enr)
+                    .ok()
+                    .and_then(|peer| self.peer_lifecycle.get(&peer))
+                    .and_then(|state| state.latest_enr.as_ref())
+                    .filter(|record| record.enr.seq() >= enr.seq())
+                    .map(|record| record.enr.clone())
+                    .unwrap_or(enr)
+            })
             .filter(|enr| enr_is_relevant_consensus_peer(enr, &self.fork_digest))
             .filter_map(|enr| {
                 let (peer_id, _) = enr_multiaddrs_for_families(self.config.dial_families, &enr)?;
@@ -5948,14 +5973,77 @@ fn known_peers_path(data_dir: &Path) -> PathBuf {
     data_dir.join(CONSENSUS_STATE_DIR).join(KNOWN_PEERS_FILE)
 }
 
-fn observe_dialable_peer_for_families(
+fn retain_cached_peer_enr(
+    lifecycle: &mut HashMap<PeerId, PeerLifecycleState>,
+    peers: &mut HashMap<PeerId, Vec<Multiaddr>>,
+    restored_metadata: &mut HashSet<PeerId>,
+    families: ConsensusDialAddressFamilies,
+    fork_digest: &[u8; 4],
+    enr: &Enr,
+    cached: &PersistedPeer,
+) -> Option<PeerId> {
+    let (peer, accepted) = retain_peer_enr(lifecycle, peers, families, fork_digest, enr, false)?;
+    let state = lifecycle.get_mut(&peer).expect("retained peer");
+    let canonical = state.latest_enr.as_ref().expect("retained ENR");
+    // Equal records may restore bootnode metadata once; stale or conflicting
+    // cache entries must not replace the winner's scores.
+    if accepted || (canonical.enr == *enr && !restored_metadata.contains(&peer)) {
+        let latest_enr = state.latest_enr.take();
+        *state = PeerLifecycleState::from_persisted(cached);
+        state.latest_enr = latest_enr;
+        restored_metadata.insert(peer);
+    }
+    refresh_peer_enr_addresses(peers, families, fork_digest, peer, state);
+    Some(peer)
+}
+
+// Sequence authority shares the lifecycle record's existing inactive eviction.
+// Equal/stale announcements can refresh eligibility, never canonical content.
+fn retain_peer_enr(
+    lifecycle: &mut HashMap<PeerId, PeerLifecycleState>,
     peers: &mut HashMap<PeerId, Vec<Multiaddr>>,
     families: ConsensusDialAddressFamilies,
+    fork_digest: &[u8; 4],
     enr: &Enr,
-) -> Option<PeerId> {
-    let (peer_id, addrs) = enr_multiaddrs_for_families(families, enr)?;
-    peers.insert(peer_id, addrs);
-    Some(peer_id)
+    bootstrap: bool,
+) -> Option<(PeerId, bool)> {
+    let peer = peer_id_from_enr(enr).ok()?;
+    let state = lifecycle.entry(peer).or_default();
+    let accepted = state
+        .latest_enr
+        .as_ref()
+        .is_none_or(|record| enr.seq() > record.enr.seq());
+    if accepted {
+        state.latest_enr = Some(RetainedPeerEnr {
+            enr: enr.clone(),
+            bootstrap,
+        });
+    }
+    refresh_peer_enr_addresses(peers, families, fork_digest, peer, state);
+    Some((peer, accepted))
+}
+
+fn refresh_peer_enr_addresses(
+    peers: &mut HashMap<PeerId, Vec<Multiaddr>>,
+    families: ConsensusDialAddressFamilies,
+    fork_digest: &[u8; 4],
+    peer: PeerId,
+    state: &PeerLifecycleState,
+) {
+    let Some(record) = &state.latest_enr else {
+        return;
+    };
+    let addresses = (!state
+        .remembered_support
+        .is_some_and(|support| !support.status)
+        && (record.bootstrap || enr_is_relevant_consensus_peer(&record.enr, fork_digest)))
+    .then(|| enr_multiaddrs_for_families(families, &record.enr))
+    .flatten();
+    if let Some((_, addresses)) = addresses {
+        peers.insert(peer, addresses);
+    } else {
+        peers.remove(&peer);
+    }
 }
 
 fn enr_multiaddrs_for_families(
@@ -6358,6 +6446,369 @@ mod tests {
             .unwrap()
             .public()
             .to_peer_id()
+    }
+
+    fn freshness_enr(index: u16, seq: u64, port: Option<u16>, ipv6: bool, digest: [u8; 4]) -> Enr {
+        let mut secret = [1; 32];
+        secret[..2].copy_from_slice(&index.to_le_bytes());
+        let key = CombinedKey::secp256k1_from_bytes(&mut secret).unwrap();
+        let mut fork_id = [0; 16];
+        fork_id[..4].copy_from_slice(&digest);
+        fork_id[8..].copy_from_slice(&u64::MAX.to_le_bytes());
+        let mut builder = Enr::builder();
+        builder.seq(seq).add_value("eth2", &fork_id);
+        if ipv6 {
+            builder.ip6(Ipv6Addr::LOCALHOST).udp6(9000);
+            if let Some(port) = port {
+                builder.tcp6(port);
+            }
+        } else {
+            builder.ip4(Ipv4Addr::LOCALHOST).udp4(9000);
+            if let Some(port) = port {
+                builder.tcp4(port);
+            }
+        }
+        builder.build(&key).unwrap()
+    }
+
+    #[tokio::test]
+    async fn peer_freshness_older_and_equal_enrs_do_not_replace_latest_endpoints() {
+        let temp = TempDir::new().unwrap();
+        let mut network = peer_retention_fixture(&temp);
+        let older = freshness_enr(1, 1, Some(9001), false, network.fork_digest);
+        let newer = freshness_enr(1, 2, Some(9002), false, network.fork_digest);
+        let conflict = freshness_enr(1, 2, Some(9999), false, network.fork_digest);
+        let peer = peer_id_from_enr(&newer).unwrap();
+        network.observe_enr(&older);
+        network.observe_enr(&newer);
+        let expected = vec![
+            format!("/ip4/127.0.0.1/tcp/9002/p2p/{peer}")
+                .parse::<Multiaddr>()
+                .unwrap(),
+        ];
+        assert_eq!(network.dialable_peers[&peer], expected);
+        for enr in [&older, &conflict, &newer] {
+            network.observe_enr(enr);
+            assert_eq!(network.dialable_peers[&peer], expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn peer_freshness_newer_withdrawals_remove_inventory_without_canceling_requests() {
+        for reason in 0..3 {
+            let temp = TempDir::new().unwrap();
+            let mut network = peer_retention_fixture(&temp);
+            let older = freshness_enr(1, 1, Some(9001), false, network.fork_digest);
+            let newer = freshness_enr(
+                1,
+                2,
+                if reason == 0 { None } else { Some(9002) },
+                reason == 1,
+                if reason == 2 {
+                    [0xff; 4]
+                } else {
+                    network.fork_digest
+                },
+            );
+            let peer = peer_id_from_enr(&older).unwrap();
+            network.observe_enr(&older);
+            network.connected_peers.insert(peer);
+            network.ensure_request(peer, RpcRequestKind::Status);
+            let pending = network.pending_requests.clone();
+            network.observe_enr(&newer);
+            assert!(!network.dialable_peers.contains_key(&peer));
+            assert!(!network.observed.contains(&peer));
+            network.observe_enr(&older);
+            assert!(!network.dialable_peers.contains_key(&peer));
+            assert_eq!(network.pending_requests, pending);
+            assert!(network.connected_peers.contains(&peer));
+            assert!(!network.closing_peers.contains(&peer));
+        }
+    }
+
+    #[tokio::test]
+    async fn peer_freshness_saved_selection_does_not_restore_withdrawn_table_enr() {
+        let temp = TempDir::new().unwrap();
+        let mut network = peer_retention_fixture(&temp);
+        let older = freshness_enr(1, 1, Some(9001), false, network.fork_digest);
+        let newer = freshness_enr(1, 2, None, false, network.fork_digest);
+        network.observe_enr(&older);
+        network.observe_enr(&newer);
+        assert!(network.selected_known_peers(vec![older]).is_empty());
+    }
+
+    #[tokio::test]
+    async fn peer_freshness_canonical_records_refresh_and_expire_with_lifecycle() {
+        let temp = TempDir::new().unwrap();
+        let mut network = peer_retention_fixture(&temp);
+        let digest = network.fork_digest;
+        for index in 0..=MAX_RETAINED_DISCONNECTED_PEERS {
+            network.observe_enr(&freshness_enr(index as u16, 2, None, false, digest));
+        }
+        assert!(network.dialable_peers.is_empty());
+        assert!(network.observed.is_empty());
+        network.prune_inactive_peer_state();
+        assert_eq!(
+            network.peer_lifecycle.len(),
+            MAX_RETAINED_DISCONNECTED_PEERS
+        );
+        network.prune_inactive_peer_state();
+        assert_eq!(
+            network.peer_lifecycle.len(),
+            MAX_RETAINED_DISCONNECTED_PEERS
+        );
+
+        let canonical = freshness_enr(600, 2, Some(9002), false, [0xff; 4]);
+        let conflict = freshness_enr(600, 2, Some(9999), false, digest);
+        let peer = peer_id_from_enr(&canonical).unwrap();
+        network.observe_enr(&canonical);
+        network.observe_enr(&conflict);
+        assert!(!network.dialable_peers.contains_key(&peer));
+        network.fork_digest = [0xff; 4];
+        network.refresh_retained_peer_inventory();
+        assert!(network.observed.contains(&peer));
+        network.fork_digest = digest;
+        network.refresh_retained_peer_inventory();
+        assert!(!network.observed.contains(&peer));
+        assert!(!network.dialable_peers.contains_key(&peer));
+        network.fork_digest = [0xff; 4];
+        network.refresh_retained_peer_inventory();
+        assert!(network.observed.contains(&peer));
+        assert_eq!(
+            network.dialable_peers[&peer],
+            vec![
+                format!("/ip4/127.0.0.1/tcp/9002/p2p/{peer}")
+                    .parse::<Multiaddr>()
+                    .unwrap()
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn peer_freshness_cached_unsupported_peer_stays_excluded_after_refresh() {
+        let temp = TempDir::new().unwrap();
+        let network = peer_retention_fixture(&temp);
+        let enr = freshness_enr(1, 2, Some(9002), false, network.fork_digest);
+        let peer = peer_id_from_enr(&enr).unwrap();
+        let cached = PersistedPeer {
+            enr: enr.to_base64(),
+            support: Some(PeerRpcSupport::default()),
+            status_successes: 7,
+            bootstrap_successes: 0,
+            useful_successes: 0,
+            dial_stats: PeerDialAddressStats::default(),
+        };
+        persist_known_peers(&network.known_peers_path, &[cached]).unwrap();
+        let mut loaded = ConsensusNetwork::new(
+            network.config.clone(),
+            network.consensus.clone(),
+            network.sync_status.clone(),
+        )
+        .unwrap();
+        assert!(!loaded.dialable_peers.contains_key(&peer));
+        assert_eq!(
+            loaded.peer_lifecycle[&peer]
+                .latest_enr
+                .as_ref()
+                .unwrap()
+                .enr,
+            enr
+        );
+        loaded.observe_enr(&enr);
+        loaded.refresh_retained_peer_inventory();
+        assert!(!loaded.dialable_peers.contains_key(&peer));
+        assert!(!loaded.observed.contains(&peer));
+        assert!(loaded.selected_known_peers(vec![enr]).is_empty());
+        loaded.persist_known_peers().unwrap();
+        assert!(
+            load_known_peers(&loaded.known_peers_path)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn peer_freshness_boot_cache_sequence_and_metadata_ordering() {
+        let digest = [0xee; 4];
+        let boot = freshness_enr(1, 2, Some(9002), false, [0xff; 4]);
+        let older = freshness_enr(1, 1, Some(9001), false, digest);
+        let conflict = freshness_enr(1, 2, Some(9999), false, digest);
+        let newer = freshness_enr(1, 3, Some(9003), false, digest);
+        let withdrawn = freshness_enr(1, 4, None, false, digest);
+        for order in [
+            vec![&older, &conflict, &newer, &older, &conflict],
+            vec![&newer, &conflict, &older],
+        ] {
+            let mut states = HashMap::new();
+            let mut peers = HashMap::new();
+            let mut restored = HashSet::new();
+            let (peer, _) = retain_peer_enr(
+                &mut states,
+                &mut peers,
+                ConsensusDialAddressFamilies::IPV4,
+                &digest,
+                &boot,
+                true,
+            )
+            .unwrap();
+            assert!(
+                peers.contains_key(&peer),
+                "built-in bootstrap retains its initial eligibility"
+            );
+            for enr in order {
+                let cached = PersistedPeer {
+                    enr: enr.to_base64(),
+                    status_successes: enr.seq() as u32,
+                    support: None,
+                    bootstrap_successes: 0,
+                    useful_successes: 0,
+                    dial_stats: PeerDialAddressStats::default(),
+                };
+                retain_cached_peer_enr(
+                    &mut states,
+                    &mut peers,
+                    &mut restored,
+                    ConsensusDialAddressFamilies::IPV4,
+                    &digest,
+                    enr,
+                    &cached,
+                )
+                .unwrap();
+            }
+            assert_eq!(states[&peer].status_successes, 3);
+            assert_eq!(states[&peer].latest_enr.as_ref().unwrap().enr, newer);
+            assert!(!states[&peer].latest_enr.as_ref().unwrap().bootstrap);
+            assert_eq!(
+                peers[&peer],
+                vec![
+                    format!("/ip4/127.0.0.1/tcp/9003/p2p/{peer}")
+                        .parse::<Multiaddr>()
+                        .unwrap()
+                ]
+            );
+            let cached = PersistedPeer {
+                enr: withdrawn.to_base64(),
+                support: Some(PeerRpcSupport::default()),
+                status_successes: 0,
+                bootstrap_successes: 0,
+                useful_successes: 0,
+                dial_stats: PeerDialAddressStats::default(),
+            };
+            retain_cached_peer_enr(
+                &mut states,
+                &mut peers,
+                &mut restored,
+                ConsensusDialAddressFamilies::IPV4,
+                &digest,
+                &withdrawn,
+                &cached,
+            )
+            .unwrap();
+            assert!(!peers.contains_key(&peer));
+            assert_eq!(states[&peer].latest_enr.as_ref().unwrap().enr.seq(), 4);
+            retain_peer_enr(
+                &mut states,
+                &mut peers,
+                ConsensusDialAddressFamilies::IPV4,
+                &digest,
+                &boot,
+                true,
+            )
+            .unwrap();
+            assert!(!peers.contains_key(&peer));
+        }
+    }
+
+    #[test]
+    fn peer_freshness_cache_support_follows_sequence_winner() {
+        let digest = [0xee; 4];
+        let older = freshness_enr(1, 1, Some(9001), false, digest);
+        let newer = freshness_enr(1, 2, Some(9002), false, digest);
+        for newer_supported in [false, true] {
+            for reverse in [false, true] {
+                let mut states = HashMap::new();
+                let mut peers = HashMap::new();
+                let mut restored = HashSet::new();
+                let mut records = vec![(&older, !newer_supported), (&newer, newer_supported)];
+                if reverse {
+                    records.reverse();
+                }
+                for (enr, status) in records {
+                    let cached = PersistedPeer {
+                        enr: enr.to_base64(),
+                        support: Some(PeerRpcSupport {
+                            status,
+                            ..PeerRpcSupport::default()
+                        }),
+                        status_successes: enr.seq() as u32,
+                        bootstrap_successes: 0,
+                        useful_successes: 0,
+                        dial_stats: PeerDialAddressStats::default(),
+                    };
+                    retain_cached_peer_enr(
+                        &mut states,
+                        &mut peers,
+                        &mut restored,
+                        ConsensusDialAddressFamilies::IPV4,
+                        &digest,
+                        enr,
+                        &cached,
+                    )
+                    .unwrap();
+                }
+                let peer = peer_id_from_enr(&newer).unwrap();
+                assert_eq!(peers.contains_key(&peer), newer_supported);
+                assert_eq!(states[&peer].status_successes, 2);
+                assert_eq!(states[&peer].latest_enr.as_ref().unwrap().enr, newer);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn peer_freshness_saved_selection_serializes_latest_and_reloads() {
+        let temp = TempDir::new().unwrap();
+        let mut network = peer_retention_fixture(&temp);
+        let old = freshness_enr(1, 1, Some(9001), false, network.fork_digest);
+        let new = freshness_enr(1, 2, Some(9002), false, network.fork_digest);
+        network.discv5.add_enr(old.clone()).unwrap();
+        network.observe_enr(&new);
+        let conflict = freshness_enr(1, 2, Some(9999), false, network.fork_digest);
+        assert_eq!(
+            network.selected_known_peers(vec![conflict])[0].enr,
+            new.to_base64()
+        );
+        let table_newer = freshness_enr(1, 3, Some(9003), false, network.fork_digest);
+        assert_eq!(
+            network.selected_known_peers(vec![table_newer.clone()])[0].enr,
+            table_newer.to_base64()
+        );
+        network.persist_known_peers().unwrap();
+        let saved = load_known_peers(&network.known_peers_path).unwrap();
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].enr, new.to_base64());
+        let reloaded = ConsensusNetwork::new(
+            network.config.clone(),
+            network.consensus.clone(),
+            network.sync_status.clone(),
+        )
+        .unwrap();
+        let peer = peer_id_from_enr(&new).unwrap();
+        assert_eq!(
+            reloaded.peer_lifecycle[&peer]
+                .latest_enr
+                .as_ref()
+                .unwrap()
+                .enr,
+            new
+        );
+        assert_eq!(
+            reloaded.dialable_peers[&peer],
+            vec![
+                format!("/ip4/127.0.0.1/tcp/9002/p2p/{peer}")
+                    .parse::<Multiaddr>()
+                    .unwrap()
+            ]
+        );
     }
 
     #[tokio::test]
@@ -7955,10 +8406,13 @@ mod tests {
             .unwrap();
         let mut peers = HashMap::new();
 
-        let peer_id = observe_dialable_peer_for_families(
+        let (peer_id, _) = retain_peer_enr(
+            &mut HashMap::new(),
             &mut peers,
             ConsensusDialAddressFamilies::IPV6,
+            &[0; 4],
             &peer_enr,
+            true,
         )
         .expect("dual-stack ENR should provide an IPv6 dial address");
 
