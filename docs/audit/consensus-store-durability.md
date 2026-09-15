@@ -111,4 +111,7 @@ strict Clippy, all-target tests (1,227 passed, 23 intentionally ignored), doc te
 and the release node build. Existing dependency future-incompatibility and Apple
 debug-linker warnings remain. Evidence is in
 [the gate record](baselines/2026-09-15-consensus-store-durability-gates.json).
-Linux/macOS CI and merge disposition remain pending.
+All six final-head CI checks passed in run `34911640046`, including Linux and
+macOS tests, on `8571c7ed`. [PR #154](https://github.com/tdenisenko/logex/pull/154)
+merged as `d0a31b2aefa3b9b3032eaaad67d32bd097da5cbb` at 2026-09-15 00:12:20 UTC.
+[CI and merge evidence](baselines/2026-09-15-consensus-store-durability-ci.json).
