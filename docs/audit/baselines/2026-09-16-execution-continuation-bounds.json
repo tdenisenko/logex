@@ -1,0 +1,85 @@
+{
+  "status": "13 focused controls pass; source review complete; local gates and CI pending",
+  "branch": "audit/execution-continuation-bounds",
+  "base": "d73fd32a5ae67498c5086af69b793dd0645fff20",
+  "finding": {
+    "id": "B4-22",
+    "severity": "medium",
+    "effect": "Fresh per-exchange deadlines allow prolonged positive partial-response continuation, including indefinite nonempty ETH70 fragments absent other interruption",
+    "correction": "One per-peer/role max(45 seconds, explicit wire timeout) continuation timer; neutral local expiry with finite existing retries"
+  },
+  "source_sha256": {
+    "crates/logex-sync/src/p2p/peer_manager/requests.rs": "a4a3b7fb6963be592eef3795856f1aee4b440b0198fadccb9c5ca8dd5a98bf25",
+    "crates/logex-sync/src/p2p/peer_manager/state.rs": "c41ec64eea826891bc8295af1219a1b4f89773579b7699f6bccb9972c1748927",
+    "crates/logex-sync/src/p2p/peer_manager/requests/continuation_tests.rs": "e74b0e9ef1f45471fda8c0ba3aaa886aad0f000c21cd8695c9994a0a56d1796f"
+  },
+  "evidence_directory": "/private/tmp/logex-execution-continuation-bounds-ds46fkay",
+  "evidence": {
+    "continuation-review.json": {
+      "sha256": "dabb872b4d36f7116c520f8e24cc2574bae0576b47cb0fd0dc814d70af253450",
+      "bytes": 7169
+    },
+    "standalone-callers-review.json": {
+      "sha256": "37eed86119ecf8d4b996fa1f631d8a6c24b0e2f94da1a58789cc7913b5f1c300",
+      "bytes": 6574
+    },
+    "planner-trust-context-review.json": {
+      "sha256": "accf52e5b07691aeefafe6a28d94f2afb34f3f3d5f3ed88dee6ef41d6c31d8c1",
+      "bytes": 4461
+    },
+    "original-result.json": {
+      "sha256": "d9d521b374bbc925a89a3bdc28559962df1bb224289268763efe583879710166",
+      "bytes": 454
+    },
+    "original-tests.rs": {
+      "sha256": "fe7a9a4bfdcd5db70991cdd1cb15f85d7a38ed66ec1258f86e02d3c61f8c9af8",
+      "bytes": 10188
+    },
+    "original-controls.log": {
+      "sha256": "aeaa495fea8041542519bae92232405fc77707cff9f091b7f4922187e6044901",
+      "bytes": 5065
+    },
+    "fixed-controls.log": {
+      "sha256": "472ec3d4d91aca4f9d9680220a4a6764d37659b6e09e367617c90ad9f6486038",
+      "bytes": 2176
+    },
+    "implementation-review.json": {
+      "sha256": "6646c9fa370920563f08d37f5a38478e6dc066053f4fc7c7e4a8adfb479f63c0",
+      "bytes": 4237
+    },
+    "cleanup-review.json": {
+      "sha256": "4d0522ffad64043a7334b280e13cea46b7a43ce6646aecdf21ba1ca4a2cf8dfe",
+      "bytes": 544
+    },
+    "gas-resource-proof.json": {
+      "sha256": "7bd90951ece0bc35dc7f09cb6005307d7cdb4d3510e6ab91f0234257e296903c",
+      "bytes": 9334
+    },
+    "final-review.json": {
+      "sha256": "77f0c54e9aca3a79672b7a62b431ebe2f13e157c473bea0bbbdbf2a522433ea7",
+      "bytes": 5754
+    }
+  },
+  "original_controls": {
+    "base": "d73fd32a5ae67498c5086af69b793dd0645fff20",
+    "production_unchanged": true,
+    "passed": 1,
+    "failed": 7,
+    "test_sha256": "fe7a9a4bfdcd5db70991cdd1cb15f85d7a38ed66ec1258f86e02d3c61f8c9af8",
+    "log_sha256": "aeaa495fea8041542519bae92232405fc77707cff9f091b7f4922187e6044901",
+    "interpretation": "Seven controls reproduce absence of the selected aggregate per-peer policy; finite body and ETH68/69 hash progress is not unbounded iteration."
+  },
+  "focused_tests": {
+    "passed": 13,
+    "failed": 0,
+    "ignored": 0
+  },
+  "performance": "One pinned timer and unboxed select per standalone role attempt; no payload copies, storage writes or spawned tasks added. No benchmark.",
+  "limits": [
+    "Not a whole-public-call time bound",
+    "Does not bound cumulative retained receipt bytes; B4-23 remains open",
+    "Cooperative cancellation cannot preempt synchronous processing or retract admitted transport requests",
+    "Existing positive partial scoring remains; only local expiry is neutral"
+  ],
+  "remote": "None; mac-mini work and obsolete-artifact cleanup complete"
+}

@@ -1,5 +1,5 @@
 {
-  "status": "All seven local gates,32 cache tests and independent final review pass; PR, CI and merge pending",
+  "status": "Merged after all seven local gates and six exact-head CI jobs passed",
   "branch": "audit/execution-cache-payload-budget",
   "base": "bc5856162311e7d40a2211e9f121c3491b91ee6e",
   "finding": {
@@ -69,6 +69,18 @@
     "gates/test-summary.json": {
       "sha256": "4d65abb9f0c0101343d9760eeb503b1646fd5bfb56d7c81c07d9a5048e3a9a33",
       "bytes": 69
+    },
+    "premerge.json": {
+      "sha256": "520e3568710f76e3f8285d6fac7b72f7af35eb43c753cc961a19c72b8d339ab7",
+      "bytes": 1894
+    },
+    "merged.json": {
+      "sha256": "8cf89665010e7e9dbef34e8e42bbbe8296fee425ae0d7304f0b86e7c124becdf",
+      "bytes": 240
+    },
+    "ci-watch.log": {
+      "sha256": "ae75a862461f340ca6fe02687bcd67d9a7a174c5d32448cd5204e9212d098041",
+      "bytes": 10233
     }
   },
   "original_controls": {
@@ -230,5 +242,51 @@
     "passed": 1505,
     "failed": 0,
     "ignored": 23
+  },
+  "pull_request": {
+    "headRefOid": "323a7d3cb67068f7931f3ec62051779ddcced53d",
+    "mergeCommit": {
+      "oid": "d73fd32a5ae67498c5086af69b793dd0645fff20"
+    },
+    "mergedAt": "2026-09-15T22:13:37Z",
+    "number": 184,
+    "state": "MERGED",
+    "url": "https://github.com/tdenisenko/logex/pull/184"
+  },
+  "ci": {
+    "run": 35029372264,
+    "head": "323a7d3cb67068f7931f3ec62051779ddcced53d",
+    "checks": [
+      {
+        "name": "Check",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS"
+      },
+      {
+        "name": "Format",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS"
+      },
+      {
+        "name": "Clippy",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS"
+      },
+      {
+        "name": "Test",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS"
+      },
+      {
+        "name": "macOS Test",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS"
+      },
+      {
+        "name": "Release Build",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS"
+      }
+    ]
   }
 }
