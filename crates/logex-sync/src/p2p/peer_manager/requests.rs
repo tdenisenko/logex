@@ -2680,22 +2680,7 @@ impl BodyReceiptRequestPlan {
             return Err(RequestAttempt::Disconnected);
         };
 
-        let sender = peer.sender.clone();
-        let (response_tx, response_rx) = oneshot::channel();
-        sender
-            .to_session_tx
-            .send(make_request(response_tx))
-            .await
-            .map_err(|_| RequestAttempt::Disconnected)?;
-
-        match timeout(request_timeout, response_rx).await {
-            Ok(Ok(Ok(response))) => Ok(response.into_value()),
-            Ok(Ok(Err(error))) => Err(RequestAttempt::Request(error)),
-            Ok(Err(_)) => Err(RequestAttempt::Disconnected),
-            Err(_) => Err(RequestAttempt::Request(
-                reth_network::p2p::error::RequestError::Timeout,
-            )),
-        }
+        request_with_sender(&peer.sender, make_request, request_timeout).await
     }
 
     fn role_request_timeout(
@@ -3866,22 +3851,12 @@ impl PeerManager {
             return Err(RequestAttempt::Disconnected);
         };
 
-        let sender = peer.sender.clone();
-        let (response_tx, response_rx) = oneshot::channel();
-        sender
-            .to_session_tx
-            .send(make_request(response_tx))
-            .await
-            .map_err(|_| RequestAttempt::Disconnected)?;
-
-        match timeout(request_timeout.unwrap_or(REQUEST_TIMEOUT), response_rx).await {
-            Ok(Ok(Ok(response))) => Ok(response.into_value()),
-            Ok(Ok(Err(error))) => Err(RequestAttempt::Request(error)),
-            Ok(Err(_)) => Err(RequestAttempt::Disconnected),
-            Err(_) => Err(RequestAttempt::Request(
-                reth_network::p2p::error::RequestError::Timeout,
-            )),
-        }
+        request_with_sender(
+            &peer.sender,
+            make_request,
+            request_timeout.unwrap_or(REQUEST_TIMEOUT),
+        )
+        .await
     }
 
     pub(super) async fn request_receipts(
@@ -5414,29 +5389,56 @@ async fn request_headers_with_sender(
     Vec<<LogexNetworkPrimitives as NetworkPrimitives>::BlockHeader>,
     RequestAttempt,
 > {
-    let (response_tx, response_rx) = oneshot::channel();
-    sender
-        .to_session_tx
-        .send(PeerRequest::GetBlockHeaders {
+    request_with_sender(
+        &sender,
+        &move |response| PeerRequest::GetBlockHeaders {
             request: GetBlockHeaders {
                 start_block: request.start,
                 limit: request.limit,
                 skip: 0,
                 direction: request.direction,
             },
-            response: response_tx,
-        })
-        .await
-        .map_err(|_| RequestAttempt::Disconnected)?;
+            response,
+        },
+        REQUEST_TIMEOUT,
+    )
+    .await
+}
 
-    match timeout(REQUEST_TIMEOUT, response_rx).await {
-        Ok(Ok(Ok(response))) => Ok(response.into_value()),
-        Ok(Ok(Err(error))) => Err(RequestAttempt::Request(error)),
-        Ok(Err(_)) => Err(RequestAttempt::Disconnected),
-        Err(_) => Err(RequestAttempt::Request(
+/// Use one budget for local queue admission and the remote response. Dropping
+/// this future cancels a pending send; an already admitted request remains owned
+/// by the session even if its response receiver is dropped.
+async fn request_with_sender<T, W, MakeRequest>(
+    sender: &PeerRequestSender<PeerRequest<LogexNetworkPrimitives>>,
+    make_request: &MakeRequest,
+    request_timeout: Duration,
+) -> std::result::Result<T, RequestAttempt>
+where
+    W: IntoResponseValue<T>,
+    MakeRequest: Fn(
+        oneshot::Sender<reth_network::p2p::error::RequestResult<W>>,
+    ) -> PeerRequest<LogexNetworkPrimitives>,
+{
+    let (response_tx, response_rx) = oneshot::channel();
+    timeout(request_timeout, async {
+        sender
+            .to_session_tx
+            .send(make_request(response_tx))
+            .await
+            .map_err(|_| RequestAttempt::Disconnected)?;
+
+        match response_rx.await {
+            Ok(Ok(response)) => Ok(response.into_value()),
+            Ok(Err(error)) => Err(RequestAttempt::Request(error)),
+            Err(_) => Err(RequestAttempt::Disconnected),
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        Err(RequestAttempt::Request(
             reth_network::p2p::error::RequestError::Timeout,
-        )),
-    }
+        ))
+    })
 }
 
 fn body_receipt_missing_prefix_reassign_candidate<T>(
@@ -8764,3 +8766,6 @@ mod tests {
 
 #[cfg(test)]
 mod ownership_tests;
+
+#[cfg(test)]
+mod deadline_tests;

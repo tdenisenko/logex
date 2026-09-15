@@ -1,6 +1,6 @@
 use super::*;
 
-fn test_session(
+pub(super) fn test_session(
     id: PeerId,
 ) -> (
     ActivePeer,
@@ -43,7 +43,7 @@ fn totals(peer: &ActivePeer) -> (usize, usize, usize, usize) {
     )
 }
 
-fn test_plan(peer: &ActivePeer) -> BodyReceiptRequestPlan {
+pub(super) fn test_plan(peer: &ActivePeer) -> BodyReceiptRequestPlan {
     let id = peer.sender.peer_id;
     BodyReceiptRequestPlan {
         hashes: vec![B256::ZERO],
