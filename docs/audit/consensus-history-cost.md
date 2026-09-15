@@ -113,7 +113,9 @@ materialization. No dependency, unsafe block or new persisted field was added.
 
 Source `7ef16e28` passes all seven local gates: vendor integrity, formatting,
 workspace check, strict Clippy, 1,397 workspace tests (23 ignored), documentation
-tests and the release node build. CI and merge remain pending.
+tests and the release node build. All six CI jobs passed on head `c0059535`
+before [PR #171](https://github.com/tdenisenko/logex/pull/171) merged as `ccb19d3b`
+after exact-head/base verification.
 Final focused, workspace and CI results are recorded in the
 [validation record](baselines/2026-09-15-consensus-history-cost.json).
 This milestone does not establish offline completion or release readiness.
