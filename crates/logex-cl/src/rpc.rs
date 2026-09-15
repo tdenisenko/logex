@@ -1,5 +1,7 @@
 use std::io;
 
+use crate::beacon_cache::CachedBeaconPayload;
+
 use alloy_primitives::B256;
 use async_trait::async_trait;
 use futures::prelude::*;
@@ -41,7 +43,8 @@ const ERROR_MESSAGE_LIMIT: usize = 256;
 const DEFAULT_RPC_TIMEOUT: Duration = Duration::from_secs(15);
 const HISTORY_RPC_TIMEOUT: Duration = Duration::from_secs(45);
 const MAX_RPC_REQUEST_SSZ_BYTES: usize = 128 * 32;
-const MAX_RPC_RESPONSE_SSZ_BYTES: usize = 10 * 1024 * 1024 + 1024;
+// MAX_PAYLOAD_SIZE bounds decoded SSZ; framing allowance is wire-only.
+const MAX_RPC_RESPONSE_SSZ_BYTES: usize = 10 * 1024 * 1024;
 const MAX_RPC_RESPONSE_CHUNKS: usize = 128;
 const MAX_RPC_STREAM_WIRE_BYTES: usize = 256 * 1024 * 1024;
 
@@ -176,6 +179,9 @@ pub enum Eth2RpcResponse {
     LightClientOptimisticUpdate(RawRpcResponse),
     BeaconBlocksByRange(Vec<RawRpcResponse>),
     BeaconBlocksByRoot(Vec<RawRpcResponse>),
+    // Outgoing bodies share their bounded cache allocation through send completion.
+    CachedBeaconBlocksByRange(Vec<CachedBeaconPayload>),
+    CachedBeaconBlocksByRoot(Vec<CachedBeaconPayload>),
     Error(Eth2RpcErrorResponse),
 }
 
@@ -226,6 +232,12 @@ pub struct RawRpcResponse {
     pub context_bytes: Option<[u8; 4]>,
     #[serde(deserialize_with = "deserialize_rpc_bytes")]
     pub bytes: Vec<u8>,
+}
+
+impl AsRef<RawRpcResponse> for RawRpcResponse {
+    fn as_ref(&self) -> &RawRpcResponse {
+        self
+    }
 }
 
 fn deserialize_rpc_bytes<'de, D: serde::Deserializer<'de>>(
@@ -452,8 +464,38 @@ impl Codec for Eth2RpcCodec {
     where
         T: AsyncWrite + Unpin + Send,
     {
-        let payload = encode_response(protocol, res)?;
-        io.write_all(&payload).await?;
+        match (protocol, res) {
+            (
+                Eth2RpcProtocol::LightClientUpdatesByRangeV1,
+                Eth2RpcResponse::LightClientUpdatesByRange(chunks),
+            )
+            | (
+                Eth2RpcProtocol::BeaconBlocksByRangeV1 | Eth2RpcProtocol::BeaconBlocksByRangeV2,
+                Eth2RpcResponse::BeaconBlocksByRange(chunks),
+            )
+            | (
+                Eth2RpcProtocol::BeaconBlocksByRootV1 | Eth2RpcProtocol::BeaconBlocksByRootV2,
+                Eth2RpcResponse::BeaconBlocksByRoot(chunks),
+            ) => {
+                write_streamed_success_responses(protocol, io, chunks, MAX_RPC_STREAM_WIRE_BYTES)
+                    .await?
+            }
+            (
+                Eth2RpcProtocol::BeaconBlocksByRangeV1 | Eth2RpcProtocol::BeaconBlocksByRangeV2,
+                Eth2RpcResponse::CachedBeaconBlocksByRange(chunks),
+            )
+            | (
+                Eth2RpcProtocol::BeaconBlocksByRootV1 | Eth2RpcProtocol::BeaconBlocksByRootV2,
+                Eth2RpcResponse::CachedBeaconBlocksByRoot(chunks),
+            ) => {
+                write_streamed_success_responses(protocol, io, chunks, MAX_RPC_STREAM_WIRE_BYTES)
+                    .await?
+            }
+            (_, response) => {
+                let payload = encode_single_response(protocol, response)?;
+                io.write_all(&payload).await?;
+            }
+        }
         io.close().await
     }
 }
@@ -504,7 +546,10 @@ fn encode_request(protocol: &Eth2RpcProtocol, request: Eth2RpcRequest) -> io::Re
     }
 }
 
-fn encode_response(protocol: &Eth2RpcProtocol, response: Eth2RpcResponse) -> io::Result<Vec<u8>> {
+fn encode_single_response(
+    protocol: &Eth2RpcProtocol,
+    response: Eth2RpcResponse,
+) -> io::Result<Vec<u8>> {
     match (protocol, response) {
         (
             Eth2RpcProtocol::StatusV1 | Eth2RpcProtocol::StatusV2,
@@ -532,18 +577,6 @@ fn encode_response(protocol: &Eth2RpcProtocol, response: Eth2RpcResponse) -> io:
             success_response_context(protocol, raw.context_bytes)?,
             &raw.bytes,
         ),
-        (
-            Eth2RpcProtocol::LightClientUpdatesByRangeV1,
-            Eth2RpcResponse::LightClientUpdatesByRange(chunks),
-        )
-        | (
-            Eth2RpcProtocol::BeaconBlocksByRangeV1 | Eth2RpcProtocol::BeaconBlocksByRangeV2,
-            Eth2RpcResponse::BeaconBlocksByRange(chunks),
-        )
-        | (
-            Eth2RpcProtocol::BeaconBlocksByRootV1 | Eth2RpcProtocol::BeaconBlocksByRootV2,
-            Eth2RpcResponse::BeaconBlocksByRoot(chunks),
-        ) => encode_streamed_success_responses(protocol, chunks),
         (_, Eth2RpcResponse::Error(error)) => encode_single_error_response(error),
         _ => Err(invalid_data(format!(
             "response variant does not match protocol {}",
@@ -754,13 +787,12 @@ fn encode_single_success_response_with_context(
             "RPC response payload exceeds the {MAX_RPC_RESPONSE_SSZ_BYTES}-byte limit"
         )));
     }
-    let mut response = Vec::with_capacity(1 + raw_ssz.len());
+    let mut response = Vec::new();
     response.push(SUCCESS_CODE);
     if let Some(context_bytes) = context_bytes {
         response.extend_from_slice(&context_bytes);
     }
-    response.extend(encode_ssz_snappy_payload(raw_ssz)?);
-    Ok(response)
+    encode_ssz_snappy_payload_into(response, raw_ssz)
 }
 
 fn encode_single_error_response(error: Eth2RpcErrorResponse) -> io::Result<Vec<u8>> {
@@ -774,59 +806,80 @@ fn encode_single_error_response(error: Eth2RpcErrorResponse) -> io::Result<Vec<u
     }
     let mut response = Vec::with_capacity(1 + error.message.len());
     response.push(error.code);
-    response.extend(encode_ssz_snappy_payload(&error.message)?);
-    Ok(response)
+    encode_ssz_snappy_payload_into(response, &error.message)
 }
 
-fn encode_streamed_success_responses(
+async fn write_streamed_success_responses<T, P>(
     protocol: &Eth2RpcProtocol,
-    chunks: Vec<RawRpcResponse>,
-) -> io::Result<Vec<u8>> {
+    io: &mut T,
+    chunks: Vec<P>,
+    max_wire_bytes: usize,
+) -> io::Result<()>
+where
+    T: AsyncWrite + Unpin + Send,
+    P: AsRef<RawRpcResponse> + Send,
+{
     if chunks.len() > MAX_RPC_RESPONSE_CHUNKS {
         return Err(invalid_data(format!(
             "RPC response stream exceeds the {MAX_RPC_RESPONSE_CHUNKS}-chunk limit"
         )));
     }
-    if chunks
-        .iter()
-        .any(|chunk| chunk.bytes.len() > MAX_RPC_RESPONSE_SSZ_BYTES)
-    {
-        return Err(invalid_data(format!(
-            "RPC response chunk exceeds the {MAX_RPC_RESPONSE_SSZ_BYTES}-byte limit"
-        )));
-    }
-    let mut response = Vec::new();
-    for chunk in chunks {
-        let context_bytes = success_response_context(protocol, chunk.context_bytes)?;
-        response.push(SUCCESS_CODE);
-        if let Some(context_bytes) = context_bytes {
-            response.extend_from_slice(&context_bytes);
-        }
-        response.extend(encode_ssz_snappy_payload(&chunk.bytes)?);
-        if response.len() > MAX_RPC_STREAM_WIRE_BYTES {
+    // Validate all cheap invariants before publishing any prefix. Encoding and
+    // socket writes then retain only one compressed chunk at a time.
+    let payload_limit = response_payload_limit(protocol, SUCCESS_CODE);
+    for chunk in &chunks {
+        let raw = chunk.as_ref();
+        if raw.bytes.len() > payload_limit {
             return Err(invalid_data(format!(
-                "RPC response stream exceeds the {MAX_RPC_STREAM_WIRE_BYTES}-byte wire limit"
+                "RPC response chunk exceeds the {payload_limit}-byte limit"
             )));
         }
+        success_response_context(protocol, raw.context_bytes)?;
     }
-    Ok(response)
+    let mut written = 0usize;
+    for chunk in chunks {
+        let raw = chunk.as_ref();
+        let encoded = encode_single_success_response_with_context(
+            success_response_context(protocol, raw.context_bytes)?,
+            &raw.bytes,
+        )?;
+        // Check before writing the next complete chunk. On failure any already
+        // written prefix consists exclusively of complete valid chunks.
+        if encoded.len() > max_wire_bytes.saturating_sub(written) {
+            return Err(invalid_data(format!(
+                "RPC response stream exceeds the {max_wire_bytes}-byte wire limit"
+            )));
+        }
+        io.write_all(&encoded).await?;
+        written += encoded.len();
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn encode_response(protocol: &Eth2RpcProtocol, response: Eth2RpcResponse) -> io::Result<Vec<u8>> {
+    let mut output = futures::io::Cursor::new(Vec::new());
+    futures::executor::block_on(Eth2RpcCodec.write_response(protocol, &mut output, response))?;
+    Ok(output.into_inner())
 }
 
 fn encode_ssz_snappy_payload(raw_ssz: &[u8]) -> io::Result<Vec<u8>> {
-    let mut payload = Vec::new();
+    encode_ssz_snappy_payload_into(Vec::new(), raw_ssz)
+}
+
+fn encode_ssz_snappy_payload_into(mut payload: Vec<u8>, raw_ssz: &[u8]) -> io::Result<Vec<u8>> {
     let mut header = unsigned_varint::encode::u64_buffer();
     payload.extend_from_slice(unsigned_varint::encode::u64(
         raw_ssz.len() as u64,
         &mut header,
     ));
-
-    let mut encoder = FrameEncoder::new(Vec::new());
+    // FrameEncoder appends directly after the RPC header, without retaining an
+    // extra compressed copy or reserving the uncompressed body length.
+    let mut encoder = FrameEncoder::new(payload);
     io::Write::write_all(&mut encoder, raw_ssz)?;
-    let compressed = encoder
+    encoder
         .into_inner()
-        .map_err(|error| io::Error::other(error.error().to_string()))?;
-    payload.extend_from_slice(&compressed);
-    Ok(payload)
+        .map_err(|error| io::Error::other(error.error().to_string()))
 }
 
 async fn read_single_response<T>(
@@ -1397,6 +1450,209 @@ fn bounded_error_message(message: impl Into<Vec<u8>>) -> Vec<u8> {
 mod tests {
     use super::*;
 
+    #[derive(Default)]
+    struct ObservedWriter {
+        bytes: Vec<u8>,
+        writes: Vec<usize>,
+        pause_after: Option<usize>,
+        fail_after: Option<usize>,
+    }
+
+    impl AsyncWrite for ObservedWriter {
+        fn poll_write(
+            mut self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+            bytes: &[u8],
+        ) -> std::task::Poll<io::Result<usize>> {
+            if self.fail_after == Some(self.writes.len()) {
+                return std::task::Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()));
+            }
+            if self.pause_after == Some(self.writes.len()) {
+                return std::task::Poll::Pending;
+            }
+            self.writes.push(bytes.len());
+            self.bytes.extend_from_slice(bytes);
+            std::task::Poll::Ready(Ok(bytes.len()))
+        }
+
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn poll_close(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn response_memory_writer_emits_complete_chunks_incrementally() {
+        let protocol = Eth2RpcProtocol::BeaconBlocksByRangeV2;
+        let chunks: Vec<_> = (0..4)
+            .map(|byte| RawRpcResponse {
+                context_bytes: Some([1, 2, 3, 4]),
+                bytes: vec![byte; 64],
+            })
+            .collect();
+        let expected_writes: Vec<_> = chunks
+            .iter()
+            .map(|raw| {
+                encode_single_success_response_with_context(raw.context_bytes, &raw.bytes)
+                    .unwrap()
+                    .len()
+            })
+            .collect();
+        let expected = Eth2RpcResponse::BeaconBlocksByRange(chunks);
+        let mut writer = ObservedWriter::default();
+        Eth2RpcCodec
+            .write_response(&protocol, &mut writer, expected.clone())
+            .await
+            .unwrap();
+        assert_eq!(writer.writes, expected_writes);
+        assert_eq!(decode_response(&protocol, &writer.bytes).unwrap(), expected);
+    }
+
+    #[test]
+    fn response_memory_ssz_bound_excludes_wire_overhead() {
+        let protocol = Eth2RpcProtocol::BeaconBlocksByRangeV1;
+        // A length prefix alone exercises the boundary without a large allocation.
+        let mut header = unsigned_varint::encode::u64_buffer();
+        let mut bytes = vec![SUCCESS_CODE];
+        bytes.extend_from_slice(unsigned_varint::encode::u64(
+            10 * 1024 * 1024 + 1,
+            &mut header,
+        ));
+        let error = decode_response(&protocol, &bytes).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("exceeds the 10485760-byte limit"),
+            "{error}"
+        );
+        let mut scanner = SnappyPayloadScanner::default();
+        assert!(
+            scanner
+                .advance(
+                    unsigned_varint::encode::u64(10 * 1024 * 1024, &mut header),
+                    response_payload_limit(&protocol, SUCCESS_CODE),
+                )
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn response_memory_stream_preflight_and_wire_limit_preserve_whole_chunks() {
+        let protocol = Eth2RpcProtocol::BeaconBlocksByRangeV2;
+        let raw = RawRpcResponse {
+            context_bytes: Some([1; 4]),
+            bytes: vec![7; 16],
+        };
+        let encoded =
+            encode_single_success_response_with_context(raw.context_bytes, &raw.bytes).unwrap();
+        let mut writer = ObservedWriter::default();
+        let error = write_streamed_success_responses(
+            &protocol,
+            &mut writer,
+            vec![raw.clone(), raw.clone()],
+            encoded.len(),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("wire limit"));
+        assert_eq!(writer.bytes, encoded);
+        assert_eq!(writer.writes, vec![encoded.len()]);
+
+        for chunks in [
+            vec![
+                raw.clone(),
+                RawRpcResponse {
+                    context_bytes: None,
+                    bytes: vec![7],
+                },
+            ],
+            vec![raw.clone(); MAX_RPC_RESPONSE_CHUNKS + 1],
+        ] {
+            let mut writer = ObservedWriter::default();
+            assert!(
+                write_streamed_success_responses(&protocol, &mut writer, chunks, usize::MAX)
+                    .await
+                    .is_err()
+            );
+            assert!(writer.bytes.is_empty());
+        }
+        let mut writer = ObservedWriter::default();
+        let oversized = RawRpcResponse {
+            context_bytes: Some([1; 4]),
+            bytes: vec![
+                0;
+                response_payload_limit(
+                    &Eth2RpcProtocol::LightClientUpdatesByRangeV1,
+                    SUCCESS_CODE
+                ) + 1
+            ],
+        };
+        assert!(
+            write_streamed_success_responses(
+                &Eth2RpcProtocol::LightClientUpdatesByRangeV1,
+                &mut writer,
+                vec![oversized],
+                usize::MAX
+            )
+            .await
+            .is_err()
+        );
+        assert!(writer.bytes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn response_memory_shared_bodies_release_on_progress_cancel_and_write_error() {
+        use crate::beacon_cache::BeaconPayloadCache;
+        for fail in [false, true] {
+            let mut cache = BeaconPayloadCache::with_limits(2, 2);
+            let raw = || RawRpcResponse {
+                context_bytes: Some([1; 4]),
+                bytes: vec![7],
+            };
+            cache.insert(B256::repeat_byte(1), raw());
+            cache.insert(B256::repeat_byte(2), raw());
+            let first = cache.get(&B256::repeat_byte(1)).unwrap().clone();
+            let second = cache.get(&B256::repeat_byte(2)).unwrap().clone();
+            let response = Eth2RpcResponse::CachedBeaconBlocksByRange(vec![first, second]);
+            let mut writer = ObservedWriter {
+                pause_after: (!fail).then_some(1),
+                fail_after: fail.then_some(1),
+                ..Default::default()
+            };
+            let mut codec = Eth2RpcCodec;
+            let protocol = Eth2RpcProtocol::BeaconBlocksByRangeV2;
+            let mut future = Box::pin(codec.write_response(&protocol, &mut writer, response));
+            if fail {
+                assert_eq!(
+                    future.as_mut().await.unwrap_err().kind(),
+                    io::ErrorKind::BrokenPipe
+                );
+            } else {
+                assert!(futures::poll!(future.as_mut()).is_pending());
+                // The first body has completed its write and is free to evict,
+                // while the second remains charged during the paused send.
+                cache.insert(B256::repeat_byte(3), raw());
+                assert!(cache.get(&B256::repeat_byte(3)).is_some());
+            }
+            drop(future);
+            cache.insert(B256::repeat_byte(4), raw());
+            cache.insert(B256::repeat_byte(5), raw());
+            assert!(cache.get(&B256::repeat_byte(4)).is_some());
+            assert!(cache.get(&B256::repeat_byte(5)).is_some());
+            assert_eq!(writer.writes.len(), 1);
+        }
+    }
+
     #[test]
     fn cached_rpc_bytes_decode_with_bounded_allocation() {
         use serde::Deserializer;
@@ -1609,7 +1865,11 @@ mod tests {
             },
         ];
         let protocol = Eth2RpcProtocol::LightClientUpdatesByRangeV1;
-        let encoded = encode_streamed_success_responses(&protocol, chunks.clone()).unwrap();
+        let encoded = encode_response(
+            &protocol,
+            Eth2RpcResponse::LightClientUpdatesByRange(chunks.clone()),
+        )
+        .unwrap();
         assert_eq!(
             decode_response(&protocol, &encoded).unwrap(),
             Eth2RpcResponse::LightClientUpdatesByRange(chunks)
