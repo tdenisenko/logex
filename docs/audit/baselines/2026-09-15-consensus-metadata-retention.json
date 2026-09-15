@@ -1,0 +1,234 @@
+{
+  "status": "All seven local gates and final independent review pass; PR/CI/merge pending",
+  "branch": "audit/consensus-metadata-retention",
+  "base": "ccb19d3b72371aed6189f6a2a68fa8a2e9b5cbd6",
+  "source_commit": "6772c7fabf03635e416e6fc89a0d69b94156ae8c",
+  "source_sha256": {
+    "crates/logex-cl/src/lib.rs": "65e58097c01d96384403004cb37d2f22d30b73a71a076193cd6c1004cf2985d2",
+    "crates/logex-cl/src/network.rs": "36e2a9ee71936613965b9a9acd6be99a2cd34ad033f42a544544b85c04d88e26",
+    "crates/logex-cl/src/candidate_metadata.rs": "8fe930d554b775053ed8c7bdb05b5efc810e13c9ebac280da71704ddb6cac679",
+    "crates/logex-cl/src/history_range_scan.rs": "ceafb5befb2228dffd96a17787b26113947558b31cbef335ae2b05363b4e1557"
+  },
+  "finding": {
+    "B3-59": "Unconnected Beacon range metadata and parent-child entries retained without admission limit"
+  },
+  "classification": "Confirmed optional metadata retention gap; backward range search prevents a FIFO-only recovery regression, not claimed as a separate preexisting bug.",
+  "limits": {
+    "candidate_records_after_batch": 8192,
+    "queue_entries_after_trim_maximum": 16384,
+    "range_response_maximum_records": 128,
+    "backward_in_flight_maximum": 1,
+    "raw_body_cache": "independent preexisting byte/entry limits",
+    "protected_ancestry": "No total bound added; retained trusted anchors and authenticated obsolete forks remain separate",
+    "persistence": "No format change or extra durable write",
+    "performance": "No benchmark or throughput/RSS percentage claimed",
+    "remote": "No remote operation in this milestone; prior cleanup remains complete"
+  },
+  "evidence_directory": "/private/tmp/logex-metadata-retention-go7yvg_2",
+  "evidence": {
+    "root-provenance-review.json": {
+      "sha256": "3dbbe25a42efe3c488799f0d06f23926c86592afa28ff77dd93dfdce7d34964d",
+      "bytes": 5993
+    },
+    "candidate-lifecycle-review.json": {
+      "sha256": "ed889c0d090847c40b380617be3a44b06d757f87dd52991f5e8aedf86719db6b",
+      "bytes": 8272
+    },
+    "metadata-design-review.json": {
+      "sha256": "6744a19fabae06626977603f4c2056d3aff47e25851705787582c6a614b4e621",
+      "bytes": 4158
+    },
+    "backward-integration-review.json": {
+      "sha256": "48217331bb7daf3ad5497719f0b121faa3a7c580bb966c03ea34bcbc5f7b1bf3",
+      "bytes": 3052
+    },
+    "network-integration-review.json": {
+      "sha256": "feccef4afbe9c30cc841cb20a841f8cfe02f51151fe27d3060ae5dc6e5aa2c11",
+      "bytes": 3739
+    },
+    "final-review.json": {
+      "sha256": "f4c1b20d435edaefc4ae825851ac68cd25256c1b61fab24ab4db62e060ebb58b",
+      "bytes": 3170
+    },
+    "original-insertion-control.json": {
+      "sha256": "52758109c626632052da0fba6b30973940de31c371cc51fbc695451e74aed268",
+      "bytes": 675
+    },
+    "original-insertion-control.log": {
+      "sha256": "326066db571f5287d6a07d965cddf818df581efe2d7ada1d73201e1a67c93200",
+      "bytes": 1343
+    },
+    "first-check.log": {
+      "sha256": "4779ee99d5f8f582d0e1b6825a66f8c1c8df2befeabbc5ab37577d7530ca3d64",
+      "bytes": 4703
+    },
+    "second-check.log": {
+      "sha256": "c69517c17ab1f288b4fab4f22bf51a88472d1309d76225219442f000e3dd597b",
+      "bytes": 453
+    },
+    "candidate-tests-first.log": {
+      "sha256": "5f1e902f818f3a79e7680a04e73f4b3138dfa48224e22f33ce28b1e4fe7fa060",
+      "bytes": 1406
+    },
+    "candidate-tests-second.log": {
+      "sha256": "43c34304aa6884b2b422600908b82707d3f0bc3218f343043a67eb83c755e270",
+      "bytes": 2776
+    },
+    "cl-tests-first.log": {
+      "sha256": "9cd64e3eec354099966d0155c1aa410378c381aeeeb2080baab27aa20f04cc27",
+      "bytes": 29553
+    },
+    "clippy-first.log": {
+      "sha256": "277a25bb61ef2033fda7ca5248be3fad3a206469a73f9311df411d0750ac295a",
+      "bytes": 453
+    },
+    "gates/results.json": {
+      "sha256": "1f87dde053f9e91451986aded36f1a8b4bf0b66b001721220caad89b8b5a1015",
+      "bytes": 3744
+    }
+  },
+  "focused_consensus_tests": {
+    "passed": 333,
+    "failed": 0,
+    "ignored": 1
+  },
+  "workspace_tests": {
+    "groups": 25,
+    "passed": 1417,
+    "failed": 0,
+    "ignored": 23
+  },
+  "gates": {
+    "commit": "6772c7fabf03635e416e6fc89a0d69b94156ae8c",
+    "rustc": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+    "gates": [
+      {
+        "name": "vendor",
+        "command": [
+          "python3",
+          "tools/verify_datafusion_vendor.py"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T15:48:33.451004+00:00",
+        "finished": "2026-09-15T15:48:33.510736+00:00",
+        "sha256": "d8d80949d6f3378c14456842b531f0cade514179e4c94781b95ff9abb6447675",
+        "log": "/private/tmp/logex-metadata-retention-go7yvg_2/gates/vendor.log"
+      },
+      {
+        "name": "format",
+        "command": [
+          "cargo",
+          "fmt",
+          "--all",
+          "--",
+          "--check"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T15:48:33.511083+00:00",
+        "finished": "2026-09-15T15:48:34.363115+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-metadata-retention-go7yvg_2/gates/format.log"
+      },
+      {
+        "name": "check",
+        "command": [
+          "cargo",
+          "check",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T15:48:34.363486+00:00",
+        "finished": "2026-09-15T15:48:44.190687+00:00",
+        "sha256": "0de52e00887cf084804ae3829dd41f5fb159372236ab65340fb8e63a8cec55e9",
+        "log": "/private/tmp/logex-metadata-retention-go7yvg_2/gates/check.log"
+      },
+      {
+        "name": "clippy",
+        "command": [
+          "cargo",
+          "clippy",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T15:48:44.191452+00:00",
+        "finished": "2026-09-15T15:48:53.584944+00:00",
+        "sha256": "b9eeb12661350cc09d61c26eab8b43bb3092dbc30343440381db2605fa0151be",
+        "log": "/private/tmp/logex-metadata-retention-go7yvg_2/gates/clippy.log"
+      },
+      {
+        "name": "test",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T15:48:53.585368+00:00",
+        "finished": "2026-09-15T15:51:54.826844+00:00",
+        "sha256": "41e4257488082846b23414f7850019b1ace04498bd2ee75ea404c53bc8e0d6da",
+        "log": "/private/tmp/logex-metadata-retention-go7yvg_2/gates/test.log"
+      },
+      {
+        "name": "doc",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--doc",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T15:51:54.827896+00:00",
+        "finished": "2026-09-15T15:52:11.465416+00:00",
+        "sha256": "4f0c3c2d152abf3d34ae5c6ee54b560b964a6bb48d721e2d9254e0e8bb7bd843",
+        "log": "/private/tmp/logex-metadata-retention-go7yvg_2/gates/doc.log"
+      },
+      {
+        "name": "release-build",
+        "command": [
+          "cargo",
+          "build",
+          "-p",
+          "logex-node",
+          "--release",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T15:52:11.466339+00:00",
+        "finished": "2026-09-15T15:53:16.101144+00:00",
+        "sha256": "39b86993675e4ac8ad5c56870c84711e827930e97150cc7f07793a25b24ab3be",
+        "log": "/private/tmp/logex-metadata-retention-go7yvg_2/gates/release-build.log"
+      }
+    ]
+  },
+  "known_initial_failures": [
+    "Misplaced range request binding in draft integration corrected before tests",
+    "New test compile setup needed explicit integer conversion and actual existing response-limit error variant",
+    "Exhaustion fixture incorrectly excluded authenticated checkpoint availability; corrected oracle distinguishes incomplete optimistic head"
+  ],
+  "remaining": "CI/merge for this milestone; protected history lifetime/cost and broader offline audit, volume supervision and offline repair remain open"
+}

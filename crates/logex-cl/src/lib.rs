@@ -14,7 +14,9 @@ use thiserror::Error;
 
 mod beacon_block;
 mod beacon_cache;
+mod candidate_metadata;
 mod chain;
+mod history_range_scan;
 mod light_client;
 mod network;
 mod rpc;

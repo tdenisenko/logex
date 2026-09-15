@@ -1,5 +1,5 @@
 {
-  "status": "All seven local gates and independent final reviews pass; PR/CI/merge pending",
+  "status": "Merged in PR #171 after all seven local gates, independent reviews and all six CI jobs passed",
   "branch": "audit/consensus-history-cost",
   "base": "9a57c22c80057b5c54cd1be248d2c1773976de4b",
   "source_commit": "7ef16e28360086b3d6b7905d8602987c03b895bf",
@@ -420,5 +420,10 @@
     "passed": 1397,
     "ignored": 23,
     "groups": 25
-  }
+  },
+  "pull_request": "https://github.com/tdenisenko/logex/pull/171",
+  "pr_head": "c0059535c1815fbad5ed6cff19c97f3ec066cb72",
+  "ci_run": 34986078627,
+  "merge_commit": "ccb19d3b72371aed6189f6a2a68fa8a2e9b5cbd6",
+  "merged_at": "2026-09-15T15:16:20Z"
 }

@@ -33,6 +33,8 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
 use crate::beacon_cache::{BeaconPayloadCache, CachedBeaconPayload};
+use crate::candidate_metadata::CandidateMetadata;
+use crate::history_range_scan::{HistoryRangeScan, MAX_SCAN_BATCH, ScanProgress};
 use crate::rpc_memory::{RESPONSE_DECODED_BYTES, RpcMemoryError, RpcResponseBudgets, from_io};
 
 use crate::light_client::{
@@ -81,7 +83,8 @@ const MAX_CONCURRENT_STATUS_REQUESTS: usize = 4;
 const MAX_CONCURRENT_HISTORY_REQUESTS: usize = 8;
 const MAX_BEACON_BLOCKS_BY_ROOT_REQUEST: usize = 128;
 const MAX_LIGHT_CLIENT_UPDATES_BY_RANGE_REQUEST: u64 = 128;
-const MAX_BEACON_BLOCKS_BY_RANGE_REQUEST: u64 = 128;
+const MAX_BEACON_BLOCKS_BY_RANGE_REQUEST: u64 = MAX_SCAN_BATCH;
+const MAX_CANDIDATE_BEACON_METADATA: usize = 8192;
 const FORWARD_BEACON_BLOCK_RANGE_WINDOW: u64 = 16;
 const MAX_DIAL_ADDRESSES_PER_ATTEMPT: usize = 2;
 const MAX_PERSISTED_KNOWN_PEERS: usize = 256;
@@ -629,7 +632,10 @@ struct ConsensusNetwork {
     pending_light_client_range_requests:
         HashMap<PendingRequestKey, LightClientUpdatesByRangeRequest>,
     pending_history_root_requests: HashMap<PendingRequestKey, Vec<B256>>,
-    pending_history_range_requests: HashMap<PendingRequestKey, BeaconBlocksByRangeRequest>,
+    pending_history_range_requests: HashMap<PendingRequestKey, PendingHistoryRange>,
+    history_range_recovery: Option<HistoryRangeRecovery>,
+    candidate_metadata: CandidateMetadata,
+    candidate_metadata_pressure: bool,
     pending_peer_kinds: HashSet<(PeerId, RpcRequestKind)>,
     inbound_rate_limits: HashMap<(PeerId, RpcRequestKind), InboundRateLimitBucket>,
     last_light_client_request_at: HashMap<RpcRequestKind, Instant>,
@@ -662,6 +668,35 @@ struct HistorySyncTarget {
     finalized_root: B256,
     optimistic_root: B256,
     optimistic_slot: u64,
+}
+
+// Pending ownership keeps the exact request and scan identity together. An Arc
+// identity distinguishes retries after resets even when every slot/root matches.
+#[derive(Debug, Clone)]
+struct PendingHistoryRange {
+    request: BeaconBlocksByRangeRequest,
+    recovery: Option<Arc<HistoryRangeRecoveryIdentity>>,
+}
+
+impl PendingHistoryRange {
+    fn forward(request: BeaconBlocksByRangeRequest) -> Self {
+        Self {
+            request,
+            recovery: None,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct HistoryRangeRecoveryIdentity {
+    target: HistorySyncTarget,
+    child: VerifiedBeaconBlock,
+    peer: PeerId,
+}
+
+struct HistoryRangeRecovery {
+    identity: Arc<HistoryRangeRecoveryIdentity>,
+    scan: HistoryRangeScan,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2292,6 +2327,9 @@ impl ConsensusNetwork {
             pending_light_client_range_requests: HashMap::new(),
             pending_history_root_requests: HashMap::new(),
             pending_history_range_requests: HashMap::new(),
+            history_range_recovery: None,
+            candidate_metadata: CandidateMetadata::new(MAX_CANDIDATE_BEACON_METADATA),
+            candidate_metadata_pressure: false,
             pending_peer_kinds: HashSet::new(),
             inbound_rate_limits: HashMap::new(),
             last_light_client_request_at: HashMap::new(),
@@ -3257,7 +3295,7 @@ impl ConsensusNetwork {
                     }
                     RpcRequestKind::BeaconBlocksByRange => self
                         .take_pending_history_range_request(request_id)
-                        .map(|request| request.count),
+                        .map(|pending| pending.request.count),
                     _ => None,
                 };
                 if self.handle_local_rpc_failure(kind, &error, failed_count, Instant::now()) {
@@ -3966,10 +4004,11 @@ impl ConsensusNetwork {
                 }
             }
             (RpcRequestKind::BeaconBlocksByRange, Eth2RpcResponse::BeaconBlocksByRange(chunks)) => {
-                let Some(request) = requested_history_range else {
+                let Some(pending_range) = requested_history_range else {
                     tracing::warn!(%peer, ?request_id, "missing beacon range request metadata");
                     return;
                 };
+                let request = pending_range.request;
                 if chunks.len() as u64 > request.count {
                     self.disconnect_faulty_history_peer(
                         peer,
@@ -4002,7 +4041,7 @@ impl ConsensusNetwork {
                                     actual_root = %block.beacon_root,
                                     actual_slot = block.slot,
                                     actual_parent_root = %block.parent_root,
-                                    requested_range = ?requested_history_range,
+                                    requested_range = ?pending_range,
                                     "discarding beacon block by range response outside the requested slot window"
                                 );
                                 continue;
@@ -4030,18 +4069,22 @@ impl ConsensusNetwork {
                     self.disconnect_faulty_history_peer(
                         peer,
                         RpcRequestKind::BeaconBlocksByRange,
-                        format!(
-                            "invalid_range_response requested_range={requested_history_range:?}"
-                        ),
+                        format!("invalid_range_response requested_range={pending_range:?}"),
                     );
                     return;
                 }
-                if decoded_blocks.is_empty() {
+                // A late response from an obsolete scan cannot advance its replacement.
+                if pending_range.recovery.is_some()
+                    && !self.history_range_recovery_matches(peer, &pending_range)
+                {
+                    return;
+                }
+                if decoded_blocks.is_empty() && pending_range.recovery.is_none() {
                     self.record_unusable_history_response(
                         peer,
                         RpcRequestKind::BeaconBlocksByRange,
                         format!(
-                            "no_decodable_blocks chunks={} total_bytes={} requested_range={requested_history_range:?}",
+                            "no_decodable_blocks chunks={} total_bytes={} requested_range={pending_range:?}",
                             chunk_count,
                             total_bytes
                         ),
@@ -4054,7 +4097,7 @@ impl ConsensusNetwork {
                     .map(|(_, payload)| payload.bytes.len())
                     .max()
                     .unwrap_or(0);
-                self.record_peer_success(peer, RpcRequestKind::BeaconBlocksByRange);
+                let last_slot = decoded_blocks.last().map(|(block, _)| block.slot);
                 self.beacon_blocks_by_range_peers.insert(peer);
                 let mut inserted = 0usize;
                 for (block, payload) in decoded_blocks {
@@ -4062,6 +4105,16 @@ impl ConsensusNetwork {
                         inserted += 1;
                     }
                 }
+                self.trim_candidate_beacon_metadata();
+                let recovering = pending_range.recovery.is_some();
+                let recovered_parent = pending_range.recovery.as_ref().is_some_and(|identity| {
+                    self.verified_beacon_blocks
+                        .contains_key(&identity.child.parent_root)
+                });
+                if !recovering || recovered_parent {
+                    self.record_peer_success(peer, RpcRequestKind::BeaconBlocksByRange);
+                }
+                self.advance_history_range_recovery(peer, &pending_range, last_slot);
                 self.history_range_batch_limit = recovered_history_batch_limit(
                     self.history_range_batch_limit,
                     request.count,
@@ -4072,6 +4125,8 @@ impl ConsensusNetwork {
                 if inserted > 0 {
                     self.seed_verified_light_client_headers();
                     self.materialize_verified_anchor_segments();
+                }
+                if inserted > 0 || recovering {
                     self.drive_rpc_requests();
                 }
             }
@@ -4172,10 +4227,11 @@ impl ConsensusNetwork {
                 self.beacon_blocks_by_root_peers.insert(peer);
                 let mut inserted = 0usize;
                 for (block, payload) in decoded_blocks {
-                    if self.record_verified_beacon_block(block, Some(payload)) {
+                    if self.record_authenticated_beacon_block(block, Some(payload)) {
                         inserted += 1;
                     }
                 }
+                self.trim_candidate_beacon_metadata();
                 self.history_root_batch_limit = recovered_history_batch_limit(
                     self.history_root_batch_limit as u64,
                     requested_history_roots.len() as u64,
@@ -4421,6 +4477,12 @@ impl ConsensusNetwork {
                 .cmp(&self.peer_priority(*left, bootstrap_needed, head_progression_needed))
                 .then_with(|| left.cmp(right))
         });
+        // Keep a usable range-search peer first so unrelated peer score changes
+        // cannot repeatedly restart a long pass. Normal eligibility checks below
+        // still rotate away from closed, busy or unavailable connections.
+        if let Some(recovery) = &self.history_range_recovery {
+            connected.sort_by_key(|peer| *peer != recovery.identity.peer);
+        }
         for peer in connected {
             if self.closing_peers.contains(&peer) || self.peer_remote_busy(peer, now) {
                 continue;
@@ -4690,7 +4752,19 @@ impl ConsensusNetwork {
             return;
         }
 
-        let Some(request) = self.build_request(kind) else {
+        let requested_history_range = if kind == RpcRequestKind::BeaconBlocksByRange {
+            self.prepare_history_range_request(peer)
+        } else {
+            None
+        };
+        let request = if kind == RpcRequestKind::BeaconBlocksByRange {
+            requested_history_range
+                .as_ref()
+                .map(|pending| Eth2RpcRequest::BeaconBlocksByRange(pending.request))
+        } else {
+            self.build_request(kind)
+        };
+        let Some(request) = request else {
             return;
         };
         let payload_bytes = consensus_request_payload_bytes(&request);
@@ -4700,10 +4774,6 @@ impl ConsensusNetwork {
         };
         let requested_history_roots = match &request {
             Eth2RpcRequest::BeaconBlocksByRoot(roots) => Some(roots.clone()),
-            _ => None,
-        };
-        let requested_history_range = match &request {
-            Eth2RpcRequest::BeaconBlocksByRange(request) => Some(*request),
             _ => None,
         };
         let request_id = match kind {
@@ -5026,11 +5096,157 @@ impl ConsensusNetwork {
     }
 
     fn next_history_range_request(&self) -> Option<BeaconBlocksByRangeRequest> {
+        if let Some((target, child)) = self.backward_history_gap() {
+            if self
+                .pending_history_range_requests
+                .values()
+                .any(|pending| pending.recovery.is_some())
+            {
+                return None;
+            }
+            if let Some(recovery) = &self.history_range_recovery
+                && recovery.identity.target == target
+                && recovery.identity.child == child
+            {
+                return recovery.scan.request(self.history_range_batch_limit);
+            }
+            return HistoryRangeScan::new(
+                child.parent_root,
+                child.slot,
+                target.checkpoint_slot,
+                self.history_range_batch_limit,
+            )?
+            .request(self.history_range_batch_limit);
+        }
         let target = self.current_history_sync_target()?;
         let forward_target =
             select_forward_history_range_target(Some(target), self.latest_history_sync_target())?;
         let pending = self.pending_history_ranges();
         self.next_forward_history_range_request_with_pending(forward_target, &pending)
+    }
+
+    // Only exact ancestry from authenticated target roots can select a backward
+    // search. Forward children of a checkpoint do not authenticate themselves.
+    fn backward_history_gap(&self) -> Option<(HistorySyncTarget, VerifiedBeaconBlock)> {
+        if !self.candidate_metadata_pressure {
+            return None;
+        }
+        let target = self.current_history_sync_target()?;
+        for root in [target.optimistic_root, target.finalized_root] {
+            let Some(mut child) = self.verified_beacon_blocks.get(&root).copied() else {
+                continue;
+            };
+            if child.beacon_root != root || self.candidate_metadata.contains(&root) {
+                continue;
+            }
+            while child.beacon_root != target.checkpoint_root && child.slot > target.checkpoint_slot
+            {
+                let Some(parent) = self.verified_beacon_blocks.get(&child.parent_root).copied()
+                else {
+                    return Some((target, child));
+                };
+                if parent.beacon_root != child.parent_root || parent.slot >= child.slot {
+                    break;
+                }
+                child = parent;
+            }
+        }
+        None
+    }
+
+    fn prepare_history_range_request(&mut self, peer: PeerId) -> Option<PendingHistoryRange> {
+        let Some((target, child)) = self.backward_history_gap() else {
+            self.history_range_recovery = None;
+            return self
+                .next_history_range_request()
+                .map(PendingHistoryRange::forward);
+        };
+        if self
+            .pending_history_range_requests
+            .values()
+            .any(|pending| pending.recovery.is_some())
+        {
+            return None;
+        }
+        let identity = HistoryRangeRecoveryIdentity {
+            target,
+            child,
+            peer,
+        };
+        if !self
+            .history_range_recovery
+            .as_ref()
+            .is_some_and(|recovery| *recovery.identity == identity)
+        {
+            // Never combine one peer's omitted windows with another's. The new
+            // identity also prevents delayed replies from advancing this pass.
+            self.history_range_recovery = Some(HistoryRangeRecovery {
+                identity: Arc::new(identity),
+                scan: HistoryRangeScan::new(
+                    child.parent_root,
+                    child.slot,
+                    target.checkpoint_slot,
+                    self.history_range_batch_limit,
+                )?,
+            });
+        }
+        let recovery = self.history_range_recovery.as_ref()?;
+        Some(PendingHistoryRange {
+            request: recovery.scan.request(self.history_range_batch_limit)?,
+            recovery: Some(Arc::clone(&recovery.identity)),
+        })
+    }
+
+    fn history_range_recovery_matches(&self, peer: PeerId, pending: &PendingHistoryRange) -> bool {
+        let (Some(identity), Some(recovery)) = (&pending.recovery, &self.history_range_recovery)
+        else {
+            return false;
+        };
+        Arc::ptr_eq(identity, &recovery.identity)
+            && identity.peer == peer
+            && self.current_history_sync_target() == Some(identity.target)
+    }
+
+    fn advance_history_range_recovery(
+        &mut self,
+        peer: PeerId,
+        pending: &PendingHistoryRange,
+        last_slot: Option<u64>,
+    ) {
+        if !self.history_range_recovery_matches(peer, pending) {
+            return;
+        }
+        let recovery = self
+            .history_range_recovery
+            .as_mut()
+            .expect("matched recovery exists");
+        if self
+            .verified_beacon_blocks
+            .contains_key(&recovery.scan.missing_root())
+        {
+            self.history_range_recovery = None;
+            return;
+        }
+        match recovery.scan.advance(pending.request, last_slot) {
+            Ok(ScanProgress::Continue) => {}
+            Ok(ScanProgress::Exhausted) => {
+                self.history_range_recovery = None;
+                self.record_unusable_history_response(
+                    peer,
+                    RpcRequestKind::BeaconBlocksByRange,
+                    "backward search exhausted; authenticated parent remains unavailable"
+                        .to_owned(),
+                );
+            }
+            Err(error) => {
+                // Local cursor disagreement is not a peer validation fault.
+                tracing::warn!(
+                    ?error,
+                    "restarting inconsistent consensus history range search"
+                );
+                self.history_range_recovery = None;
+            }
+        }
     }
 
     fn next_forward_history_range_request_with_pending(
@@ -5077,6 +5293,20 @@ impl ConsensusNetwork {
                 .insert(block.beacon_root, payload);
         }
         let previous = self.verified_beacon_blocks.insert(block.beacon_root, block);
+        if previous.is_none() {
+            self.candidate_metadata.insert(block.beacon_root);
+        }
+        if self
+            .verified_beacon_block_children
+            .get(&block.beacon_root)
+            .is_some_and(|children| {
+                children.iter().any(|child| {
+                    child.slot > block.slot && !self.candidate_metadata.contains(&child.beacon_root)
+                })
+            })
+        {
+            self.protect_beacon_ancestry(block.beacon_root);
+        }
         if previous == Some(block) {
             return false;
         }
@@ -5110,6 +5340,57 @@ impl ConsensusNetwork {
         true
     }
 
+    fn record_authenticated_beacon_block(
+        &mut self,
+        block: VerifiedBeaconBlock,
+        payload: Option<RawRpcResponse>,
+    ) -> bool {
+        let changed = self.record_verified_beacon_block(block, payload);
+        self.protect_beacon_ancestry(block.beacon_root);
+        changed
+    }
+
+    fn protect_beacon_ancestry(&mut self, mut root: B256) {
+        while let Some(block) = self.verified_beacon_blocks.get(&root) {
+            self.candidate_metadata.protect(&root);
+            let Some(parent) = self.verified_beacon_blocks.get(&block.parent_root) else {
+                break;
+            };
+            if parent.beacon_root != block.parent_root
+                || parent.slot >= block.slot
+                || !self.candidate_metadata.contains(&parent.beacon_root)
+            {
+                break;
+            }
+            root = parent.beacon_root;
+        }
+    }
+
+    fn trim_candidate_beacon_metadata(&mut self) {
+        // Complete bounded response batches and promote their authenticated
+        // ancestry before evicting any optional metadata.
+        let evicted = self.candidate_metadata.trim();
+        self.candidate_metadata_pressure |= !evicted.is_empty();
+        for root in evicted {
+            let Some(block) = self.verified_beacon_blocks.remove(&root) else {
+                continue;
+            };
+            let remove_parent = self
+                .verified_beacon_block_children
+                .get_mut(&block.parent_root)
+                .is_some_and(|children| {
+                    children.retain(|child| child.beacon_root != root);
+                    children.is_empty()
+                });
+            if remove_parent {
+                self.verified_beacon_block_children
+                    .remove(&block.parent_root);
+            }
+            // Keep children[root]: retained children may still commit to this
+            // missing parent and must authenticate it when it is fetched again.
+        }
+    }
+
     fn seed_verified_light_client_headers(&mut self) -> bool {
         let Some(store) = self.consensus.light_client_store() else {
             return false;
@@ -5117,8 +5398,9 @@ impl ConsensusNetwork {
         let blocks = verified_beacon_blocks_from_light_client_store(&store);
         let mut inserted = false;
         for block in blocks {
-            inserted |= self.record_verified_beacon_block(block, None);
+            inserted |= self.record_authenticated_beacon_block(block, None);
         }
+        self.trim_candidate_beacon_metadata();
         inserted
     }
 
@@ -5148,7 +5430,8 @@ impl ConsensusNetwork {
     fn pending_history_ranges(&self) -> Vec<BeaconBlocksByRangeRequest> {
         self.pending_history_range_requests
             .values()
-            .copied()
+            .filter(|pending| pending.recovery.is_none())
+            .map(|pending| pending.request)
             .collect()
     }
 
@@ -5616,7 +5899,7 @@ impl ConsensusNetwork {
     fn take_pending_history_range_request(
         &mut self,
         request_id: Eth2OutboundRequestId,
-    ) -> Option<BeaconBlocksByRangeRequest> {
+    ) -> Option<PendingHistoryRange> {
         self.pending_history_range_requests
             .remove(&PendingRequestKey {
                 kind: RpcRequestKind::BeaconBlocksByRange,
@@ -5922,7 +6205,11 @@ impl ConsensusNetwork {
             .values()
             .filter(|support| support.beacon_blocks_by_root)
             .count();
-        let pending_forward_ranges = self.pending_history_range_requests.len();
+        let pending_forward_ranges = self
+            .pending_history_range_requests
+            .values()
+            .filter(|pending| pending.recovery.is_none())
+            .count();
         let p2p_download = self.p2p_download_metrics.snapshot(now);
         let p2p_upload = self.p2p_upload_metrics.snapshot(now);
         let current_slot = current_wall_clock_slot();
@@ -8445,7 +8732,9 @@ mod tests {
                 kind: RpcRequestKind::BeaconBlocksByRange,
                 request_id: id,
             };
-            network.pending_history_range_requests.insert(key, request);
+            network
+                .pending_history_range_requests
+                .insert(key, PendingHistoryRange::forward(request));
             (key.kind, id)
         } else {
             let roots = (0..count)
@@ -8967,7 +9256,9 @@ mod tests {
                 network.pending_requests.insert(key, peer);
                 network.pending_peer_kinds.insert((peer, kind));
                 if range {
-                    network.pending_history_range_requests.insert(key, request);
+                    network
+                        .pending_history_range_requests
+                        .insert(key, PendingHistoryRange::forward(request));
                 } else {
                     network.pending_history_root_requests.insert(key, roots);
                 }
@@ -12049,6 +12340,474 @@ mod tests {
         assert!(
             cached_beacon_block_payloads_by_range(missing_first, &canonical_blocks, &sparse)
                 .is_empty()
+        );
+    }
+
+    // Offline bookkeeping controls. Synthetic ancestry_test_block values model
+    // already-decoded metadata; they do not claim valid SSZ or proposer signatures.
+    fn candidate_index_oracle(network: &ConsensusNetwork) {
+        let mut expected: HashMap<B256, Vec<VerifiedBeaconBlock>> = HashMap::new();
+        for block in network.verified_beacon_blocks.values().copied() {
+            expected.entry(block.parent_root).or_default().push(block);
+        }
+        for children in expected.values_mut() {
+            children.sort_by_key(|child| (child.slot, child.beacon_root));
+        }
+        assert_eq!(network.verified_beacon_block_children, expected);
+    }
+
+    fn candidate_test_network(temp: &TempDir) -> ConsensusNetwork {
+        let (mut network, _) = request_lifecycle_fixture(temp);
+        network.verified_beacon_blocks.clear();
+        network.verified_beacon_block_children.clear();
+        network.candidate_metadata = CandidateMetadata::new(2);
+        network.candidate_metadata_pressure = false;
+        // Deliberately missing trusted target: unrelated candidates cannot produce
+        // a checkpoint-connected chain or publish anchors.
+        network.active_history_target = Some(HistorySyncTarget {
+            checkpoint_root: B256::repeat_byte(240),
+            checkpoint_slot: 1,
+            finalized_root: B256::repeat_byte(241),
+            optimistic_root: B256::repeat_byte(242),
+            optimistic_slot: 1000,
+        });
+        network
+    }
+
+    #[tokio::test]
+    async fn candidate_metadata_pressure_keeps_exact_children_without_publication() {
+        let temp = TempDir::new().unwrap();
+        let mut network = candidate_test_network(&temp);
+        let before = network.consensus.ordered_anchors();
+        let original_file = std::fs::read(network.consensus.state_path()).unwrap();
+        for batch in 0..8u8 {
+            let first = 10 + batch * 3;
+            for offset in 0..3u8 {
+                let marker = first + offset;
+                network.record_verified_beacon_block(
+                    ancestry_test_block(u64::from(marker), marker, marker - 1),
+                    None,
+                );
+            }
+            network.trim_candidate_beacon_metadata();
+            assert_eq!(network.verified_beacon_blocks.len(), 2);
+            assert_eq!(network.candidate_metadata.len(), 2);
+            // Retained first child's parent was evicted; its edge must survive.
+            assert!(
+                network
+                    .verified_beacon_block_children
+                    .contains_key(&B256::repeat_byte(first))
+            );
+            candidate_index_oracle(&network);
+            network.materialize_verified_anchor_segments();
+            assert_eq!(network.consensus.ordered_anchors(), before);
+            assert_eq!(
+                std::fs::read(network.consensus.state_path()).unwrap(),
+                original_file
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn candidate_metadata_whole_batch_promotes_cached_ancestry_before_trim() {
+        let temp = TempDir::new().unwrap();
+        let mut network = candidate_test_network(&temp);
+        let parent = ancestry_test_block(10, 1, 0);
+        let middle = ancestry_test_block(11, 2, 1);
+        let head = ancestry_test_block(12, 3, 2);
+        // Arrival order is deliberately opposite ancestry traversal, with a batch
+        // larger than quota. No mid-batch trim may destroy the authenticated path.
+        for block in [parent, middle, head] {
+            assert!(network.record_verified_beacon_block(block, None));
+        }
+        assert_eq!(network.candidate_metadata.len(), 3);
+        assert!(!network.record_authenticated_beacon_block(head, None));
+        network.trim_candidate_beacon_metadata();
+        assert_eq!(network.candidate_metadata.len(), 0);
+        for block in [parent, middle, head] {
+            assert_eq!(
+                network.verified_beacon_blocks.get(&block.beacon_root),
+                Some(&block)
+            );
+        }
+        for marker in 20..26 {
+            network
+                .record_verified_beacon_block(ancestry_test_block(marker.into(), marker, 19), None);
+        }
+        network.trim_candidate_beacon_metadata();
+        assert_eq!(network.verified_beacon_blocks.len(), 5);
+        for block in [parent, middle, head] {
+            assert!(
+                network
+                    .verified_beacon_blocks
+                    .contains_key(&block.beacon_root)
+            );
+        }
+        candidate_index_oracle(&network);
+    }
+
+    #[tokio::test]
+    async fn candidate_metadata_forward_attachment_is_not_authentication() {
+        let temp = TempDir::new().unwrap();
+        let mut network = candidate_test_network(&temp);
+        let checkpoint = ancestry_test_block(10, 1, 0);
+        network.record_authenticated_beacon_block(checkpoint, None);
+        let child = ancestry_test_block(11, 2, 1);
+        network.record_verified_beacon_block(child, None);
+        assert!(network.candidate_metadata.contains(&child.beacon_root));
+        for marker in [3, 4] {
+            network.record_verified_beacon_block(
+                ancestry_test_block(u64::from(marker) + 10, marker, 1),
+                None,
+            );
+        }
+        network.trim_candidate_beacon_metadata();
+        assert!(
+            !network
+                .verified_beacon_blocks
+                .contains_key(&child.beacon_root)
+        );
+        assert!(
+            network
+                .verified_beacon_blocks
+                .contains_key(&checkpoint.beacon_root)
+        );
+        candidate_index_oracle(&network);
+    }
+
+    #[tokio::test]
+    async fn candidate_metadata_seed_and_refetched_parent_promote_without_duplicate_edges() {
+        let temp = TempDir::new().unwrap();
+        let mut network = candidate_test_network(&temp);
+        let parent = ancestry_test_block(10, 1, 0);
+        let head = ancestry_test_block(11, 2, 1);
+        network.record_verified_beacon_block(parent, None);
+        network.record_verified_beacon_block(head, None);
+        network.record_verified_beacon_block(ancestry_test_block(12, 3, 0), None);
+        network.trim_candidate_beacon_metadata();
+        assert!(
+            !network
+                .verified_beacon_blocks
+                .contains_key(&parent.beacon_root)
+        );
+        assert!(
+            network
+                .verified_beacon_block_children
+                .contains_key(&parent.beacon_root)
+        );
+        assert!(!network.record_authenticated_beacon_block(head, None));
+        // Existing authenticated child's committed parent authenticates the
+        // refetched range entry without changing the child's edge.
+        network.record_verified_beacon_block(parent, None);
+        assert!(!network.candidate_metadata.contains(&parent.beacon_root));
+        assert!(!network.record_verified_beacon_block(parent, None));
+        candidate_index_oracle(&network);
+
+        // Synthetic same-root replacement exercises defensive index maintenance;
+        // real root-bound decoding does not allow arbitrary parent replacement.
+        let replacement = ancestry_test_block(12, 3, 9);
+        assert!(network.record_verified_beacon_block(replacement, None));
+        assert!(!network.record_verified_beacon_block(replacement, None));
+        candidate_index_oracle(&network);
+        network.trim_candidate_beacon_metadata();
+        candidate_index_oracle(&network);
+    }
+
+    // Synthetic metadata exercises the scheduler after root-bound decoding.
+    // No listener or discovery task runs in these fixtures.
+    fn backward_test_network(temp: &TempDir) -> (ConsensusNetwork, Vec<VerifiedBeaconBlock>) {
+        let mut network = candidate_test_network(temp);
+        let chain = vec![
+            ancestry_test_block(100, 1, 0),
+            ancestry_test_block(101, 2, 1),
+            ancestry_test_block(103, 3, 2),
+            ancestry_test_block(106, 4, 3),
+            ancestry_test_block(107, 5, 4),
+            ancestry_test_block(110, 6, 5),
+        ];
+        network.active_history_target = Some(HistorySyncTarget {
+            checkpoint_root: chain[0].beacon_root,
+            checkpoint_slot: chain[0].slot,
+            finalized_root: chain[0].beacon_root,
+            optimistic_root: chain[5].beacon_root,
+            optimistic_slot: chain[5].slot,
+        });
+        for block in [chain[0], chain[5]] {
+            network.record_authenticated_beacon_block(block, None);
+        }
+        network.history_range_batch_limit = 3;
+        (network, chain)
+    }
+
+    #[tokio::test]
+    async fn candidate_metadata_range_only_recovery_survives_forward_prefix_eviction() {
+        let temp = TempDir::new().unwrap();
+        let (mut network, chain) = backward_test_network(&temp);
+        // Forward ingestion cannot retain the entire prefix at capacity two.
+        for block in &chain[1..4] {
+            network.record_verified_beacon_block(*block, None);
+            network.trim_candidate_beacon_metadata();
+        }
+        let target = network.current_history_sync_target().unwrap();
+        assert!(network.candidate_metadata_pressure);
+        assert_eq!(
+            network.checkpoint_forward_highest_cached_slot(target),
+            Some(100)
+        );
+        let peer = PeerId::random();
+        let mut requests = 0;
+        while let Some((_, missing_child)) = network.backward_history_gap() {
+            let pending = network.prepare_history_range_request(peer).unwrap();
+            assert!(pending.recovery.is_some());
+            assert!(pending.request.count <= 3);
+            assert!(pending.request.start_slot + pending.request.count <= missing_child.slot);
+            // Model a range-only peer returning a bounded prefix. Skipped slots
+            // and a partial reply leave the remaining upper suffix searchable.
+            let response: Vec<_> = chain
+                .iter()
+                .copied()
+                .filter(|block| range_request_contains_slot(pending.request, block.slot))
+                .take(1)
+                .collect();
+            assert!(valid_history_range_sequence(
+                pending.request,
+                response.iter()
+            ));
+            for block in &response {
+                network.record_verified_beacon_block(*block, None);
+            }
+            network.trim_candidate_beacon_metadata();
+            network.advance_history_range_recovery(
+                peer,
+                &pending,
+                response.last().map(|block| block.slot),
+            );
+            candidate_index_oracle(&network);
+            assert!(network.candidate_metadata.len() <= 2);
+            assert!(network.pending_history_root_requests.is_empty());
+            requests += 1;
+            assert!(
+                requests <= 16,
+                "bounded fixture must finish without root RPC"
+            );
+        }
+        assert!(requests > 0);
+        assert_eq!(
+            network.canonical_chain_blocks_to_root(
+                target.checkpoint_root,
+                target.checkpoint_slot,
+                target.optimistic_root
+            ),
+            Some(chain)
+        );
+        assert_eq!(network.candidate_metadata.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn candidate_metadata_backward_partial_empty_and_peer_reset_are_correlated() {
+        let temp = TempDir::new().unwrap();
+        let (mut network, _) = backward_test_network(&temp);
+        network.candidate_metadata_pressure = true;
+        let first_peer = PeerId::random();
+        let other_peer = PeerId::random();
+        let first = network.prepare_history_range_request(first_peer).unwrap();
+        network.advance_history_range_recovery(first_peer, &first, Some(107));
+        let suffix = network.prepare_history_range_request(first_peer).unwrap();
+        assert_eq!(suffix.request.start_slot, 108);
+        assert_eq!(suffix.request.count, 2);
+        network.advance_history_range_recovery(first_peer, &suffix, None);
+        let lower = network.prepare_history_range_request(first_peer).unwrap();
+        assert_eq!(lower.request.start_slot, 104);
+        let restarted = network.prepare_history_range_request(other_peer).unwrap();
+        assert_eq!(restarted.request, first.request);
+        assert!(!Arc::ptr_eq(
+            first.recovery.as_ref().unwrap(),
+            restarted.recovery.as_ref().unwrap()
+        ));
+        network.advance_history_range_recovery(first_peer, &first, None);
+        assert_eq!(
+            network
+                .prepare_history_range_request(other_peer)
+                .unwrap()
+                .request,
+            first.request
+        );
+        assert!(!network.history_range_recovery_matches(first_peer, &restarted));
+        // Even identical request windows from a reset on the same peer have a
+        // different identity; no stale response can advance the replacement.
+        network.history_range_recovery = None;
+        let same_peer_reset = network.prepare_history_range_request(other_peer).unwrap();
+        assert_eq!(same_peer_reset.request, restarted.request);
+        assert!(!network.history_range_recovery_matches(other_peer, &restarted));
+        let mut changed = network.active_history_target.unwrap();
+        changed.optimistic_root = B256::repeat_byte(7);
+        network.active_history_target = Some(changed);
+        assert!(!network.history_range_recovery_matches(other_peer, &same_peer_reset));
+    }
+
+    #[tokio::test]
+    async fn candidate_metadata_backward_failure_and_disconnect_release_owned_request() {
+        let temp = TempDir::new().unwrap();
+        let (mut network, _) = backward_test_network(&temp);
+        network.candidate_metadata_pressure = true;
+        let peer = PeerId::random();
+        let kind = RpcRequestKind::BeaconBlocksByRange;
+        network.ensure_request(peer, kind);
+        let key = *network.pending_requests.keys().next().unwrap();
+        let pending = network.pending_history_range_requests[&key].clone();
+        assert!(pending.recovery.is_some());
+        assert!(network.pending_history_ranges().is_empty());
+        assert!(network.next_history_range_request().is_none());
+        network.ensure_request(PeerId::random(), kind);
+        assert_eq!(network.pending_history_range_requests.len(), 1);
+        network.handle_rpc_event(
+            kind,
+            request_response::Event::OutboundFailure {
+                peer,
+                connection_id: libp2p::swarm::ConnectionId::new_unchecked(1),
+                request_id: key.request_id,
+                error: request_response::OutboundFailure::Io(io::Error::other(
+                    RpcMemoryError::ResponseLimit { limit: 1 },
+                )),
+            },
+        );
+        assert!(network.pending_requests.is_empty());
+        assert!(network.pending_history_range_requests.is_empty());
+        assert!(network.pending_peer_kinds.is_empty());
+        assert!(!network.peer_failures.contains_key(&peer));
+        assert_eq!(
+            network
+                .prepare_history_range_request(peer)
+                .unwrap()
+                .request
+                .start_slot,
+            pending.request.start_slot
+        );
+        network.local_rpc_retry_after.clear();
+        network.ensure_request(peer, kind);
+        let retry_key = *network.pending_requests.keys().next().unwrap();
+        let retry = network.pending_history_range_requests[&retry_key].clone();
+        assert!(retry.request.count < pending.request.count);
+        network.handle_rpc_response(
+            kind,
+            peer,
+            key.request_id,
+            Eth2RpcResponse::BeaconBlocksByRange(Vec::new()),
+        );
+        assert!(
+            network
+                .pending_history_range_requests
+                .contains_key(&retry_key)
+        );
+        assert!(network.prepare_history_range_request(peer).is_none());
+        network.clear_pending_requests_for_peer(peer);
+        assert!(network.pending_requests.is_empty());
+        assert!(network.pending_history_range_requests.is_empty());
+        assert!(network.pending_peer_kinds.is_empty());
+        let next = network.prepare_history_range_request(peer).unwrap();
+        assert_eq!(next.request, retry.request);
+    }
+
+    #[tokio::test]
+    async fn candidate_metadata_backward_exhaustion_never_publishes_absence() {
+        let temp = TempDir::new().unwrap();
+        let (mut network, chain) = backward_test_network(&temp);
+        network.candidate_metadata_pressure = true;
+        let before = network.consensus.ordered_anchors();
+        let peer = PeerId::random();
+        // Three complete unavailable passes retain the gap and accumulate the
+        // existing availability backoff; intermediate empty windows are neutral.
+        for pass in 1..=3 {
+            loop {
+                let pending = network.prepare_history_range_request(peer).unwrap();
+                network.advance_history_range_recovery(peer, &pending, None);
+                if network.history_range_recovery.is_none() {
+                    break;
+                }
+            }
+            assert_eq!(network.peer_failures[&peer].beacon_blocks_by_range, pass);
+            assert!(network.backward_history_gap().is_some());
+            // The authenticated checkpoint remains publishable; empty search
+            // responses must not make the incomplete head publishable too.
+            let available = network
+                .materializable_history_chain(network.active_history_target.unwrap())
+                .unwrap();
+            assert_eq!(available.blocks, vec![chain[0]]);
+            assert!(!available.reaches_optimistic_head);
+            assert_eq!(network.consensus.ordered_anchors(), before);
+        }
+        assert!(
+            network
+                .last_rpc_failure
+                .as_ref()
+                .unwrap()
+                .contains("parent remains unavailable")
+        );
+    }
+
+    #[tokio::test]
+    async fn candidate_metadata_range_response_authenticates_exact_parent_before_eviction() {
+        let temp = TempDir::new().unwrap();
+        let mut network = candidate_test_network(&temp);
+        let payload = RawRpcResponse {
+            bytes: include_bytes!("../tests/fixtures/beacon_block_14132042.ssz").to_vec(),
+            context_bytes: None,
+        };
+        let parent = decode_verified_beacon_block(&payload).unwrap();
+        let checkpoint = ancestry_test_block(parent.slot - 4, 1, 0);
+        let mut head = ancestry_test_block(parent.slot + 1, 2, 0);
+        head.parent_root = parent.beacon_root;
+        // Model an authenticated header committing to the actual fixture root.
+        // This control tests decoded response admission, not LC signature proof.
+        network.record_authenticated_beacon_block(checkpoint, None);
+        network.record_authenticated_beacon_block(head, None);
+        network.active_history_target = Some(HistorySyncTarget {
+            checkpoint_root: checkpoint.beacon_root,
+            checkpoint_slot: checkpoint.slot,
+            finalized_root: checkpoint.beacon_root,
+            optimistic_root: head.beacon_root,
+            optimistic_slot: head.slot,
+        });
+        network.candidate_metadata = CandidateMetadata::new(0);
+        network.candidate_metadata_pressure = true;
+        network.history_range_batch_limit = 3;
+        let peer = PeerId::random();
+        let kind = RpcRequestKind::BeaconBlocksByRange;
+        network.ensure_request(peer, kind);
+        let key = *network.pending_requests.keys().next().unwrap();
+        assert!(
+            network.pending_history_range_requests[&key]
+                .recovery
+                .is_some()
+        );
+        network.handle_rpc_response(
+            kind,
+            peer,
+            key.request_id,
+            Eth2RpcResponse::BeaconBlocksByRange(vec![payload]),
+        );
+        assert!(network.pending_requests.is_empty());
+        assert!(network.pending_history_range_requests.is_empty());
+        assert_eq!(
+            network.verified_beacon_blocks.get(&parent.beacon_root),
+            Some(&parent)
+        );
+        assert_eq!(network.candidate_metadata.len(), 0);
+        assert_eq!(network.peer_lifecycle[&peer].useful_successes, 1);
+        assert!(
+            network
+                .verified_beacon_block_payloads
+                .get(&parent.beacon_root)
+                .is_some()
+        );
+        candidate_index_oracle(&network);
+        // Its own missing parent still prevents the fixture's anchor publication.
+        assert!(
+            !network
+                .consensus
+                .ordered_anchors()
+                .iter()
+                .any(|record| record.anchor == parent.execution_anchor)
         );
     }
 
