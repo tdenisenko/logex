@@ -416,26 +416,50 @@ fn encode_request(protocol: &Eth2RpcProtocol, request: Eth2RpcRequest) -> io::Re
 }
 
 fn encode_response(protocol: &Eth2RpcProtocol, response: Eth2RpcResponse) -> io::Result<Vec<u8>> {
-    match response {
-        Eth2RpcResponse::Status(status) => {
-            encode_single_success_response(&encode_status(protocol, status))
+    match (protocol, response) {
+        (
+            Eth2RpcProtocol::StatusV1 | Eth2RpcProtocol::StatusV2,
+            Eth2RpcResponse::Status(status),
+        ) => encode_single_success_response(&encode_status(protocol, status)),
+        (Eth2RpcProtocol::GoodbyeV1, Eth2RpcResponse::Goodbye(reason)) => {
+            encode_single_success_response(&encode_u64(reason))
         }
-        Eth2RpcResponse::Goodbye(reason) => encode_single_success_response(&encode_u64(reason)),
-        Eth2RpcResponse::MetaData(metadata) => {
-            encode_single_success_response(&encode_metadata(protocol, metadata))
-        }
-        Eth2RpcResponse::Ping(seq_number) => {
+        (
+            Eth2RpcProtocol::MetadataV1 | Eth2RpcProtocol::MetadataV2 | Eth2RpcProtocol::MetadataV3,
+            Eth2RpcResponse::MetaData(metadata),
+        ) => encode_single_success_response(&encode_metadata(protocol, metadata)),
+        (Eth2RpcProtocol::PingV1, Eth2RpcResponse::Ping(seq_number)) => {
             encode_single_success_response(&encode_u64(seq_number))
         }
-        Eth2RpcResponse::LightClientBootstrap(raw)
-        | Eth2RpcResponse::LightClientFinalityUpdate(raw)
-        | Eth2RpcResponse::LightClientOptimisticUpdate(raw) => {
-            encode_single_success_response_with_context(raw.context_bytes, &raw.bytes)
-        }
-        Eth2RpcResponse::LightClientUpdatesByRange(chunks)
-        | Eth2RpcResponse::BeaconBlocksByRange(chunks)
-        | Eth2RpcResponse::BeaconBlocksByRoot(chunks) => encode_streamed_success_responses(chunks),
-        Eth2RpcResponse::Error(error) => encode_single_error_response(error),
+        (Eth2RpcProtocol::LightClientBootstrapV1, Eth2RpcResponse::LightClientBootstrap(raw))
+        | (
+            Eth2RpcProtocol::LightClientFinalityUpdateV1,
+            Eth2RpcResponse::LightClientFinalityUpdate(raw),
+        )
+        | (
+            Eth2RpcProtocol::LightClientOptimisticUpdateV1,
+            Eth2RpcResponse::LightClientOptimisticUpdate(raw),
+        ) => encode_single_success_response_with_context(
+            success_response_context(protocol, raw.context_bytes)?,
+            &raw.bytes,
+        ),
+        (
+            Eth2RpcProtocol::LightClientUpdatesByRangeV1,
+            Eth2RpcResponse::LightClientUpdatesByRange(chunks),
+        )
+        | (
+            Eth2RpcProtocol::BeaconBlocksByRangeV1 | Eth2RpcProtocol::BeaconBlocksByRangeV2,
+            Eth2RpcResponse::BeaconBlocksByRange(chunks),
+        )
+        | (
+            Eth2RpcProtocol::BeaconBlocksByRootV1 | Eth2RpcProtocol::BeaconBlocksByRootV2,
+            Eth2RpcResponse::BeaconBlocksByRoot(chunks),
+        ) => encode_streamed_success_responses(protocol, chunks),
+        (_, Eth2RpcResponse::Error(error)) => encode_single_error_response(error),
+        _ => Err(invalid_data(format!(
+            "response variant does not match protocol {}",
+            protocol.as_ref()
+        ))),
     }
 }
 
@@ -650,6 +674,11 @@ fn encode_single_success_response_with_context(
 }
 
 fn encode_single_error_response(error: Eth2RpcErrorResponse) -> io::Result<Vec<u8>> {
+    if error.code == SUCCESS_CODE {
+        return Err(invalid_data(
+            "RPC error response must not use success result code 0",
+        ));
+    }
     if error.message.len() > ERROR_MESSAGE_LIMIT {
         return Err(invalid_data("error message exceeds 256 bytes"));
     }
@@ -659,7 +688,10 @@ fn encode_single_error_response(error: Eth2RpcErrorResponse) -> io::Result<Vec<u
     Ok(response)
 }
 
-fn encode_streamed_success_responses(chunks: Vec<RawRpcResponse>) -> io::Result<Vec<u8>> {
+fn encode_streamed_success_responses(
+    protocol: &Eth2RpcProtocol,
+    chunks: Vec<RawRpcResponse>,
+) -> io::Result<Vec<u8>> {
     if chunks.len() > MAX_RPC_RESPONSE_CHUNKS {
         return Err(invalid_data(format!(
             "RPC response stream exceeds the {MAX_RPC_RESPONSE_CHUNKS}-chunk limit"
@@ -675,8 +707,9 @@ fn encode_streamed_success_responses(chunks: Vec<RawRpcResponse>) -> io::Result<
     }
     let mut response = Vec::new();
     for chunk in chunks {
+        let context_bytes = success_response_context(protocol, chunk.context_bytes)?;
         response.push(SUCCESS_CODE);
-        if let Some(context_bytes) = chunk.context_bytes {
+        if let Some(context_bytes) = context_bytes {
             response.extend_from_slice(&context_bytes);
         }
         response.extend(encode_ssz_snappy_payload(&chunk.bytes)?);
@@ -1137,6 +1170,23 @@ fn single_response_len(protocol: &Eth2RpcProtocol, bytes: &[u8]) -> io::Result<O
     Ok(Some(payload_offset + consumed))
 }
 
+fn success_response_context(
+    protocol: &Eth2RpcProtocol,
+    context_bytes: Option<[u8; 4]>,
+) -> io::Result<Option<[u8; 4]>> {
+    if success_response_context_len(protocol) == 0 {
+        // Cached Beacon V2 payloads may also be served over V1, whose framing
+        // never includes the cached fork digest.
+        return Ok(None);
+    }
+    context_bytes.map(Some).ok_or_else(|| {
+        invalid_data(format!(
+            "success response for {} requires 4 fork context bytes",
+            protocol.as_ref()
+        ))
+    })
+}
+
 fn success_response_context_len(protocol: &Eth2RpcProtocol) -> usize {
     match protocol {
         Eth2RpcProtocol::LightClientBootstrapV1
@@ -1423,6 +1473,242 @@ mod tests {
                 context_bytes: Some([0xaa, 0xbb, 0xcc, 0xdd]),
                 bytes: vec![1, 2, 3, 4, 5],
             })
+        );
+    }
+
+    fn context_fixture(context_bytes: Option<[u8; 4]>) -> RawRpcResponse {
+        RawRpcResponse {
+            context_bytes,
+            bytes: vec![1, 2, 3, 4, 5],
+        }
+    }
+
+    #[test]
+    fn response_context_missing_single_is_rejected_before_wire_encoding() {
+        let mut invalid_encodings = Vec::new();
+        for (protocol, response) in [
+            (
+                Eth2RpcProtocol::LightClientBootstrapV1,
+                Eth2RpcResponse::LightClientBootstrap(context_fixture(None)),
+            ),
+            (
+                Eth2RpcProtocol::LightClientFinalityUpdateV1,
+                Eth2RpcResponse::LightClientFinalityUpdate(context_fixture(None)),
+            ),
+            (
+                Eth2RpcProtocol::LightClientOptimisticUpdateV1,
+                Eth2RpcResponse::LightClientOptimisticUpdate(context_fixture(None)),
+            ),
+        ] {
+            match encode_response(&protocol, response) {
+                Ok(encoded) => {
+                    // Before the guard, ordinary bounded payloads produced
+                    // success bytes that the same negotiated codec rejects.
+                    assert!(decode_response(&protocol, &encoded).is_err());
+                    invalid_encodings.push(protocol);
+                }
+                Err(error) => {
+                    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+                    assert!(error.to_string().contains("requires 4 fork context bytes"));
+                }
+            }
+        }
+        assert!(
+            invalid_encodings.is_empty(),
+            "encoded missing context: {invalid_encodings:?}"
+        );
+    }
+
+    #[test]
+    fn response_context_missing_stream_chunk_is_rejected_before_wire_encoding() {
+        let mut invalid_encodings = Vec::new();
+        let chunks = vec![context_fixture(Some([1, 2, 3, 4])), context_fixture(None)];
+        for (protocol, response) in [
+            (
+                Eth2RpcProtocol::LightClientUpdatesByRangeV1,
+                Eth2RpcResponse::LightClientUpdatesByRange(chunks.clone()),
+            ),
+            (
+                Eth2RpcProtocol::BeaconBlocksByRangeV2,
+                Eth2RpcResponse::BeaconBlocksByRange(chunks.clone()),
+            ),
+            (
+                Eth2RpcProtocol::BeaconBlocksByRootV2,
+                Eth2RpcResponse::BeaconBlocksByRoot(chunks),
+            ),
+        ] {
+            match encode_response(&protocol, response) {
+                Ok(encoded) => {
+                    assert!(decode_response(&protocol, &encoded).is_err());
+                    invalid_encodings.push(protocol);
+                }
+                Err(error) => assert!(error.to_string().contains("requires 4 fork context bytes")),
+            }
+        }
+        assert!(
+            invalid_encodings.is_empty(),
+            "encoded missing context: {invalid_encodings:?}"
+        );
+    }
+
+    #[test]
+    fn response_context_present_round_trips_exact_single_and_streamed_bytes() {
+        for context in [[0; 4], [0xaa, 0xbb, 0xcc, 0xdd]] {
+            let raw = context_fixture(Some(context));
+            let chunks = vec![raw.clone(), context_fixture(Some([4, 3, 2, 1]))];
+            for (protocol, response) in [
+                (
+                    Eth2RpcProtocol::LightClientBootstrapV1,
+                    Eth2RpcResponse::LightClientBootstrap(raw.clone()),
+                ),
+                (
+                    Eth2RpcProtocol::LightClientFinalityUpdateV1,
+                    Eth2RpcResponse::LightClientFinalityUpdate(raw.clone()),
+                ),
+                (
+                    Eth2RpcProtocol::LightClientOptimisticUpdateV1,
+                    Eth2RpcResponse::LightClientOptimisticUpdate(raw),
+                ),
+                (
+                    Eth2RpcProtocol::LightClientUpdatesByRangeV1,
+                    Eth2RpcResponse::LightClientUpdatesByRange(chunks.clone()),
+                ),
+                (
+                    Eth2RpcProtocol::BeaconBlocksByRangeV2,
+                    Eth2RpcResponse::BeaconBlocksByRange(chunks.clone()),
+                ),
+                (
+                    Eth2RpcProtocol::BeaconBlocksByRootV2,
+                    Eth2RpcResponse::BeaconBlocksByRoot(chunks),
+                ),
+            ] {
+                let encoded = encode_response(&protocol, response.clone()).unwrap();
+                assert_eq!(decode_response(&protocol, &encoded).unwrap(), response);
+            }
+        }
+    }
+
+    #[test]
+    fn response_contextless_protocols_and_empty_streams_round_trip() {
+        let status = StatusMessage::genesis([1, 2, 3, 4], B256::repeat_byte(0x11));
+        for (protocol, response) in [
+            (Eth2RpcProtocol::StatusV1, Eth2RpcResponse::Status(status)),
+            (Eth2RpcProtocol::StatusV2, Eth2RpcResponse::Status(status)),
+            (
+                Eth2RpcProtocol::MetadataV1,
+                Eth2RpcResponse::MetaData(MetaData::empty()),
+            ),
+            (
+                Eth2RpcProtocol::MetadataV2,
+                Eth2RpcResponse::MetaData(MetaData::empty()),
+            ),
+            (
+                Eth2RpcProtocol::MetadataV3,
+                Eth2RpcResponse::MetaData(MetaData::empty()),
+            ),
+            (Eth2RpcProtocol::PingV1, Eth2RpcResponse::Ping(42)),
+            (Eth2RpcProtocol::GoodbyeV1, Eth2RpcResponse::Goodbye(3)),
+            (
+                Eth2RpcProtocol::BeaconBlocksByRangeV1,
+                Eth2RpcResponse::BeaconBlocksByRange(vec![context_fixture(None)]),
+            ),
+            (
+                Eth2RpcProtocol::BeaconBlocksByRootV1,
+                Eth2RpcResponse::BeaconBlocksByRoot(vec![context_fixture(None)]),
+            ),
+            (
+                Eth2RpcProtocol::LightClientUpdatesByRangeV1,
+                Eth2RpcResponse::LightClientUpdatesByRange(vec![]),
+            ),
+            (
+                Eth2RpcProtocol::BeaconBlocksByRangeV1,
+                Eth2RpcResponse::BeaconBlocksByRange(vec![]),
+            ),
+            (
+                Eth2RpcProtocol::BeaconBlocksByRangeV2,
+                Eth2RpcResponse::BeaconBlocksByRange(vec![]),
+            ),
+            (
+                Eth2RpcProtocol::BeaconBlocksByRootV1,
+                Eth2RpcResponse::BeaconBlocksByRoot(vec![]),
+            ),
+            (
+                Eth2RpcProtocol::BeaconBlocksByRootV2,
+                Eth2RpcResponse::BeaconBlocksByRoot(vec![]),
+            ),
+        ] {
+            let encoded = encode_response(&protocol, response.clone()).unwrap();
+            assert_eq!(decode_response(&protocol, &encoded).unwrap(), response);
+            let error = resource_unavailable("fixture unavailable");
+            let encoded = encode_response(&protocol, error.clone()).unwrap();
+            assert_eq!(decode_response(&protocol, &encoded).unwrap(), error);
+        }
+    }
+
+    #[test]
+    fn response_context_beacon_v1_omits_cached_v2_context() {
+        for (protocol, response, expected) in [
+            (
+                Eth2RpcProtocol::BeaconBlocksByRangeV1,
+                Eth2RpcResponse::BeaconBlocksByRange(vec![context_fixture(Some([1, 2, 3, 4]))]),
+                Eth2RpcResponse::BeaconBlocksByRange(vec![context_fixture(None)]),
+            ),
+            (
+                Eth2RpcProtocol::BeaconBlocksByRootV1,
+                Eth2RpcResponse::BeaconBlocksByRoot(vec![context_fixture(Some([1, 2, 3, 4]))]),
+                Eth2RpcResponse::BeaconBlocksByRoot(vec![context_fixture(None)]),
+            ),
+        ] {
+            let encoded = encode_response(&protocol, response).unwrap();
+            assert_eq!(decode_response(&protocol, &encoded).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn response_context_cannot_be_bypassed_with_wrong_response_variant() {
+        for (protocol, response) in [
+            (
+                Eth2RpcProtocol::LightClientOptimisticUpdateV1,
+                Eth2RpcResponse::Ping(1),
+            ),
+            (
+                Eth2RpcProtocol::StatusV2,
+                Eth2RpcResponse::LightClientOptimisticUpdate(context_fixture(Some([1, 2, 3, 4]))),
+            ),
+            (
+                Eth2RpcProtocol::LightClientFinalityUpdateV1,
+                Eth2RpcResponse::LightClientOptimisticUpdate(context_fixture(Some([1, 2, 3, 4]))),
+            ),
+            (
+                Eth2RpcProtocol::BeaconBlocksByRangeV2,
+                Eth2RpcResponse::LightClientUpdatesByRange(vec![]),
+            ),
+        ] {
+            let error = encode_response(&protocol, response).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+            assert!(
+                error
+                    .to_string()
+                    .contains("response variant does not match protocol")
+            );
+        }
+    }
+
+    #[test]
+    fn response_context_error_cannot_use_success_result_code() {
+        let error = encode_response(
+            &Eth2RpcProtocol::LightClientOptimisticUpdateV1,
+            Eth2RpcResponse::Error(Eth2RpcErrorResponse {
+                code: SUCCESS_CODE,
+                message: b"not a success payload".to_vec(),
+            }),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(
+            error
+                .to_string()
+                .contains("must not use success result code")
         );
     }
 
