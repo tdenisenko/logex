@@ -86,12 +86,13 @@ const GOODBYE_REASON_IRRELEVANT_NETWORK: u64 = 2;
 const GOODBYE_REASON_FAULT: u64 = 3;
 const IDENTIFY_PROTOCOL_VERSION: &str = "eth2/1.0.0";
 const IDENTIFY_AGENT_VERSION: &str = concat!("logex/", env!("CARGO_PKG_VERSION"));
-const GOSSIP_MAX_TRANSMIT_SIZE: usize = 10 * 1024 * 1024 + 1024;
+const GOSSIP_MAX_PAYLOAD_SIZE: usize = 10 * 1024 * 1024;
 const P2P_BANDWIDTH_RATE_WINDOW: Duration = Duration::from_secs(15);
 const LIGHT_CLIENT_FINALITY_UPDATE_TOPIC_NAME: &str = "light_client_finality_update";
 const LIGHT_CLIENT_OPTIMISTIC_UPDATE_TOPIC_NAME: &str = "light_client_optimistic_update";
 const GOSSIP_ENCODING_NAME: &str = "ssz_snappy";
 const MESSAGE_DOMAIN_VALID_SNAPPY: [u8; 4] = [1, 0, 0, 0];
+const MESSAGE_DOMAIN_INVALID_SNAPPY: [u8; 4] = [0, 0, 0, 0];
 const ATTESTATION_SUBNET_BITFIELD: [u8; 8] = [0u8; 8];
 const SYNCNET_BITFIELD: [u8; 1] = [0u8; 1];
 const LOCAL_CUSTODY_GROUP_COUNT: u64 = 0;
@@ -200,7 +201,7 @@ struct PersistedPeer {
 struct ConsensusBehaviour {
     connection_limits: libp2p::connection_limits::Behaviour,
     identify: identify::Behaviour,
-    gossip: gossipsub::Behaviour,
+    gossip: gossipsub::Behaviour<GossipSizeGuard>,
     status_rpc: StatusRpcBehaviour,
     goodbye_rpc: GoodbyeRpcBehaviour,
     metadata_rpc: MetadataRpcBehaviour,
@@ -2772,7 +2773,9 @@ impl ConsensusNetwork {
         propagation_source: PeerId,
         message: &gossipsub::Message,
     ) -> gossipsub::MessageAcceptance {
-        let Some(decoded) = decode_gossip_payload(&message.data) else {
+        let Some(decoded) =
+            decode_gossip_payload(&message.data, gossip_payload_limit(&message.topic))
+        else {
             self.gossip_counts.decode_failures += 1;
             tracing::debug!(
                 %propagation_source,
@@ -5920,16 +5923,73 @@ fn build_rpc_transport(
         .map_err(|error| ConsensusNetworkError::ConstructRpcTransport(error.to_string()))
 }
 
-fn build_gossip_behaviour() -> Result<gossipsub::Behaviour, ConsensusNetworkError> {
-    let config = gossipsub::ConfigBuilder::default()
+// This transform preserves wire bytes. Global size failures are rejected by
+// gossipsub before ID generation and do not reach application-event counters.
+// Malformed Snappy within those bounds still receives the required INVALID ID.
+#[derive(Default)]
+struct GossipSizeGuard;
+
+fn validate_gossip_wire_size(payload: &[u8], max_decoded: usize) -> io::Result<()> {
+    if payload.len() > snap::raw::max_compress_len(max_decoded) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "gossip compressed payload exceeds global limit",
+        ));
+    }
+    if snap::raw::decompress_len(payload).is_ok_and(|length| length > max_decoded) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "gossip declared payload exceeds global limit",
+        ));
+    }
+    Ok(())
+}
+
+impl gossipsub::DataTransform for GossipSizeGuard {
+    fn inbound_transform(&self, message: gossipsub::RawMessage) -> io::Result<gossipsub::Message> {
+        validate_gossip_wire_size(&message.data, GOSSIP_MAX_PAYLOAD_SIZE)?;
+        Ok(gossipsub::Message {
+            source: message.source,
+            data: message.data,
+            sequence_number: message.sequence_number,
+            topic: message.topic,
+        })
+    }
+
+    fn outbound_transform(&self, _: &gossipsub::TopicHash, data: Vec<u8>) -> io::Result<Vec<u8>> {
+        validate_gossip_wire_size(&data, GOSSIP_MAX_PAYLOAD_SIZE)?;
+        Ok(data)
+    }
+}
+
+fn build_gossip_config() -> Result<gossipsub::Config, ConsensusNetworkError> {
+    gossipsub::ConfigBuilder::default()
         .validation_mode(gossipsub::ValidationMode::Anonymous)
         .validate_messages()
-        .max_transmit_size(GOSSIP_MAX_TRANSMIT_SIZE)
+        // Phase0 networking parameters; mainnet seen_ttl is 12 * 32 * 2.
+        .mesh_n(8)
+        .mesh_n_low(6)
+        .mesh_n_high(12)
+        .gossip_lazy(6)
+        .heartbeat_interval(Duration::from_millis(700))
+        .fanout_ttl(Duration::from_secs(60))
+        .history_length(6)
+        .history_gossip(3)
+        .duplicate_cache_time(Duration::from_secs(768))
+        .max_transmit_size(snap::raw::max_compress_len(GOSSIP_MAX_PAYLOAD_SIZE) + 1024)
         .message_id_fn(eth2_message_id)
         .build()
-        .map_err(|error| ConsensusNetworkError::ConstructGossip(error.to_string()))?;
-    gossipsub::Behaviour::new(gossipsub::MessageAuthenticity::Anonymous, config)
         .map_err(|error| ConsensusNetworkError::ConstructGossip(error.to_string()))
+}
+
+fn build_gossip_behaviour() -> Result<gossipsub::Behaviour<GossipSizeGuard>, ConsensusNetworkError>
+{
+    gossipsub::Behaviour::new_with_transform(
+        gossipsub::MessageAuthenticity::Anonymous,
+        build_gossip_config()?,
+        GossipSizeGuard,
+    )
+    .map_err(|error| ConsensusNetworkError::ConstructGossip(error.to_string()))
 }
 
 fn build_gossip_topics(fork_digest: [u8; 4]) -> ConsensusGossipTopics {
@@ -5947,17 +6007,39 @@ fn build_gossip_topics(fork_digest: [u8; 4]) -> ConsensusGossipTopics {
 fn eth2_message_id(message: &gossipsub::Message) -> gossipsub::MessageId {
     let topic = message.topic.as_str().as_bytes();
     let mut hasher = Sha256::new();
-    hasher.update(MESSAGE_DOMAIN_VALID_SNAPPY);
+    let decoded = decode_gossip_payload(&message.data, GOSSIP_MAX_PAYLOAD_SIZE);
+    let (domain, payload) = match &decoded {
+        Some(payload) => (MESSAGE_DOMAIN_VALID_SNAPPY, payload.as_slice()),
+        None => (MESSAGE_DOMAIN_INVALID_SNAPPY, message.data.as_slice()),
+    };
+    hasher.update(domain);
     hasher.update(usize_to_u64(topic.len()).to_le_bytes());
     hasher.update(topic);
-    hasher.update(&message.data);
+    hasher.update(payload);
     let digest = hasher.finalize();
     gossipsub::MessageId::from(digest[..20].to_vec())
 }
 
-fn decode_gossip_payload(payload: &[u8]) -> Option<Vec<u8>> {
+fn gossip_payload_limit(topic: &gossipsub::TopicHash) -> usize {
+    let mut components = topic.as_str().rsplit('/');
+    if components.next() != Some(GOSSIP_ENCODING_NAME) {
+        return GOSSIP_MAX_PAYLOAD_SIZE;
+    }
+    let protocol = match components.next() {
+        Some(LIGHT_CLIENT_FINALITY_UPDATE_TOPIC_NAME) => {
+            crate::rpc::Eth2RpcProtocol::LightClientFinalityUpdateV1
+        }
+        Some(LIGHT_CLIENT_OPTIMISTIC_UPDATE_TOPIC_NAME) => {
+            crate::rpc::Eth2RpcProtocol::LightClientOptimisticUpdateV1
+        }
+        _ => return GOSSIP_MAX_PAYLOAD_SIZE,
+    };
+    crate::rpc::response_payload_limit(&protocol, 0)
+}
+
+fn decode_gossip_payload(payload: &[u8], max_decoded: usize) -> Option<Vec<u8>> {
     let decompressed_len = snap::raw::decompress_len(payload).ok()?;
-    if decompressed_len > GOSSIP_MAX_TRANSMIT_SIZE {
+    if decompressed_len > max_decoded.min(GOSSIP_MAX_PAYLOAD_SIZE) {
         return None;
     }
     snap::raw::Decoder::new().decompress_vec(payload).ok()
@@ -7896,29 +7978,197 @@ mod tests {
         );
     }
 
-    #[test]
-    fn gossip_message_id_uses_post_altair_topic_aware_wire_hash() {
-        let topic = gossipsub::TopicHash::from_raw(
-            "/eth2/8c9f62fe/light_client_optimistic_update/ssz_snappy",
-        );
-        let message = gossipsub::Message {
-            source: None,
-            data: vec![1, 2, 3, 4],
-            sequence_number: None,
-            topic,
-        };
-        let topic_bytes = message.topic.as_str().as_bytes();
-        let mut hasher = Sha256::new();
-        hasher.update(MESSAGE_DOMAIN_VALID_SNAPPY);
-        hasher.update(usize_to_u64(topic_bytes.len()).to_le_bytes());
-        hasher.update(topic_bytes);
-        hasher.update(&message.data);
-        let expected = hasher.finalize();
+    const TEST_GOSSIP_TOPIC: &str = "/eth2/8c9f62fe/light_client_optimistic_update/ssz_snappy";
+    const HELLO_SNAPPY: &[u8] = &[5, 16, b'h', b'e', b'l', b'l', b'o'];
+    const HELLO_SPLIT_SNAPPY: &[u8] = &[5, 4, b'h', b'e', 8, b'l', b'l', b'o'];
 
-        assert_eq!(
-            eth2_message_id(&message),
-            gossipsub::MessageId::from(expected[..20].to_vec())
+    fn gossip_test_message(data: &[u8], topic: &str) -> gossipsub::Message {
+        gossipsub::Message {
+            source: None,
+            data: data.to_vec(),
+            sequence_number: None,
+            topic: gossipsub::TopicHash::from_raw(topic),
+        }
+    }
+
+    #[test]
+    fn gossip_message_id_matches_independent_decompressed_hash() {
+        // Literal raw Snappy blocks use one versus two literal tags to encode
+        // ASCII hello. Expected hashes were independently derived with Python
+        // hashlib from Altair's domain + topic length LE64 + topic + payload.
+        for encoded in [HELLO_SNAPPY, HELLO_SPLIT_SNAPPY] {
+            let message = gossip_test_message(encoded, TEST_GOSSIP_TOPIC);
+            assert_eq!(
+                hex::encode(eth2_message_id(&message).0),
+                "acdaed95fb905c932cde9a7c5f82be95a0a13999"
+            );
+        }
+        let other = gossip_test_message(
+            HELLO_SNAPPY,
+            "/eth2/8c9f62fe/light_client_finality_update/ssz_snappy",
         );
+        assert_eq!(
+            hex::encode(eth2_message_id(&other).0),
+            "72751e8394b7da80573f4351834cc8ec8eab4747"
+        );
+    }
+
+    #[test]
+    fn gossip_message_id_uses_invalid_domain_for_malformed_snappy() {
+        let message = gossip_test_message(&[5, 16, b'h'], TEST_GOSSIP_TOPIC);
+        assert_eq!(
+            hex::encode(eth2_message_id(&message).0),
+            "a5fda19ffa82c72dbac59ef5792012e4c5791e86"
+        );
+        let invalid_empty = gossip_test_message(&[], TEST_GOSSIP_TOPIC);
+        assert_eq!(
+            hex::encode(eth2_message_id(&invalid_empty).0),
+            "23b136acdeb2da6a2fbc26747ab2ea7eddf0fa97"
+        );
+        let valid_empty = gossip_test_message(&[0], TEST_GOSSIP_TOPIC);
+        assert_eq!(
+            hex::encode(eth2_message_id(&valid_empty).0),
+            "5343304ad5b71850b0ad402d4658092ced89bfac"
+        );
+    }
+
+    fn gossip_raw_message(data: &[u8]) -> gossipsub::RawMessage {
+        gossipsub::RawMessage {
+            source: None,
+            data: data.to_vec(),
+            sequence_number: None,
+            topic: gossipsub::TopicHash::from_raw(TEST_GOSSIP_TOPIC),
+            signature: None,
+            key: None,
+            validated: false,
+        }
+    }
+
+    #[test]
+    fn gossip_size_guard_preserves_wire_and_rejects_global_oversize() {
+        use gossipsub::DataTransform as _;
+        for payload in [HELLO_SNAPPY, HELLO_SPLIT_SNAPPY, &[5, 16, b'h'], &[], &[0]] {
+            let message = GossipSizeGuard
+                .inbound_transform(gossip_raw_message(payload))
+                .unwrap();
+            assert_eq!(message.data, payload);
+            assert_eq!(
+                GossipSizeGuard
+                    .outbound_transform(&message.topic, message.data)
+                    .unwrap(),
+                payload
+            );
+        }
+        let mut buffer = unsigned_varint::encode::u64_buffer();
+        let oversized_header =
+            unsigned_varint::encode::u64((GOSSIP_MAX_PAYLOAD_SIZE + 1) as u64, &mut buffer);
+        assert!(
+            GossipSizeGuard
+                .inbound_transform(gossip_raw_message(oversized_header))
+                .is_err()
+        );
+        assert!(
+            GossipSizeGuard
+                .outbound_transform(
+                    &gossipsub::TopicHash::from_raw(TEST_GOSSIP_TOPIC),
+                    oversized_header.to_vec()
+                )
+                .is_err()
+        );
+        // Exercise compressed-size boundaries with a small injected budget;
+        // malformed bounded bytes remain admitted for INVALID-domain IDs.
+        let max_wire = snap::raw::max_compress_len(8);
+        assert!(validate_gossip_wire_size(&vec![0x80; max_wire], 8).is_ok());
+        assert!(validate_gossip_wire_size(&vec![0x80; max_wire + 1], 8).is_err());
+        assert!(validate_gossip_wire_size(HELLO_SNAPPY, 5).is_ok());
+        assert!(validate_gossip_wire_size(HELLO_SNAPPY, 4).is_err());
+    }
+
+    #[test]
+    fn gossip_type_limits_do_not_change_valid_snappy_ids() {
+        let topic = gossipsub::TopicHash::from_raw(TEST_GOSSIP_TOPIC);
+        assert_eq!(gossip_payload_limit(&topic), 1_032);
+        let finality = gossipsub::TopicHash::from_raw(
+            "/eth2/8c9f62fe/light_client_finality_update/ssz_snappy",
+        );
+        assert_eq!(gossip_payload_limit(&finality), 2_120);
+        let retired = gossipsub::TopicHash::from_raw(
+            "/eth2/cb0d1acc/light_client_finality_update/ssz_snappy",
+        );
+        assert_eq!(gossip_payload_limit(&retired), 2_120);
+        assert_eq!(
+            decode_gossip_payload(HELLO_SNAPPY, 5),
+            Some(b"hello".to_vec())
+        );
+        assert!(decode_gossip_payload(HELLO_SNAPPY, 4).is_none());
+        let encoded = snap::raw::Encoder::new()
+            .compress_vec(&vec![b'x'; 1_033])
+            .unwrap();
+        assert!(validate_gossip_wire_size(&encoded, GOSSIP_MAX_PAYLOAD_SIZE).is_ok());
+        assert!(decode_gossip_payload(&encoded, gossip_payload_limit(&topic)).is_none());
+        let message = gossip_test_message(&encoded, TEST_GOSSIP_TOPIC);
+        // SHA256 oracle hashes the decompressed 1033 ASCII x bytes under VALID,
+        // even though this payload is too large for the optimistic SSZ type.
+        assert_eq!(
+            hex::encode(eth2_message_id(&message).0),
+            "dc816b31a7b43c062e43b6441746e7a27529c160"
+        );
+    }
+
+    #[test]
+    fn gossip_config_matches_pinned_mainnet_parameters() {
+        let config = build_gossip_config().unwrap();
+        assert_eq!(
+            (
+                config.mesh_n(),
+                config.mesh_n_low(),
+                config.mesh_n_high(),
+                config.gossip_lazy()
+            ),
+            (8, 6, 12, 6)
+        );
+        assert_eq!(config.heartbeat_interval(), Duration::from_millis(700));
+        assert_eq!(config.fanout_ttl(), Duration::from_secs(60));
+        assert_eq!((config.history_length(), config.history_gossip()), (6, 3));
+        assert_eq!(config.duplicate_cache_time(), Duration::from_secs(768));
+        assert_eq!(
+            config.max_transmit_size_for_topic(&gossipsub::TopicHash::from_raw(TEST_GOSSIP_TOPIC)),
+            12_234_442
+        );
+        assert_eq!(GOSSIP_MAX_PAYLOAD_SIZE, 10_485_760);
+        assert!(config.validate_messages());
+        assert!(matches!(
+            config.validation_mode(),
+            gossipsub::ValidationMode::Anonymous
+        ));
+    }
+
+    #[tokio::test]
+    async fn gossip_event_keeps_compressed_accounting_and_rejects_type_oversize() {
+        let temp = TempDir::new().unwrap();
+        let (mut network, _) = request_lifecycle_fixture(&temp);
+        let peer = PeerId::random();
+        let topic = network.gossip_topics.optimistic_update.hash();
+        let encoded = snap::raw::Encoder::new()
+            .compress_vec(&vec![b'x'; 1_033])
+            .unwrap();
+        let message = gossip_test_message(&encoded, topic.as_str());
+        let before = network.consensus.light_client_store();
+        let message_id = eth2_message_id(&message);
+        network.handle_gossip_event(gossipsub::Event::Message {
+            propagation_source: peer,
+            message_id,
+            message,
+        });
+        assert_eq!(network.gossip_counts.decode_failures, 1);
+        assert_eq!(
+            network
+                .p2p_download_metrics
+                .snapshot(Instant::now())
+                .total_payload_bytes,
+            encoded.len() as u64
+        );
+        assert_eq!(network.consensus.light_client_store(), before);
     }
 
     #[test]
