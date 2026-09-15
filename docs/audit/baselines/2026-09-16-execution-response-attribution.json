@@ -1,5 +1,5 @@
 {
-  "status": "Implementation and focused sync tests, original helper controls, final review pass; full gates and CI/merge pending",
+  "status": "All seven local gates and final independent review pass; PR/CI/merge pending",
   "branch": "audit/execution-response-attribution",
   "base": "9912844170251f26b6a54752fdaa4f3c329aab9d",
   "source_sha256": {
@@ -73,6 +73,10 @@
     "pairing-callers.log": {
       "sha256": "05dd8d983776737524e19cbe249962deae792217585f388f1a25c3f9761f1c83",
       "bytes": 1181
+    },
+    "gates/results.json": {
+      "sha256": "cff3e31a2d00c51f3b4d36c381546e82adf1e66a232a92b69ab4220b15401417",
+      "bytes": 3828
     }
   },
   "focused_sync_tests": {
@@ -98,5 +102,139 @@
     "cost": "Remove per-block vectors and premature comparisons; no extra hashing, storage write, format or dependency change; no benchmark",
     "remaining": "Send-queue deadlines and continuation memory budgets remain separate; offline audit, volume supervision and verified repair incomplete",
     "remote": "No remote work; mac-mini cleanup complete"
+  },
+  "source_commit": "4c60b745ee7d39d312694a7f391c5ab8eb0f9094",
+  "workspace_tests": {
+    "groups": 25,
+    "passed": 1448,
+    "failed": 0,
+    "ignored": 23
+  },
+  "gates": {
+    "commit": "4c60b745ee7d39d312694a7f391c5ab8eb0f9094",
+    "rustc": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+    "gates": [
+      {
+        "name": "vendor",
+        "command": [
+          "python3",
+          "tools/verify_datafusion_vendor.py"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T18:46:38.950169+00:00",
+        "finished": "2026-09-15T18:46:39.006949+00:00",
+        "sha256": "d8d80949d6f3378c14456842b531f0cade514179e4c94781b95ff9abb6447675",
+        "log": "/private/tmp/logex-execution-response-attribution-kfydwarx/gates/vendor.log"
+      },
+      {
+        "name": "format",
+        "command": [
+          "cargo",
+          "fmt",
+          "--all",
+          "--",
+          "--check"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T18:46:39.007263+00:00",
+        "finished": "2026-09-15T18:46:39.865752+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-execution-response-attribution-kfydwarx/gates/format.log"
+      },
+      {
+        "name": "check",
+        "command": [
+          "cargo",
+          "check",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T18:46:39.866202+00:00",
+        "finished": "2026-09-15T18:46:47.177253+00:00",
+        "sha256": "39f4b9c995125aad0890d9397f9088a4402187a3f11d3c2d70342a9806086013",
+        "log": "/private/tmp/logex-execution-response-attribution-kfydwarx/gates/check.log"
+      },
+      {
+        "name": "clippy",
+        "command": [
+          "cargo",
+          "clippy",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T18:46:47.178465+00:00",
+        "finished": "2026-09-15T18:46:53.550414+00:00",
+        "sha256": "a717179302290500d68cc66033436bc7cefa94851c3d44686d14350f36130141",
+        "log": "/private/tmp/logex-execution-response-attribution-kfydwarx/gates/clippy.log"
+      },
+      {
+        "name": "test",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T18:46:53.551146+00:00",
+        "finished": "2026-09-15T18:49:39.662492+00:00",
+        "sha256": "a9fa0a2ef77be30811ad1f7e52cb08a0c28eaa3155118641b2bdb7b8a8b9b4d0",
+        "log": "/private/tmp/logex-execution-response-attribution-kfydwarx/gates/test.log"
+      },
+      {
+        "name": "doc",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--doc",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T18:49:39.665689+00:00",
+        "finished": "2026-09-15T18:49:50.087866+00:00",
+        "sha256": "653415b59af3dc09314d35f147614c83a5778fd46e452955967564a2e5aec150",
+        "log": "/private/tmp/logex-execution-response-attribution-kfydwarx/gates/doc.log"
+      },
+      {
+        "name": "release-build",
+        "command": [
+          "cargo",
+          "build",
+          "-p",
+          "logex-node",
+          "--release",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T18:49:50.088397+00:00",
+        "finished": "2026-09-15T18:50:33.475418+00:00",
+        "sha256": "7487c4f50495c3427a8decf7a923cc6419e76c8822a0acacd880b352b93165a6",
+        "log": "/private/tmp/logex-execution-response-attribution-kfydwarx/gates/release-build.log"
+      }
+    ]
   }
 }

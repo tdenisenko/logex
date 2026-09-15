@@ -49,8 +49,7 @@ an indefinitely progressing ETH70 response's total memory.
 
 Three added tests and all 344 sync library tests pass (one ignored). Both exact
 original-helper controls fail as expected, and candidate source is restored
-byte-for-byte. Final independent review passes. Full local gates and CI/merge
-remain pending.
+byte-for-byte. Final independent review passes. Source `4c60b745` passes all seven local gates: vendor verification, formatting, workspace check, strict Clippy, 1,448 workspace tests (23 ignored), documentation tests and release node linking. CI and merge remain pending.
 
 The regression scope includes both response arrival orders, mismatching inner
 counts, empty inner receipt sets, incomplete outer shape, and existing ETH70
