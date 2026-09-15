@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::convert::Infallible;
 use std::fs;
-use std::io;
+use std::io::{self, Read, Write};
 use std::net::IpAddr;
 use std::num::NonZeroU8;
 use std::path::{Path, PathBuf};
@@ -81,6 +81,9 @@ const MAX_BEACON_BLOCKS_BY_RANGE_REQUEST: u64 = 128;
 const FORWARD_BEACON_BLOCK_RANGE_WINDOW: u64 = 16;
 const MAX_DIAL_ADDRESSES_PER_ATTEMPT: usize = 2;
 const MAX_PERSISTED_KNOWN_PEERS: usize = 256;
+const MAX_KNOWN_PEERS_BYTES: usize = 1024 * 1024;
+// ENR raw records are capped at 300 bytes, plus the base64 `enr:` prefix.
+const MAX_PERSISTED_ENR_BYTES: usize = 404;
 const HEAD_RECOVERY_PROGRESSION_PEER_RESERVE: usize = 2;
 const MAX_STATUS_FAILURES_BEFORE_DISCONNECT: u32 = 2;
 const IDENTIFY_GRACE_PERIOD: Duration = Duration::from_secs(8);
@@ -163,8 +166,8 @@ pub enum ConsensusNetworkError {
     PersistSecret { path: PathBuf, source: io::Error },
     #[error("failed to load known peers {path}: {source}")]
     ReadKnownPeers { path: PathBuf, source: io::Error },
-    #[error("failed to parse known peers {path}: {message}")]
-    ParseKnownPeers { path: PathBuf, message: String },
+    #[error("failed to preserve damaged known peers {path}: {source}")]
+    QuarantineKnownPeers { path: PathBuf, source: io::Error },
     #[error("failed to persist known peers {path}: {source}")]
     PersistKnownPeers { path: PathBuf, source: io::Error },
     #[error("invalid built-in mainnet bootnode ENR: {0}")]
@@ -6281,45 +6284,127 @@ fn load_or_create_secret_key(secret_key_path: &Path) -> Result<CombinedKey, Cons
 }
 
 fn load_known_peers(path: &Path) -> Result<Vec<PersistedPeer>, ConsensusNetworkError> {
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
-
-    let contents =
-        fs::read_to_string(path).map_err(|source| ConsensusNetworkError::ReadKnownPeers {
+    let file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(source) => {
+            return Err(ConsensusNetworkError::ReadKnownPeers {
+                path: path.to_path_buf(),
+                source,
+            });
+        }
+    };
+    let mut contents = Vec::new();
+    file.take((MAX_KNOWN_PEERS_BYTES + 1) as u64)
+        .read_to_end(&mut contents)
+        .map_err(|source| ConsensusNetworkError::ReadKnownPeers {
             path: path.to_path_buf(),
             source,
         })?;
-    serde_json::from_str(&contents).map_err(|error| ConsensusNetworkError::ParseKnownPeers {
-        path: path.to_path_buf(),
-        message: error.to_string(),
-    })
+    let decoded = if contents.len() > MAX_KNOWN_PEERS_BYTES {
+        Err("known-peer cache exceeds byte limit".to_owned())
+    } else {
+        let mut decoder = serde_json::Deserializer::from_slice(&contents);
+        serde::de::Deserializer::deserialize_seq(&mut decoder, KnownPeersVisitor)
+            .and_then(|peers| decoder.end().map(|()| peers))
+            .map_err(|error| error.to_string())
+    };
+    match decoded {
+        Ok(peers) => Ok(peers),
+        Err(reason) => {
+            let retained = quarantine_known_peers(path).map_err(|source| {
+                ConsensusNetworkError::QuarantineKnownPeers {
+                    path: path.to_path_buf(),
+                    source,
+                }
+            })?;
+            tracing::warn!(path = %path.display(), quarantine = %retained.display(), %reason,
+                "preserved damaged known-peer cache; continuing without cached peers");
+            Ok(Vec::new())
+        }
+    }
+}
+
+struct KnownPeersVisitor;
+
+impl<'de> serde::de::Visitor<'de> for KnownPeersVisitor {
+    type Value = Vec<PersistedPeer>;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "at most {MAX_PERSISTED_KNOWN_PEERS} known-peer records"
+        )
+    }
+
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+        let mut peers = Vec::new();
+        while peers.len() < MAX_PERSISTED_KNOWN_PEERS {
+            match seq.next_element::<PersistedPeer>()? {
+                Some(peer) => peers.push(peer),
+                None => return Ok(peers),
+            }
+        }
+        if seq.next_element::<serde::de::IgnoredAny>()?.is_some() {
+            return Err(serde::de::Error::custom(
+                "known-peer cache exceeds record limit",
+            ));
+        }
+        Ok(peers)
+    }
+}
+
+fn quarantine_known_peers(path: &Path) -> io::Result<PathBuf> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let directory = tempfile::Builder::new()
+        .prefix(".known-peers-quarantine-")
+        .tempdir_in(parent)?;
+    let retained = directory.path().join(KNOWN_PEERS_FILE);
+    fs::rename(path, &retained)?;
+    // Once the original moves, no subsequent cleanup may remove this evidence.
+    let _ = directory.keep();
+    Ok(retained)
 }
 
 fn persist_known_peers(path: &Path, peers: &[PersistedPeer]) -> Result<(), ConsensusNetworkError> {
-    if let Some(dir) = path.parent() {
-        fs::create_dir_all(dir).map_err(|source| ConsensusNetworkError::PersistKnownPeers {
-            path: path.to_path_buf(),
-            source,
-        })?;
-    }
-
-    let json = serde_json::to_vec_pretty(peers).map_err(|error| {
-        ConsensusNetworkError::ParseKnownPeers {
-            path: path.to_path_buf(),
-            message: error.to_string(),
+    let write = || -> io::Result<()> {
+        if peers.len() > MAX_PERSISTED_KNOWN_PEERS
+            || peers
+                .iter()
+                .any(|peer| peer.enr.len() > MAX_PERSISTED_ENR_BYTES)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "known-peer records exceed writer limits",
+            ));
         }
-    })?;
-    let tmp = path.with_extension("json.tmp");
-    fs::write(&tmp, json).map_err(|source| ConsensusNetworkError::PersistKnownPeers {
-        path: tmp.clone(),
-        source,
-    })?;
-    fs::rename(&tmp, path).map_err(|source| ConsensusNetworkError::PersistKnownPeers {
+        let json = serde_json::to_vec_pretty(peers).map_err(io::Error::other)?;
+        if json.len() > MAX_KNOWN_PEERS_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "known-peer cache exceeds byte limit",
+            ));
+        }
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        fs::create_dir_all(parent)?;
+        let mut temporary = tempfile::Builder::new()
+            .prefix(".known-peers-")
+            .tempfile_in(parent)?;
+        temporary.write_all(&json)?;
+        // These derived hints need atomic visibility, not periodic power-loss barriers.
+        temporary.persist(path).map_err(|error| error.error)?;
+        Ok(())
+    };
+    write().map_err(|source| ConsensusNetworkError::PersistKnownPeers {
         path: path.to_path_buf(),
         source,
-    })?;
-    Ok(())
+    })
 }
 
 fn mainnet_bootnodes() -> Result<Vec<Enr>, ConsensusNetworkError> {
@@ -8342,6 +8427,214 @@ mod tests {
         let loaded = load_known_peers(&path).unwrap();
 
         assert_eq!(loaded, peers);
+    }
+
+    fn peer_cache_test_record() -> PersistedPeer {
+        PersistedPeer {
+            enr: MAINNET_BOOTNODES[0].to_string(),
+            support: Some(PeerRpcSupport {
+                status: true,
+                ..Default::default()
+            }),
+            status_successes: u32::MAX,
+            bootstrap_successes: u32::MAX,
+            useful_successes: u32::MAX,
+            dial_stats: PeerDialAddressStats::default(),
+        }
+    }
+
+    fn peer_cache_quarantined_contents(parent: &Path) -> Vec<Vec<u8>> {
+        let mut originals = fs::read_dir(parent)
+            .unwrap()
+            .map(Result::unwrap)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".known-peers-quarantine-")
+            })
+            .map(|entry| fs::read(entry.path().join(KNOWN_PEERS_FILE)).unwrap())
+            .collect::<Vec<_>>();
+        originals.sort();
+        originals
+    }
+
+    #[test]
+    fn peer_cache_recovery_preserves_each_incomplete_original() {
+        let temp = TempDir::new().unwrap();
+        let path = known_peers_path(temp.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut truncated = serde_json::to_vec_pretty(&[peer_cache_test_record()]).unwrap();
+        truncated.pop();
+        let mut originals = Vec::new();
+        for contents in [Vec::new(), truncated, vec![0xff], b"[] []".to_vec()] {
+            fs::write(&path, &contents).unwrap();
+            assert!(load_known_peers(&path).unwrap().is_empty());
+            assert!(!path.exists());
+            originals.push(contents);
+            originals.sort();
+            assert_eq!(
+                peer_cache_quarantined_contents(path.parent().unwrap()),
+                originals
+            );
+            // A second open sees an absent cache and creates no extra quarantine.
+            assert!(load_known_peers(&path).unwrap().is_empty());
+            assert_eq!(
+                peer_cache_quarantined_contents(path.parent().unwrap()),
+                originals
+            );
+        }
+        let peers = vec![peer_cache_test_record()];
+        persist_known_peers(&path, &peers).unwrap();
+        assert_eq!(load_known_peers(&path).unwrap(), peers);
+        assert_eq!(
+            peer_cache_quarantined_contents(path.parent().unwrap()),
+            originals
+        );
+    }
+
+    #[test]
+    fn peer_cache_recovery_bounds_file_bytes() {
+        let temp = TempDir::new().unwrap();
+        let path = known_peers_path(temp.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        // Valid JSON with whitespace, one byte above the chosen 1 MiB cache policy.
+        let mut contents = vec![b' '; 1024 * 1024 + 1];
+        contents[..2].copy_from_slice(b"[]");
+        fs::write(&path, &contents).unwrap();
+        assert!(load_known_peers(&path).unwrap().is_empty());
+        assert!(!path.exists());
+        assert_eq!(
+            peer_cache_quarantined_contents(path.parent().unwrap()),
+            vec![contents]
+        );
+    }
+
+    #[test]
+    fn peer_cache_recovery_enforces_the_writer_record_limit() {
+        let temp = TempDir::new().unwrap();
+        let path = known_peers_path(temp.path());
+        let peers = vec![peer_cache_test_record(); MAX_PERSISTED_KNOWN_PEERS];
+        persist_known_peers(&path, &peers).unwrap();
+        assert_eq!(load_known_peers(&path).unwrap(), peers);
+        let oversized = vec![peer_cache_test_record(); MAX_PERSISTED_KNOWN_PEERS + 1];
+        let contents = serde_json::to_vec_pretty(&oversized).unwrap();
+        fs::write(&path, &contents).unwrap();
+        assert!(load_known_peers(&path).unwrap().is_empty());
+        assert!(!path.exists());
+        assert_eq!(
+            peer_cache_quarantined_contents(path.parent().unwrap()),
+            vec![contents]
+        );
+    }
+
+    #[test]
+    fn peer_cache_recovery_leaves_existing_staging_artifacts_untouched() {
+        let temp = TempDir::new().unwrap();
+        let path = known_peers_path(temp.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let old_staging = path.with_extension("json.tmp");
+        fs::write(&old_staging, b"retained staging evidence").unwrap();
+        let peers = vec![peer_cache_test_record()];
+        persist_known_peers(&path, &peers).unwrap();
+        assert_eq!(load_known_peers(&path).unwrap(), peers);
+        assert_eq!(
+            fs::read(&old_staging).unwrap(),
+            b"retained staging evidence"
+        );
+    }
+
+    #[test]
+    fn peer_cache_recovery_propagates_real_read_errors() {
+        let temp = TempDir::new().unwrap();
+        let path = known_peers_path(temp.path());
+        assert!(load_known_peers(&path).unwrap().is_empty());
+        assert!(!path.parent().unwrap().exists());
+        fs::create_dir_all(&path).unwrap();
+        assert!(matches!(
+            load_known_peers(&path),
+            Err(ConsensusNetworkError::ReadKnownPeers { .. })
+        ));
+        assert!(path.is_dir());
+        assert!(peer_cache_quarantined_contents(path.parent().unwrap()).is_empty());
+    }
+
+    #[tokio::test]
+    async fn peer_cache_recovery_allows_network_construction_without_changing_trust() {
+        let temp = TempDir::new().unwrap();
+        let network = peer_retention_fixture(&temp);
+        let trusted_before = network.consensus.light_client_store();
+        fs::write(&network.known_peers_path, b"[").unwrap();
+        let loaded = ConsensusNetwork::new(
+            network.config.clone(),
+            network.consensus.clone(),
+            network.sync_status.clone(),
+        )
+        .unwrap();
+        assert!(loaded.last_persisted.is_empty());
+        assert_eq!(loaded.consensus.light_client_store(), trusted_before);
+        assert!(loaded.bootnode_count > 0);
+        assert_eq!(
+            peer_cache_quarantined_contents(loaded.known_peers_path.parent().unwrap()),
+            vec![b"[".to_vec()]
+        );
+    }
+
+    #[test]
+    fn peer_cache_recovery_preserves_artifacts_on_io_failures() {
+        let temp = TempDir::new().unwrap();
+        let parent_file = temp.path().join("parent-file");
+        fs::write(&parent_file, b"original").unwrap();
+        assert!(matches!(
+            load_known_peers(&parent_file.join(KNOWN_PEERS_FILE)),
+            Err(ConsensusNetworkError::ReadKnownPeers { .. })
+        ));
+        assert!(quarantine_known_peers(&parent_file.join(KNOWN_PEERS_FILE)).is_err());
+        assert_eq!(fs::read(&parent_file).unwrap(), b"original");
+        // The parent permits creating quarantine, but the source disappeared.
+        assert!(quarantine_known_peers(&temp.path().join("missing.json")).is_err());
+        assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 1);
+
+        let destination = temp.path().join("destination");
+        fs::create_dir(&destination).unwrap();
+        fs::write(destination.join("retained"), b"original").unwrap();
+        assert!(persist_known_peers(&destination, &[peer_cache_test_record()]).is_err());
+        assert_eq!(fs::read(destination.join("retained")).unwrap(), b"original");
+        assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn peer_cache_recovery_rejects_invalid_writer_input_without_replacement() {
+        let temp = TempDir::new().unwrap();
+        let path = known_peers_path(temp.path());
+        let peers = vec![peer_cache_test_record()];
+        persist_known_peers(&path, &peers).unwrap();
+        let original = fs::read(&path).unwrap();
+        assert!(
+            persist_known_peers(
+                &path,
+                &vec![peer_cache_test_record(); MAX_PERSISTED_KNOWN_PEERS + 1]
+            )
+            .is_err()
+        );
+        let mut oversized = peer_cache_test_record();
+        oversized.enr = "x".repeat(MAX_PERSISTED_ENR_BYTES + 1);
+        assert!(persist_known_peers(&path, &[oversized]).is_err());
+        assert_eq!(fs::read(&path).unwrap(), original);
+    }
+
+    #[tokio::test]
+    async fn peer_cache_recovery_failed_save_retains_last_persisted() {
+        let temp = TempDir::new().unwrap();
+        let mut network = peer_retention_fixture(&temp);
+        network.last_persisted = vec![peer_cache_test_record()];
+        let before = network.last_persisted.clone();
+        let blocked = temp.path().join("blocked");
+        fs::write(&blocked, b"original").unwrap();
+        network.known_peers_path = blocked.join(KNOWN_PEERS_FILE);
+        assert!(network.persist_known_peers().is_err());
+        assert_eq!(network.last_persisted, before);
+        assert_eq!(fs::read(blocked).unwrap(), b"original");
     }
 
     #[test]
