@@ -117,4 +117,7 @@ Independent final source/test review found no remaining actionable defect.
 Cleanup removed the hash-only paired prepare wrapper and independent optional
 hash/gas API parameters. Still-used scheduling and final verification helpers
 remain. Validation metadata records original/final logs, proof and review hashes.
-Seven local gates, CI and merge remain pending. No Mac mini work was performed.
+All seven local gates pass on `641d5a2e`, including 1,532 workspace
+tests (23 ignored), doc tests and release linking. CI and merge remain pending.
+[Validation record](baselines/2026-09-16-execution-receipt-resource-bounds.json).
+No Mac mini work was performed.
