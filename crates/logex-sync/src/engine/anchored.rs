@@ -2997,8 +2997,7 @@ impl SyncEngine {
                 self.handle_reorg(reorg).await?;
             }
 
-            self.peers
-                .cache_canonical_block(header.clone(), body.clone(), &receipts);
+            self.peers.cache_canonical_block(&header, &body, &receipts);
             self.note_serving_peer(header_peer, &mut newly_serving_peers);
             self.note_serving_peer(body_peer, &mut newly_serving_peers);
             self.note_serving_peer(receipt_peer, &mut newly_serving_peers);
@@ -3346,7 +3345,7 @@ impl SyncEngine {
 
                 let recent_headers = self.head_tracker.snapshot();
                 self.peers
-                    .cache_canonical_block(header.clone(), body.clone(), block_receipts);
+                    .cache_canonical_block(header, body, block_receipts);
                 let log_count = self
                     .ingest_block(header, block_hash, &txs, &recent_headers, Some(&anchor))
                     .await?;

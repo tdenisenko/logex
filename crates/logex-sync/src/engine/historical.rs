@@ -337,7 +337,7 @@ impl SyncEngine {
 
                     let recent_headers = self.head_tracker.snapshot();
                     self.peers
-                        .cache_canonical_block(header.clone(), body.clone(), block_receipts);
+                        .cache_canonical_block(header, body, block_receipts);
                     let log_count = self
                         .ingest_block(header, block_hash, &txs, &recent_headers, None)
                         .await?;

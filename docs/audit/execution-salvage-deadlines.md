@@ -63,7 +63,8 @@ Independent source review found no actionable defect in the correction.
 
 All seven local gates pass on source `2894e2b5`: vendor verification, formatting,
 workspace check, strict Clippy, 1,497 workspace tests (23 ignored), documentation
-tests and release node linking. PR, exact-head CI and merge remain pending.
+tests and release node linking. All six CI jobs passed on head `0ef7a886` (run
+`35027144349`); PR #183 merged as `bc585616` after fresh exact-head/base checks.
 Evidence and source identities are recorded in
 [the validation record](baselines/2026-09-16-execution-salvage-deadlines.json). The broader offline audit, volume supervision,
 verified repair and subsequent live/staging acceptance remain incomplete.

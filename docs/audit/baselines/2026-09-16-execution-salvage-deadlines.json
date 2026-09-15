@@ -1,5 +1,5 @@
 {
-  "status": "All seven local gates, eight focused controls and independent final review pass; PR, CI and merge pending",
+  "status": "Merged after all seven local gates and all six exact-head CI jobs passed",
   "branch": "audit/execution-salvage-deadlines",
   "base": "76ecd1849c4cfc4dffb547fa2663d8328d730ecb",
   "finding": {
@@ -61,6 +61,18 @@
     "gates/test-summary.json": {
       "sha256": "d84ec804d8c540e4254ca052b8b6e7c81a87e664eaf76d3e39a347af306fda34",
       "bytes": 69
+    },
+    "premerge.json": {
+      "sha256": "ee6b463c376d1acf8bf1e42bc6c7b9fbc75fdf08d6ea06ea8dd1c1f6cd0ff63c",
+      "bytes": 1894
+    },
+    "merged.json": {
+      "sha256": "ced3434cbdef0f407309b6fe85bf257fa47808bbb897599485f58eae23a9588c",
+      "bytes": 240
+    },
+    "ci-watch.log": {
+      "sha256": "c5ace29f6e59740d52be1e293b0a9dbcb3af5c532ba7c1d74d7ba4f68775bcb2",
+      "bytes": 12815
     }
   },
   "original_controls": {
@@ -215,5 +227,51 @@
     "passed": 1497,
     "failed": 0,
     "ignored": 23
+  },
+  "pull_request": {
+    "headRefOid": "0ef7a886290357bac1ff03bdc441d5a419585e5e",
+    "mergeCommit": {
+      "oid": "bc5856162311e7d40a2211e9f121c3491b91ee6e"
+    },
+    "mergedAt": "2026-09-15T21:49:40Z",
+    "number": 183,
+    "state": "MERGED",
+    "url": "https://github.com/tdenisenko/logex/pull/183"
+  },
+  "ci": {
+    "run": 35027144349,
+    "head": "0ef7a886290357bac1ff03bdc441d5a419585e5e",
+    "checks": [
+      {
+        "name": "Check",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS"
+      },
+      {
+        "name": "Format",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS"
+      },
+      {
+        "name": "Clippy",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS"
+      },
+      {
+        "name": "Test",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS"
+      },
+      {
+        "name": "macOS Test",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS"
+      },
+      {
+        "name": "Release Build",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS"
+      }
+    ]
   }
 }

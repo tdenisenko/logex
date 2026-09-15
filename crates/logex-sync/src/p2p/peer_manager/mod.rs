@@ -718,8 +718,8 @@ impl PeerManager {
 
     pub fn cache_canonical_block(
         &self,
-        header: <LogexNetworkPrimitives as NetworkPrimitives>::BlockHeader,
-        body: <LogexNetworkPrimitives as NetworkPrimitives>::BlockBody,
+        header: &<LogexNetworkPrimitives as NetworkPrimitives>::BlockHeader,
+        body: &<LogexNetworkPrimitives as NetworkPrimitives>::BlockBody,
         receipts: &[alloy_consensus::ReceiptWithBloom<
             <LogexNetworkPrimitives as NetworkPrimitives>::Receipt,
         >],
