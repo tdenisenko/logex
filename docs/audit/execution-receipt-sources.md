@@ -59,8 +59,8 @@ block's supplier in both parallel validation and streaming extraction.
 See [the validation record](baselines/2026-09-16-execution-receipt-sources.json).
 Final independent review and all seven local gates pass on source `35750c2d`:
 vendor verification, formatting, workspace check, strict Clippy, 1,468 workspace
-tests (23 ignored), documentation tests and release node linking. PR and CI remain
-pending. Aggregate
+tests (23 ignored), documentation tests and release node linking. All six CI jobs passed on head `870b2ad3` (run `35018416011`); PR #180 merged
+as `87692192` after fresh exact-head/base verification. Aggregate
 salvage/ETH70 budgets and the telemetry encoding-cost lead remain separate review
 items. The broader offline audit, external-volume supervision, verified repair
 and later live/staging acceptance remain incomplete. Mac-mini testing and owned

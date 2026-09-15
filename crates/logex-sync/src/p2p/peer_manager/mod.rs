@@ -734,7 +734,9 @@ impl PeerManager {
         &self,
         headers: impl IntoIterator<Item = <LogexNetworkPrimitives as NetworkPrimitives>::BlockHeader>,
     ) {
-        self.serve_cache.insert_headers(headers);
+        if self.serve_cache.insert_headers(headers) {
+            self.sync_advertised_history_range();
+        }
     }
 
     pub fn remove_cached_blocks(&self, reverted_hashes: &[B256]) {
