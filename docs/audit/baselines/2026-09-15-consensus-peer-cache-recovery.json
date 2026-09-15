@@ -1,0 +1,198 @@
+{
+  "source_commit": "7771ddfed8cabd6990f06f3664cbd4f509608f08",
+  "baseline": {
+    "base_commit": "3ba2bb0e54c415cadb2ea5dc4b0f11722ff245ba",
+    "command": [
+      "cargo",
+      "test",
+      "-p",
+      "logex-cl",
+      "--lib",
+      "--locked",
+      "--offline",
+      "-j",
+      "2",
+      "peer_cache_recovery_"
+    ],
+    "exit_code": 101,
+    "passed": 1,
+    "failed": 5,
+    "before_log_sha256": "37612ebc40808d8804eaf31f54db2f7bed381fa638fae7fe2c39084c71bd4fa2",
+    "regression_source_sha256": "b7e772af9cfb4d75b59ab5f9fb9c9c9d9a501dd1d66fae80800586a25f8d27c2",
+    "passed_control": "real read error remains an error",
+    "baseline_findings": [
+      "incomplete content prevents loader and actual network construction",
+      "oversized valid JSON is accepted without preserving/rejecting original",
+      "257 records accepted despite256-record producer limit",
+      "existing fixed-name staging file is overwritten/removed"
+    ]
+  },
+  "metadata_error_reproduction": {
+    "restored_function": "load_known_peers",
+    "function_source_commit": "3ba2bb0e54c415cadb2ea5dc4b0f11722ff245ba",
+    "other_code": "candidate unchanged",
+    "command": [
+      "cargo",
+      "test",
+      "-p",
+      "logex-cl",
+      "--lib",
+      "--locked",
+      "--offline",
+      "-j",
+      "2",
+      "peer_cache_recovery_preserves_artifacts_on_io_failures"
+    ],
+    "exit_code": 101,
+    "candidate_sha256": "fad8a1e10daf59d66c287b80f6cbfc212cb12a9cf9151f31d7d83b66073a058f",
+    "old_function_sha256": "f2bd27b2256a58380fa0c43bc103a41f77b254c1950abfc060740c68a97e990f"
+  },
+  "final_focused": {
+    "passed": 9,
+    "failed": 0,
+    "exit_code": 0,
+    "log": "/private/tmp/logex-peer-cache.ne2n4imc/root-focused.log",
+    "sha256": "ac88b6733c8928e19c450f7b5aa8ce7e6bcafc944f68a3b7d804637c4a9552ca"
+  },
+  "final_review_binding": {
+    "source_file": "crates/logex-cl/src/network.rs",
+    "source_sha256": "78eeceb883188ffb6f52647b4287b4631aee3850f92213fcefa80854d69dfe73",
+    "review_file": "/private/tmp/logex-peer-cache-final-review/review.json",
+    "review_sha256": "a460aaf059abb679cc52281e8c899efb4f67d35398edfdb2806521a2a7832e2b",
+    "commit": "7771ddfed8cabd6990f06f3664cbd4f509608f08"
+  },
+  "workspace_gates": {
+    "commit": "7771ddfed8cabd6990f06f3664cbd4f509608f08",
+    "rustc": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+    "gates": [
+      {
+        "name": "vendor",
+        "command": [
+          "python3",
+          "tools/verify_datafusion_vendor.py"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T11:25:01.348106+00:00",
+        "finished": "2026-09-15T11:25:01.405429+00:00",
+        "sha256": "d8d80949d6f3378c14456842b531f0cade514179e4c94781b95ff9abb6447675",
+        "log": "/private/tmp/logex-peer-cache.ne2n4imc/gates/vendor.log"
+      },
+      {
+        "name": "format",
+        "command": [
+          "cargo",
+          "fmt",
+          "--all",
+          "--",
+          "--check"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T11:25:01.405745+00:00",
+        "finished": "2026-09-15T11:25:02.229473+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-peer-cache.ne2n4imc/gates/format.log"
+      },
+      {
+        "name": "check",
+        "command": [
+          "cargo",
+          "check",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T11:25:02.229803+00:00",
+        "finished": "2026-09-15T11:25:11.320864+00:00",
+        "sha256": "894ad44c4a1a023541467be4c9094f32c3151187fafa893a386b83c4a5308ef8",
+        "log": "/private/tmp/logex-peer-cache.ne2n4imc/gates/check.log"
+      },
+      {
+        "name": "clippy",
+        "command": [
+          "cargo",
+          "clippy",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T11:25:11.321284+00:00",
+        "finished": "2026-09-15T11:25:20.048299+00:00",
+        "sha256": "850724108cd40a8e78c72bc693e5071603283c1a43baf0384cd100b178eece20",
+        "log": "/private/tmp/logex-peer-cache.ne2n4imc/gates/clippy.log"
+      },
+      {
+        "name": "test",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T11:25:20.049043+00:00",
+        "finished": "2026-09-15T11:28:15.499770+00:00",
+        "sha256": "b97e3fc21b57850b931558257b63ad67da15aba1f78edaca272b2bac64a17563",
+        "log": "/private/tmp/logex-peer-cache.ne2n4imc/gates/test.log"
+      },
+      {
+        "name": "doc",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--doc",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T11:28:15.502129+00:00",
+        "finished": "2026-09-15T11:28:30.844810+00:00",
+        "sha256": "3973136a2bb5fcbdac77f66d33229dc2026abc34df92ac53d47d8dfe561bfe61",
+        "log": "/private/tmp/logex-peer-cache.ne2n4imc/gates/doc.log"
+      },
+      {
+        "name": "release-build",
+        "command": [
+          "cargo",
+          "build",
+          "-p",
+          "logex-node",
+          "--release",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-15T11:28:30.845414+00:00",
+        "finished": "2026-09-15T11:29:33.293101+00:00",
+        "sha256": "8b4542f150e5f47e25fc0bef697c5be1ba898149c2804bc366012eb86ec51d7c",
+        "log": "/private/tmp/logex-peer-cache.ne2n4imc/gates/release-build.log"
+      }
+    ]
+  },
+  "pr_status": "pending",
+  "workspace_test_totals": {
+    "groups": 25,
+    "passed": 1340,
+    "failed": 0,
+    "ignored": 23
+  }
+}

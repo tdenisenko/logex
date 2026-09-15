@@ -3,7 +3,7 @@
 This batch fixes two arithmetic defects in restored consensus peer history. The
 existing scoring weights, address selection policy, failure resets and persisted
 cache schema remain unchanged. Source `a134d127` is independently reviewed;
-all seven local workspace gates pass. PR/CI completion remains pending.
+all seven local workspace gates and all six Linux/macOS CI jobs pass.
 
 ## Findings
 
@@ -70,7 +70,9 @@ SHA256. All seven local gates pass: vendor integrity, formatting, workspace
 checking, strict workspace Clippy, 1,331 workspace tests (23 ignored), doc tests
 and release build. Commands, source/review bindings and hashed logs are retained
 in the [validation record](baselines/2026-09-15-consensus-peer-scoring.json).
-PR/CI completion remains pending before merge.
+[PR #164](https://github.com/tdenisenko/logex/pull/164) merged as `3ba2bb0e`
+after all six CI jobs passed at head `e81884de` in run `34960664262`. See the
+[CI and merge record](baselines/2026-09-15-consensus-peer-scoring-ci.json).
 
 Cleanup removed the obsolete signed narrowing, old fallback type and unchecked
 persisted success increments. No duplicate helper, new format or scoring-policy

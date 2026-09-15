@@ -188,5 +188,8 @@
     "failed": 0,
     "ignored": 23
   },
-  "pr_status": "pending"
+  "pr_status": "merged",
+  "pr_url": "https://github.com/tdenisenko/logex/pull/164",
+  "merge_commit": "3ba2bb0e54c415cadb2ea5dc4b0f11722ff245ba",
+  "ci_run_id": 34960664262
 }
