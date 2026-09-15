@@ -90,7 +90,8 @@ PR #186 (`9317c42a`) after all local and CI gates.
 
 The [execution progress review](execution-partial-progress.md) records B4-24–27:
 useful partial-response accounting, exact tail failure context and receipt retry
-cleanup. All 247 focused tests and final review pass; seven gates and merge are next.
+cleanup. All 247 focused tests, final review and seven local gates pass; CI/merge
+remain pending.
 
 ## Baseline findings
 
