@@ -113,8 +113,10 @@ parallelism for bounded optional metadata after pressure. No throughput improvem
 or regression percentage is inferred from these implementation observations.
 
 The focused consensus suite passes 333 tests with one existing test ignored.
-Workspace gates, final source reconciliation, CI and merge remain pending.
-Evidence is recorded in the accompanying validation record when those checks finish.
+Source `6772c7fa` passes final independent review, strict Clippy and all
+seven local gates: vendor integrity, formatting, workspace check, Clippy, 1,417
+workspace tests (23 ignored), documentation tests and the release node build. CI and merge remain pending. Results and source
+hashes are recorded in the [validation record](baselines/2026-09-15-consensus-metadata-retention.json).
 
 ## Remaining scope
 
