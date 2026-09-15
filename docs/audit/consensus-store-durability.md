@@ -105,4 +105,10 @@ restorations. No blanket lint changes, new unsafe code, retention cap or benchma
 campaign was introduced. The pinned existing tempfile dependency is promoted from
 dev-only to production use; the lockfile is unchanged.
 
-Local gates and Linux/macOS CI/merge disposition will be recorded here once complete.
+Source `8832a8d528f06cdff97ed398f24253c6c7f08457` passed all seven local gates:
+vendored-source verification, formatting, locked workspace/all-target check,
+strict Clippy, all-target tests (1,227 passed, 23 intentionally ignored), doc tests
+and the release node build. Existing dependency future-incompatibility and Apple
+debug-linker warnings remain. Evidence is in
+[the gate record](baselines/2026-09-15-consensus-store-durability-gates.json).
+Linux/macOS CI and merge disposition remain pending.
