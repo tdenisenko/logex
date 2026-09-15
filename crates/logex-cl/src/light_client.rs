@@ -1020,6 +1020,7 @@ impl DecodedUpdate {
                 next_sync_committee: verified_optional_sync_committee(
                     &payload.next_sync_committee,
                     &payload.next_sync_committee_branch,
+                    payload.attested_header.beacon.slot,
                 )?,
                 signature_slot: payload.signature_slot,
                 participants: participant_count(&payload.sync_aggregate),
@@ -1036,6 +1037,7 @@ impl DecodedUpdate {
                 next_sync_committee: verified_optional_sync_committee(
                     &payload.next_sync_committee,
                     &payload.next_sync_committee_branch,
+                    payload.attested_header.beacon.slot,
                 )?,
                 signature_slot: payload.signature_slot,
                 participants: participant_count(&payload.sync_aggregate),
@@ -1052,6 +1054,7 @@ impl DecodedUpdate {
                 next_sync_committee: verified_optional_sync_committee(
                     &payload.next_sync_committee,
                     &payload.next_sync_committee_branch,
+                    payload.attested_header.beacon.slot,
                 )?,
                 signature_slot: payload.signature_slot,
                 participants: participant_count(&payload.sync_aggregate),
@@ -1458,6 +1461,7 @@ fn verified_optional_deneb_header(
 fn verified_optional_sync_committee<const N: usize>(
     committee: &SyncCommitteeRaw,
     branch: &FixedBytes<N>,
+    attested_slot: u64,
 ) -> Result<Option<SyncCommitteeData>, LightClientVerificationError> {
     // Presence follows the branch, not the committee bytes. A zero branch
     // cannot carry a committee even if it reconstructs the signed state root.
@@ -1467,7 +1471,7 @@ fn verified_optional_sync_committee<const N: usize>(
     ) {
         (false, true) => Ok(None),
         (true, false) => Ok(Some(committee.to_persisted())),
-        _ => Err(LightClientVerificationError::InvalidNextSyncCommitteeProof { attested_slot: 0 }),
+        _ => Err(LightClientVerificationError::InvalidNextSyncCommitteeProof { attested_slot }),
     }
 }
 
@@ -3167,11 +3171,17 @@ mod tests {
                     1 => with_committee!(LightClientUpdateDeneb),
                     _ => with_committee!(LightClientUpdateElectra),
                 };
-                assert_eq!(
-                    apply_light_client_update_payload(&bytes, &store).is_ok(),
-                    has_branch,
-                    "schema {schema}, branch present {has_branch}"
-                );
+                let result = apply_light_client_update_payload(&bytes, &store);
+                if has_branch {
+                    assert!(result.is_ok(), "schema {schema}");
+                } else {
+                    assert!(matches!(
+                        result,
+                        Err(LightClientVerificationError::InvalidNextSyncCommitteeProof {
+                            attested_slot,
+                        }) if attested_slot == store.bootstrap_slot + 1
+                    ));
+                }
                 let mut cache = crate::PersistedLightClientPayloads {
                     updates_by_period: std::collections::BTreeMap::from([(
                         sync_committee_period_at_slot(store.bootstrap_slot),
