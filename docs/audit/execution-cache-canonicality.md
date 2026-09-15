@@ -79,8 +79,10 @@ the initial implementation. Five additional controls pass for full-domain sparse
 ranges, retained-body fallback after header eviction, body-change reporting,
 delayed invalidation and callback mutation snapshots (23 cache tests total).
 Whole-domain controls use only a handful of cached entries and were not run
-against the original numeric-span loops. Final independent review and workspace
-gates are recorded in the linked validation record before merge.
+against the original numeric-span loops. Final independent review and all seven
+local gates pass on source `910f4a72`: vendor verification, formatting, workspace
+check, strict Clippy, 1,483 workspace tests (23 ignored), documentation tests and
+release node linking. PR, exact-head CI and merge remain pending.
 
 See [the validation record](baselines/2026-09-16-execution-cache-canonicality.json).
 Cache payload admission, aggregate request budgets and cheaper/honest network
