@@ -176,7 +176,48 @@ impl MetaData {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RawRpcResponse {
     pub context_bytes: Option<[u8; 4]>,
+    #[serde(deserialize_with = "deserialize_rpc_bytes")]
     pub bytes: Vec<u8>,
+}
+
+fn deserialize_rpc_bytes<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<u8>, D::Error> {
+    deserializer.deserialize_seq(BoundedRpcBytes::<MAX_RPC_RESPONSE_SSZ_BYTES>)
+}
+
+struct BoundedRpcBytes<const LIMIT: usize>;
+
+impl<'de, const LIMIT: usize> serde::de::Visitor<'de> for BoundedRpcBytes<LIMIT> {
+    type Value = Vec<u8>;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "a byte sequence of at most {LIMIT} bytes")
+    }
+
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut sequence: A) -> Result<Vec<u8>, A::Error> {
+        let mut bytes = Vec::new();
+        // Persisted JSON uses the same per-payload bound as the wire codec.
+        // Ignore size_hint: a deserializer's advertised length must not drive
+        // an oversized reservation before any bytes have been consumed.
+        while let Some(byte) = sequence.next_element::<u8>()? {
+            if bytes.len() == LIMIT {
+                return Err(serde::de::Error::custom(format!(
+                    "RPC response payload exceeds the {LIMIT}-byte limit"
+                )));
+            }
+            if bytes.len() == bytes.capacity() {
+                let additional = bytes.capacity().max(1024).min(LIMIT - bytes.len());
+                bytes.try_reserve_exact(additional).map_err(|error| {
+                    serde::de::Error::custom(format!(
+                        "cannot allocate cached RPC response payload: {error}"
+                    ))
+                })?;
+            }
+            bytes.push(byte);
+        }
+        Ok(bytes)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1237,6 +1278,78 @@ fn bounded_error_message(message: impl Into<Vec<u8>>) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cached_rpc_bytes_decode_with_bounded_allocation() {
+        use serde::Deserializer;
+
+        struct MisleadingHint(std::vec::IntoIter<u8>);
+        impl Iterator for MisleadingHint {
+            type Item = u8;
+
+            fn next(&mut self) -> Option<u8> {
+                self.0.next()
+            }
+
+            fn size_hint(&self) -> (usize, Option<usize>) {
+                (usize::MAX, Some(usize::MAX))
+            }
+        }
+
+        for input in [vec![], vec![1], vec![1, 2, 3, 4]] {
+            let sequence = serde::de::value::SeqDeserializer::<_, serde::de::value::Error>::new(
+                MisleadingHint(input.clone().into_iter()),
+            );
+            let decoded = sequence.deserialize_seq(BoundedRpcBytes::<4>).unwrap();
+            assert_eq!(decoded, input);
+            assert!(decoded.capacity() <= 4);
+        }
+        let mut deserializer = serde_json::Deserializer::from_str("[1,2,3,4,5]");
+        let error = (&mut deserializer)
+            .deserialize_seq(BoundedRpcBytes::<4>)
+            .unwrap_err();
+        assert!(error.to_string().contains("exceeds the 4-byte limit"));
+
+        let mut deserializer = serde_json::Deserializer::from_str("[]");
+        assert!(
+            (&mut deserializer)
+                .deserialize_seq(BoundedRpcBytes::<0>)
+                .unwrap()
+                .is_empty()
+        );
+        let mut deserializer = serde_json::Deserializer::from_str("[1]");
+        assert!(
+            (&mut deserializer)
+                .deserialize_seq(BoundedRpcBytes::<0>)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn cached_rpc_bytes_serde_uses_wire_limit_and_preserves_json() {
+        for bytes in [vec![], vec![0, 1, 127, 255]] {
+            for context_bytes in [None, Some([1, 2, 3, 4])] {
+                let payload = RawRpcResponse {
+                    context_bytes,
+                    bytes: bytes.clone(),
+                };
+                let json = serde_json::to_string(&payload).unwrap();
+                assert_eq!(
+                    serde_json::from_str::<RawRpcResponse>(&json).unwrap(),
+                    payload
+                );
+            }
+        }
+        // The visitor's diagnostic exposes the actual production limit without
+        // allocating a production-sized fixture merely to test its wiring.
+        let error = serde_json::from_str::<RawRpcResponse>(
+            r#"{"context_bytes":null,"bytes":"invalid sequence"}"#,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains(&format!(
+            "a byte sequence of at most {MAX_RPC_RESPONSE_SSZ_BYTES} bytes"
+        )));
+    }
 
     #[test]
     fn status_round_trip() {
