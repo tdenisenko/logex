@@ -1,0 +1,27 @@
+{
+  "headers": {
+    "attested_header": {
+      "beacon": {
+        "slot": 14187832299631165748,
+        "proposer_index": 10611888770194510892,
+        "parent_root": "0xa866f97daa5f3f32409f2a60d8ed955c8bf034053f128393a4d8eca5de594436",
+        "state_root": "0xe08823f94a36765635c4f178e0821fb8372af8a8a0532740fe6513287f96e4c9",
+        "body_root": "0x535eaec7156d48f43787fd6b004b5a93f481be23fcd8e20689c465133ac14d56"
+      },
+      "execution": {
+        "block_number": 10433204821260945903,
+        "gas_limit": 4882339392791496357,
+        "gas_used": 18114989040758912503,
+        "timestamp": 3701820689076127546,
+        "extra_data": "0x9e984bf703807dae",
+        "block_hash": "0x83be37c247b5c1f9f6195456f8589211cd0f227eb804d2e1936c39fcdd4ba686",
+        "transactions_root": "0x81dd2d6093e858593233b590c06ed1946a12032fac095af0f42e08c19bca3ab0",
+        "withdrawals_root": "0xc9d444f95d82784324f8e0d25dbb4046a3d81f2cf4ef24eb61bef7fc1e11cb15"
+      },
+      "beacon_root": "0xb823d269278ec95b2bd21b00c333c0180c1c02c61bfa13c9242e501b0281aa2d"
+    }
+  },
+  "signature_slot": 14411299255901060167,
+  "sync_committee_bits": "0x8975a34dfdbd4d98d3319022a1ff67c1b6fe1f23c36a41d3213033f15bb85b915c846a2acba8f20a0f1b8663797f3ca6b47f51411056674300a86d2cff5cafcc",
+  "sync_committee_signature": "0xd70e63df6de514e9d1654f3e515862a96f5f85b88215419e13ad7d1fe63de52a32966dde9efd62fc919cb9bef58721ea5b74f9bc45e0b21d7c3e8ddce00d3c159bd78a33ddfb47a0d53ecaf4844b3b269d74629c13e512f2e63165d3c5239b16"
+}

@@ -1,0 +1,47 @@
+{
+  "headers": {
+    "attested_header": {
+      "beacon": {
+        "slot": 10229049466355468264,
+        "proposer_index": 15275166991659134262,
+        "parent_root": "0x5a1b661b76cb59896366f2904df9cf40516dfe853298b24513834c7f5d2ec0b9",
+        "state_root": "0x61e66ecbd0feeb7609c08f583736fe4912737b697c10ef3f7306aee9b8154c06",
+        "body_root": "0xf17a1c7c4f4901210a7acc0e2c54e9cebcd913ec256fc738e1769ff8ef6a98b9"
+      },
+      "execution": {
+        "block_number": 6753428761653070818,
+        "gas_limit": 11986747465175988695,
+        "gas_used": 8086532287583899313,
+        "timestamp": 12646702287649872511,
+        "extra_data": "0x2c6fc70d2048",
+        "block_hash": "0x6ab5b568df41030c62c2867cd04b435a0eed996ac1e32489577b853a4c80399e",
+        "transactions_root": "0x0f80d21a2be509424823059b725ecea8ad90be7e86ccfc1d2c35ae84befcb58d",
+        "withdrawals_root": "0x474b07466dc8f1988f12337f5d3b674deb665e196cdba1cc38642c488af2e3c8"
+      },
+      "beacon_root": "0x8055c31b22a35de03306167ecae6b53ec370d27cca66c3ffddb68fd19bd34d5f"
+    },
+    "finalized_header": {
+      "beacon": {
+        "slot": 14932283224861452607,
+        "proposer_index": 1009470367118663274,
+        "parent_root": "0x587c3aabb0de600187c040b32f564c781e208145672d7ee5f520b436bef02cf8",
+        "state_root": "0x578831cffb834b10f7fef19c8f3f227421b5bf39b03e60ec18687b200afc6500",
+        "body_root": "0x85eb436140f9f1b9081430d6ac6c62ada31e32bc92e7671fe66ca6ec2c46186b"
+      },
+      "execution": {
+        "block_number": 1784320175972455650,
+        "gas_limit": 3629287728304773817,
+        "gas_used": 11376654372519537747,
+        "timestamp": 6546606517341301113,
+        "extra_data": "0x403e482dacc003feafdc0ea5abf210378a8caf40c71cb339d12c3d34ac81c175",
+        "block_hash": "0x59b829e2170c973b94117782025bb2a4366274210851f761aec4dca5507e7733",
+        "transactions_root": "0xfec886d7dcd76154d5a5a338503ce8ff8e4163ec5a54b449f2e498cc29c1dd4c",
+        "withdrawals_root": "0x9dbee20518af5cb18d3f746c70eee6ac849ee515b2ab80beb6c42b50260b9882"
+      },
+      "beacon_root": "0xd1797b2c93d201b44905d8021d1d3b67cd1bc121923006f16702ccc2c6846052"
+    }
+  },
+  "signature_slot": 7563832983336433126,
+  "sync_committee_bits": "0x855fef010123233f0c0ff97f777251f786b9ec024b16d38dd0a6eaf9a5df0b5d303e06450eb4c1940d6e10185d22f9068e8d14e61eb802a25bf4cc0c61de15a7",
+  "sync_committee_signature": "0xcec2423afef19ab9b774d7bc46d685496494e12c1b5defec92fea336047a31fd3f1aef548500612944cf4f12580257281906090499db12746f9d9e20e31251005688f8bb87ad58ee7a85b5ba3898e3c833eb153bafefcc95a520249304d437e7"
+}

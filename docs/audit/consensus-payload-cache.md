@@ -47,9 +47,11 @@ need not equal saved status summaries, since range updates change summaries
 independently. A cache need not contain a contiguous history. Its supplied
 bootstrap, if present, must match the retained checkpoint.
 
-The existing pre-Fulu digest policy is retained. Independent compatibility work
-on historical plain-versus-shifted digests remains in the roadmap; no policy
-change is inferred from a function name or unverified future schedule.
+This milestone retained the existing pre-Fulu digest policy pending independent
+compatibility evidence. The subsequent [fork conformance batch](consensus-fork-conformance.md)
+resolves it against corrected specifications and an independent client: historical
+pre-Fulu contexts use the plain digest. The original uncertainty is retained here
+as the scope boundary of PR #155.
 
 These checks establish decoded structure and local commitments, not authenticity
 of arbitrary modifications to a trusted file. No current-committee signature
@@ -114,5 +116,8 @@ commitment-checking code. The completed integrated consensus-crate suite passes
 local gates: vendor verification, formatting, workspace check, strict Clippy,
 1,249 workspace tests (23 ignored), documentation tests and release build.
 [Gate records](baselines/2026-09-15-consensus-payload-cache-gates.json) retain
-commands, toolchain, log hashes and focused evidence. Linux/macOS CI and merge
-remain pending.
+commands, toolchain, log hashes and focused evidence. All six Linux/macOS CI
+jobs passed on head `f157d5f7` in run `34914060937`; [PR #155](https://github.com/tdenisenko/logex/pull/155)
+merged as `d67f9360` on September 15, 2026 at 00:44:44 UTC.
+[CI and merge records](baselines/2026-09-15-consensus-payload-cache-ci.json) retain
+the exact head and final outcomes.

@@ -97,18 +97,19 @@ PR #153 merged as `037e54ad` on September 14 at 23:39:26 UTC; the
 
 Remaining evidence and lifecycle work:
 
-- Persisted consensus snapshots currently trust restored summaries/store fields;
-  structural validation, bounded reads, transactional publication and write-failure
-  handling require the CL persistence/runtime batch. Source proof checks do not
-  establish on-disk corruption detection.
+- PRs #154/#155 subsequently added structural restore/cache validation, per-entry
+  byte bounds, transactional publication and write-failure handling. Complete
+  stored-state integrity and historical retention remain in the CL/storage
+  batches; source proof checks do not establish all on-disk corruption detection.
 - `SyncEngine::new(None)` retains an explicit legacy unanchored path. Normal node
   startup resolves a checkpoint when state is absent, so this is not a demonstrated
   ordinary fresh-start bypass. Review the missing-state race and retire obsolete
   compatibility paths during sync/runtime work under the migration waiver.
-- Official independent multi-fork update fixtures, genesis-default finality
-  handling and historical BPO digest interop remain precise conformance leads.
-  Existing synthetic tests do not prove every transition; no new defect is claimed
-  without a relevant reproducer.
+- The subsequent [fork conformance batch](consensus-fork-conformance.md) resolves
+  the named multi-fork SSZ, genesis-default finality and historical BPO digest
+  leads. Published random vectors establish decoding, while signed local controls
+  verify the corrected proof/domain behavior; neither claims exhaustive
+  authenticated official transition coverage.
 - The reviewed code does not reexecute Ethereum state, withdrawals or transactions.
   Receipt/body/header guarantees continue to depend on the configured checkpoint
   and authenticated ancestry.

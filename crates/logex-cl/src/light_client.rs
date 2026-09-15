@@ -18,6 +18,9 @@ use tree_hash::{TreeHash as _, merkle_root, mix_in_length};
 
 use crate::MAINNET_CONSENSUS_CHAIN_SPEC;
 
+#[cfg(test)]
+mod conformance_tests;
+
 const SYNC_COMMITTEE_PUBKEYS: usize = 512;
 const BLS_PUBKEY_BYTES: usize = 48;
 const SYNC_COMMITTEE_BITS_BYTES: usize = 64;
@@ -75,6 +78,8 @@ pub enum LightClientVerificationError {
     TrustedCheckpointSlotMismatch { expected: u64, actual: u64 },
     #[error("invalid execution header for beacon slot {slot}: {reason}")]
     InvalidExecutionHeader { slot: u64, reason: &'static str },
+    #[error("invalid finalized header at slot {slot}: {reason}")]
+    InvalidFinalityHeader { slot: u64, reason: &'static str },
     #[error("invalid execution proof for beacon slot {slot}")]
     InvalidExecutionProof { slot: u64 },
     #[error("invalid current sync committee proof for beacon slot {slot}")]
@@ -119,8 +124,6 @@ pub enum LightClientVerificationError {
     },
     #[error("invalid next sync committee proof for attested slot {attested_slot}")]
     InvalidNextSyncCommitteeProof { attested_slot: u64 },
-    #[error("finality update did not include a finalized header")]
-    MissingFinalizedHeader,
     #[error("invalid sync committee length: expected {SYNC_COMMITTEE_PUBKEYS}, got {actual}")]
     InvalidCommitteeLength { actual: usize },
     #[error("invalid sync committee public key at index {index}: {details}")]
@@ -567,14 +570,14 @@ pub(crate) fn validate_cached_light_client_payloads(
             let decoded = decode_finality_update_payload(&payload.bytes)?;
             let update = VerifiedLightClientUpdate {
                 attested_header: decoded.attested_verified_header()?,
-                finalized_header: Some(decoded.finalized_verified_header()?),
+                finalized_header: decoded.finalized_verified_header()?,
                 next_sync_committee: None,
                 signature_slot: decoded.signature_slot(),
                 participants: participant_count(decoded.sync_aggregate()),
             };
             validate_cached_update_structure(
                 &update,
-                Some(decoded.finality_branch()),
+                decoded.finality_branch_for_verification(),
                 None,
                 decoded.sync_aggregate(),
             )?;
@@ -629,8 +632,6 @@ pub(crate) fn normalize_cached_context(
     payload: &mut crate::rpc::RawRpcResponse,
     slot: u64,
 ) -> Result<(), String> {
-    // Preserve the existing chain-spec digest policy, including historical
-    // epochs. Pre-Fulu plain-versus-shifted interoperability is a separate audit.
     // Context follows the bootstrap/attested slot, not finalized/signature slot
     // or the current node epoch; BPO transitions make that distinction matter.
     let expected = MAINNET_CONSENSUS_CHAIN_SPEC
@@ -750,7 +751,7 @@ pub(crate) fn apply_finality_update_payload(
     let finalized_header = decoded.finalized_verified_header()?;
     let update = VerifiedLightClientUpdate {
         attested_header: attested_header.clone(),
-        finalized_header: Some(finalized_header.clone()),
+        finalized_header: finalized_header.clone(),
         next_sync_committee: None,
         signature_slot: decoded.signature_slot(),
         participants: participant_count(decoded.sync_aggregate()),
@@ -760,18 +761,20 @@ pub(crate) fn apply_finality_update_payload(
         verify_valid_light_client_update(
             store,
             update,
-            Some(decoded.finality_branch()),
+            decoded.finality_branch_for_verification(),
             None,
             decoded.sync_aggregate(),
         )?,
     )?;
     Ok((
-        applied
-            .finality_status
-            .expect("finality wrapper should always yield a finality status"),
+        applied.finality_status.unwrap_or_else(|| decoded.status()),
         applied.store,
         attested_header,
-        finalized_header,
+        finalized_header.unwrap_or_else(|| VerifiedLightClientHeader {
+            fork: decoded.status().fork,
+            beacon: BeaconBlockHeaderSsz::default(),
+            execution: None,
+        }),
     ))
 }
 
@@ -899,15 +902,20 @@ impl DecodedFinalityUpdate {
 
     fn finalized_verified_header(
         &self,
-    ) -> Result<VerifiedLightClientHeader, LightClientVerificationError> {
+    ) -> Result<Option<VerifiedLightClientHeader>, LightClientVerificationError> {
         match self {
-            Self::Capella(payload) => verify_capella_header(&payload.finalized_header),
-            Self::Deneb(payload) => {
-                verify_deneb_header(&payload.finalized_header, ConsensusDataFork::Deneb)
-            }
-            Self::Electra(payload) => {
-                verify_deneb_header(&payload.finalized_header, ConsensusDataFork::Electra)
-            }
+            Self::Capella(payload) => verified_optional_capella_header(
+                &payload.finalized_header,
+                branch_has_nonzero(payload.finality_branch.as_slice()),
+            ),
+            Self::Deneb(payload) => verified_optional_deneb_header(
+                &payload.finalized_header,
+                branch_has_nonzero(payload.finality_branch.as_slice()),
+            ),
+            Self::Electra(payload) => verified_optional_deneb_header(
+                &payload.finalized_header,
+                branch_has_nonzero(payload.finality_branch.as_slice()),
+            ),
         }
     }
 
@@ -925,6 +933,14 @@ impl DecodedFinalityUpdate {
             Self::Deneb(payload) => branch_from_fixed(&payload.finality_branch),
             Self::Electra(payload) => branch_from_fixed(&payload.finality_branch),
         }
+    }
+
+    fn finality_branch_for_verification(&self) -> Option<Vec<B256>> {
+        let branch = self.finality_branch();
+        branch
+            .iter()
+            .any(|item| *item != B256::ZERO)
+            .then_some(branch)
     }
 
     fn signature_slot(&self) -> u64 {
@@ -986,10 +1002,14 @@ impl DecodedUpdate {
         match self {
             Self::Capella(payload) => Ok(VerifiedLightClientUpdate {
                 attested_header: verify_capella_header(&payload.attested_header)?,
-                finalized_header: verified_optional_capella_header(&payload.finalized_header)?,
+                finalized_header: verified_optional_capella_header(
+                    &payload.finalized_header,
+                    branch_has_nonzero(payload.finality_branch.as_slice()),
+                )?,
                 next_sync_committee: verified_optional_sync_committee(
                     &payload.next_sync_committee,
                     &payload.next_sync_committee_branch,
+                    payload.attested_header.beacon.slot,
                 )?,
                 signature_slot: payload.signature_slot,
                 participants: participant_count(&payload.sync_aggregate),
@@ -999,10 +1019,14 @@ impl DecodedUpdate {
                     &payload.attested_header,
                     fork_for_slot(payload.attested_header.beacon.slot),
                 )?,
-                finalized_header: verified_optional_deneb_header(&payload.finalized_header)?,
+                finalized_header: verified_optional_deneb_header(
+                    &payload.finalized_header,
+                    branch_has_nonzero(payload.finality_branch.as_slice()),
+                )?,
                 next_sync_committee: verified_optional_sync_committee(
                     &payload.next_sync_committee,
                     &payload.next_sync_committee_branch,
+                    payload.attested_header.beacon.slot,
                 )?,
                 signature_slot: payload.signature_slot,
                 participants: participant_count(&payload.sync_aggregate),
@@ -1012,10 +1036,14 @@ impl DecodedUpdate {
                     &payload.attested_header,
                     ConsensusDataFork::Electra,
                 )?,
-                finalized_header: verified_optional_deneb_header(&payload.finalized_header)?,
+                finalized_header: verified_optional_deneb_header(
+                    &payload.finalized_header,
+                    branch_has_nonzero(payload.finality_branch.as_slice()),
+                )?,
                 next_sync_committee: verified_optional_sync_committee(
                     &payload.next_sync_committee,
                     &payload.next_sync_committee_branch,
+                    payload.attested_header.beacon.slot,
                 )?,
                 signature_slot: payload.signature_slot,
                 participants: participant_count(&payload.sync_aggregate),
@@ -1041,29 +1069,26 @@ impl DecodedUpdate {
 
     fn finality_branch_for_verification(&self) -> Option<Vec<B256>> {
         let branch = self.finality_branch();
-        let has_verified_finalized_header = match self {
-            Self::Capella(payload) => {
-                payload.finalized_header != LightClientHeaderCapella::default()
-            }
-            Self::Deneb(payload) => payload.finalized_header != LightClientHeaderDeneb::default(),
-            Self::Electra(payload) => payload.finalized_header != LightClientHeaderDeneb::default(),
-        };
-        (has_verified_finalized_header || branch.iter().any(|item| *item != B256::ZERO))
+        branch
+            .iter()
+            .any(|item| *item != B256::ZERO)
             .then_some(branch)
     }
 
     fn next_sync_committee_branch(&self) -> Option<Vec<B256>> {
         match self {
             Self::Capella(payload)
-                if payload.next_sync_committee != SyncCommitteeRaw::default() =>
+                if branch_has_nonzero(payload.next_sync_committee_branch.as_slice()) =>
             {
                 Some(branch_from_fixed(&payload.next_sync_committee_branch))
             }
-            Self::Deneb(payload) if payload.next_sync_committee != SyncCommitteeRaw::default() => {
+            Self::Deneb(payload)
+                if branch_has_nonzero(payload.next_sync_committee_branch.as_slice()) =>
+            {
                 Some(branch_from_fixed(&payload.next_sync_committee_branch))
             }
             Self::Electra(payload)
-                if payload.next_sync_committee != SyncCommitteeRaw::default() =>
+                if branch_has_nonzero(payload.next_sync_committee_branch.as_slice()) =>
             {
                 Some(branch_from_fixed(&payload.next_sync_committee_branch))
             }
@@ -1374,39 +1399,68 @@ fn verify_deneb_header(
     })
 }
 
+// A nonzero branch denotes finality, including the genesis checkpoint whose
+// header is wholly default and whose proof leaf is zero (Altair sync protocol).
+fn validate_finalized_header_shape(
+    is_default: bool,
+    slot: u64,
+    has_finality: bool,
+) -> Result<(), LightClientVerificationError> {
+    if !is_default && (!has_finality || slot == 0) {
+        return Err(LightClientVerificationError::InvalidFinalityHeader {
+            slot,
+            reason: "absent finality and genesis finality require a default header",
+        });
+    }
+    Ok(())
+}
+
 fn verified_optional_capella_header(
     header: &LightClientHeaderCapella,
+    has_finality: bool,
 ) -> Result<Option<VerifiedLightClientHeader>, LightClientVerificationError> {
-    if header == &LightClientHeaderCapella::default() {
-        Ok(None)
-    } else {
+    validate_finalized_header_shape(
+        header == &LightClientHeaderCapella::default(),
+        header.beacon.slot,
+        has_finality,
+    )?;
+    if has_finality {
         verify_capella_header(header).map(Some)
+    } else {
+        Ok(None)
     }
 }
 
 fn verified_optional_deneb_header(
     header: &LightClientHeaderDeneb,
+    has_finality: bool,
 ) -> Result<Option<VerifiedLightClientHeader>, LightClientVerificationError> {
-    if header == &LightClientHeaderDeneb::default() {
-        Ok(None)
-    } else {
+    validate_finalized_header_shape(
+        header == &LightClientHeaderDeneb::default(),
+        header.beacon.slot,
+        has_finality,
+    )?;
+    if has_finality {
         verify_deneb_header(header, fork_for_slot(header.beacon.slot)).map(Some)
+    } else {
+        Ok(None)
     }
 }
 
 fn verified_optional_sync_committee<const N: usize>(
     committee: &SyncCommitteeRaw,
     branch: &FixedBytes<N>,
+    attested_slot: u64,
 ) -> Result<Option<SyncCommitteeData>, LightClientVerificationError> {
-    if committee == &SyncCommitteeRaw::default() {
-        if branch_has_nonzero(branch.as_slice()) {
-            return Err(
-                LightClientVerificationError::InvalidNextSyncCommitteeProof { attested_slot: 0 },
-            );
-        }
-        Ok(None)
-    } else {
-        Ok(Some(committee.to_persisted()))
+    // Presence follows the branch, not the committee bytes. A zero branch
+    // cannot carry a committee even if it reconstructs the signed state root.
+    match (
+        branch_has_nonzero(branch.as_slice()),
+        committee == &SyncCommitteeRaw::default(),
+    ) {
+        (false, true) => Ok(None),
+        (true, false) => Ok(Some(committee.to_persisted())),
+        _ => Err(LightClientVerificationError::InvalidNextSyncCommitteeProof { attested_slot }),
     }
 }
 
@@ -1516,6 +1570,7 @@ fn verify_update_finality_proof(
         let root = update
             .finalized_header
             .as_ref()
+            .filter(|header| header.beacon.slot != 0)
             .map(VerifiedLightClientHeader::beacon_root)
             .unwrap_or(B256::ZERO);
         let attested_slot = update.attested_header.beacon.slot;
@@ -1606,7 +1661,9 @@ fn process_light_client_update(
             .finalized_header
             .as_ref()
             .map(|finalized_header| LightClientFinalityUpdateStatus {
-                fork: finalized_header.fork,
+                // This describes the update, whose finalized header can be
+                // from an earlier fork or the default genesis checkpoint.
+                fork: update.attested_header.fork,
                 attested_header: header_summary_verified(&update.attested_header),
                 finalized_header: header_summary_verified(finalized_header),
                 signature_slot: update.signature_slot,
@@ -2954,6 +3011,305 @@ mod tests {
 
     const CAPELLA_START_SLOT: u64 = 194_048 * SLOTS_PER_EPOCH;
     const DENEB_START_SLOT: u64 = 269_568 * SLOTS_PER_EPOCH;
+
+    // These small signed objects exercise the genesis/default rules in the
+    // v1.6.0 Altair validate_light_client_update specification. Their Merkle
+    // roots are constructed fixtures, not claims about canonical mainnet state.
+    fn genesis_finality_fixture(
+        schema: usize,
+        has_branch: bool,
+        nondefault_slot: Option<u64>,
+    ) -> (Vec<u8>, Vec<u8>, VerifiedLightClientStore) {
+        let slot = [
+            CAPELLA_START_SLOT + 16,
+            DENEB_START_SLOT + 16,
+            364_032 * 32 + 16,
+        ][schema];
+        let sk = SecretKey::key_gen(&[7u8; 32], &[]).unwrap();
+        let mut attested = upgrade_capella_header(capella_header(slot));
+        if schema > 0 {
+            attested.beacon.body_root = branch_root(
+                execution_payload_header_deneb_root(&attested.execution),
+                &branch_from_fixed(&attested.execution_branch),
+                subtree_index(EXECUTION_PAYLOAD_GINDEX),
+            );
+        }
+        let mut finalized = LightClientHeaderDeneb::default();
+        if let Some(slot) = nondefault_slot {
+            finalized.beacon.slot = slot;
+            finalized.beacon.proposer_index = 1;
+        }
+        let leaf = if nondefault_slot.is_some() {
+            beacon_block_header_root(&finalized.beacon)
+        } else {
+            B256::ZERO
+        };
+        let branch = vec![
+            if has_branch {
+                B256::repeat_byte(0xe1)
+            } else {
+                B256::ZERO
+            };
+            finality_branch_depth_at_slot(slot)
+        ];
+        attested.beacon.state_root = branch_root(
+            leaf,
+            &branch,
+            subtree_index(finalized_root_gindex_at_slot(slot)),
+        );
+        if !has_branch && nondefault_slot.is_none() {
+            // Absence carries no state-root commitment to verify.
+            attested.beacon.state_root = B256::repeat_byte(0x42);
+        }
+        let signature_slot = slot + 1;
+        let aggregate = signed_sync_aggregate(&sk, &attested.beacon, signature_slot);
+        let verified = verify_deneb_header(&attested, fork_for_slot(slot)).unwrap();
+        let mut initial_header = verified;
+        initial_header.beacon.slot -= 1;
+        let store = VerifiedLightClientStore {
+            checkpoint_root: initial_header.beacon_root(),
+            bootstrap_slot: slot - 1,
+            current_sync_committee: sync_committee_from_secret_key(&sk).to_persisted(),
+            next_sync_committee: None,
+            finalized_header: initial_header.clone(),
+            optimistic_header: initial_header,
+            best_valid_update: None,
+            previous_max_active_participants: 0,
+            current_max_active_participants: 0,
+        };
+        let branch_bytes: Vec<u8> = branch.iter().flat_map(|root| root.0).collect();
+        macro_rules! encode_pair {
+            ($finality:ident, $update:ident, $attested:expr, $finalized:expr) => {{
+                let finality = $finality {
+                    attested_header: $attested,
+                    finalized_header: $finalized,
+                    finality_branch: FixedBytes::from_slice(&branch_bytes),
+                    sync_aggregate: aggregate,
+                    signature_slot,
+                };
+                let update = $update {
+                    attested_header: finality.attested_header.clone(),
+                    finalized_header: finality.finalized_header.clone(),
+                    finality_branch: finality.finality_branch,
+                    next_sync_committee: SyncCommitteeRaw::default(),
+                    next_sync_committee_branch: FixedBytes::ZERO,
+                    sync_aggregate: finality.sync_aggregate.clone(),
+                    signature_slot,
+                };
+                (finality.as_ssz_bytes(), update.as_ssz_bytes(), store)
+            }};
+        }
+        match schema {
+            0 => {
+                let mut capella = capella_header(slot);
+                capella.beacon = attested.beacon;
+                let finalized = LightClientHeaderCapella {
+                    beacon: finalized.beacon,
+                    ..Default::default()
+                };
+                encode_pair!(
+                    LightClientFinalityUpdateCapella,
+                    LightClientUpdateCapella,
+                    capella,
+                    finalized
+                )
+            }
+            1 => encode_pair!(
+                LightClientFinalityUpdateDeneb,
+                LightClientUpdateDeneb,
+                attested,
+                finalized
+            ),
+            _ => encode_pair!(
+                LightClientFinalityUpdateElectra,
+                LightClientUpdateElectra,
+                attested,
+                finalized
+            ),
+        }
+    }
+
+    #[test]
+    fn next_committee_presence_requires_nonzero_branch_in_signed_updates_and_cache() {
+        for schema in 0..3 {
+            for has_branch in [false, true] {
+                let (_, range, store) = genesis_finality_fixture(schema, false, None);
+                let sk = SecretKey::key_gen(&[7u8; 32], &[]).unwrap();
+                macro_rules! with_committee {
+                    ($ty:ty) => {{
+                        let mut update = <$ty>::from_ssz_bytes(&range).unwrap();
+                        update.next_sync_committee = sync_committee_from_secret_key(&sk);
+                        if has_branch {
+                            update.next_sync_committee_branch = FixedBytes::repeat_byte(0xd1);
+                        }
+                        update.attested_header.beacon.state_root = branch_root(
+                            update.next_sync_committee.tree_hash_root(),
+                            &branch_from_fixed(&update.next_sync_committee_branch),
+                            subtree_index(next_sync_committee_gindex_at_slot(
+                                update.attested_header.beacon.slot,
+                            )),
+                        );
+                        update.sync_aggregate = signed_sync_aggregate(
+                            &sk,
+                            &update.attested_header.beacon,
+                            update.signature_slot,
+                        );
+                        update.as_ssz_bytes()
+                    }};
+                }
+                let bytes = match schema {
+                    0 => with_committee!(LightClientUpdateCapella),
+                    1 => with_committee!(LightClientUpdateDeneb),
+                    _ => with_committee!(LightClientUpdateElectra),
+                };
+                let result = apply_light_client_update_payload(&bytes, &store);
+                if has_branch {
+                    assert!(result.is_ok(), "schema {schema}");
+                } else {
+                    assert!(matches!(
+                        result,
+                        Err(LightClientVerificationError::InvalidNextSyncCommitteeProof {
+                            attested_slot,
+                        }) if attested_slot == store.bootstrap_slot + 1
+                    ));
+                }
+                let mut cache = crate::PersistedLightClientPayloads {
+                    updates_by_period: std::collections::BTreeMap::from([(
+                        sync_committee_period_at_slot(store.bootstrap_slot),
+                        crate::rpc::RawRpcResponse {
+                            bytes,
+                            context_bytes: None,
+                        },
+                    )]),
+                    ..Default::default()
+                };
+                assert_eq!(
+                    validate_cached_light_client_payloads(
+                        &mut cache,
+                        WeakSubjectivityCheckpoint {
+                            beacon_root: store.checkpoint_root,
+                            beacon_slot: Some(store.bootstrap_slot),
+                        },
+                    )
+                    .is_ok(),
+                    has_branch,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn genesis_finality_signed_families_and_cache_preserve_presence() {
+        for schema in 0..3 {
+            for has_branch in [true, false] {
+                let (finality, range, store) = genesis_finality_fixture(schema, has_branch, None);
+                let (summary, finality_store, _, finalized) =
+                    apply_finality_update_payload(&finality, &store).unwrap();
+                let expected_fork = [
+                    ConsensusDataFork::Capella,
+                    ConsensusDataFork::Deneb,
+                    ConsensusDataFork::Electra,
+                ][schema];
+                assert_eq!(summary.fork, expected_fork);
+                assert_eq!(finalized.beacon.slot, 0);
+                let applied = apply_light_client_update_payload(&range, &store).unwrap();
+                if let Some(status) = &applied.finality_status {
+                    assert_eq!(
+                        status.fork, expected_fork,
+                        "finality summary describes the update, including genesis finality"
+                    );
+                }
+                for result in [&finality_store, &applied.store] {
+                    assert_eq!(result.finalized_header, store.finalized_header);
+                    assert_eq!(
+                        result
+                            .best_valid_update
+                            .as_ref()
+                            .unwrap()
+                            .finalized_header
+                            .is_some(),
+                        has_branch
+                    );
+                }
+                let mut cache = crate::PersistedLightClientPayloads {
+                    finality_update: Some(crate::rpc::RawRpcResponse {
+                        bytes: finality,
+                        context_bytes: None,
+                    }),
+                    updates_by_period: std::collections::BTreeMap::from([(
+                        sync_committee_period_at_slot(store.bootstrap_slot),
+                        crate::rpc::RawRpcResponse {
+                            bytes: range,
+                            context_bytes: None,
+                        },
+                    )]),
+                    ..Default::default()
+                };
+                validate_cached_light_client_payloads(
+                    &mut cache,
+                    WeakSubjectivityCheckpoint {
+                        beacon_root: store.checkpoint_root,
+                        beacon_slot: Some(store.bootstrap_slot),
+                    },
+                )
+                .unwrap();
+            }
+            let (_, no_finality, store) = genesis_finality_fixture(schema, false, None);
+            let (_, genesis, _) = genesis_finality_fixture(schema, true, None);
+            let absent = apply_light_client_update_payload(&no_finality, &store)
+                .unwrap()
+                .store
+                .best_valid_update
+                .unwrap();
+            let present = apply_light_client_update_payload(&genesis, &store)
+                .unwrap()
+                .store
+                .best_valid_update
+                .unwrap();
+            assert!(is_better_update(&present, &absent));
+            assert!(!is_better_update(&absent, &present));
+        }
+    }
+
+    #[test]
+    fn genesis_finality_rejects_nondefault_header_and_absent_branch_mismatch() {
+        for schema in 0..3 {
+            for (has_branch, slot) in [(true, 0), (false, 0), (false, 1)] {
+                let (finality, range, store) =
+                    genesis_finality_fixture(schema, has_branch, Some(slot));
+                assert!(apply_finality_update_payload(&finality, &store).is_err());
+                assert!(apply_light_client_update_payload(&range, &store).is_err());
+                for family in 0..2 {
+                    let mut cache = crate::PersistedLightClientPayloads::default();
+                    let raw = crate::rpc::RawRpcResponse {
+                        bytes: if family == 0 {
+                            finality.clone()
+                        } else {
+                            range.clone()
+                        },
+                        context_bytes: None,
+                    };
+                    if family == 0 {
+                        cache.finality_update = Some(raw);
+                    } else {
+                        cache
+                            .updates_by_period
+                            .insert(sync_committee_period_at_slot(store.bootstrap_slot), raw);
+                    }
+                    assert!(
+                        validate_cached_light_client_payloads(
+                            &mut cache,
+                            WeakSubjectivityCheckpoint {
+                                beacon_root: store.checkpoint_root,
+                                beacon_slot: Some(store.bootstrap_slot)
+                            }
+                        )
+                        .is_err()
+                    );
+                }
+            }
+        }
+    }
 
     fn capella_header(slot: u64) -> LightClientHeaderCapella {
         let execution = ExecutionPayloadHeaderCapella {
