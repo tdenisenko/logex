@@ -1,0 +1,310 @@
+{
+  "commit": "57c36f760100662fe94eb88464cffee0bb5d5ae7",
+  "rustc": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+  "gates": [
+    {
+      "name": "vendor",
+      "command": [
+        "python3",
+        "tools/verify_datafusion_vendor.py"
+      ],
+      "exit_code": 0,
+      "started": "2026-09-15T02:34:52.561172+00:00",
+      "finished": "2026-09-15T02:34:52.620987+00:00",
+      "sha256": "d8d80949d6f3378c14456842b531f0cade514179e4c94781b95ff9abb6447675",
+      "log": "/private/tmp/logex-peer-freshness.o8wqidy3/gates/vendor.log"
+    },
+    {
+      "name": "format",
+      "command": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "exit_code": 0,
+      "started": "2026-09-15T02:34:52.621364+00:00",
+      "finished": "2026-09-15T02:34:53.471090+00:00",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "log": "/private/tmp/logex-peer-freshness.o8wqidy3/gates/format.log"
+    },
+    {
+      "name": "check",
+      "command": [
+        "cargo",
+        "check",
+        "--workspace",
+        "--all-targets",
+        "--locked",
+        "--offline",
+        "-j",
+        "2"
+      ],
+      "exit_code": 0,
+      "started": "2026-09-15T02:34:53.471495+00:00",
+      "finished": "2026-09-15T02:35:04.388915+00:00",
+      "sha256": "b34979b47260df22970a36137cff1ac3a535197ff9168050059f05b4c73e848b",
+      "log": "/private/tmp/logex-peer-freshness.o8wqidy3/gates/check.log"
+    },
+    {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--locked",
+        "--offline",
+        "-j",
+        "2",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit_code": 0,
+      "started": "2026-09-15T02:35:04.390156+00:00",
+      "finished": "2026-09-15T02:35:14.966946+00:00",
+      "sha256": "9096893ab7b6e96185547293454d3cc8578f2c31df71159a483a153c359802ce",
+      "log": "/private/tmp/logex-peer-freshness.o8wqidy3/gates/clippy.log"
+    },
+    {
+      "name": "test",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace",
+        "--all-targets",
+        "--locked",
+        "--offline",
+        "-j",
+        "2"
+      ],
+      "exit_code": 0,
+      "started": "2026-09-15T02:35:14.967759+00:00",
+      "finished": "2026-09-15T02:38:30.054536+00:00",
+      "sha256": "3f2d8ded2e39dd536b67e0ff218d3a1d55a9c4bce03b10956d60747571b2821c",
+      "log": "/private/tmp/logex-peer-freshness.o8wqidy3/gates/test.log"
+    },
+    {
+      "name": "doc",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace",
+        "--doc",
+        "--locked",
+        "--offline",
+        "-j",
+        "2"
+      ],
+      "exit_code": 0,
+      "started": "2026-09-15T02:38:30.058801+00:00",
+      "finished": "2026-09-15T02:38:55.468305+00:00",
+      "sha256": "7735aac2738cf7a8ff18d66f4ec6d5784fef06e90d73b786a73ec034a19c2984",
+      "log": "/private/tmp/logex-peer-freshness.o8wqidy3/gates/doc.log"
+    },
+    {
+      "name": "release-build",
+      "command": [
+        "cargo",
+        "build",
+        "-p",
+        "logex-node",
+        "--release",
+        "--locked",
+        "--offline",
+        "-j",
+        "2"
+      ],
+      "exit_code": 0,
+      "started": "2026-09-15T02:38:55.469182+00:00",
+      "finished": "2026-09-15T02:40:24.148637+00:00",
+      "sha256": "46b2dba2d395da5f37ab17daf8f9b3c635a5bd5b94a724af952ad63072587729",
+      "log": "/private/tmp/logex-peer-freshness.o8wqidy3/gates/release-build.log"
+    }
+  ],
+  "workspace_test_summary": {
+    "groups": 25,
+    "passed": 1294,
+    "failed": 0,
+    "ignored": 23
+  },
+  "base": "c7ef4411cb1f1085e49704a673e164aa6c5189fe",
+  "branch": "audit/consensus-peer-freshness",
+  "source_sha256": {
+    "crates/logex-cl/src/network.rs": "f0416bef475c6c7084335eec8156de0733fbbf9fce3646702dfef466f32a66f5"
+  },
+  "focused_evidence": {
+    "files": [
+      {
+        "path": "/private/tmp/logex-consensus-peer-freshness-independent-review-1/design-review.json",
+        "bytes": 1639,
+        "sha256": "608a78ce469503786628824f2f3b3f403412717a25e41e34a5e2147c949f5c0f"
+      },
+      {
+        "path": "/private/tmp/logex-consensus-peer-freshness-independent-review-1/draft-integration.diff",
+        "bytes": 22540,
+        "sha256": "38d9d4fe5b1494c545becc4a86492f21ae8738ea65e373a842c6d6d39d609556"
+      },
+      {
+        "path": "/private/tmp/logex-consensus-peer-freshness-independent-review-1/draft-integration.json",
+        "bytes": 1283,
+        "sha256": "84955a9dec2d655f4ce41e713969f99c6e85d25f1275cc9e75a19d8c83fe5d84"
+      },
+      {
+        "path": "/private/tmp/logex-consensus-peer-freshness-independent-review-1/final-reconciliation-1/commit-binding.json",
+        "bytes": 585,
+        "sha256": "288e4d0474fa620930ade3fcf92b804061fb6cb7c9f9423fffc518aaf06a1f1e"
+      },
+      {
+        "path": "/private/tmp/logex-consensus-peer-freshness-independent-review-1/final-reconciliation-1/review.json",
+        "bytes": 2773,
+        "sha256": "ab707933573c55579b86211c31c24a24d85114daae039dba3f8efa22179aeadb"
+      },
+      {
+        "path": "/private/tmp/logex-consensus-peer-freshness-independent-review-1/final-reconciliation-1/reviewed.diff",
+        "bytes": 27360,
+        "sha256": "9887ba55a8ec421bc166221c27cf848d9c5e994d04a7217d2cbab401d9188706"
+      },
+      {
+        "path": "/private/tmp/logex-peer-freshness.S9CPf4/after-controls.log",
+        "bytes": 1116,
+        "sha256": "30790b15e4f11113658570cc0d17b95908b983ebbfc81c01a91b290ff8a37ca2"
+      },
+      {
+        "path": "/private/tmp/logex-peer-freshness.S9CPf4/after-controls2.log",
+        "bytes": 1247,
+        "sha256": "e2764303469abad03f6150fc57891f8ac76a8f143ed1a5fd756ac5defd6ef5aa"
+      },
+      {
+        "path": "/private/tmp/logex-peer-freshness.S9CPf4/after-initial.log",
+        "bytes": 978,
+        "sha256": "fc231cd9acf5bed96f45f81a79a577495a161d34a6586dbf7c82272445eea028"
+      },
+      {
+        "path": "/private/tmp/logex-peer-freshness.S9CPf4/before.log",
+        "bytes": 2565,
+        "sha256": "b5990aafac1c6950a61ccb9705bc87b9f66a080682dca058f08bca3191b50648"
+      },
+      {
+        "path": "/private/tmp/logex-peer-freshness.S9CPf4/clippy-final.log",
+        "bytes": 453,
+        "sha256": "cf84380fca01d6be938567ad2a285c3956b57b7f569c81cd53190303dbd89852"
+      },
+      {
+        "path": "/private/tmp/logex-peer-freshness.S9CPf4/clippy.log",
+        "bytes": 453,
+        "sha256": "888c8c6697a0c555620f9dcd2b906d67b3bc4167d1f8b5fe42758f6a94126ca6"
+      },
+      {
+        "path": "/private/tmp/logex-peer-freshness.S9CPf4/commands.txt",
+        "bytes": 1388,
+        "sha256": "e39985a901ced2deb33ad07030995d7f101643dae377e89d568dcd4cbb222af2"
+      },
+      {
+        "path": "/private/tmp/logex-peer-freshness.S9CPf4/final-controls.log",
+        "bytes": 1423,
+        "sha256": "0c4756bfcb54592251d8a545c654860a3656b367b7c7a8336a8bcfc188398c84"
+      },
+      {
+        "path": "/private/tmp/logex-peer-freshness.S9CPf4/network-final.log",
+        "bytes": 8667,
+        "sha256": "4e1f6e9c1feb9cece4b5449a81d0d6648066ca4b15af257a979535ee985c4bf9"
+      },
+      {
+        "path": "/private/tmp/logex-peer-freshness.S9CPf4/network-final2.log",
+        "bytes": 8667,
+        "sha256": "87f742ce11790e00c16bee2789694ded9538e4837fb73267b8be53f4cfb76561"
+      },
+      {
+        "path": "/private/tmp/logex-peer-freshness.S9CPf4/network.log",
+        "bytes": 8586,
+        "sha256": "bf448d557c8a866b7371b6c7c03be718e33accba28d48c1a4fb1052642a60de9"
+      }
+    ],
+    "observed_log_test_summaries": {
+      "network.log": [
+        "test result: ok. 90 passed; 0 failed; 0 ignored; 0 measured; 126 filtered out; finished in 2.29s"
+      ],
+      "after-initial.log": [
+        "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 209 filtered out; finished in 0.29s"
+      ],
+      "clippy-final.log": [],
+      "network-final.log": [
+        "test result: ok. 91 passed; 0 failed; 0 ignored; 0 measured; 126 filtered out; finished in 1.93s"
+      ],
+      "clippy.log": [],
+      "final-controls.log": [
+        "test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 209 filtered out; finished in 1.29s"
+      ],
+      "after-controls.log": [],
+      "after-controls2.log": [
+        "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 209 filtered out; finished in 1.12s"
+      ],
+      "network-final2.log": [
+        "test result: ok. 91 passed; 0 failed; 0 ignored; 0 measured; 126 filtered out; finished in 1.97s"
+      ],
+      "before.log": [
+        "test result: FAILED. 0 passed; 3 failed; 0 ignored; 0 measured; 209 filtered out; finished in 0.13s"
+      ]
+    },
+    "review": {
+      "status": "REVIEWED_NO_ACTIONABLE_FINDING_PENDING_COMMIT_BINDING",
+      "base": "c7ef4411",
+      "source_sha256": "f0416bef475c6c7084335eec8156de0733fbbf9fce3646702dfef466f32a66f5",
+      "diff_sha256": "9887ba55a8ec421bc166221c27cf848d9c5e994d04a7217d2cbab401d9188706",
+      "dependency_inputs": {
+        "/Users/tdenisenko/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/discv5-0.10.4/src/service.rs": "408fb84197063b008e06a621547d4fdcf28ec28b8a73417e663beb505020ff8a",
+        "/Users/tdenisenko/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/discv5-0.10.4/src/discv5.rs": "5036a7baf0f3141c3b340e01f9810d79319c246c5858218a150f8fb04166f27a"
+      },
+      "findings": [],
+      "resolved": [
+        "Saved selection chooses strictly newer routing ENR or retained canonical for equal/older routing data before eligibility filtering.",
+        "Shared state-based address refresh excludes remembered no-Status after startup and subsequent stale/live/fork refresh.",
+        "Lifecycle discovery provenance restores observed membership when retained live records become eligible at fork transition; startup-only records remain unobserved.",
+        "Startup caches establish sequence authority before filtering; metadata follows accepted newer record or exact equal canonical once, stale/conflicting entries cannot replace scores.",
+        "last_persisted is actual loaded records, permitting next save to remove stale/ineligible cached content."
+      ],
+      "reviewed_invariants": [
+        "Strict seq increase alone replaces canonical content and built-in bypass provenance.",
+        "Connected/request ownership unaffected by address withdrawal.",
+        "Retained metadata and observation provenance share existing lifecycle union pruning and protected-policy behavior.",
+        "Existing candidate set and ranking preserved by saved selection.",
+        "Fork transition invokes refresh over all lifecycle records, including records absent routing table."
+      ],
+      "source_controls_read": [
+        "Explicit expected port after newer/equal/stale updates",
+        "Withdrawals: endpoint, family and relevance; pending requests retained",
+        "Fork reeligibility/count refresh and lifecycle pruning",
+        "Actual startup unsupported cache exclusion and stale-file removal",
+        "Boot/cache sequence and metadata ordering",
+        "Duplicate cache support winner in both orders",
+        "Saved newest/equal conflict selection, serialization and reload"
+      ],
+      "validation_limits": [
+        "Read-only review; implementer/root own all Cargo and runtime checks.",
+        "Commit binding pending; source currently under final test-only cleanup.",
+        "Retained history can expire via eviction/restart; periodic protected-policy limit is not instantaneous hard cap.",
+        "Cache durability and gossip/message-ID work outside this scoped review."
+      ]
+    },
+    "binding": {
+      "status": "REVIEW_BOUND_TO_COMMITTED_SOURCE",
+      "commit": "57c36f760100662fe94eb88464cffee0bb5d5ae7",
+      "source_path": "crates/logex-cl/src/network.rs",
+      "source_sha256": "f0416bef475c6c7084335eec8156de0733fbbf9fce3646702dfef466f32a66f5",
+      "review_path": "/private/tmp/logex-consensus-peer-freshness-independent-review-1/final-reconciliation-1/review.json",
+      "review_sha256": "ab707933573c55579b86211c31c24a24d85114daae039dba3f8efa22179aeadb",
+      "source_matches_review": true,
+      "limits": "Read-only review; no additional tests performed. Root validation gates are separate."
+    },
+    "command_ledger_note": "network.log records90passed; previous88 count was a transcription error corrected against retained log. clippy-final exit0 verified from completed process and log."
+  },
+  "scope": [
+    "Temporary fixtures and scripted objects only; no live discovery, swarm polling, peers or user data.",
+    "No benchmark or remote-host work.",
+    "Canonical ENR metadata shares existing lifecycle pruning and protected-state policy; authority expires on eviction and only existing cache records survive restart.",
+    "Gossip message-ID conformance, aggregate response memory, peer-cache crash durability and shared IPv6 port fallback remain separate recorded follow-ups."
+  ]
+}
