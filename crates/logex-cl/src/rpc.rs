@@ -1,6 +1,9 @@
 use std::io;
 
 use crate::beacon_cache::CachedBeaconPayload;
+use crate::rpc_memory::{
+    RpcMemoryPool, RpcReservation, RpcResponseBudgets, allocation_error, response_limit,
+};
 
 use alloy_primitives::B256;
 use async_trait::async_trait;
@@ -97,7 +100,7 @@ pub(crate) fn response_payload_limit(protocol: &Eth2RpcProtocol, result_code: u8
 }
 
 pub type Eth2RpcBehaviour = request_response::Behaviour<Eth2RpcCodec>;
-pub type Eth2RpcEvent = request_response::Event<Eth2RpcRequest, Eth2RpcResponse>;
+pub type Eth2RpcEvent = request_response::Event<Eth2RpcRequest, BudgetedRpcResponse>;
 pub type Eth2OutboundRequestId = request_response::OutboundRequestId;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Eth2RpcProtocol {
@@ -183,6 +186,29 @@ pub enum Eth2RpcResponse {
     CachedBeaconBlocksByRange(Vec<CachedBeaconPayload>),
     CachedBeaconBlocksByRoot(Vec<CachedBeaconPayload>),
     Error(Eth2RpcErrorResponse),
+}
+
+/// Transport ownership stays charged through queued events and application validation.
+/// This wrapper must not deep-clone its response under a shared reservation.
+#[derive(Debug)]
+pub struct BudgetedRpcResponse {
+    response: Eth2RpcResponse,
+    reservations: Vec<RpcReservation>,
+}
+
+impl BudgetedRpcResponse {
+    pub(crate) fn into_parts(self) -> (Eth2RpcResponse, Vec<RpcReservation>) {
+        (self.response, self.reservations)
+    }
+}
+
+impl From<Eth2RpcResponse> for BudgetedRpcResponse {
+    fn from(response: Eth2RpcResponse) -> Self {
+        Self {
+            response,
+            reservations: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -286,43 +312,59 @@ pub struct Eth2RpcErrorResponse {
     pub message: Vec<u8>,
 }
 
+#[cfg(test)]
 enum StreamedRpcResponse {
     Success(Vec<RawRpcResponse>),
     Error(Eth2RpcErrorResponse),
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct Eth2RpcCodec;
+pub struct Eth2RpcCodec {
+    budgets: RpcResponseBudgets,
+    expected_chunks: Option<usize>,
+}
+
+impl Eth2RpcCodec {
+    pub(crate) fn new(budgets: RpcResponseBudgets) -> Self {
+        Self {
+            budgets,
+            expected_chunks: None,
+        }
+    }
+}
 
 fn build_rpc_behaviour(
     protocols: impl IntoIterator<Item = (Eth2RpcProtocol, ProtocolSupport)>,
     request_timeout: Duration,
+    budgets: RpcResponseBudgets,
 ) -> Eth2RpcBehaviour {
     let config = request_response::Config::default()
         .with_request_timeout(request_timeout)
         .with_max_concurrent_streams(64);
 
-    Eth2RpcBehaviour::with_codec(Eth2RpcCodec, protocols, config)
+    Eth2RpcBehaviour::with_codec(Eth2RpcCodec::new(budgets), protocols, config)
 }
 
-pub fn build_status_behaviour() -> Eth2RpcBehaviour {
+pub fn build_status_behaviour(budgets: RpcResponseBudgets) -> Eth2RpcBehaviour {
     build_rpc_behaviour(
         [
             (Eth2RpcProtocol::StatusV1, ProtocolSupport::Full),
             (Eth2RpcProtocol::StatusV2, ProtocolSupport::Full),
         ],
         DEFAULT_RPC_TIMEOUT,
+        budgets,
     )
 }
 
-pub fn build_goodbye_behaviour() -> Eth2RpcBehaviour {
+pub fn build_goodbye_behaviour(budgets: RpcResponseBudgets) -> Eth2RpcBehaviour {
     build_rpc_behaviour(
         [(Eth2RpcProtocol::GoodbyeV1, ProtocolSupport::Full)],
         DEFAULT_RPC_TIMEOUT,
+        budgets,
     )
 }
 
-pub fn build_metadata_behaviour() -> Eth2RpcBehaviour {
+pub fn build_metadata_behaviour(budgets: RpcResponseBudgets) -> Eth2RpcBehaviour {
     build_rpc_behaviour(
         [
             (Eth2RpcProtocol::MetadataV2, ProtocolSupport::Full),
@@ -330,57 +372,69 @@ pub fn build_metadata_behaviour() -> Eth2RpcBehaviour {
             (Eth2RpcProtocol::MetadataV1, ProtocolSupport::Full),
         ],
         DEFAULT_RPC_TIMEOUT,
+        budgets,
     )
 }
 
-pub fn build_ping_behaviour() -> Eth2RpcBehaviour {
+pub fn build_ping_behaviour(budgets: RpcResponseBudgets) -> Eth2RpcBehaviour {
     build_rpc_behaviour(
         [(Eth2RpcProtocol::PingV1, ProtocolSupport::Full)],
         DEFAULT_RPC_TIMEOUT,
+        budgets,
     )
 }
 
-pub fn build_light_client_bootstrap_behaviour() -> Eth2RpcBehaviour {
+pub fn build_light_client_bootstrap_behaviour(budgets: RpcResponseBudgets) -> Eth2RpcBehaviour {
     build_rpc_behaviour(
         [(
             Eth2RpcProtocol::LightClientBootstrapV1,
             ProtocolSupport::Full,
         )],
         DEFAULT_RPC_TIMEOUT,
+        budgets,
     )
 }
 
-pub fn build_light_client_updates_by_range_behaviour() -> Eth2RpcBehaviour {
+pub fn build_light_client_updates_by_range_behaviour(
+    budgets: RpcResponseBudgets,
+) -> Eth2RpcBehaviour {
     build_rpc_behaviour(
         [(
             Eth2RpcProtocol::LightClientUpdatesByRangeV1,
             ProtocolSupport::Full,
         )],
         HISTORY_RPC_TIMEOUT,
+        budgets,
     )
 }
 
-pub fn build_light_client_finality_update_behaviour() -> Eth2RpcBehaviour {
+pub fn build_light_client_finality_update_behaviour(
+    budgets: RpcResponseBudgets,
+) -> Eth2RpcBehaviour {
     build_rpc_behaviour(
         [(
             Eth2RpcProtocol::LightClientFinalityUpdateV1,
             ProtocolSupport::Full,
         )],
         DEFAULT_RPC_TIMEOUT,
+        budgets,
     )
 }
 
-pub fn build_light_client_optimistic_update_behaviour() -> Eth2RpcBehaviour {
+pub fn build_light_client_optimistic_update_behaviour(
+    budgets: RpcResponseBudgets,
+) -> Eth2RpcBehaviour {
     build_rpc_behaviour(
         [(
             Eth2RpcProtocol::LightClientOptimisticUpdateV1,
             ProtocolSupport::Full,
         )],
         DEFAULT_RPC_TIMEOUT,
+        budgets,
     )
 }
 
-pub fn build_beacon_blocks_by_range_behaviour() -> Eth2RpcBehaviour {
+pub fn build_beacon_blocks_by_range_behaviour(budgets: RpcResponseBudgets) -> Eth2RpcBehaviour {
     build_rpc_behaviour(
         [
             (
@@ -393,16 +447,18 @@ pub fn build_beacon_blocks_by_range_behaviour() -> Eth2RpcBehaviour {
             ),
         ],
         HISTORY_RPC_TIMEOUT,
+        budgets,
     )
 }
 
-pub fn build_beacon_blocks_by_root_behaviour() -> Eth2RpcBehaviour {
+pub fn build_beacon_blocks_by_root_behaviour(budgets: RpcResponseBudgets) -> Eth2RpcBehaviour {
     build_rpc_behaviour(
         [
             (Eth2RpcProtocol::BeaconBlocksByRootV2, ProtocolSupport::Full),
             (Eth2RpcProtocol::BeaconBlocksByRootV1, ProtocolSupport::Full),
         ],
         HISTORY_RPC_TIMEOUT,
+        budgets,
     )
 }
 
@@ -410,7 +466,7 @@ pub fn build_beacon_blocks_by_root_behaviour() -> Eth2RpcBehaviour {
 impl Codec for Eth2RpcCodec {
     type Protocol = Eth2RpcProtocol;
     type Request = Eth2RpcRequest;
-    type Response = Eth2RpcResponse;
+    type Response = BudgetedRpcResponse;
 
     async fn read_request<T>(
         &mut self,
@@ -432,13 +488,7 @@ impl Codec for Eth2RpcCodec {
     where
         T: AsyncRead + Unpin + Send,
     {
-        if is_multi_chunk_protocol(protocol) {
-            let bytes =
-                read_bounded_to_end(io, MAX_RPC_STREAM_WIRE_BYTES, "RPC response stream").await?;
-            return decode_response(protocol, &bytes);
-        }
-
-        read_single_response(protocol, io).await
+        read_budgeted_response(protocol, io, &self.budgets, self.expected_chunks).await
     }
 
     async fn write_request<T>(
@@ -450,6 +500,21 @@ impl Codec for Eth2RpcCodec {
     where
         T: AsyncWrite + Unpin + Send,
     {
+        // libp2p clones a codec per stream and uses it for both this write and
+        // read_response, keeping the response count tied to the actual request.
+        self.expected_chunks = Some(
+            match &req {
+                Eth2RpcRequest::LightClientUpdatesByRange(request) => {
+                    usize::try_from(request.count).unwrap_or(usize::MAX)
+                }
+                Eth2RpcRequest::BeaconBlocksByRange(request) => {
+                    usize::try_from(request.count).unwrap_or(usize::MAX)
+                }
+                Eth2RpcRequest::BeaconBlocksByRoot(roots) => roots.len(),
+                _ => 1,
+            }
+            .min(MAX_RPC_RESPONSE_CHUNKS),
+        );
         let payload = encode_request(protocol, req)?;
         io.write_all(&payload).await?;
         io.close().await
@@ -464,6 +529,7 @@ impl Codec for Eth2RpcCodec {
     where
         T: AsyncWrite + Unpin + Send,
     {
+        let (res, _reservations) = res.into_parts();
         match (protocol, res) {
             (
                 Eth2RpcProtocol::LightClientUpdatesByRangeV1,
@@ -633,6 +699,7 @@ fn decode_request(protocol: &Eth2RpcProtocol, payload: &[u8]) -> io::Result<Eth2
     }
 }
 
+#[cfg(test)]
 fn decode_response(protocol: &Eth2RpcProtocol, bytes: &[u8]) -> io::Result<Eth2RpcResponse> {
     match protocol {
         Eth2RpcProtocol::LightClientUpdatesByRangeV1 => {
@@ -698,6 +765,23 @@ fn decode_response(protocol: &Eth2RpcProtocol, bytes: &[u8]) -> io::Result<Eth2R
         response_payload_limit(protocol, SUCCESS_CODE),
     )?;
 
+    decode_single_payload(
+        protocol,
+        RawRpcResponse {
+            context_bytes,
+            bytes: payload,
+        },
+    )
+}
+
+fn decode_single_payload(
+    protocol: &Eth2RpcProtocol,
+    raw: RawRpcResponse,
+) -> io::Result<Eth2RpcResponse> {
+    let RawRpcResponse {
+        context_bytes,
+        bytes: payload,
+    } = raw;
     match protocol {
         Eth2RpcProtocol::StatusV1 | Eth2RpcProtocol::StatusV2 => {
             decode_status(protocol, &payload).map(Eth2RpcResponse::Status)
@@ -859,7 +943,11 @@ where
 #[cfg(test)]
 fn encode_response(protocol: &Eth2RpcProtocol, response: Eth2RpcResponse) -> io::Result<Vec<u8>> {
     let mut output = futures::io::Cursor::new(Vec::new());
-    futures::executor::block_on(Eth2RpcCodec.write_response(protocol, &mut output, response))?;
+    futures::executor::block_on(Eth2RpcCodec::default().write_response(
+        protocol,
+        &mut output,
+        response.into(),
+    ))?;
     Ok(output.into_inner())
 }
 
@@ -882,6 +970,234 @@ fn encode_ssz_snappy_payload_into(mut payload: Vec<u8>, raw_ssz: &[u8]) -> io::R
         .map_err(|error| io::Error::other(error.error().to_string()))
 }
 
+// Each response retains decoded reservations until its queued event is consumed.
+// Wire storage is private to one chunk and is released before that charge shrinks.
+async fn read_budgeted_response<T>(
+    protocol: &Eth2RpcProtocol,
+    io: &mut T,
+    budgets: &RpcResponseBudgets,
+    expected_chunks: Option<usize>,
+) -> io::Result<BudgetedRpcResponse>
+where
+    T: AsyncRead + Unpin + Send,
+{
+    let beacon = matches!(
+        protocol,
+        Eth2RpcProtocol::BeaconBlocksByRangeV1
+            | Eth2RpcProtocol::BeaconBlocksByRangeV2
+            | Eth2RpcProtocol::BeaconBlocksByRootV1
+            | Eth2RpcProtocol::BeaconBlocksByRootV2
+    );
+    let pool = budgets.pool(beacon);
+    let multi = is_multi_chunk_protocol(protocol);
+    let max_chunks = expected_chunks
+        .unwrap_or(MAX_RPC_RESPONSE_CHUNKS)
+        .min(MAX_RPC_RESPONSE_CHUNKS);
+    let mut reader = ResponseStream { io, wire_bytes: 0 };
+    let mut accumulated = IncomingChunks::default();
+    let mut decoded_bytes = 0usize;
+    loop {
+        let Some(code) = reader.read_optional_byte().await? else {
+            if !multi {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "empty RPC response",
+                ));
+            }
+            let response = match protocol {
+                Eth2RpcProtocol::LightClientUpdatesByRangeV1 => {
+                    Eth2RpcResponse::LightClientUpdatesByRange(accumulated.chunks)
+                }
+                Eth2RpcProtocol::BeaconBlocksByRangeV1 | Eth2RpcProtocol::BeaconBlocksByRangeV2 => {
+                    Eth2RpcResponse::BeaconBlocksByRange(accumulated.chunks)
+                }
+                Eth2RpcProtocol::BeaconBlocksByRootV1 | Eth2RpcProtocol::BeaconBlocksByRootV2 => {
+                    Eth2RpcResponse::BeaconBlocksByRoot(accumulated.chunks)
+                }
+                _ => unreachable!("multi-chunk protocols are selected above"),
+            };
+            return Ok(BudgetedRpcResponse {
+                response,
+                reservations: accumulated.reservations,
+            });
+        };
+        if code != SUCCESS_CODE {
+            // An error terminates the response and supersedes any success prefix.
+            accumulated.chunks.clear();
+            accumulated.reservations.clear();
+            let (raw, reservation) = reader
+                .read_payload(protocol, code, &pool, 0, budgets.max_decoded())
+                .await?;
+            let terminal = BudgetedRpcResponse {
+                response: Eth2RpcResponse::Error(Eth2RpcErrorResponse {
+                    code,
+                    message: raw.bytes,
+                }),
+                reservations: vec![reservation],
+            };
+            if multi && reader.read_optional_byte().await?.is_some() {
+                return Err(invalid_data(
+                    "error response on multi-chunk stream must terminate the stream",
+                ));
+            }
+            return Ok(terminal);
+        }
+        if accumulated.chunks.len() >= max_chunks {
+            return Err(invalid_data(format!(
+                "RPC response exceeds the {max_chunks}-chunk request limit"
+            )));
+        }
+        let (raw, reservation) = reader
+            .read_payload(protocol, code, &pool, decoded_bytes, budgets.max_decoded())
+            .await?;
+        decoded_bytes += raw.bytes.len();
+        if !multi {
+            return Ok(BudgetedRpcResponse {
+                response: decode_single_payload(protocol, raw)?,
+                reservations: vec![reservation],
+            });
+        }
+        accumulated.chunks.push(raw);
+        accumulated.reservations.push(reservation);
+    }
+}
+
+#[derive(Default)]
+struct IncomingChunks {
+    // Fields drop in declaration order: free payloads before returning quota,
+    // including on parse errors and cancellation while reading a later chunk.
+    chunks: Vec<RawRpcResponse>,
+    reservations: Vec<RpcReservation>,
+}
+
+struct ResponseStream<'a, T> {
+    io: &'a mut T,
+    wire_bytes: usize,
+}
+
+impl<T: AsyncRead + Unpin + Send> ResponseStream<'_, T> {
+    async fn read_optional_byte(&mut self) -> io::Result<Option<u8>> {
+        let mut byte = [0u8; 1];
+        if self.io.read(&mut byte).await? == 0 {
+            return Ok(None);
+        }
+        if self.wire_bytes == MAX_RPC_STREAM_WIRE_BYTES {
+            return Err(invalid_data("RPC response exceeds the stream wire limit"));
+        }
+        self.wire_bytes += 1;
+        Ok(Some(byte[0]))
+    }
+
+    async fn read_exact(&mut self, bytes: &mut [u8]) -> io::Result<()> {
+        if bytes.len() > MAX_RPC_STREAM_WIRE_BYTES.saturating_sub(self.wire_bytes) {
+            return Err(invalid_data("RPC response exceeds the stream wire limit"));
+        }
+        self.io.read_exact(bytes).await?;
+        self.wire_bytes += bytes.len();
+        Ok(())
+    }
+
+    async fn read_payload(
+        &mut self,
+        protocol: &Eth2RpcProtocol,
+        code: u8,
+        pool: &RpcMemoryPool,
+        decoded_bytes: usize,
+        max_decoded: usize,
+    ) -> io::Result<(RawRpcResponse, RpcReservation)> {
+        let context_bytes = if code == SUCCESS_CODE && success_response_context_len(protocol) == 4 {
+            let mut context = [0u8; 4];
+            self.read_exact(&mut context).await?;
+            Some(context)
+        } else {
+            None
+        };
+        let mut prefix = [0u8; 10];
+        let mut prefix_len = 0;
+        let declared_len = loop {
+            self.read_exact(&mut prefix[prefix_len..prefix_len + 1])
+                .await?;
+            prefix_len += 1;
+            if let Some((declared, _)) = decode_unsigned_varint_prefix(&prefix[..prefix_len])? {
+                break usize::try_from(declared)
+                    .map_err(|_| invalid_data("payload length does not fit in memory"))?;
+            }
+            if prefix_len == prefix.len() {
+                return Err(invalid_data("invalid RPC length prefix"));
+            }
+        };
+        let payload_limit = response_payload_limit(protocol, code);
+        if declared_len > payload_limit {
+            return Err(invalid_data(format!(
+                "declared payload length {declared_len} exceeds the {payload_limit}-byte limit"
+            )));
+        }
+        if declared_len > max_decoded.saturating_sub(decoded_bytes) {
+            return Err(response_limit(max_decoded));
+        }
+        let max_wire = prefix_len + snap::raw::max_compress_len(declared_len);
+        let mut reservation = pool.try_reserve(max_wire + declared_len)?;
+        let mut bytes = Vec::new();
+        grow_wire_buffer(&mut bytes, prefix_len, max_wire)?;
+        bytes.extend_from_slice(&prefix[..prefix_len]);
+        let mut scanner = SnappyPayloadScanner::default();
+        loop {
+            if scanner.advance(&bytes, payload_limit)?.is_some() {
+                break;
+            }
+            // The scanner has consumed all complete frames. Read exactly the
+            // next frame header/body, never bytes belonging to the next RPC chunk.
+            let frame_start = bytes.len();
+            let mut header = [0u8; 4];
+            self.read_exact(&mut header).await?;
+            grow_wire_buffer(&mut bytes, frame_start + header.len(), max_wire)?;
+            bytes.extend_from_slice(&header);
+            let frame_len = usize::from(header[1])
+                | (usize::from(header[2]) << 8)
+                | (usize::from(header[3]) << 16);
+            // Validate the header before reserving or reading its advertised body.
+            scanner.advance(&bytes, payload_limit)?;
+            let end = bytes
+                .len()
+                .checked_add(frame_len)
+                .ok_or_else(|| invalid_data("Snappy frame length overflow"))?;
+            grow_wire_buffer(&mut bytes, end, max_wire)?;
+            let body_start = bytes.len();
+            bytes.resize(end, 0);
+            self.read_exact(&mut bytes[body_start..]).await?;
+        }
+        let raw = decode_scanned_payload(&bytes, &scanner)?;
+        let capacity = raw.capacity();
+        drop(bytes);
+        reservation.shrink_to(capacity);
+        Ok((
+            RawRpcResponse {
+                context_bytes,
+                bytes: raw,
+            },
+            reservation,
+        ))
+    }
+}
+
+fn grow_wire_buffer(bytes: &mut Vec<u8>, required: usize, max_wire: usize) -> io::Result<()> {
+    if required > max_wire {
+        return Err(invalid_data(
+            "Snappy payload exceeds its compressed wire limit",
+        ));
+    }
+    if required > bytes.capacity() {
+        let target = required
+            .max(bytes.capacity().saturating_mul(2))
+            .min(max_wire);
+        bytes
+            .try_reserve_exact(target - bytes.len())
+            .map_err(allocation_error)?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
 async fn read_single_response<T>(
     protocol: &Eth2RpcProtocol,
     io: &mut T,
@@ -889,27 +1205,9 @@ async fn read_single_response<T>(
 where
     T: AsyncRead + Unpin + Send,
 {
-    let mut bytes = Vec::new();
-    let mut chunk = [0u8; 4096];
-    let mut scanner = SnappyPayloadScanner::default();
-    let max_wire_bytes = max_snappy_wire_bytes(MAX_RPC_RESPONSE_SSZ_BYTES)
-        .saturating_add(1 + success_response_context_len(protocol));
-    loop {
-        if let Some(consumed) = scan_single_response(protocol, &bytes, &mut scanner)? {
-            return decode_response(protocol, &bytes[..consumed]);
-        }
-
-        let read = io.read(&mut chunk).await?;
-        if read == 0 {
-            return decode_response(protocol, &bytes);
-        }
-        bytes.extend_from_slice(&chunk[..read]);
-        if bytes.len() > max_wire_bytes {
-            return Err(invalid_data(format!(
-                "RPC response exceeds the {max_wire_bytes}-byte wire limit"
-            )));
-        }
-    }
+    read_budgeted_response(protocol, io, &RpcResponseBudgets::default(), Some(1))
+        .await
+        .map(|value| value.into_parts().0)
 }
 
 #[cfg(test)]
@@ -1045,19 +1343,26 @@ fn decode_ssz_snappy_payload_prefix_with_limit(
                 "incomplete SSZ-snappy payload",
             )
         })?;
+    let raw = decode_scanned_payload(&bytes[..consumed], &scanner)?;
+    Ok((raw, consumed))
+}
+
+fn decode_scanned_payload(bytes: &[u8], scanner: &SnappyPayloadScanner) -> io::Result<Vec<u8>> {
     let (declared_len, prefix_len) = scanner.header.expect("complete scan has a length header");
-    let mut decoder = FrameDecoder::new(&bytes[prefix_len..consumed]);
-    let mut raw = Vec::with_capacity(declared_len);
-    io::Read::read_to_end(
-        &mut io::Read::take(&mut decoder, declared_len as u64 + 1),
-        &mut raw,
-    )?;
-    if raw.len() != declared_len {
+    let mut raw = Vec::new();
+    raw.try_reserve_exact(declared_len)
+        .map_err(allocation_error)?;
+    raw.resize(declared_len, 0);
+    let mut decoder = FrameDecoder::new(&bytes[prefix_len..]);
+    io::Read::read_exact(&mut decoder, &mut raw)?;
+    // A fixed probe checks EOF without read_to_end growing the full Vec.
+    let mut extra = [0u8; 1];
+    if io::Read::read(&mut decoder, &mut extra)? != 0 {
         return Err(invalid_data(
             "decoded Snappy length differs from its declaration",
         ));
     }
-    Ok((raw, consumed))
+    Ok(raw)
 }
 
 fn decode_unsigned_varint_prefix(bytes: &[u8]) -> io::Result<Option<(u64, usize)>> {
@@ -1272,6 +1577,7 @@ fn decode_beacon_blocks_by_root_request(payload: &[u8]) -> io::Result<Vec<B256>>
     Ok(chunks.iter().map(|chunk| B256::from_slice(chunk)).collect())
 }
 
+#[cfg(test)]
 fn decode_stream_response(
     protocol: &Eth2RpcProtocol,
     bytes: &[u8],
@@ -1355,6 +1661,7 @@ fn single_response_len(protocol: &Eth2RpcProtocol, bytes: &[u8]) -> io::Result<O
     scan_single_response(protocol, bytes, &mut SnappyPayloadScanner::default())
 }
 
+#[cfg(test)]
 fn scan_single_response(
     protocol: &Eth2RpcProtocol,
     bytes: &[u8],
@@ -1450,6 +1757,255 @@ fn bounded_error_message(message: impl Into<Vec<u8>>) -> Vec<u8> {
 mod tests {
     use super::*;
 
+    fn incoming_fixture_chunks(lengths: &[usize]) -> Vec<RawRpcResponse> {
+        lengths
+            .iter()
+            .enumerate()
+            .map(|(i, len)| RawRpcResponse {
+                context_bytes: Some([1, 2, 3, 4]),
+                bytes: vec![i as u8; *len],
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn incoming_memory_queued_responses_share_pools_and_release_on_drop() {
+        let protocol = Eth2RpcProtocol::BeaconBlocksByRangeV2;
+        let budgets = RpcResponseBudgets::with_limits(64, 64, 32);
+        let mut codec = Eth2RpcCodec::new(budgets.clone());
+        let encoded = encode_response(
+            &protocol,
+            Eth2RpcResponse::BeaconBlocksByRange(incoming_fixture_chunks(&[8, 8])),
+        )
+        .unwrap();
+        let queued = codec
+            .read_response(&protocol, &mut futures::io::Cursor::new(&encoded))
+            .await
+            .unwrap();
+        assert_eq!(budgets.pool(true).used(), 16);
+        let error = codec
+            .clone()
+            .read_response(&protocol, &mut futures::io::Cursor::new(&encoded))
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            crate::rpc_memory::from_io(&error),
+            Some(crate::rpc_memory::RpcMemoryError::Capacity { .. })
+        ));
+        assert_eq!(budgets.pool(true).used(), 16);
+
+        // Historic body pressure cannot consume the separate light-client pool.
+        let control_protocol = Eth2RpcProtocol::LightClientOptimisticUpdateV1;
+        let control = encode_response(
+            &control_protocol,
+            Eth2RpcResponse::LightClientOptimisticUpdate(incoming_fixture_chunks(&[8]).remove(0)),
+        )
+        .unwrap();
+        let control = codec
+            .clone()
+            .read_response(&control_protocol, &mut futures::io::Cursor::new(control))
+            .await
+            .unwrap();
+        assert_eq!(budgets.pool(false).used(), 8);
+        drop(control);
+        assert_eq!(budgets.pool(false).used(), 0);
+        assert_eq!(budgets.pool(true).used(), 16);
+        drop(queued);
+        assert_eq!(budgets.pool(true).used(), 0);
+        let retried = codec
+            .read_response(&protocol, &mut futures::io::Cursor::new(encoded))
+            .await
+            .unwrap();
+        drop(retried);
+        assert_eq!(budgets.pool(true).used(), 0);
+    }
+
+    #[tokio::test]
+    async fn incoming_memory_decoded_limit_discards_prefix_and_smaller_retry_succeeds() {
+        let protocol = Eth2RpcProtocol::BeaconBlocksByRootV2;
+        let budgets = RpcResponseBudgets::with_limits(128, 64, 12);
+        let mut codec = Eth2RpcCodec::new(budgets.clone());
+        let encoded = encode_response(
+            &protocol,
+            Eth2RpcResponse::BeaconBlocksByRoot(incoming_fixture_chunks(&[8, 8])),
+        )
+        .unwrap();
+        // The retained wire reference accepts both protocol-valid chunks. The
+        // configured local allowance, independently, requires a smaller retry.
+        assert_eq!(
+            decode_response(&protocol, &encoded).unwrap(),
+            Eth2RpcResponse::BeaconBlocksByRoot(incoming_fixture_chunks(&[8, 8]))
+        );
+        let mut input = futures::io::Cursor::new(&encoded);
+        let error = codec
+            .read_response(&protocol, &mut input)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            crate::rpc_memory::from_io(&error),
+            Some(crate::rpc_memory::RpcMemoryError::ResponseLimit { limit: 12 })
+        ));
+        assert!(input.position() < encoded.len() as u64);
+        assert_eq!(budgets.pool(true).used(), 0);
+        let expected = Eth2RpcResponse::BeaconBlocksByRoot(incoming_fixture_chunks(&[8]));
+        let retry = encode_response(&protocol, expected.clone()).unwrap();
+        let retried = codec
+            .read_response(&protocol, &mut futures::io::Cursor::new(retry))
+            .await
+            .unwrap();
+        assert_eq!(retried.response, expected);
+        assert_eq!(budgets.pool(true).used(), 8);
+        drop(retried);
+        assert_eq!(budgets.pool(true).used(), 0);
+    }
+
+    struct PrefixThenPending {
+        bytes: Vec<u8>,
+        offset: usize,
+    }
+    impl AsyncRead for PrefixThenPending {
+        fn poll_read(
+            mut self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+            output: &mut [u8],
+        ) -> std::task::Poll<io::Result<usize>> {
+            if output.is_empty() {
+                return std::task::Poll::Ready(Ok(0));
+            }
+            if self.offset == self.bytes.len() {
+                return std::task::Poll::Pending;
+            }
+            let count = output.len().min(self.bytes.len() - self.offset);
+            output[..count].copy_from_slice(&self.bytes[self.offset..self.offset + count]);
+            self.offset += count;
+            std::task::Poll::Ready(Ok(count))
+        }
+    }
+
+    #[tokio::test]
+    async fn incoming_memory_partial_read_cancellation_releases_current_and_prior_chunks() {
+        let protocol = Eth2RpcProtocol::BeaconBlocksByRangeV2;
+        for complete_prefix in [false, true] {
+            let budgets = RpcResponseBudgets::with_limits(128, 64, 32);
+            let mut codec = Eth2RpcCodec::new(budgets.clone());
+            let mut bytes = if complete_prefix {
+                encode_response(
+                    &protocol,
+                    Eth2RpcResponse::BeaconBlocksByRange(incoming_fixture_chunks(&[8])),
+                )
+                .unwrap()
+            } else {
+                Vec::new()
+            };
+            bytes.extend_from_slice(&[SUCCESS_CODE, 1, 2, 3, 4, 8]);
+            let mut reader = PrefixThenPending { bytes, offset: 0 };
+            let mut pending = Box::pin(codec.read_response(&protocol, &mut reader));
+            assert!(futures::poll!(pending.as_mut()).is_pending());
+            assert!(budgets.pool(true).used() > if complete_prefix { 8 } else { 0 });
+            drop(pending);
+            assert_eq!(budgets.pool(true).used(), 0);
+        }
+        // A terminal error stays owned while waiting for the stream to close.
+        let budgets = RpcResponseBudgets::with_limits(128, 64, 32);
+        let mut codec = Eth2RpcCodec::new(budgets.clone());
+        let bytes = encode_response(&protocol, resource_unavailable(b"old".to_vec())).unwrap();
+        let mut reader = PrefixThenPending { bytes, offset: 0 };
+        let mut pending = Box::pin(codec.read_response(&protocol, &mut reader));
+        assert!(futures::poll!(pending.as_mut()).is_pending());
+        assert_eq!(budgets.pool(true).used(), 3);
+        drop(pending);
+        assert_eq!(budgets.pool(true).used(), 0);
+    }
+
+    #[tokio::test]
+    async fn incoming_memory_invalid_tail_and_terminal_error_release_prefix() {
+        let protocol = Eth2RpcProtocol::BeaconBlocksByRangeV2;
+        let budgets = RpcResponseBudgets::with_limits(1024, 64, 128);
+        let mut codec = Eth2RpcCodec::new(budgets.clone());
+        let first = encode_response(
+            &protocol,
+            Eth2RpcResponse::BeaconBlocksByRange(incoming_fixture_chunks(&[8])),
+        )
+        .unwrap();
+        let mut tail = first.clone();
+        *tail.last_mut().unwrap() ^= 1;
+        let mut corrupt = first.clone();
+        corrupt.extend_from_slice(&tail);
+        assert!(
+            codec
+                .read_response(&protocol, &mut futures::io::Cursor::new(corrupt))
+                .await
+                .is_err()
+        );
+        assert_eq!(budgets.pool(true).used(), 0);
+        let error_response = resource_unavailable(b"old".to_vec());
+        let mut error_wire = first;
+        error_wire.extend_from_slice(&encode_response(&protocol, error_response.clone()).unwrap());
+        let response = codec
+            .read_response(&protocol, &mut futures::io::Cursor::new(&error_wire))
+            .await
+            .unwrap();
+        assert_eq!(response.response, error_response);
+        assert_eq!(budgets.pool(true).used(), 3);
+        drop(response);
+        assert_eq!(budgets.pool(true).used(), 0);
+        error_wire.push(SUCCESS_CODE);
+        assert!(
+            codec
+                .read_response(&protocol, &mut futures::io::Cursor::new(error_wire))
+                .await
+                .is_err()
+        );
+        assert_eq!(budgets.pool(true).used(), 0);
+    }
+
+    #[tokio::test]
+    async fn incoming_memory_request_count_is_checked_before_surplus_body() {
+        let protocol = Eth2RpcProtocol::BeaconBlocksByRootV2;
+        let budgets = RpcResponseBudgets::with_limits(128, 64, 32);
+        let mut codec = Eth2RpcCodec::new(budgets.clone());
+        codec
+            .write_request(
+                &protocol,
+                &mut futures::io::Cursor::new(Vec::new()),
+                Eth2RpcRequest::BeaconBlocksByRoot(vec![B256::ZERO]),
+            )
+            .await
+            .unwrap();
+        let bytes = encode_response(
+            &protocol,
+            Eth2RpcResponse::BeaconBlocksByRoot(incoming_fixture_chunks(&[8, 8])),
+        )
+        .unwrap();
+        let first_chunk_len = encode_response(
+            &protocol,
+            Eth2RpcResponse::BeaconBlocksByRoot(incoming_fixture_chunks(&[8])),
+        )
+        .unwrap()
+        .len();
+        let mut input = futures::io::Cursor::new(bytes);
+        let error = codec
+            .read_response(&protocol, &mut input)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("1-chunk request limit"));
+        assert_eq!(input.position(), (first_chunk_len + 1) as u64);
+        assert!(crate::rpc_memory::from_io(&error).is_none());
+        assert_eq!(budgets.pool(true).used(), 0);
+    }
+
+    #[test]
+    fn incoming_memory_decoded_capacity_matches_the_declared_payload() {
+        for length in [
+            0, 1, 63, 64, 127, 128, 1024, 65_535, 65_536, 65_537, 2_097_152,
+        ] {
+            let encoded = encode_ssz_snappy_payload(&vec![7; length]).unwrap();
+            let decoded = decode_ssz_snappy_payload(&encoded).unwrap();
+            assert_eq!(decoded.len(), length);
+            assert_eq!(decoded.capacity(), length);
+        }
+    }
+
     #[derive(Default)]
     struct ObservedWriter {
         bytes: Vec<u8>,
@@ -1509,8 +2065,8 @@ mod tests {
             .collect();
         let expected = Eth2RpcResponse::BeaconBlocksByRange(chunks);
         let mut writer = ObservedWriter::default();
-        Eth2RpcCodec
-            .write_response(&protocol, &mut writer, expected.clone())
+        Eth2RpcCodec::default()
+            .write_response(&protocol, &mut writer, expected.clone().into())
             .await
             .unwrap();
         assert_eq!(writer.writes, expected_writes);
@@ -1629,9 +2185,10 @@ mod tests {
                 fail_after: fail.then_some(1),
                 ..Default::default()
             };
-            let mut codec = Eth2RpcCodec;
+            let mut codec = Eth2RpcCodec::default();
             let protocol = Eth2RpcProtocol::BeaconBlocksByRangeV2;
-            let mut future = Box::pin(codec.write_response(&protocol, &mut writer, response));
+            let mut future =
+                Box::pin(codec.write_response(&protocol, &mut writer, response.into()));
             if fail {
                 assert_eq!(
                     future.as_mut().await.unwrap_err().kind(),
