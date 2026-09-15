@@ -445,6 +445,19 @@ pub(crate) fn test_sync_committee() -> SyncCommitteeData {
     }
 }
 
+#[cfg(test)]
+pub(crate) struct TestLightClientCache {
+    pub checkpoint: WeakSubjectivityCheckpoint,
+    pub store: VerifiedLightClientStore,
+    pub status: logex_types::ConsensusLightClientStatus,
+    pub payloads: crate::PersistedLightClientPayloads,
+}
+
+#[cfg(test)]
+pub(crate) fn test_cached_light_client_fixture(slot: u64) -> TestLightClientCache {
+    tests::cached_light_client_fixture(slot)
+}
+
 #[derive(Debug, Clone)]
 enum DecodedBootstrap {
     Capella(LightClientBootstrapCapella),
@@ -534,6 +547,116 @@ pub fn decode_optimistic_update(
     bytes: &[u8],
 ) -> Result<LightClientOptimisticUpdateStatus, LightClientDecodeError> {
     Ok(decode_optimistic_update_payload(bytes)?.status())
+}
+
+/// Validate locally persisted cache commitments without replaying historical
+/// signatures against the current (possibly rotated) committee. This does not
+/// authenticate arbitrary edits to the trusted local snapshot.
+pub(crate) fn validate_cached_light_client_payloads(
+    payloads: &mut crate::PersistedLightClientPayloads,
+    checkpoint: WeakSubjectivityCheckpoint,
+) -> Result<(), String> {
+    if let Some(payload) = &mut payloads.bootstrap {
+        let (status, _) = verify_bootstrap_payload(&payload.bytes, checkpoint)
+            .map_err(|error| format!("cached bootstrap: {error}"))?;
+        normalize_cached_context(payload, status.header.beacon_slot)
+            .map_err(|error| format!("cached bootstrap: {error}"))?;
+    }
+    if let Some(payload) = &mut payloads.finality_update {
+        let slot = (|| {
+            let decoded = decode_finality_update_payload(&payload.bytes)?;
+            let update = VerifiedLightClientUpdate {
+                attested_header: decoded.attested_verified_header()?,
+                finalized_header: Some(decoded.finalized_verified_header()?),
+                next_sync_committee: None,
+                signature_slot: decoded.signature_slot(),
+                participants: participant_count(decoded.sync_aggregate()),
+            };
+            validate_cached_update_structure(&update, Some(decoded.finality_branch()), None)?;
+            Ok::<_, LightClientVerificationError>(update.attested_header.beacon.slot)
+        })()
+        .map_err(|error| format!("cached finality update: {error}"))?;
+        normalize_cached_context(payload, slot)
+            .map_err(|error| format!("cached finality update: {error}"))?;
+    }
+    if let Some(payload) = &mut payloads.optimistic_update {
+        let slot = (|| {
+            let decoded = decode_optimistic_update_payload(&payload.bytes)?;
+            let update = VerifiedLightClientUpdate {
+                attested_header: decoded.attested_verified_header()?,
+                finalized_header: None,
+                next_sync_committee: None,
+                signature_slot: decoded.signature_slot(),
+                participants: participant_count(decoded.sync_aggregate()),
+            };
+            validate_cached_update_structure(&update, None, None)?;
+            Ok::<_, LightClientVerificationError>(update.attested_header.beacon.slot)
+        })()
+        .map_err(|error| format!("cached optimistic update: {error}"))?;
+        normalize_cached_context(payload, slot)
+            .map_err(|error| format!("cached optimistic update: {error}"))?;
+    }
+    for (&period, payload) in &mut payloads.updates_by_period {
+        let slot = (|| {
+            let decoded = decode_update_payload(&payload.bytes)?;
+            let update = decoded.verified_update()?;
+            validate_cached_update_structure(
+                &update,
+                decoded.finality_branch_for_verification(),
+                decoded.next_sync_committee_branch(),
+            )?;
+            Ok::<_, LightClientVerificationError>(update.attested_header.beacon.slot)
+        })()
+        .map_err(|error| format!("cached update for period {period}: {error}"))?;
+        if sync_committee_period_at_slot(slot) != period {
+            return Err(format!(
+                "cached update for period {period} has attested slot {slot} in a different period"
+            ));
+        }
+        normalize_cached_context(payload, slot)
+            .map_err(|error| format!("cached update for period {period}: {error}"))?;
+    }
+    Ok(())
+}
+
+pub(crate) fn normalize_cached_context(
+    payload: &mut crate::rpc::RawRpcResponse,
+    slot: u64,
+) -> Result<(), String> {
+    // Preserve the existing chain-spec digest policy, including historical
+    // epochs. Pre-Fulu plain-versus-shifted interoperability is a separate audit.
+    // Context follows the bootstrap/attested slot, not finalized/signature slot
+    // or the current node epoch; BPO transitions make that distinction matter.
+    let expected = MAINNET_CONSENSUS_CHAIN_SPEC
+        .fork_digest_for_epoch(MAINNET_CONSENSUS_CHAIN_SPEC.epoch_for_slot(slot));
+    if payload
+        .context_bytes
+        .is_some_and(|actual| actual != expected)
+    {
+        return Err(format!("fork context does not match payload slot {slot}"));
+    }
+    payload.context_bytes = Some(expected);
+    Ok(())
+}
+
+fn validate_cached_update_structure(
+    update: &VerifiedLightClientUpdate,
+    finality_branch: Option<Vec<B256>>,
+    next_sync_committee_branch: Option<Vec<B256>>,
+) -> Result<(), LightClientVerificationError> {
+    if update.participants < MIN_SYNC_COMMITTEE_PARTICIPANTS {
+        return Err(LightClientVerificationError::NoSyncCommitteeParticipants);
+    }
+    let attested_slot = update.attested_header.beacon.slot;
+    if update.signature_slot <= attested_slot || attested_slot < update.finalized_slot() {
+        return Err(LightClientVerificationError::InvalidSlotOrdering {
+            signature_slot: update.signature_slot,
+            attested_slot,
+            finalized_slot: update.finalized_slot(),
+        });
+    }
+    verify_update_finality_proof(update, finality_branch)?;
+    verify_update_next_committee_proof(update, next_sync_committee_branch)
 }
 
 pub(crate) fn apply_light_client_update_payload(
@@ -1336,50 +1459,16 @@ fn verify_valid_light_client_update(
         });
     }
 
-    if let Some(finality_branch) = finality_branch {
-        let finalized_root = update
-            .finalized_header
-            .as_ref()
-            .map(VerifiedLightClientHeader::beacon_root)
-            .unwrap_or(B256::ZERO);
-        if !is_valid_normalized_merkle_branch(
-            finalized_root,
-            finality_branch,
-            finalized_root_gindex_at_slot(attested_slot),
-            update.attested_header.beacon.state_root,
-        ) {
-            return Err(LightClientVerificationError::InvalidFinalityProof {
-                attested_slot,
-                finalized_slot,
-            });
-        }
-    }
+    verify_update_finality_proof(&update, finality_branch)?;
 
-    if let Some(next_sync_committee) = &update.next_sync_committee {
-        if attested_period == store_period
-            && let Some(known_next_sync_committee) = &store.next_sync_committee
-            && next_sync_committee != known_next_sync_committee
-        {
-            return Err(
-                LightClientVerificationError::InvalidNextSyncCommitteeProof { attested_slot },
-            );
-        }
-        let Some(next_sync_committee_branch) = next_sync_committee_branch else {
-            return Err(
-                LightClientVerificationError::InvalidNextSyncCommitteeProof { attested_slot },
-            );
-        };
-        if !is_valid_normalized_merkle_branch(
-            sync_committee_tree_hash_root(next_sync_committee),
-            next_sync_committee_branch,
-            next_sync_committee_gindex_at_slot(attested_slot),
-            update.attested_header.beacon.state_root,
-        ) {
-            return Err(
-                LightClientVerificationError::InvalidNextSyncCommitteeProof { attested_slot },
-            );
-        }
+    if let Some(next_sync_committee) = &update.next_sync_committee
+        && attested_period == store_period
+        && let Some(known_next_sync_committee) = &store.next_sync_committee
+        && next_sync_committee != known_next_sync_committee
+    {
+        return Err(LightClientVerificationError::InvalidNextSyncCommitteeProof { attested_slot });
     }
+    verify_update_next_committee_proof(&update, next_sync_committee_branch)?;
 
     let participant_pubkeys =
         committee.participant_public_keys(&sync_aggregate.sync_committee_bits)?;
@@ -1405,6 +1494,57 @@ fn verify_valid_light_client_update(
     }
 
     Ok(update)
+}
+
+fn verify_update_finality_proof(
+    update: &VerifiedLightClientUpdate,
+    branch: Option<Vec<B256>>,
+) -> Result<(), LightClientVerificationError> {
+    if let Some(branch) = branch {
+        let root = update
+            .finalized_header
+            .as_ref()
+            .map(VerifiedLightClientHeader::beacon_root)
+            .unwrap_or(B256::ZERO);
+        let attested_slot = update.attested_header.beacon.slot;
+        if !is_valid_normalized_merkle_branch(
+            root,
+            branch,
+            finalized_root_gindex_at_slot(attested_slot),
+            update.attested_header.beacon.state_root,
+        ) {
+            return Err(LightClientVerificationError::InvalidFinalityProof {
+                attested_slot,
+                finalized_slot: update.finalized_slot(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn verify_update_next_committee_proof(
+    update: &VerifiedLightClientUpdate,
+    branch: Option<Vec<B256>>,
+) -> Result<(), LightClientVerificationError> {
+    if let Some(committee) = &update.next_sync_committee {
+        let attested_slot = update.attested_header.beacon.slot;
+        let Some(branch) = branch else {
+            return Err(
+                LightClientVerificationError::InvalidNextSyncCommitteeProof { attested_slot },
+            );
+        };
+        if !is_valid_normalized_merkle_branch(
+            sync_committee_tree_hash_root(committee),
+            branch,
+            next_sync_committee_gindex_at_slot(attested_slot),
+            update.attested_header.beacon.state_root,
+        ) {
+            return Err(
+                LightClientVerificationError::InvalidNextSyncCommitteeProof { attested_slot },
+            );
+        }
+    }
+    Ok(())
 }
 
 fn process_light_client_update(
@@ -2052,6 +2192,373 @@ mod tests {
 
     fn fixed<const N: usize>(byte: u8) -> FixedBytes<N> {
         FixedBytes::from_slice(&vec![byte; N])
+    }
+
+    pub(super) fn cached_light_client_fixture(slot: u64) -> TestLightClientCache {
+        assert!(slot >= 364_032 * 32);
+        assert!(slot % 8192 <= 8188);
+        let sk = SecretKey::key_gen(&[7u8; 32], &[]).unwrap();
+        let committee = sync_committee_from_secret_key(&sk);
+        let execution = deneb_execution(22_000_000, 0x21);
+        let execution_branch = ExecutionBranch::repeat_byte(0xb1);
+        let mut header = LightClientHeaderDeneb {
+            beacon: beacon_header(
+                slot,
+                B256::ZERO,
+                branch_root(
+                    execution_payload_header_deneb_root(&execution),
+                    &branch_from_fixed(&execution_branch),
+                    subtree_index(EXECUTION_PAYLOAD_GINDEX),
+                ),
+                0x11,
+            ),
+            execution,
+            execution_branch,
+        };
+        let committee_branch = ElectraSyncCommitteeBranch::repeat_byte(0xa1);
+        header.beacon.state_root = branch_root(
+            committee.tree_hash_root(),
+            &branch_from_fixed(&committee_branch),
+            subtree_index(ELECTRA_CURRENT_SYNC_COMMITTEE_GINDEX),
+        );
+        let checkpoint = WeakSubjectivityCheckpoint {
+            beacon_root: beacon_block_header_root(&header.beacon),
+            beacon_slot: Some(slot),
+        };
+        let bootstrap = LightClientBootstrapElectra {
+            header: header.clone(),
+            current_sync_committee: committee.clone(),
+            current_sync_committee_branch: committee_branch,
+        }
+        .as_ssz_bytes();
+        let (bootstrap_status, initial_store) =
+            verify_bootstrap_payload(&bootstrap, checkpoint).unwrap();
+
+        let mut attested = header.clone();
+        attested.beacon.slot = slot + 1;
+        let next_branch = ElectraSyncCommitteeBranch::repeat_byte(0xd1);
+        attested.beacon.state_root = branch_root(
+            committee.tree_hash_root(),
+            &branch_from_fixed(&next_branch),
+            subtree_index(ELECTRA_NEXT_SYNC_COMMITTEE_GINDEX),
+        );
+        let update = LightClientUpdateElectra {
+            attested_header: attested.clone(),
+            next_sync_committee: committee,
+            next_sync_committee_branch: next_branch,
+            finalized_header: LightClientHeaderDeneb::default(),
+            finality_branch: ElectraFinalityBranch::ZERO,
+            sync_aggregate: signed_sync_aggregate(&sk, &attested.beacon, slot + 2),
+            signature_slot: slot + 2,
+        }
+        .as_ssz_bytes();
+        let applied = apply_light_client_update_payload(&update, &initial_store).unwrap();
+
+        let finality_branch = ElectraFinalityBranch::repeat_byte(0xe1);
+        attested.beacon.state_root = branch_root(
+            checkpoint.beacon_root,
+            &branch_from_fixed(&finality_branch),
+            subtree_index(ELECTRA_FINALIZED_ROOT_GINDEX),
+        );
+        let finality = LightClientFinalityUpdateElectra {
+            attested_header: attested.clone(),
+            finalized_header: header,
+            finality_branch,
+            sync_aggregate: signed_sync_aggregate(&sk, &attested.beacon, slot + 2),
+            signature_slot: slot + 2,
+        }
+        .as_ssz_bytes();
+        let (finality_status, store, _, _) =
+            apply_finality_update_payload(&finality, &applied.store).unwrap();
+
+        attested.beacon.slot = slot + 2;
+        let optimistic = LightClientOptimisticUpdateDeneb {
+            attested_header: attested.clone(),
+            sync_aggregate: signed_sync_aggregate(&sk, &attested.beacon, slot + 3),
+            signature_slot: slot + 3,
+        }
+        .as_ssz_bytes();
+        let (optimistic_status, store, _) =
+            apply_optimistic_update_payload(&optimistic, &store).unwrap();
+        let context = MAINNET_CONSENSUS_CHAIN_SPEC.fork_digest_for_epoch(slot / 32);
+        TestLightClientCache {
+            checkpoint,
+            store,
+            status: logex_types::ConsensusLightClientStatus {
+                bootstrap: Some(bootstrap_status),
+                finality_update: Some(finality_status),
+                optimistic_update: Some(optimistic_status),
+            },
+            payloads: crate::PersistedLightClientPayloads {
+                bootstrap: Some(crate::rpc::RawRpcResponse {
+                    context_bytes: Some(context),
+                    bytes: bootstrap,
+                }),
+                finality_update: Some(crate::rpc::RawRpcResponse {
+                    context_bytes: None,
+                    bytes: finality,
+                }),
+                optimistic_update: Some(crate::rpc::RawRpcResponse {
+                    context_bytes: None,
+                    bytes: optimistic,
+                }),
+                updates_by_period: std::collections::BTreeMap::from([(
+                    sync_committee_period_at_slot(slot + 1),
+                    crate::rpc::RawRpcResponse {
+                        context_bytes: Some(context),
+                        bytes: update,
+                    },
+                )]),
+            },
+        }
+    }
+
+    fn cache_payload_mut(
+        payloads: &mut crate::PersistedLightClientPayloads,
+        family: usize,
+    ) -> &mut crate::rpc::RawRpcResponse {
+        match family {
+            0 => payloads.bootstrap.as_mut().unwrap(),
+            1 => payloads.finality_update.as_mut().unwrap(),
+            2 => payloads.optimistic_update.as_mut().unwrap(),
+            3 => payloads.updates_by_period.values_mut().next().unwrap(),
+            _ => unreachable!(),
+        }
+    }
+
+    const CACHE_TEST_SLOT: u64 = 419_072 * 32 + 16;
+
+    #[test]
+    fn cached_payload_validation_rejects_malformed_ssz_and_contexts_in_each_family() {
+        let fixture = test_cached_light_client_fixture(CACHE_TEST_SLOT);
+        for family in 0..4 {
+            let mut cache = fixture.payloads.clone();
+            cache_payload_mut(&mut cache, family).bytes.truncate(1);
+            assert!(validate_cached_light_client_payloads(&mut cache, fixture.checkpoint).is_err());
+
+            let mut cache = fixture.payloads.clone();
+            cache_payload_mut(&mut cache, family).context_bytes = Some([0xff; 4]);
+            assert!(
+                validate_cached_light_client_payloads(&mut cache, fixture.checkpoint)
+                    .unwrap_err()
+                    .contains("fork context")
+            );
+        }
+        let mut cache = fixture.payloads.clone();
+        let wrong_checkpoint = WeakSubjectivityCheckpoint {
+            beacon_root: B256::repeat_byte(0xff),
+            ..fixture.checkpoint
+        };
+        assert!(validate_cached_light_client_payloads(&mut cache, wrong_checkpoint).is_err());
+        let wrong_slot = WeakSubjectivityCheckpoint {
+            beacon_slot: Some(CACHE_TEST_SLOT + 1),
+            ..fixture.checkpoint
+        };
+        assert!(validate_cached_light_client_payloads(&mut cache, wrong_slot).is_err());
+    }
+
+    #[test]
+    fn cached_payload_validation_enforces_header_bounds_beyond_ssz_decoding() {
+        let fixture = test_cached_light_client_fixture(CACHE_TEST_SLOT);
+        for family in 0..4 {
+            let mut cache = fixture.payloads.clone();
+            let raw = cache_payload_mut(&mut cache, family);
+            raw.bytes = match family {
+                0 => {
+                    let mut payload =
+                        LightClientBootstrapElectra::from_ssz_bytes(&raw.bytes).unwrap();
+                    payload.header.execution.extra_data = vec![0; 33];
+                    let bytes = payload.as_ssz_bytes();
+                    assert!(decode_bootstrap(&bytes).is_ok());
+                    bytes
+                }
+                1 => {
+                    let mut payload =
+                        LightClientFinalityUpdateElectra::from_ssz_bytes(&raw.bytes).unwrap();
+                    payload.attested_header.execution.extra_data = vec![0; 33];
+                    let bytes = payload.as_ssz_bytes();
+                    assert!(decode_finality_update(&bytes).is_ok());
+                    bytes
+                }
+                2 => {
+                    let mut payload =
+                        LightClientOptimisticUpdateDeneb::from_ssz_bytes(&raw.bytes).unwrap();
+                    payload.attested_header.execution.extra_data = vec![0; 33];
+                    let bytes = payload.as_ssz_bytes();
+                    assert!(decode_optimistic_update(&bytes).is_ok());
+                    bytes
+                }
+                3 => {
+                    let mut payload = LightClientUpdateElectra::from_ssz_bytes(&raw.bytes).unwrap();
+                    payload.attested_header.execution.extra_data = vec![0; 33];
+                    let bytes = payload.as_ssz_bytes();
+                    assert!(decode_update_payload(&bytes).is_ok());
+                    bytes
+                }
+                _ => unreachable!(),
+            };
+            assert!(
+                validate_cached_light_client_payloads(&mut cache, fixture.checkpoint)
+                    .unwrap_err()
+                    .contains("extra data")
+            );
+        }
+    }
+
+    #[test]
+    fn cached_payload_validation_checks_update_order_participation_and_proofs() {
+        let fixture = test_cached_light_client_fixture(CACHE_TEST_SLOT);
+        for family in 1..4 {
+            for empty_participation in [false, true] {
+                let mut cache = fixture.payloads.clone();
+                let raw = cache_payload_mut(&mut cache, family);
+                macro_rules! mutate_update {
+                    ($ty:ty) => {{
+                        let mut payload = <$ty>::from_ssz_bytes(&raw.bytes).unwrap();
+                        if empty_participation {
+                            payload.sync_aggregate.sync_committee_bits = FixedBytes::ZERO;
+                        } else {
+                            payload.signature_slot = payload.attested_header.beacon.slot;
+                        }
+                        payload.as_ssz_bytes()
+                    }};
+                }
+                raw.bytes = match family {
+                    1 => mutate_update!(LightClientFinalityUpdateElectra),
+                    2 => mutate_update!(LightClientOptimisticUpdateDeneb),
+                    3 => mutate_update!(LightClientUpdateElectra),
+                    _ => unreachable!(),
+                };
+                assert!(
+                    validate_cached_light_client_payloads(&mut cache, fixture.checkpoint).is_err()
+                );
+            }
+        }
+        let mut cache = fixture.payloads.clone();
+        let raw = cache.finality_update.as_mut().unwrap();
+        let mut payload = LightClientFinalityUpdateElectra::from_ssz_bytes(&raw.bytes).unwrap();
+        payload.finality_branch[0] ^= 1;
+        raw.bytes = payload.as_ssz_bytes();
+        assert!(
+            validate_cached_light_client_payloads(&mut cache, fixture.checkpoint)
+                .unwrap_err()
+                .contains("finalized checkpoint proof")
+        );
+
+        let mut cache = fixture.payloads.clone();
+        let raw = cache.updates_by_period.values_mut().next().unwrap();
+        let mut payload = LightClientUpdateElectra::from_ssz_bytes(&raw.bytes).unwrap();
+        payload.next_sync_committee_branch[0] ^= 1;
+        raw.bytes = payload.as_ssz_bytes();
+        assert!(
+            validate_cached_light_client_payloads(&mut cache, fixture.checkpoint)
+                .unwrap_err()
+                .contains("next sync committee proof")
+        );
+
+        let mut cache = fixture.payloads.clone();
+        let (period, payload) = cache.updates_by_period.pop_first().unwrap();
+        cache.updates_by_period.insert(period + 1, payload);
+        assert!(
+            validate_cached_light_client_payloads(&mut cache, fixture.checkpoint)
+                .unwrap_err()
+                .contains("different period")
+        );
+    }
+
+    #[test]
+    fn cached_payload_validation_preserves_old_updates_and_normalizes_historical_context() {
+        let fixture = test_cached_light_client_fixture(CACHE_TEST_SLOT);
+        // Before BPO1, after BPO1 and after BPO2 use different digests while all
+        // sharing the Electra/Fulu wire schema. Old caches survive rotation.
+        for slot in [411_392 * 32 + 16, 412_672 * 32 + 16, CACHE_TEST_SLOT] {
+            let historical = test_cached_light_client_fixture(slot);
+            let mut cache = historical.payloads.clone();
+            cache.bootstrap = fixture.payloads.bootstrap.clone();
+            let mut original = cache.clone();
+            validate_cached_light_client_payloads(&mut cache, fixture.checkpoint).unwrap();
+            for family in 0..4 {
+                let old = cache_payload_mut(&mut original, family);
+                let normalized = cache_payload_mut(&mut cache, family);
+                assert_eq!(normalized.bytes, old.bytes);
+                let context_slot = if family == 0 { CACHE_TEST_SLOT } else { slot };
+                assert_eq!(
+                    normalized.context_bytes,
+                    Some(MAINNET_CONSENSUS_CHAIN_SPEC.fork_digest_for_epoch(context_slot / 32))
+                );
+            }
+            if slot != CACHE_TEST_SLOT {
+                assert!(
+                    apply_optimistic_update_payload(
+                        &historical
+                            .payloads
+                            .optimistic_update
+                            .as_ref()
+                            .unwrap()
+                            .bytes,
+                        &fixture.store,
+                    )
+                    .is_err()
+                );
+            }
+        }
+        let mut empty = crate::PersistedLightClientPayloads::default();
+        validate_cached_light_client_payloads(&mut empty, fixture.checkpoint).unwrap();
+    }
+
+    #[test]
+    fn cached_payload_context_uses_attested_slot_across_bpo_boundaries() {
+        let bpo_slot = 419_072 * 32;
+        let sk = SecretKey::key_gen(&[7u8; 32], &[]).unwrap();
+        let mut before = test_cached_light_client_fixture(bpo_slot - 4);
+        let raw = before.payloads.optimistic_update.as_mut().unwrap();
+        let mut optimistic = LightClientOptimisticUpdateDeneb::from_ssz_bytes(&raw.bytes).unwrap();
+        optimistic.signature_slot = bpo_slot;
+        optimistic.sync_aggregate =
+            signed_sync_aggregate(&sk, &optimistic.attested_header.beacon, bpo_slot);
+        raw.bytes = optimistic.as_ssz_bytes();
+        before.store.next_sync_committee = Some(before.store.current_sync_committee.clone());
+        apply_optimistic_update_payload(&raw.bytes, &before.store).unwrap();
+        validate_cached_light_client_payloads(&mut before.payloads, before.checkpoint).unwrap();
+        let before_context = before
+            .payloads
+            .optimistic_update
+            .unwrap()
+            .context_bytes
+            .unwrap();
+
+        let mut after = test_cached_light_client_fixture(bpo_slot + 16);
+        let raw = after.payloads.finality_update.as_mut().unwrap();
+        let mut finality = LightClientFinalityUpdateElectra::from_ssz_bytes(&raw.bytes).unwrap();
+        finality.finalized_header.beacon.slot = bpo_slot - 1;
+        finality.attested_header.beacon.state_root = branch_root(
+            beacon_block_header_root(&finality.finalized_header.beacon),
+            &branch_from_fixed(&finality.finality_branch),
+            subtree_index(ELECTRA_FINALIZED_ROOT_GINDEX),
+        );
+        finality.sync_aggregate = signed_sync_aggregate(
+            &sk,
+            &finality.attested_header.beacon,
+            finality.signature_slot,
+        );
+        raw.bytes = finality.as_ssz_bytes();
+        apply_finality_update_payload(&raw.bytes, &after.store).unwrap();
+        validate_cached_light_client_payloads(&mut after.payloads, after.checkpoint).unwrap();
+        let after_context = after
+            .payloads
+            .finality_update
+            .unwrap()
+            .context_bytes
+            .unwrap();
+        assert_ne!(before_context, after_context);
+        assert_eq!(
+            before_context,
+            MAINNET_CONSENSUS_CHAIN_SPEC.fork_digest_for_epoch(419_071)
+        );
+        assert_eq!(
+            after_context,
+            MAINNET_CONSENSUS_CHAIN_SPEC.fork_digest_for_epoch(419_072)
+        );
     }
 
     fn persisted_store_fixture() -> (WeakSubjectivityCheckpoint, VerifiedLightClientStore) {
