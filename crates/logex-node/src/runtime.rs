@@ -33,10 +33,10 @@ use crate::background::{log_task_exit, run_background_indexer};
 use crate::checkpoint::{RECENT_CHECKPOINT_MAX_FINALIZED_EPOCH_LAG, resolve_checkpoint};
 
 const SYNC_ENGINE_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(120);
-// Fatal store failures allow the engine's 120-second grace plus 60 seconds
+// Fatal store or execution-worker failures allow the engine's 120-second grace plus 60 seconds
 // for shared cleanup. An independent thread enforces this even if startup,
 // filesystem calls or post-abort joins block application runtime workers.
-const CONSENSUS_STORAGE_FAILURE_CLEANUP_GRACE: Duration = Duration::from_secs(180);
+const RUNTIME_FAILURE_CLEANUP_GRACE: Duration = Duration::from_secs(180);
 const LOW_DISK_SPACE_POLL_INTERVAL: Duration = Duration::from_secs(10);
 const LOW_DISK_SPACE_MIN_FREE_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 const SYNC_MODE_FILE_NAME: &str = "sync-mode.json";
@@ -482,11 +482,9 @@ pub async fn run_sync(options: RunSyncOptions) {
         .as_ref()
         .map(|store| store.subscribe_storage_failure());
     let _consensus_storage_watchdog = consensus_storage_failure.as_ref().map(|receiver| {
-        start_consensus_storage_watchdog(
-            receiver.clone(),
-            CONSENSUS_STORAGE_FAILURE_CLEANUP_GRACE,
-            || std::process::exit(1),
-        )
+        start_runtime_failure_watchdog(receiver.clone(), RUNTIME_FAILURE_CLEANUP_GRACE, || {
+            std::process::exit(1)
+        })
         .unwrap_or_else(|error| {
             tracing::error!(%error, "failed to start consensus storage shutdown watchdog");
             std::process::exit(1);
@@ -579,6 +577,17 @@ pub async fn run_sync(options: RunSyncOptions) {
         }
     };
 
+    let mut execution_network_failure = Some(peers.task_failure_receiver());
+    let _execution_network_watchdog = start_runtime_failure_watchdog(
+        peers.task_failure_receiver(),
+        RUNTIME_FAILURE_CLEANUP_GRACE,
+        || std::process::exit(1),
+    )
+    .unwrap_or_else(|error| {
+        tracing::error!(%error, "failed to start execution network shutdown watchdog");
+        std::process::exit(1);
+    });
+
     let sync_config = SyncConfig {
         max_peers,
         disable_historical_sync: historical_sync_disabled,
@@ -599,9 +608,9 @@ pub async fn run_sync(options: RunSyncOptions) {
         let mut engine_run = pin!(engine.run());
         tokio::select! {
             biased;
-            error = wait_for_consensus_storage_failure(&mut consensus_storage_failure) => {
+            error = wait_for_runtime_failure(&mut consensus_storage_failure) => {
                 tracing::error!(%error, "consensus storage failed, stopping node gracefully");
-                mark_sync_stopped_for_consensus_storage_failure(&state.sync_status);
+                mark_sync_stopped_for_runtime_failure(&state.sync_status, true);
                 let _ = shutdown_tx.send(true);
                 match tokio::time::timeout(SYNC_ENGINE_SHUTDOWN_TIMEOUT, &mut engine_run).await {
                     Ok(result) => result,
@@ -609,6 +618,21 @@ pub async fn run_sync(options: RunSyncOptions) {
                         tracing::warn!(
                             ?SYNC_ENGINE_SHUTDOWN_TIMEOUT,
                             "sync engine did not stop within consensus storage failure shutdown timeout, closing network tasks"
+                        );
+                        Ok(())
+                    }
+                }
+            },
+            error = wait_for_runtime_failure(&mut execution_network_failure) => {
+                tracing::error!(%error, "execution network failed, stopping node gracefully");
+                mark_sync_stopped_for_runtime_failure(&state.sync_status, false);
+                let _ = shutdown_tx.send(true);
+                match tokio::time::timeout(SYNC_ENGINE_SHUTDOWN_TIMEOUT, &mut engine_run).await {
+                    Ok(result) => result,
+                    Err(_) => {
+                        tracing::warn!(
+                            ?SYNC_ENGINE_SHUTDOWN_TIMEOUT,
+                            "sync engine did not stop within execution network failure shutdown timeout, closing network tasks"
                         );
                         Ok(())
                     }
@@ -691,9 +715,16 @@ pub async fn run_sync(options: RunSyncOptions) {
         tracing::error!(%error, "node stopped after fatal consensus storage failure");
         std::process::exit(1);
     }
+    if let Some(error) = execution_network_failure
+        .as_ref()
+        .and_then(|receiver| receiver.borrow().clone())
+    {
+        tracing::error!(%error, "node stopped after fatal execution network failure");
+        std::process::exit(1);
+    }
 }
 
-async fn wait_for_consensus_storage_failure(
+async fn wait_for_runtime_failure(
     receiver: &mut Option<tokio::sync::watch::Receiver<Option<Arc<str>>>>,
 ) -> Arc<str> {
     let Some(receiver) = receiver else {
@@ -704,18 +735,18 @@ async fn wait_for_consensus_storage_failure(
             return error;
         }
         if receiver.changed().await.is_err() {
-            // A closed channel without a failure is not a storage failure.
+            // A closed channel without a failure is not a runtime failure.
             return std::future::pending().await;
         }
     }
 }
 
-struct ConsensusStorageWatchdog {
+struct RuntimeFailureWatchdog {
     waiting_complete: Option<tokio::sync::oneshot::Sender<()>>,
     deadline_complete: std::sync::mpsc::Sender<()>,
 }
 
-impl Drop for ConsensusStorageWatchdog {
+impl Drop for RuntimeFailureWatchdog {
     fn drop(&mut self) {
         if let Some(complete) = self.waiting_complete.take() {
             let _ = complete.send(());
@@ -724,40 +755,40 @@ impl Drop for ConsensusStorageWatchdog {
     }
 }
 
-fn start_consensus_storage_watchdog(
+fn start_runtime_failure_watchdog(
     receiver: tokio::sync::watch::Receiver<Option<Arc<str>>>,
     grace: Duration,
     on_expiry: impl FnOnce() + Send + 'static,
-) -> std::io::Result<ConsensusStorageWatchdog> {
+) -> std::io::Result<RuntimeFailureWatchdog> {
     // Tokio watch has no blocking receiver API. This runtime belongs solely to
     // the watchdog thread and only awaits notifications; it starts no workers.
     let runtime = tokio::runtime::Builder::new_current_thread().build()?;
     let (waiting_complete, mut waiting_done) = tokio::sync::oneshot::channel();
     let (deadline_complete, deadline_done) = std::sync::mpsc::channel();
     std::thread::Builder::new()
-        .name("consensus-storage-watchdog".to_owned())
+        .name("runtime-failure-watchdog".to_owned())
         .spawn(move || {
             let mut receiver = Some(receiver);
             let failed = runtime.block_on(async {
                 tokio::select! {
                     biased;
                     _ = &mut waiting_done => false,
-                    _ = wait_for_consensus_storage_failure(&mut receiver) => true,
+                    _ = wait_for_runtime_failure(&mut receiver) => true,
                 }
             });
             if failed {
-                finish_consensus_storage_watchdog(deadline_done, grace, on_expiry);
+                finish_runtime_failure_watchdog(deadline_done, grace, on_expiry);
             }
         })?;
     // Dropping the guard wakes either notification wait without joining the
     // thread. Normal shutdown never leaves a thread waiting for a future fault.
-    Ok(ConsensusStorageWatchdog {
+    Ok(RuntimeFailureWatchdog {
         waiting_complete: Some(waiting_complete),
         deadline_complete,
     })
 }
 
-fn finish_consensus_storage_watchdog(
+fn finish_runtime_failure_watchdog(
     completed: std::sync::mpsc::Receiver<()>,
     grace: Duration,
     on_expiry: impl FnOnce(),
@@ -772,12 +803,17 @@ fn finish_consensus_storage_watchdog(
     }
 }
 
-fn mark_sync_stopped_for_consensus_storage_failure(sync_status: &std::sync::Mutex<SyncStatus>) {
+fn mark_sync_stopped_for_runtime_failure(
+    sync_status: &std::sync::Mutex<SyncStatus>,
+    consensus_unavailable: bool,
+) {
     let mut status = sync_status.lock().expect("sync status mutex poisoned");
     status.syncing = false;
     status.eta_seconds = None;
     status.historical_eta_seconds = None;
-    status.consensus_head_fresh = Some(false);
+    if consensus_unavailable {
+        status.consensus_head_fresh = Some(false);
+    }
     status.node_state = logex_types::NodeState::Disconnected;
 }
 
@@ -1746,14 +1782,14 @@ mod tests {
     use alloy_primitives::B256;
 
     #[test]
-    fn consensus_storage_watchdog_expires_without_application_runtime() {
+    fn runtime_failure_watchdog_expires_without_application_runtime() {
         for initially_failed in [true, false] {
             let message: Arc<str> = Arc::from("state write failed");
             let (failure, receiver) =
                 tokio::sync::watch::channel(initially_failed.then(|| Arc::clone(&message)));
             let (expired, observed) = std::sync::mpsc::channel();
             let _watchdog =
-                start_consensus_storage_watchdog(receiver, Duration::from_millis(20), move || {
+                start_runtime_failure_watchdog(receiver, Duration::from_millis(20), move || {
                     expired.send(()).unwrap()
                 })
                 .unwrap();
@@ -1767,11 +1803,11 @@ mod tests {
     }
 
     #[test]
-    fn consensus_storage_watchdog_drop_releases_waiting_thread() {
+    fn runtime_failure_watchdog_drop_releases_waiting_thread() {
         let (_failure, receiver) = tokio::sync::watch::channel(None);
         let (expired, observed) = std::sync::mpsc::channel();
         let watchdog =
-            start_consensus_storage_watchdog(receiver, Duration::from_secs(30), move || {
+            start_runtime_failure_watchdog(receiver, Duration::from_secs(30), move || {
                 expired.send(()).unwrap()
             })
             .unwrap();
@@ -1785,7 +1821,7 @@ mod tests {
     }
 
     #[test]
-    fn consensus_storage_watchdog_deadline_is_disarmed_by_cleanup() {
+    fn runtime_failure_watchdog_deadline_is_disarmed_by_cleanup() {
         for send_completion in [true, false] {
             let (complete, completed) = std::sync::mpsc::channel();
             if send_completion {
@@ -1793,7 +1829,7 @@ mod tests {
             }
             drop(complete);
             let expired = std::cell::Cell::new(false);
-            finish_consensus_storage_watchdog(completed, Duration::ZERO, || expired.set(true));
+            finish_runtime_failure_watchdog(completed, Duration::ZERO, || expired.set(true));
             assert!(!expired.get());
         }
     }
@@ -1804,17 +1840,14 @@ mod tests {
         let message: Arc<str> = Arc::from("consensus state write failed");
         sender.send_replace(Some(Arc::clone(&message)));
         let mut receiver = Some(sender.subscribe());
-        assert_eq!(
-            wait_for_consensus_storage_failure(&mut receiver).await,
-            message
-        );
+        assert_eq!(wait_for_runtime_failure(&mut receiver).await, message);
     }
 
     #[tokio::test]
     async fn consensus_storage_failure_waiter_observes_new_latch() {
         let (sender, receiver) = tokio::sync::watch::channel(None);
         let mut receiver = Some(receiver);
-        let mut waiting = pin!(wait_for_consensus_storage_failure(&mut receiver));
+        let mut waiting = pin!(wait_for_runtime_failure(&mut receiver));
         assert!(futures_util::poll!(&mut waiting).is_pending());
         let message: Arc<str> = Arc::from("consensus state rename failed");
         sender.send(Some(Arc::clone(&message))).unwrap();
@@ -1824,7 +1857,7 @@ mod tests {
     #[tokio::test]
     async fn consensus_storage_failure_waiter_without_store_remains_pending() {
         let mut receiver = None;
-        let mut waiting = pin!(wait_for_consensus_storage_failure(&mut receiver));
+        let mut waiting = pin!(wait_for_runtime_failure(&mut receiver));
         assert!(futures_util::poll!(&mut waiting).is_pending());
     }
 
@@ -1833,7 +1866,7 @@ mod tests {
         let (sender, receiver) = tokio::sync::watch::channel(None);
         drop(sender);
         let mut receiver = Some(receiver);
-        let mut waiting = pin!(wait_for_consensus_storage_failure(&mut receiver));
+        let mut waiting = pin!(wait_for_runtime_failure(&mut receiver));
         assert!(futures_util::poll!(&mut waiting).is_pending());
     }
 
@@ -1846,13 +1879,33 @@ mod tests {
             historical_eta_seconds: Some(20.0),
             ..Default::default()
         });
-        mark_sync_stopped_for_consensus_storage_failure(&status);
+        mark_sync_stopped_for_runtime_failure(&status, true);
         let status = status.lock().unwrap();
         assert!(!status.syncing);
         assert_eq!(status.consensus_head_fresh, Some(false));
         assert_eq!(status.node_state, logex_types::NodeState::Disconnected);
         assert!(status.eta_seconds.is_none());
         assert!(status.historical_eta_seconds.is_none());
+    }
+
+    #[test]
+    fn execution_failure_marks_sync_unavailable_without_changing_consensus_freshness() {
+        for freshness in [None, Some(false), Some(true)] {
+            let status = std::sync::Mutex::new(SyncStatus {
+                syncing: true,
+                consensus_head_fresh: freshness,
+                eta_seconds: Some(10.0),
+                historical_eta_seconds: Some(20.0),
+                ..Default::default()
+            });
+            mark_sync_stopped_for_runtime_failure(&status, false);
+            let status = status.lock().unwrap();
+            assert!(!status.syncing);
+            assert_eq!(status.consensus_head_fresh, freshness);
+            assert_eq!(status.node_state, logex_types::NodeState::Disconnected);
+            assert!(status.eta_seconds.is_none());
+            assert!(status.historical_eta_seconds.is_none());
+        }
     }
 
     fn checkpoint_at_slot(slot: u64) -> String {

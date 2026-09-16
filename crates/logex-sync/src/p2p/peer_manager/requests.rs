@@ -8864,3 +8864,6 @@ mod failure_context_tests;
 
 #[cfg(test)]
 mod publication_tests;
+
+#[cfg(test)]
+mod supervision_tests;

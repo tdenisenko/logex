@@ -6,9 +6,33 @@ use tracing::{debug, trace, warn};
 
 use super::*;
 
+impl Drop for PeerManager {
+    fn drop(&mut self) {
+        self.task_monitor.begin_shutdown();
+        // The async shutdown path joins workers. This covers cancellation or
+        // early owner drop, where dropping JoinHandle alone would detach them.
+        for task in [
+            &self.network_task,
+            &self.eth_request_task,
+            &self.dns_discovery_task,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            task.abort();
+        }
+    }
+}
+
 impl PeerManager {
+    /// Permanent first unexpected exit of an execution-network worker.
+    pub fn task_failure_receiver(&self) -> tokio::sync::watch::Receiver<Option<Arc<str>>> {
+        self.task_monitor.subscribe()
+    }
+
     /// Gracefully stop the network manager and wait for the background task.
     pub async fn shutdown(&mut self) {
+        self.task_monitor.begin_shutdown();
         match timeout(NETWORK_SHUTDOWN_TIMEOUT, self.network.shutdown()).await {
             Ok(Ok(())) => {}
             Ok(Err(error)) => {
@@ -91,11 +115,27 @@ impl PeerManager {
     }
 
     pub(crate) fn drain_events_now(&mut self) {
-        while let Some(event) = self.network_events.next().now_or_never().flatten() {
-            self.handle_network_event(event);
+        loop {
+            match self.network_events.next().now_or_never() {
+                Some(Some(event)) => self.handle_network_event(event),
+                Some(None) => {
+                    self.network_events = Box::pin(tokio_stream::pending());
+                    warn!("network event stream closed");
+                    break;
+                }
+                None => break,
+            }
         }
-        while let Some(event) = self.discovery_events.next().now_or_never().flatten() {
-            self.handle_discovery_event(event);
+        loop {
+            match self.discovery_events.next().now_or_never() {
+                Some(Some(event)) => self.handle_discovery_event(event),
+                Some(None) => {
+                    self.discovery_events = Box::pin(tokio_stream::pending());
+                    warn!("discovery event stream closed");
+                    break;
+                }
+                None => break,
+            }
         }
         self.drain_dns_discovery_events_now();
         let now = Instant::now();
@@ -209,6 +249,7 @@ impl PeerManager {
                         self.handle_network_event(event);
                         true
                     } else {
+                        self.network_events = Box::pin(tokio_stream::pending());
                         warn!("network event stream closed");
                         false
                     }
@@ -218,6 +259,7 @@ impl PeerManager {
                         self.handle_discovery_event(event);
                         true
                     } else {
+                        self.discovery_events = Box::pin(tokio_stream::pending());
                         warn!("discovery event stream closed");
                         false
                     }
@@ -231,6 +273,7 @@ impl PeerManager {
                         self.handle_network_event(event);
                         true
                     } else {
+                        self.network_events = Box::pin(tokio_stream::pending());
                         warn!("network event stream closed");
                         false
                     }
@@ -240,6 +283,7 @@ impl PeerManager {
                         self.handle_discovery_event(event);
                         true
                     } else {
+                        self.discovery_events = Box::pin(tokio_stream::pending());
                         warn!("discovery event stream closed");
                         false
                     }
@@ -252,15 +296,22 @@ impl PeerManager {
     fn drain_dns_discovery_events_now(&mut self) -> usize {
         let mut count = 0usize;
         loop {
-            let Some(event) = self
+            match self
                 .dns_discovery_events
                 .as_mut()
-                .and_then(|events| events.next().now_or_never().flatten())
-            else {
-                break;
-            };
-            self.handle_dns_discovery_event(event);
-            count = count.saturating_add(1);
+                .and_then(|events| events.next().now_or_never())
+            {
+                Some(Some(event)) => {
+                    self.handle_dns_discovery_event(event);
+                    count = count.saturating_add(1);
+                }
+                Some(None) => {
+                    self.dns_discovery_events = None;
+                    warn!("execution DNS discovery stream closed");
+                    break;
+                }
+                None => break,
+            }
         }
         count
     }

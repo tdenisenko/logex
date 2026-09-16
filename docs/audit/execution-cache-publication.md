@@ -85,7 +85,8 @@ all production body-map mutation sites are covered by invalidation. The obsolete
 repeated predecessor lookup loop and unconditional ordinary submissions are removed;
 necessary forced head submissions remain. All eight local gates pass on `21e9dcc2`: vendor integrity, workspace and
 patched-vendor formatting, all-target check, strict Clippy, 1,584 workspace tests
-(24 ignored), doc tests and the release build. PR/CI/merge remain pending.
+(24 ignored), doc tests and the release build. All six CI jobs passed on `b36933f0`;
+[PR #189](https://github.com/tdenisenko/logex/pull/189) merged as `e17bd1bf`.
 Mac mini cleanup remains complete; this task uses no remote host or external volume.
 
 [Validation record](baselines/2026-09-16-execution-cache-publication.json).

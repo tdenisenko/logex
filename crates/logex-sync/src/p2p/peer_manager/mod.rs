@@ -56,6 +56,7 @@ mod requests;
 #[cfg(test)]
 mod serving_tests;
 mod state;
+mod tasks;
 
 pub use self::requests::ReceiptRequestContext;
 use self::requests::RequestAttempt;
@@ -139,6 +140,7 @@ pub type SourcedBodyReceipts = (SourcedBlockBody, SourcedReceiptSet);
 
 /// Manages peer sessions and request routing on top of Reth's real network stack.
 pub struct PeerManager {
+    task_monitor: tasks::TaskMonitor,
     network: NetworkHandle<LogexNetworkPrimitives>,
     network_task: Option<JoinHandle<()>>,
     eth_request_task: Option<JoinHandle<()>>,
@@ -466,8 +468,9 @@ impl PeerManager {
         let network_activated = network_head.number > 0;
         let fork_filter = MAINNET.fork_filter(network_head);
 
-        let mut dns_discovery_events = None;
-        let mut dns_discovery_task = None;
+        // Keep the DNS service owned here until all fallible network setup has
+        // succeeded. Dropping this constructor must not detach a poller.
+        let mut prepared_dns = None;
         let mut dns_initial_boot_nodes = DnsInitialBootNodes::default();
         if dial_families.includes_ipv6()
             && let Some((dns_network, dns_discovery_config)) = dns_discovery.as_ref()
@@ -486,10 +489,7 @@ impl PeerManager {
                         &mut events,
                     )
                     .await;
-                    let (events, task) =
-                        spawn_dns_discovery_poller(events, handle, dns_network.clone());
-                    dns_discovery_events = Some(events);
-                    dns_discovery_task = Some(task);
+                    prepared_dns = Some((events, handle, dns_network.clone()));
                     tracing::info!(
                         dns_network,
                         bind_ip = %bind_ip,
@@ -497,7 +497,7 @@ impl PeerManager {
                         direct_bootnodes = dns_initial_boot_nodes.direct_node_records.len(),
                         discovery_bootnodes = dns_initial_boot_nodes.discovery_node_records.len(),
                         signed_bootnodes = dns_initial_boot_nodes.signed_enrs.len(),
-                        "started family-aware execution DNS discovery for outbound p2p candidates"
+                        "prepared family-aware execution DNS discovery for outbound p2p candidates"
                     );
                 }
                 Err(error) => {
@@ -614,12 +614,23 @@ impl PeerManager {
         let local_enr = handle.local_enr();
         let network_events = Box::pin(handle.event_listener());
         let discovery_events = Box::pin(handle.discovery_listener());
-        let network_task = tokio::spawn(network);
+        let task_monitor = tasks::TaskMonitor::default();
+        let (dns_discovery_events, dns_discovery_task) = match prepared_dns {
+            Some((events, dns_handle, dns_network)) => {
+                let (events, task) =
+                    spawn_dns_discovery_poller(&task_monitor, events, dns_handle, dns_network);
+                (Some(events), Some(task))
+            }
+            None => (None, None),
+        };
+        let network_task = task_monitor.spawn("execution network task", network);
         if !network_activated {
             handle.set_network_hibernate();
         }
-        let eth_request_task = tokio::spawn(request_handler);
+        let eth_request_task =
+            task_monitor.spawn("execution request handler task", request_handler);
         let mut manager = Self {
+            task_monitor,
             network: handle,
             network_task: Some(network_task),
             eth_request_task: Some(eth_request_task),
@@ -1152,12 +1163,13 @@ async fn collect_initial_dns_boot_nodes(
 }
 
 fn spawn_dns_discovery_poller(
+    monitor: &tasks::TaskMonitor,
     mut events: DnsDiscoveryEvents,
     handle: DnsDiscoveryHandle,
     dns_network: String,
 ) -> (DnsDiscoveryEvents, JoinHandle<()>) {
     let (sender, receiver) = mpsc::channel(DNS_DISCOVERY_EVENT_BUFFER);
-    let task = tokio::spawn(async move {
+    let task = monitor.spawn("execution DNS discovery task", async move {
         let mut forwarded = 0u64;
         let mut rebootstrap = time::interval_at(
             TokioInstant::now() + DNS_DISCOVERY_REBOOTSTRAP_INTERVAL,

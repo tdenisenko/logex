@@ -3,7 +3,7 @@
   "branch": "audit/execution-cache-publication",
   "finding": "B4-33",
   "classification": "Confirmed redundant implementation work; measured component optimization, no new correctness failure claimed",
-  "status": "All eight local gates pass; PR/CI/merge pending",
+  "status": "Merged after all eight local gates and six exact-head CI jobs passed",
   "focused_tests": {
     "passed": 316,
     "failed": 0,
@@ -128,6 +128,18 @@
     "clippy-correction.log": {
       "sha256": "13f6f8cb4c13d180159269d84b7e3dd0cbeb86926e2825aeffe0f59dc38f4808",
       "bytes": 1035
+    },
+    "premerge.json": {
+      "sha256": "3f0c87f3fc46214a3d7bd5ab6fd4222a5d1a8ad719f7cc865caf0f38496536e5",
+      "bytes": 1894
+    },
+    "merged.json": {
+      "sha256": "996b046af761b58632e3147ab7d82bfa3e89653bf0a97ca0b977e5c4c6d2ec28",
+      "bytes": 240
+    },
+    "ci-watch.log": {
+      "sha256": "96ede969b382ab99ba7a4d587dcd7f30a1f8e6fecc31ac701de8566162a127d3",
+      "bytes": 9585
     }
   },
   "source_commit": "21e9dcc298942c341754d102d8718c278eee7289",
@@ -480,5 +492,51 @@
       ]
     }
   ],
-  "first_gate_disposition": "Test-only constant release assertion flagged by Clippy; explained function-level lint expectation retains runtime guard; the initial macro placement was ignored. No production/measurement algorithm change. Full rerun passed."
+  "first_gate_disposition": "Test-only constant release assertion flagged by Clippy; explained function-level lint expectation retains runtime guard; the initial macro placement was ignored. No production/measurement algorithm change. Full rerun passed.",
+  "pull_request": {
+    "headRefOid": "b36933f0ebd70f87a5e1a41ba283faa0fd5bc325",
+    "mergeCommit": {
+      "oid": "e17bd1bf1ddbc1454a308e4dc73700cdb4aa7fcc"
+    },
+    "mergedAt": "2026-09-16T01:01:53Z",
+    "number": 189,
+    "state": "MERGED",
+    "url": "https://github.com/tdenisenko/logex/pull/189"
+  },
+  "ci": {
+    "run": 35042065936,
+    "head": "b36933f0ebd70f87a5e1a41ba283faa0fd5bc325",
+    "checks": [
+      {
+        "name": "Check",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS"
+      },
+      {
+        "name": "Format",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS"
+      },
+      {
+        "name": "Clippy",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS"
+      },
+      {
+        "name": "Test",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS"
+      },
+      {
+        "name": "macOS Test",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS"
+      },
+      {
+        "name": "Release Build",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS"
+      }
+    ]
+  }
 }
