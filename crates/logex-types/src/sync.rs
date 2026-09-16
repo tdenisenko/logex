@@ -338,9 +338,11 @@ pub struct ExecutionNetworkStatus {
     pub historical_scheduler_receipt_blocks: u64,
     /// Approximate successful execution response payload rate in bytes per second.
     /// Uses normalized RLP encoded lengths, not compressed wire bytes.
+    /// A 15-second recent window uses 250 ms buckets; boundary expiry is approximate.
     pub p2p_download_bytes_per_sec: u64,
     /// Approximate execution request/serving payload rate in bytes per second.
     /// Counts payload estimates before confirmed delivery; excludes transport overhead.
+    /// Uses the same bucketed recent window as execution download accounting.
     pub p2p_upload_bytes_per_sec: u64,
     /// Cumulative normalized RLP payload-length estimates for successful execution responses.
     /// Locally reconstructed response fields can differ from the original wire representation.

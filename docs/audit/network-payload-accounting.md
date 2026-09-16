@@ -52,6 +52,9 @@ retransmissions and acknowledgement traffic are not represented. The dashboard
 therefore labels combined values **P2P payload rate (est.)**, explains their mixed
 basis and notes that upload does not confirm delivery. Public field names, numeric
 types, units, aggregation and rate windows remain unchanged.
+The later [bandwidth retention review](execution-bandwidth-retention.md) replaces
+per-event storage with bounded 250 ms buckets and documents the resulting
+recent-rate boundary approximation; lifetime counting retains its prior semantics.
 
 Displayed numbers can change materially on the same workload because the basis
 changes, including removal of compression and synthetic acknowledgements. They

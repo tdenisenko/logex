@@ -1,7 +1,8 @@
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use super::bandwidth::PayloadBandwidthWindow;
+use std::collections::{BTreeMap, HashMap};
 use std::ops::{Bound, RangeBounds, RangeInclusive};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use alloy_consensus::{Block, BlockBody, Header, ReceiptWithBloom, RlpEncodableReceipt as _};
 use alloy_eips::BlockHashOrNumber;
@@ -24,7 +25,6 @@ const SERVE_CACHE_HEADER_LIMIT: usize = 8_192;
 // Normalized encoded header/body/receipt weight, not resident memory. Separate
 // headers, spare capacity, shared backing and outgoing copies are not charged.
 const SERVE_CACHE_PAYLOAD_LIMIT: u64 = 128 * 1024 * 1024;
-const P2P_UPLOAD_RATE_WINDOW: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Clone)]
 pub struct ServeCacheProvider {
@@ -52,61 +52,6 @@ struct CachedBlock {
     block: Block<reth_ethereum_primitives::TransactionSigned>,
     receipts: Vec<LogexReceipt>,
     payload_bytes: u64,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-struct P2pUploadSnapshot {
-    bytes_per_sec: u64,
-    total_payload_bytes: u64,
-}
-
-#[derive(Debug, Default)]
-struct PayloadBandwidthWindow {
-    events: VecDeque<(Instant, u64)>,
-    window_payload_bytes: u64,
-    total_payload_bytes: u64,
-}
-
-impl PayloadBandwidthWindow {
-    fn record(&mut self, payload_bytes: u64, now: Instant) {
-        if payload_bytes == 0 {
-            return;
-        }
-        self.events.push_back((now, payload_bytes));
-        self.window_payload_bytes = self.window_payload_bytes.saturating_add(payload_bytes);
-        self.total_payload_bytes = self.total_payload_bytes.saturating_add(payload_bytes);
-        self.prune(now);
-    }
-
-    fn snapshot(&mut self, now: Instant) -> P2pUploadSnapshot {
-        self.prune(now);
-        let bytes_per_sec = self
-            .events
-            .front()
-            .map(|(first_event_at, _)| {
-                let elapsed = now
-                    .saturating_duration_since(*first_event_at)
-                    .max(Duration::from_secs(1))
-                    .min(P2P_UPLOAD_RATE_WINDOW);
-                (self.window_payload_bytes as f64 / elapsed.as_secs_f64()).round() as u64
-            })
-            .unwrap_or_default();
-
-        P2pUploadSnapshot {
-            bytes_per_sec,
-            total_payload_bytes: self.total_payload_bytes,
-        }
-    }
-
-    fn prune(&mut self, now: Instant) {
-        while let Some((event_at, payload_bytes)) = self.events.front().copied() {
-            if now.saturating_duration_since(event_at) <= P2P_UPLOAD_RATE_WINDOW {
-                break;
-            }
-            self.events.pop_front();
-            self.window_payload_bytes = self.window_payload_bytes.saturating_sub(payload_bytes);
-        }
-    }
 }
 
 fn usize_to_u64(value: usize) -> u64 {
@@ -1220,6 +1165,17 @@ mod tests {
             provider.block_by_number(7).unwrap().unwrap().header.number,
             7
         );
+    }
+
+    #[test]
+    fn bandwidth_telemetry_retains_bounded_samples_during_burst() {
+        let mut window = PayloadBandwidthWindow::default();
+        let now = Instant::now();
+        for _ in 0..4096 {
+            window.record(1, now);
+        }
+        assert!(window.sample_count() <= 61);
+        assert_eq!(window.snapshot(now).total_payload_bytes, 4096);
     }
 
     #[test]

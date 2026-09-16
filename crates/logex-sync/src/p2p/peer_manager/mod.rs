@@ -1,3 +1,4 @@
+use super::bandwidth::PayloadBandwidthWindow;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::num::{NonZeroU32, NonZeroUsize};
@@ -78,7 +79,6 @@ use super::persistence::MAX_PERSISTED_PEERS;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const DISCOVERY_WAIT: Duration = Duration::from_secs(2);
 const FILL_BUDGET: Duration = Duration::from_secs(2);
-const P2P_BANDWIDTH_RATE_WINDOW: Duration = Duration::from_secs(15);
 const DISCOVERY_LOOKUP_INTERVAL: Duration = Duration::from_secs(3);
 const DISCOVERY_PING_INTERVAL: Duration = Duration::from_secs(5);
 const DNS_DISCOVERY_IPV4_REQUESTS_PER_SEC: usize = 16;
@@ -194,69 +194,6 @@ struct ExecutionPeerSessionMetrics {
     submitted_dials_total: u64,
     submitted_dial_expirations: u64,
     p2p_download: PayloadBandwidthWindow,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-struct PayloadBandwidthSnapshot {
-    bytes_per_sec: u64,
-    total_payload_bytes: u64,
-}
-
-#[derive(Debug, Default)]
-struct PayloadBandwidthWindow {
-    events: VecDeque<(Instant, u64)>,
-    total_payload_bytes: u64,
-}
-
-impl PayloadBandwidthWindow {
-    fn record(&mut self, payload_bytes: u64, now: Instant) {
-        if payload_bytes == 0 {
-            return;
-        }
-
-        self.events.push_back((now, payload_bytes));
-        self.total_payload_bytes = self.total_payload_bytes.saturating_add(payload_bytes);
-        self.prune(now);
-    }
-
-    fn snapshot(&self, now: Instant) -> PayloadBandwidthSnapshot {
-        let mut window_payload_bytes = 0u64;
-        let mut first_event_at = None;
-
-        for (event_at, payload_bytes) in self.events.iter().copied() {
-            if now.saturating_duration_since(event_at) > P2P_BANDWIDTH_RATE_WINDOW {
-                continue;
-            }
-            if first_event_at.is_none() {
-                first_event_at = Some(event_at);
-            }
-            window_payload_bytes = window_payload_bytes.saturating_add(payload_bytes);
-        }
-
-        let bytes_per_sec = first_event_at
-            .map(|first_event_at| {
-                let elapsed = now
-                    .saturating_duration_since(first_event_at)
-                    .max(Duration::from_secs(1))
-                    .min(P2P_BANDWIDTH_RATE_WINDOW);
-                (window_payload_bytes as f64 / elapsed.as_secs_f64()).round() as u64
-            })
-            .unwrap_or_default();
-
-        PayloadBandwidthSnapshot {
-            bytes_per_sec,
-            total_payload_bytes: self.total_payload_bytes,
-        }
-    }
-
-    fn prune(&mut self, now: Instant) {
-        while let Some((event_at, _)) = self.events.front().copied() {
-            if now.saturating_duration_since(event_at) <= P2P_BANDWIDTH_RATE_WINDOW {
-                break;
-            }
-            self.events.pop_front();
-        }
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -1487,6 +1424,17 @@ mod tests {
     }
 
     #[test]
+    fn bandwidth_telemetry_retains_bounded_samples_during_burst() {
+        let mut window = PayloadBandwidthWindow::default();
+        let now = Instant::now();
+        for _ in 0..4096 {
+            window.record(1, now);
+        }
+        assert!(window.sample_count() <= 61);
+        assert_eq!(window.snapshot(now).total_payload_bytes, 4096);
+    }
+
+    #[test]
     fn payload_bandwidth_window_sums_parallel_payloads_by_wall_clock() {
         let mut window = PayloadBandwidthWindow::default();
         let start = Instant::now();
@@ -1507,7 +1455,7 @@ mod tests {
 
         window.record(1_024, start);
 
-        let snapshot = window.snapshot(start + P2P_BANDWIDTH_RATE_WINDOW + Duration::from_secs(1));
+        let snapshot = window.snapshot(start + Duration::from_secs(16));
 
         assert_eq!(snapshot.total_payload_bytes, 1_024);
         assert_eq!(snapshot.bytes_per_sec, 0);

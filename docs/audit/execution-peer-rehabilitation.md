@@ -66,6 +66,7 @@ resident-memory bound. This milestone does not close the whole execution batch.
 
 All eight local gates pass on `46078c53`: vendor integrity, workspace and
 patched-vendor formatting, all-target check, strict Clippy, 1,617 workspace tests
-(24 ignored), documentation tests and release build. PR/CI/merge remain pending.
+(24 ignored), documentation tests and release build. All six CI jobs passed on `fb1ce172`;
+[PR #193](https://github.com/tdenisenko/logex/pull/193) merged as `bedfed0d`.
 
 [Validation record](baselines/2026-09-16-execution-peer-rehabilitation.json).
