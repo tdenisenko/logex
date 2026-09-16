@@ -8867,3 +8867,6 @@ mod publication_tests;
 
 #[cfg(test)]
 mod supervision_tests;
+
+#[cfg(test)]
+mod session_endpoint_tests;

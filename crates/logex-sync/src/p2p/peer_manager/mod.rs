@@ -280,6 +280,9 @@ struct BodyReceiptSchedulerMetrics {
 #[derive(Clone)]
 struct ActivePeer {
     sender: PeerRequestSender<PeerRequest<LogexNetworkPrimitives>>,
+    /// Actual socket reported by the established session.
+    remote_addr: SocketAddr,
+    /// Advertised retry hint, which may differ from the connected socket.
     remote_record: NodeRecord,
     remote_record_is_dialable: bool,
     remote_status: UnifiedStatus,

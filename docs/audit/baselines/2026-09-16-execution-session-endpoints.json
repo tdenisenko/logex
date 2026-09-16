@@ -1,0 +1,55 @@
+{
+  "status": "Focused checks pass; full gates and PR/CI/merge pending",
+  "branch": "audit/execution-session-endpoints",
+  "baseline_commit": "e5eb60ace0a7b4704115f541750a0c956a6a05c4",
+  "findings": [
+    "B4-39"
+  ],
+  "original_controls": {
+    "passed": 2,
+    "failed": 1,
+    "production_unchanged": true
+  },
+  "focused_final": {
+    "passed": 294,
+    "failed": 0,
+    "new_controls": 4
+  },
+  "no_change_disposition": "Preserve newer advertised retry hints; they are not session endpoint evidence. Initial opposite oracle rejected.",
+  "review": "Implementer source review only",
+  "limitations": [
+    "No live connections or full-node log capture",
+    "No throughput measurement",
+    "Broader execution review remains open"
+  ],
+  "evidence": {
+    "original-source.json": {
+      "sha256": "09d3692863dfb794b80786d8b1cf2c3c9132db8f1df51a724c44aa31da9f20de",
+      "bytes": 633
+    },
+    "original-session-endpoint-tests.rs": {
+      "sha256": "0ec6073ee88b7444742356280d78fe33e45b52d0bfb74b34dbae8fa4485bded8",
+      "bytes": 4011
+    },
+    "original-session-endpoints.log": {
+      "sha256": "ac8984bec2c4c3434b8db4c30c94347dbd1d030795369e24161a06a40b2d837a",
+      "bytes": 1794
+    },
+    "initial-oracle-session-endpoints.log": {
+      "sha256": "d0e48b3c695964ce8d28e397ba958890b5f90cd7456eeff8fd8ab53f149eebf7",
+      "bytes": 2617
+    },
+    "fixture-compile-attempt.log": {
+      "sha256": "e866ef4e8f9053636483eef4e4e15dc398ac15d2b8d682410094b5c000cceb1c",
+      "bytes": 1448
+    },
+    "fixture-compile-attempt-2.log": {
+      "sha256": "9e49a722cf5382d88967fe00ee0459c691612bcc91049fda0fbb9cd39affff16",
+      "bytes": 1292
+    },
+    "focused-final.log": {
+      "sha256": "c585e8e1f6f3f070c9ee17e704c195c42a5e5c2005ec9b3347abe087d5182c73",
+      "bytes": 32083
+    }
+  }
+}

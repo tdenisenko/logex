@@ -164,7 +164,7 @@ impl PeerManager {
         let mut serving_ipv6_peers = 0usize;
         for peer in self.peers.values() {
             client_counts.record(&peer.client_version, peer.is_serving);
-            if peer.remote_record.tcp_addr().ip().is_ipv4() {
+            if peer.remote_addr.ip().is_ipv4() {
                 connected_ipv4_peers = connected_ipv4_peers.saturating_add(1);
                 if peer.is_serving {
                     serving_ipv4_peers = serving_ipv4_peers.saturating_add(1);

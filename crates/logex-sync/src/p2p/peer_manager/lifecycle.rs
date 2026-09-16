@@ -529,6 +529,7 @@ impl PeerManager {
         );
         let peer = ActivePeer {
             sender: messages,
+            remote_addr: info.remote_addr,
             remote_record: record,
             remote_record_is_dialable,
             remote_status: *info.status,
@@ -722,7 +723,7 @@ impl PeerManager {
                 .reputation_change(peer_id, ReputationChangeKind::Dropped);
             debug!(
                 peer = %peer_id,
-                remote_addr = %peer.remote_record.tcp_addr(),
+                remote_addr = %peer.remote_addr,
                 client_version = %peer.client_version,
                 connected_for = ?peer.connected_at.elapsed(),
                 "disconnecting stale non-serving peer without an advertised tip"
@@ -858,7 +859,7 @@ impl PeerManager {
         if noisy_remote_rejection {
             debug!(
                 peer = %peer_id,
-                remote_addr = %peer.remote_record.tcp_addr(),
+                remote_addr = %peer.remote_addr,
                 client_version = %peer.client_version,
                 ?reason,
                 ?connected_for,
@@ -872,7 +873,7 @@ impl PeerManager {
         } else if reason.is_some() && !noisy_non_serving_disconnect {
             debug!(
                 peer = %peer_id,
-                remote_addr = %peer.remote_record.tcp_addr(),
+                remote_addr = %peer.remote_addr,
                 client_version = %peer.client_version,
                 ?reason,
                 ?connected_for,
@@ -886,7 +887,7 @@ impl PeerManager {
         } else {
             debug!(
                 peer = %peer_id,
-                remote_addr = %peer.remote_record.tcp_addr(),
+                remote_addr = %peer.remote_addr,
                 client_version = %peer.client_version,
                 ?reason,
                 ?connected_for,

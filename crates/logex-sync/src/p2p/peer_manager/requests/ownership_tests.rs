@@ -10,6 +10,7 @@ pub(super) fn test_session(
     let now = Instant::now();
     let peer = ActivePeer {
         sender: PeerRequestSender::new(id, sender),
+        remote_addr: "127.0.0.1:30303".parse().unwrap(),
         remote_record: NodeRecord::new_with_ports("127.0.0.1".parse().unwrap(), 30303, None, id),
         remote_record_is_dialable: true,
         remote_status: UnifiedStatus::default(),
