@@ -51,7 +51,7 @@ appropriate, so no change was made there.
 
 ## Validation and cleanup
 
-All 152 node tests pass, including ten new controls and two relocated existing
+All 154 node tests pass, including twelve new controls and two relocated existing
 controls. These cover the original missing path, exact per-path I/O error,
 low-space measurement and equality boundary, actual healthy temporary roots,
 worker unwind, a started probe timeout, cancellation while queued, invalid path
@@ -59,9 +59,15 @@ conversion, failure status/diagnostics and signal responsiveness during a held
 probe. Blocking controls own and release their workers before assertions; the
 queued-work control drops its runtime before checking that canceled work never ran.
 No physical-volume, live-node, external service or mac-mini test is claimed.
-All eight local gates pass on `e56c3953`: vendor integrity, workspace and
-patched-vendor formatting, all-target check, strict Clippy, 1,720 workspace tests
-(24 ignored), documentation tests and release build. PR/CI/merge remain pending.
+The initial source passed all eight local gates (1,720 tests, 24 ignored) and all
+six CI jobs, but final review found a deadline-completion ordering gap before
+merge. Pinned Tokio 1.51 polls a ready join before checking its timeout. A
+ready-join/expired-deadline control fails on a behavior-preserving extraction of
+the candidate's completion path. The corrected worker records its completion
+time; the original deadline is established before spawning, and late successful
+completion is rejected even if already queued. Timely completion remains valid
+when observed late. Both cases have deterministic controls. The final workspace
+gates and fresh-head CI/merge are pending.
 
 Implementer review traced both probe roots, error and cancellation paths, exactly
 one active job, unchanged interval/threshold, supervisor outcome handling and

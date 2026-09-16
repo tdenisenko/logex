@@ -5,6 +5,50 @@ use std::sync::{
     mpsc,
 };
 
+#[tokio::test]
+async fn queued_completion_after_deadline_is_not_healthy() {
+    let deadline = tokio::time::Instant::now() - Duration::from_secs(1);
+    let mut work = JoinSet::new();
+    let task = work.spawn(async { (tokio::time::Instant::now(), Ok(())) });
+    while !task.is_finished() {
+        tokio::task::yield_now().await;
+    }
+    let result = await_probe(
+        PathBuf::from("owned-probe-control"),
+        Duration::ZERO,
+        deadline,
+        work,
+    )
+    .await;
+    assert!(
+        matches!(result, Err(StorageHealthFailure::Probe { source, .. })
+        if source.kind() == io::ErrorKind::TimedOut)
+    );
+}
+
+#[tokio::test]
+async fn queued_timely_completion_survives_delayed_polling() {
+    let (finished, observed) = tokio::sync::oneshot::channel();
+    let mut work = JoinSet::new();
+    let task = work.spawn(async move {
+        let completed = tokio::time::Instant::now();
+        finished.send(completed).unwrap();
+        (completed, Ok(()))
+    });
+    let deadline = observed.await.unwrap();
+    while !task.is_finished() {
+        tokio::task::yield_now().await;
+    }
+    await_probe(
+        PathBuf::from("owned-probe-control"),
+        Duration::ZERO,
+        deadline,
+        work,
+    )
+    .await
+    .unwrap();
+}
+
 #[test]
 fn disk_space_guard_trips_below_threshold() {
     assert!(disk_space_is_low(9, 10));

@@ -47,16 +47,36 @@ pub(super) async fn run_probe(
     timeout: Duration,
     probe: impl FnOnce(&Path) -> Result<(), StorageHealthFailure> + Send + 'static,
 ) -> Result<(), StorageHealthFailure> {
+    let deadline = tokio::time::Instant::now()
+        .checked_add(timeout)
+        .ok_or_else(|| StorageHealthFailure::Probe {
+            path: path.clone(),
+            source: io::Error::new(io::ErrorKind::InvalidInput, "probe timeout is too large"),
+        })?;
     // Canonicalization and statvfs can both block on an unavailable filesystem.
     // Keep them off the supervisor's async worker, with only one probe in flight.
     let mut work = JoinSet::new();
     let probe_path = path.clone();
-    work.spawn_blocking(move || probe(&probe_path));
-    let source = match tokio::time::timeout(timeout, work.join_next()).await {
-        Ok(Some(Ok(result))) => return result,
+    work.spawn_blocking(move || {
+        let result = probe(&probe_path);
+        (tokio::time::Instant::now(), result)
+    });
+    await_probe(path, timeout, deadline, work).await
+}
+
+async fn await_probe(
+    path: PathBuf,
+    timeout: Duration,
+    deadline: tokio::time::Instant,
+    mut work: JoinSet<(tokio::time::Instant, Result<(), StorageHealthFailure>)>,
+) -> Result<(), StorageHealthFailure> {
+    let source = match tokio::time::timeout_at(deadline, work.join_next()).await {
+        // Timeout polls a ready join before its timer. Check when the worker
+        // actually completed so delayed polling cannot accept late success.
+        Ok(Some(Ok((completed, result)))) if completed <= deadline => return result,
         Ok(Some(Err(error))) => io::Error::other(error),
         Ok(None) => unreachable!("the health guard owns one probe"),
-        Err(_) => io::Error::new(
+        Ok(Some(Ok(_))) | Err(_) => io::Error::new(
             io::ErrorKind::TimedOut,
             format!("filesystem probe exceeded {timeout:?}"),
         ),
