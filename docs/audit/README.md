@@ -129,8 +129,8 @@ skip provider reads and response construction for receivers already closed in th
 Merged in PR #196 (`cc1bb889`) after 372 focused P2P tests, eight local gates and six CI jobs.
 
 The [historical memory probe review](historical-memory-probes.md) records B5-02/B5-03:
-bounded host-reference ownership and nonoverlapping macOS page accounting; implemented,
-validation and merge pending.
+bounded host-reference ownership and nonoverlapping macOS page accounting;
+all eight local gates pass (1,731 tests, 24 ignored); CI/merge pending.
 
 The [historical fetch supervision review](historical-fetch-supervision.md) records B5-01:
 report workers that finish without a result while preserving queued successes and cancellation.

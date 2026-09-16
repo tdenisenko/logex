@@ -68,7 +68,10 @@ race. No other process is queried and no resource limit is stressed.
 
 All 570 sync tests pass (two existing workloads ignored). After simplifying the
 concurrent ownership control to acquire its two candidates before spawning, all
-nine final memory controls pass. Workspace gates are pending.
+nine final memory controls pass. All eight local gates pass on `546d6d89`:
+vendor integrity, workspace/patched-vendor formatting, check, strict Clippy,
+1,731 workspace tests (24 ignored), documentation tests and release build.
+PR/CI/merge remain pending.
 
 Implementer review traced every historical memory caller, cache initialization,
 failed queries, wrapper lifetime, ABI prefix and arithmetic. No independent review
