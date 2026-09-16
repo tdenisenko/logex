@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
+#[cfg(test)]
 use std::pin::pin;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -32,8 +33,10 @@ use serde::{Deserialize, Serialize};
 use crate::background::{log_task_exit, run_background_indexer};
 use crate::checkpoint::{RECENT_CHECKPOINT_MAX_FINALIZED_EPOCH_LAG, resolve_checkpoint};
 
+mod supervision;
+
 const SYNC_ENGINE_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(120);
-// Fatal store or execution-worker failures allow the engine's 120-second grace plus 60 seconds
+// Runtime failures allow the engine's 120-second grace plus 60 seconds
 // for shared cleanup. An independent thread enforces this even if startup,
 // filesystem calls or post-abort joins block application runtime workers.
 const RUNTIME_FAILURE_CLEANUP_GRACE: Duration = Duration::from_secs(180);
@@ -604,81 +607,34 @@ pub async fn run_sync(options: RunSyncOptions) {
         shutdown_rx.clone(),
     );
 
-    let engine_result = {
-        let mut engine_run = pin!(engine.run());
-        tokio::select! {
-            biased;
-            error = wait_for_runtime_failure(&mut consensus_storage_failure) => {
-                tracing::error!(%error, "consensus storage failed, stopping node gracefully");
-                mark_sync_stopped_for_runtime_failure(&state.sync_status, true);
-                let _ = shutdown_tx.send(true);
-                match tokio::time::timeout(SYNC_ENGINE_SHUTDOWN_TIMEOUT, &mut engine_run).await {
-                    Ok(result) => result,
-                    Err(_) => {
-                        tracing::warn!(
-                            ?SYNC_ENGINE_SHUTDOWN_TIMEOUT,
-                            "sync engine did not stop within consensus storage failure shutdown timeout, closing network tasks"
-                        );
-                        Ok(())
-                    }
-                }
-            },
-            error = wait_for_runtime_failure(&mut execution_network_failure) => {
-                tracing::error!(%error, "execution network failed, stopping node gracefully");
-                mark_sync_stopped_for_runtime_failure(&state.sync_status, false);
-                let _ = shutdown_tx.send(true);
-                match tokio::time::timeout(SYNC_ENGINE_SHUTDOWN_TIMEOUT, &mut engine_run).await {
-                    Ok(result) => result,
-                    Err(_) => {
-                        tracing::warn!(
-                            ?SYNC_ENGINE_SHUTDOWN_TIMEOUT,
-                            "sync engine did not stop within execution network failure shutdown timeout, closing network tasks"
-                        );
-                        Ok(())
-                    }
-                }
-            },
-            res = &mut engine_run => res,
-            signal = wait_for_shutdown_signal() => {
-                tracing::info!(signal, "shutdown requested, stopping node gracefully");
-                let _ = shutdown_tx.send(true);
-                match tokio::time::timeout(SYNC_ENGINE_SHUTDOWN_TIMEOUT, &mut engine_run).await {
-                    Ok(result) => result,
-                    Err(_) => {
-                        tracing::warn!(
-                            ?SYNC_ENGINE_SHUTDOWN_TIMEOUT,
-                            "sync engine did not stop within shutdown timeout, closing network tasks"
-                        );
-                        Ok(())
-                    }
-                }
-            },
-            low_disk = wait_for_low_disk_space(data_dir.clone()) => {
-                tracing::error!(
-                    path = %low_disk.path.display(),
-                    free_bytes = low_disk.free_bytes,
-                    min_free_bytes = low_disk.min_free_bytes,
-                    "disk space below safety threshold, stopping node gracefully"
-                );
-                mark_sync_stopped_for_low_disk(&state);
-                let _ = shutdown_tx.send(true);
-                match tokio::time::timeout(SYNC_ENGINE_SHUTDOWN_TIMEOUT, &mut engine_run).await {
-                    Ok(result) => result,
-                    Err(_) => {
-                        tracing::warn!(
-                            ?SYNC_ENGINE_SHUTDOWN_TIMEOUT,
-                            "sync engine did not stop within low-disk shutdown timeout, closing network tasks"
-                        );
-                        Ok(())
-                    }
-                }
-            }
-        }
-    };
-
-    if let Err(e) = engine_result {
-        tracing::error!(error = %e, "sync engine error");
+    let mut _runtime_failure_watchdog = None;
+    let engine_exit_code = supervision::SyncSupervisor {
+        shutdown_tx: &shutdown_tx,
+        sync_status: &state.sync_status,
+        consensus_storage_failure: &mut consensus_storage_failure,
+        execution_network_failure: &mut execution_network_failure,
+        shutdown_timeout: SYNC_ENGINE_SHUTDOWN_TIMEOUT,
     }
+    .run(
+        engine.run(),
+        wait_for_shutdown_signal(),
+        wait_for_low_disk_space(data_dir.clone()),
+        |error| {
+            // Arm before status locks or cleanup. The failure is already latched,
+            // so this adds a watchdog thread only when shutdown has failed.
+            let (_, receiver) = tokio::sync::watch::channel(Some(Arc::<str>::from(error)));
+            _runtime_failure_watchdog = Some(
+                start_runtime_failure_watchdog(receiver, RUNTIME_FAILURE_CLEANUP_GRACE, || {
+                    std::process::exit(1)
+                })
+                .unwrap_or_else(|error| {
+                    tracing::error!(%error, "failed to start sync failure shutdown watchdog");
+                    std::process::exit(1);
+                }),
+            );
+        },
+    )
+    .await;
 
     engine.shutdown().await;
 
@@ -720,6 +676,11 @@ pub async fn run_sync(options: RunSyncOptions) {
         .and_then(|receiver| receiver.borrow().clone())
     {
         tracing::error!(%error, "node stopped after fatal execution network failure");
+        std::process::exit(1);
+    }
+    if engine_exit_code != std::process::ExitCode::SUCCESS {
+        // Keep the watchdog alive until process exit. Dropping Tokio's runtime
+        // instead could wait indefinitely for unfinished blocking work.
         std::process::exit(1);
     }
 }
@@ -807,7 +768,11 @@ fn mark_sync_stopped_for_runtime_failure(
     sync_status: &std::sync::Mutex<SyncStatus>,
     consensus_unavailable: bool,
 ) {
-    let mut status = sync_status.lock().expect("sync status mutex poisoned");
+    // Reporting a failure must not unwind and disarm its cleanup watchdog if a
+    // previous telemetry update was interrupted. Retain the poison indication.
+    let mut status = sync_status
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
     status.syncing = false;
     status.eta_seconds = None;
     status.historical_eta_seconds = None;
@@ -1735,17 +1700,6 @@ fn insert_disk_space_probe_path(probes: &mut BTreeSet<PathBuf>, path: PathBuf) {
 
 fn disk_space_is_low(free_bytes: u64, min_free_bytes: u64) -> bool {
     free_bytes < min_free_bytes
-}
-
-fn mark_sync_stopped_for_low_disk(state: &AppState) {
-    let mut status = state
-        .sync_status
-        .lock()
-        .expect("sync status mutex poisoned");
-    status.syncing = false;
-    status.eta_seconds = None;
-    status.historical_eta_seconds = None;
-    status.node_state = logex_types::NodeState::Disconnected;
 }
 
 #[cfg(unix)]

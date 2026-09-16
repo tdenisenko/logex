@@ -69,7 +69,8 @@ Acquire load and channel `try_recv` waits for an in-progress send instead of
 reporting that queue state as empty. No independent review is claimed. Removed redundant stale-work scans from
 the candidate; no existing runtime helper became obsolete. All eight local gates pass on `5514fe1b`: vendor integrity, workspace and
 patched-vendor formatting, all-target check, strict Clippy, 1,657 workspace tests
-(24 ignored), documentation tests and release build. PR/CI/merge remain pending.
+(24 ignored), documentation tests and release build. All six CI jobs passed on `fbe3b0f4`;
+[PR #197](https://github.com/tdenisenko/logex/pull/197) merged as `f6f05acc`.
 
 ## Remaining boundaries
 

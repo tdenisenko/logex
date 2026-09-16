@@ -1,0 +1,94 @@
+{
+  "status": "Focused node suite passed; full gates pending",
+  "findings": [
+    "B10-01",
+    "B10-02"
+  ],
+  "base": "f6f05acc019a8c13a74507fac1e794b2c5b36c55",
+  "evidence_directory": "/private/tmp/logex-runtime-failure-exit-wsnzszoi",
+  "original_exit_controls": {
+    "method": "Behavior-preserving extraction of the existing selector and discarded engine result; no live node startup",
+    "passed": 2,
+    "failed": 4
+  },
+  "original_status_control": {
+    "method": "Production status-marker function verified byte-identical to base before reproduction",
+    "passed": 0,
+    "failed": 1
+  },
+  "candidate_review_controls": [
+    "Uncontained engine unwind bypassed explicit cleanup; contained as terminal failure",
+    "Final engine progress overwrote the failure marker during shutdown; reasserted after grace period"
+  ],
+  "final_new_controls": 16,
+  "focused_node_tests": {
+    "passed": 124,
+    "ignored": 0
+  },
+  "review": "Implementer review; no independent review claimed",
+  "performance": "Same selector and polling inputs; one unwind boundary around the engine future; no new I/O or per-block transformation; added watchdog starts only on failure. No benchmark claim.",
+  "limitations": [
+    "No full-node or live-sync test",
+    "Panic containment handles unwinding; it does not resume the engine or repair data",
+    "CLI post-cleanup failure exit and watchdog lifetime have source review; test watchdog callbacks report through local channels instead of exiting the test process",
+    "HTTP/gRPC/indexer supervision, volume protection and verified repair remain open"
+  ],
+  "evidence": {
+    "original-source.json": {
+      "sha256": "234c861fb14e7978835fd0d9bec010ae6d9913e5a483839b9b9326eab212c9be",
+      "bytes": 210
+    },
+    "original-runtime.rs": {
+      "sha256": "483f9e1ca9b51bc055203a496461c4eadd1aca963ca488bb0aa587464180a2dc",
+      "bytes": 99427
+    },
+    "extract-supervisor.py": {
+      "sha256": "3f29ca741087b3097216bf5f41e55a4c719fffd1fac5707bd50ceeac9b16a97c",
+      "bytes": 3767
+    },
+    "extraction-runtime.patch": {
+      "sha256": "4deae420bf89958190d95b8082dc2a1f06fa69c28400e87386461f239d30cbc7",
+      "bytes": 7014
+    },
+    "extracted-original-supervision.rs": {
+      "sha256": "2ac2463349e4b0cfe7ba488dfb34030752762fa069078e0cbb0c7003c6b0da72",
+      "bytes": 4889
+    },
+    "original-tests.rs": {
+      "sha256": "d6f44fc56697f875bfbbe1bbb922e217841d2622bd9b5e9df4eadb666ca50172",
+      "bytes": 4987
+    },
+    "original-controls-compile.log": {
+      "sha256": "493f70154af3ef70d0dd3a58ad10eea95736948adf6cae5b1eeee1630b80f361",
+      "bytes": 1054
+    },
+    "original-controls.log": {
+      "sha256": "fb4b2949214295f8b1ddacad9e3d9d415aa8c1d8876464d956f7637fd862d474",
+      "bytes": 3072
+    },
+    "original-poison-control.log": {
+      "sha256": "e689f308e72a0d1224ec8f1bb8818bf5a17552d45835694ca604269a872f6884",
+      "bytes": 1588
+    },
+    "original-status-marker.json": {
+      "sha256": "b6dbf310c447de777531d1fcf39f5f8a153eeb5eae76a8d6c584646498c7c77b",
+      "bytes": 122
+    },
+    "focused-candidate.log": {
+      "sha256": "a103592e5a3b37041baf133448061a1fc125ef5812bb43a57ca36b4a2d493112",
+      "bytes": 1660
+    },
+    "unhandled-engine-panic.log": {
+      "sha256": "f7237db2fe39f4d09d6397dce05d30c098369c4cd4c239482c59561387ff14d4",
+      "bytes": 1304
+    },
+    "final-status-candidate-control.log": {
+      "sha256": "c0290774990b18db0d21c2833fb17ff3bd57e9505688a3bbe100f11ad8169537",
+      "bytes": 1369
+    },
+    "focused-final-complete.log": {
+      "sha256": "8a5726a01d827063bd6eff1361a85db82637fef3cd9562da473129d3641071b9",
+      "bytes": 11033
+    }
+  }
+}
