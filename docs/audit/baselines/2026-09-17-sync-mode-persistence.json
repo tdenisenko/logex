@@ -1,0 +1,57 @@
+{
+  "status": "Focused validation passes; full gates and publication pending",
+  "base": {
+    "commit": "c63d9c273b811d9837d016ac0c9a9d4326e790fe",
+    "runtime_sha256": "89222b31026c1839b965472dfdd90a49659d7652e5afd6b90a4c99f1e5f6b938"
+  },
+  "findings": [
+    "B10-13",
+    "B10-14",
+    "B10-15"
+  ],
+  "original_controls": {
+    "passed": 2,
+    "failed": 5,
+    "runtime_production": "Unchanged except test-module declaration",
+    "power_loss_reproduction": false
+  },
+  "focused": {
+    "new_tests": 16,
+    "node_passed": 188
+  },
+  "evidence_directory": "/private/tmp/logex-sync-mode-persistence-fsfg4fw1",
+  "evidence": {
+    "focused-mode.log": {
+      "bytes": 1560,
+      "sha256": "8fb32146a08677f45b54984ea1466ae1ea231fb20c8bc153ed4ebb3c147a9ed2"
+    },
+    "focused-node-final.log": {
+      "bytes": 16946,
+      "sha256": "8fc150fceb38270c29353706d0ca961e957649110ff0b565974f65f3b3f0ffcc"
+    },
+    "focused-node.log": {
+      "bytes": 16847,
+      "sha256": "6b350b3deb8aeff38388e73e300bc24a5d1b250d033f893abb987f4867bd769b"
+    },
+    "original-controls.log": {
+      "bytes": 4006,
+      "sha256": "1aa3a3e701201751d55d73651032b9852beec63c636f19e87dc9492e57426bcb"
+    },
+    "original-controls.patch": {
+      "bytes": 359,
+      "sha256": "2a1969443d74e0a797088bab16463ea5339f64c9f42f564764af8c20b8f1dfac"
+    },
+    "original-runtime.rs": {
+      "bytes": 94526,
+      "sha256": "89222b31026c1839b965472dfdd90a49659d7652e5afd6b90a4c99f1e5f6b938"
+    },
+    "original-source.json": {
+      "bytes": 147,
+      "sha256": "b4d39486c7b8ddce2ae88adbce8a4f14d7977206c36c691b896d8d217b8833c5"
+    },
+    "original-sync-mode-tests.rs": {
+      "bytes": 2671,
+      "sha256": "d661d38e6eef8a95a7eaad09542336a0ec889294e54732c5f6d13ff8afa49e60"
+    }
+  }
+}

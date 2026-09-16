@@ -75,7 +75,8 @@ Final review then noticed that location counters inferred `i32`; they now use
 `usize`, matching string offsets. A giant-file runtime reproduction was not run.
 Initial CI was canceled before merge, and revised-source gates pass on `c70c2118`: vendor integrity, workspace/patched-vendor
 formatting, check, strict Clippy, 1,765 workspace tests (24 ignored), documentation
-tests and release build. CI and merge are pending. Four additional checks of the actual release executable pass:
+tests and release build. All six CI jobs passed on `08bdcc6b`;
+[PR #205](https://github.com/tdenisenko/logex/pull/205) merged as `c63d9c27`. Four additional checks of the actual release executable pass:
 explicit directories before/after `info` select only the requested owned temporary
 directory, and unknown-key/syntax errors exit 1 before either candidate data
 directory is created. The syntax error does not print the fixture value. All four
