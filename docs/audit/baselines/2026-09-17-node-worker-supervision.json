@@ -1,0 +1,113 @@
+{
+  "status": "Focused checks pass; full gates and PR/CI/merge pending",
+  "base": "a47ecbd871e5b30c777588e77838231e241aaa0e",
+  "findings": [
+    "B10-03",
+    "B10-04",
+    "B10-05"
+  ],
+  "evidence_directory": "/private/tmp/logex-node-worker-supervision-loj_iclr",
+  "original_controls": {
+    "failed": 4,
+    "method": "HTTP/gRPC behavior-preserving spawn extraction; background checkpoint loop and existing monitor production bodies verified byte-identical to base"
+  },
+  "new_controls": 13,
+  "focused_node": {
+    "passed": 131,
+    "ignored": 0
+  },
+  "focused_sync": {
+    "passed": 558,
+    "ignored": 2
+  },
+  "review": "Implementer review; no independent review claimed",
+  "performance": "One additional sleeping watchdog thread and failure channel; no per-block writes/transformations or recurring timer; no benchmark/percentage claim",
+  "limitations": [
+    "No full-node or live-sync run",
+    "General cleanup joins and ignored cleanup errors remain separate work",
+    "Outer consensus supervisor, compaction-worker policy, volume protection and offline repair remain open",
+    "Actual process exit mapping source-reviewed; test watchdog callbacks report locally instead of exiting"
+  ],
+  "evidence": {
+    "original-source.json": {
+      "sha256": "9aa715d5cff8f16f06f84dacb44c08cd1a1a8ba6c002bf733c1e14fcf2704c99",
+      "bytes": 418
+    },
+    "original-production-verification.json": {
+      "sha256": "b1fea3cdae090438eae35770b97c40ff5d05312e82836ce0fdb8bad417350168",
+      "bytes": 245
+    },
+    "runtime.rs": {
+      "sha256": "baa54f1a6b09ebf3506642a8af076c3d77a4ca062b987e29a92368a12fe591bc",
+      "bytes": 97183
+    },
+    "background.rs": {
+      "sha256": "0fbf932e8082a8adb043a15bdb08ca6eb22529aece16da7fa774c77e1e86be8d",
+      "bytes": 27526
+    },
+    "tasks.rs": {
+      "sha256": "c9f55a4dffed73052fc3e60e03869098f4363529c416ace775677919fa000430",
+      "bytes": 4434
+    },
+    "original-service-spawns.rs": {
+      "sha256": "1e3763fa459c9f508c207b80fd4bf31abee9a58b3ce045c7a605b854f86c0563",
+      "bytes": 977
+    },
+    "original-services.rs": {
+      "sha256": "e63620a57bd534a8705170d15739ae02675775e9d303f2b42cae039dfa6afe9b",
+      "bytes": 994
+    },
+    "original-extraction.patch": {
+      "sha256": "c5c3a9a56f76ffd6173e80942cb626e9ba25203edd713b3bc3bb65d800989adb",
+      "bytes": 2028
+    },
+    "original-supervisor-tests.rs": {
+      "sha256": "6e8b6364247bfe16db9497f11847b1f6cae94ca96007fd259db47b593bec78d3",
+      "bytes": 14720
+    },
+    "original-background-tests.rs": {
+      "sha256": "bfc7fd7c25ec1744c2a06eed2b16323a25fb78bdf84ec57ae0dfced8e7de0a58",
+      "bytes": 29396
+    },
+    "original-monitor-tests.rs": {
+      "sha256": "c55da242d28615d3f698cc6b63abed737df343afc92201a1968dd55629e2bff6",
+      "bytes": 4841
+    },
+    "original-listeners.log": {
+      "sha256": "411de00cc46404501e9122e387ecf31f189ac284818e02fc3cd89347a28be3d7",
+      "bytes": 2041
+    },
+    "original-checkpoint.log": {
+      "sha256": "2c8d1245d12cab314820196f81d5ffab56b65cb137c881c73daa3adb98195ad5",
+      "bytes": 1487
+    },
+    "original-shutdown-unwind.log": {
+      "sha256": "49db55015620ca7c9da576bd2321f08fafb80abc0afcf66cafb44d3ed26fb304",
+      "bytes": 1551
+    },
+    "focused-monitor.log": {
+      "sha256": "0de67f08af5cd2baf649b649a50f7f80036028a27f86872fd2a410b00aec0446",
+      "bytes": 2161
+    },
+    "focused-node.log": {
+      "sha256": "3e72e05aa1b53d14f4735588a70ba28cea9b97d9c38badb912b6f9c2fae7ffd5",
+      "bytes": 12637
+    },
+    "focused-sync-final.log": {
+      "sha256": "e50e963f8a9b64a21ca982a1d585718fba05301c029061eb16b5c3c2d1753a8a",
+      "bytes": 57567
+    },
+    "focused-node-final.log": {
+      "sha256": "19468f5d244582c8b2f99222d1ea20d4813206de27f50346c5f98bf3c0bb0d88",
+      "bytes": 12027
+    },
+    "focused-results.json": {
+      "sha256": "2c3f32ebe89d7c0b93d54274a4b9ade0a643d8adc610588ae18ec0bbbaee948f",
+      "bytes": 395
+    },
+    "final-listener-diagnostics.log": {
+      "sha256": "1d4da71281c997b077a6f2af89310080f76931cc0dbd22df260d447117435e14",
+      "bytes": 1117
+    }
+  }
+}

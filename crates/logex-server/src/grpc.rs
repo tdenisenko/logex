@@ -166,7 +166,7 @@ pub async fn serve_grpc(
     shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> Result<(), tonic::transport::Error> {
     let service = LogExGrpcService::new(state);
-    tracing::info!(%addr, "gRPC server listening");
+    tracing::info!(%addr, "gRPC server starting");
 
     tonic::transport::Server::builder()
         .add_service(LogExServiceServer::new(service))

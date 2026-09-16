@@ -32,11 +32,11 @@ struct CompactionReport {
     profile_rewrite_backlog: Option<usize>,
 }
 
-/// Background task that periodically rebuilds indexes on the hot partition.
+/// Checkpoint idle ingestion and periodically compact/build derived indexes.
 pub async fn run_background_indexer(
     state: Arc<AppState>,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
-) {
+) -> io::Result<()> {
     let mut last_indexed: Option<HotIndexState> = None;
     let mut sealed_index_scan_complete_for_max_id: Option<u64> = None;
     let mut last_active_backlog_refresh: Option<std::time::Instant> = None;
@@ -46,6 +46,7 @@ pub async fn run_background_indexer(
 
     loop {
         tokio::select! {
+            biased;
             _ = wait_for_shutdown(&mut shutdown) => {
                 tracing::info!("background indexer shutting down");
                 break;
@@ -57,19 +58,17 @@ pub async fn run_background_indexer(
         // Keep filesystem work off async workers and run before compaction/index
         // selection so newly durable sealed segments become eligible together.
         let storage = Arc::clone(&state.storage);
-        match tokio::task::spawn_blocking(move || storage.blocking_write().checkpoint_if_due())
+        tokio::task::spawn_blocking(move || storage.blocking_write().checkpoint_if_due())
             .await
-        {
-            Ok(Ok(_)) => {}
-            Ok(Err(error)) => {
-                tracing::error!(%error, "storage checkpoint failed; writes require recovery");
-                continue;
-            }
-            Err(error) => {
-                tracing::error!(%error, "storage checkpoint worker failed");
-                continue;
-            }
-        }
+            .map_err(|error| {
+                io::Error::other(format!("storage checkpoint worker failed: {error}"))
+            })?
+            .map_err(|error| {
+                io::Error::new(
+                    error.kind(),
+                    format!("storage checkpoint failed; writes require recovery: {error}"),
+                )
+            })?;
 
         {
             let active_sync_status = sync_is_active(&state);
@@ -338,6 +337,7 @@ pub async fn run_background_indexer(
             }
         }
     }
+    Ok(())
 }
 
 fn sync_is_active(state: &AppState) -> bool {
@@ -537,6 +537,52 @@ fn query_indexes_missing(path: &Path) -> Option<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn indexer_stops_when_checkpoint_requires_recovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut storage = PartitionManager::open(logex_storage::PartitionManagerConfig {
+            data_dir: dir.path().to_owned(),
+            ..Default::default()
+        })
+        .unwrap();
+        let row = logex_types::LogRow {
+            block_number: 1,
+            block_hash: alloy_primitives::B256::repeat_byte(1),
+            timestamp: 1,
+            tx_hash: alloy_primitives::B256::repeat_byte(2),
+            tx_index: 0,
+            log_index: 0,
+            address: alloy_primitives::Address::ZERO,
+            topic0: None,
+            topic1: None,
+            topic2: None,
+            topic3: None,
+            data: alloy_primitives::Bytes::new(),
+            data_len: 0,
+            source: logex_types::Source::Receipt,
+        };
+        storage.write_batch(&[row]).unwrap();
+        // Only this temporary fixture is changed. Preserve its catalog, then
+        // occupy the publication destination to force a real checkpoint error.
+        let catalog = dir.path().join("catalog.json");
+        std::fs::rename(&catalog, dir.path().join("saved-catalog.json")).unwrap();
+        std::fs::create_dir(&catalog).unwrap();
+        assert!(storage.checkpoint_durable().is_err());
+        let error = storage.checkpoint_if_due().unwrap_err();
+        assert!(error.to_string().contains("unfinished transaction"));
+        let state = Arc::new(AppState::new(storage, None, SyncStatus::default()));
+        let (_shutdown, receiver) = tokio::sync::watch::channel(false);
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            run_background_indexer(state, receiver),
+        )
+        .await;
+        let error = result
+            .expect("checkpoint failure must stop the indexer")
+            .unwrap_err();
+        assert!(error.to_string().contains("unfinished transaction"));
+    }
 
     #[test]
     fn rebuild_hot_indexes_when_partition_rotates() {

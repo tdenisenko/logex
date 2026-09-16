@@ -83,7 +83,8 @@ format changed. Implementer review covered all selector branches, watchdog lifet
 terminal exit mapping and unchanged late-latch checks; no independent review is
 claimed. All eight local gates pass on `36caff48`: vendor integrity, workspace and
 patched-vendor formatting, all-target check, strict Clippy, 1,673 workspace tests
-(24 ignored), documentation tests and release build. PR/CI/merge remain pending.
+(24 ignored), documentation tests and release build. All six CI jobs passed on `6f524028`;
+[PR #198](https://github.com/tdenisenko/logex/pull/198) merged as `a47ecbd8`.
 
 ## Remaining boundaries
 

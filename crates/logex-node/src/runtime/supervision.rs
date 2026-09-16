@@ -11,6 +11,7 @@ use std::time::Duration;
 use tokio::sync::watch;
 
 pub(super) struct SyncSupervisor<'a> {
+    pub(super) node_workers: &'a logex_sync::tasks::TaskMonitor,
     pub(super) shutdown_tx: &'a watch::Sender<bool>,
     pub(super) sync_status: &'a Mutex<SyncStatus>,
     pub(super) consensus_storage_failure: &'a mut Option<watch::Receiver<Option<Arc<str>>>>,
@@ -53,6 +54,7 @@ impl SyncSupervisor<'_> {
                 }
             }
         });
+        let mut node_worker_failure = Some(self.node_workers.subscribe());
         let trigger = tokio::select! {
             biased;
             error = wait_for_runtime_failure(self.consensus_storage_failure) => StopTrigger::RuntimeFailure {
@@ -60,6 +62,9 @@ impl SyncSupervisor<'_> {
             },
             error = wait_for_runtime_failure(self.execution_network_failure) => StopTrigger::RuntimeFailure {
                 component: "execution network", error, consensus_unavailable: false,
+            },
+            error = wait_for_runtime_failure(&mut node_worker_failure) => StopTrigger::RuntimeFailure {
+                component: "node worker", error, consensus_unavailable: false,
             },
             result = &mut engine => StopTrigger::Engine(result),
             signal = signal => StopTrigger::Signal(signal),
@@ -111,6 +116,7 @@ impl SyncSupervisor<'_> {
             }
         };
 
+        self.node_workers.begin_shutdown();
         // Notify other workers before taking status locks or awaiting the engine.
         // For failures, record_failure already armed the outer cleanup watchdog.
         let _ = self.shutdown_tx.send(true);
