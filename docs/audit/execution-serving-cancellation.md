@@ -76,6 +76,8 @@ The existing handler fixture is reused; its retained provider reference is test
 only. No provider helper became obsolete, and no unrelated production code was
 removed. Mac mini and external-volume contents were not accessed.
 
-Full workspace gates and PR/CI/merge are pending.
+All eight local gates pass on `780d63be`: vendor integrity, workspace and
+patched-vendor formatting, all-target check, strict Clippy, 1,641 workspace tests
+(24 ignored), documentation tests and release build. PR/CI/merge remain pending.
 
 [Validation record](baselines/2026-09-16-execution-serving-cancellation.json).

@@ -126,7 +126,7 @@ Merged in PR #195 (`a03e2d51`) after 367 focused P2P tests, eight local gates an
 
 The [serving cancellation review](execution-serving-cancellation.md) records B4-46:
 skip provider reads and response construction for receivers already closed in the queue.
-All 372 focused P2P tests pass; full gates and merge remain pending.
+All 372 focused P2P tests and eight local gates pass; CI/merge remain pending.
 
 ## Baseline findings
 
