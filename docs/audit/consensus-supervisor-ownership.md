@@ -76,7 +76,8 @@ is five seconds to accommodate CI scheduling; the original reproduction used
 200 milliseconds and still released its worker before assertion. All eight local
 gates pass on `b8c770e6`: vendor integrity, workspace and patched-vendor
 formatting, all-target check, strict Clippy, 1,710 workspace tests (24 ignored),
-documentation tests and release build. PR/CI/merge remain pending.
+documentation tests and release build. All six CI jobs passed on `f8bd25a3`;
+[PR #201](https://github.com/tdenisenko/logex/pull/201) merged as `a3c57ac2`.
 
 Implementer review traces the initial constructor, restart ownership, all API
 callers, shutdown-before-notification ordering and the existing permanent monitor

@@ -1,4 +1,3 @@
-use std::collections::BTreeSet;
 use std::fs;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -36,6 +35,7 @@ use crate::checkpoint::{RECENT_CHECKPOINT_MAX_FINALIZED_EPOCH_LAG, resolve_check
 
 mod cleanup;
 mod services;
+mod storage_health;
 mod supervision;
 
 pub use cleanup::finish_runtime_shutdown;
@@ -46,8 +46,6 @@ const SYNC_ENGINE_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(120);
 // for shared cleanup. An independent thread enforces this even if startup,
 // filesystem calls or post-abort joins block application runtime workers.
 const RUNTIME_FAILURE_CLEANUP_GRACE: Duration = Duration::from_secs(180);
-const LOW_DISK_SPACE_POLL_INTERVAL: Duration = Duration::from_secs(10);
-const LOW_DISK_SPACE_MIN_FREE_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 const SYNC_MODE_FILE_NAME: &str = "sync-mode.json";
 const MAINNET_SECONDS_PER_SLOT: u64 = 12;
 const MAINNET_SLOTS_PER_EPOCH: u64 = 32;
@@ -648,7 +646,7 @@ pub async fn run_sync(options: RunSyncOptions) -> cleanup::RuntimeShutdown {
     .run(
         engine.run(),
         wait_for_shutdown_signal(),
-        wait_for_low_disk_space(data_dir.clone()),
+        storage_health::wait_for_failure(data_dir.clone()),
         |_| {},
     )
     .await;
@@ -1695,86 +1693,6 @@ async fn wait_for_shutdown_signal() -> &'static str {
     }
 }
 
-#[derive(Debug)]
-struct LowDiskSpace {
-    path: PathBuf,
-    free_bytes: u64,
-    min_free_bytes: u64,
-}
-
-async fn wait_for_low_disk_space(path: PathBuf) -> LowDiskSpace {
-    let mut interval = tokio::time::interval(LOW_DISK_SPACE_POLL_INTERVAL);
-    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
-    loop {
-        interval.tick().await;
-        for probe_path in disk_space_probe_paths(&path) {
-            match free_space_bytes(&probe_path) {
-                Ok(free_bytes) if disk_space_is_low(free_bytes, LOW_DISK_SPACE_MIN_FREE_BYTES) => {
-                    return LowDiskSpace {
-                        path: probe_path,
-                        free_bytes,
-                        min_free_bytes: LOW_DISK_SPACE_MIN_FREE_BYTES,
-                    };
-                }
-                Ok(_) => {}
-                Err(error) => {
-                    tracing::warn!(
-                        path = %probe_path.display(),
-                        %error,
-                        "failed to check data directory free space"
-                    );
-                }
-            }
-        }
-    }
-}
-
-fn disk_space_probe_paths(data_dir: &Path) -> Vec<PathBuf> {
-    let mut probes = BTreeSet::new();
-    insert_disk_space_probe_path(&mut probes, data_dir.to_path_buf());
-    insert_disk_space_probe_path(&mut probes, data_dir.join("segments"));
-
-    probes.into_iter().collect()
-}
-
-fn insert_disk_space_probe_path(probes: &mut BTreeSet<PathBuf>, path: PathBuf) {
-    let path = path.canonicalize().unwrap_or(path);
-    probes.insert(path);
-}
-
-fn disk_space_is_low(free_bytes: u64, min_free_bytes: u64) -> bool {
-    free_bytes < min_free_bytes
-}
-
-#[cfg(unix)]
-fn free_space_bytes(path: &Path) -> std::io::Result<u64> {
-    use std::ffi::CString;
-    use std::os::unix::ffi::OsStrExt;
-
-    let path = CString::new(path.as_os_str().as_bytes()).map_err(|_| {
-        std::io::Error::new(std::io::ErrorKind::InvalidInput, "path contains NUL byte")
-    })?;
-
-    let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
-    let result = unsafe { libc::statvfs(path.as_ptr(), stat.as_mut_ptr()) };
-    if result != 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-
-    let stat = unsafe { stat.assume_init() };
-    let free = (stat.f_bavail as u128).saturating_mul(stat.f_frsize as u128);
-    Ok(free.min(u64::MAX as u128) as u64)
-}
-
-#[cfg(not(unix))]
-fn free_space_bytes(_path: &Path) -> std::io::Result<u64> {
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "free-space reporting is not implemented on this platform",
-    ))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2619,35 +2537,6 @@ mod tests {
 
         assert_eq!(status.current_block, 83_714);
         assert_eq!(status.target_block, 0);
-    }
-
-    #[test]
-    fn disk_space_guard_trips_below_threshold() {
-        assert!(disk_space_is_low(9, 10));
-        assert!(!disk_space_is_low(10, 10));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn disk_space_probe_paths_track_writable_storage_roots_not_sealed_segment_targets() {
-        let base =
-            std::env::temp_dir().join(format!("logex-node-disk-probes-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
-        let data_dir = base.join("data");
-        let segments_dir = data_dir.join("segments");
-        let extra_segments_dir = base.join("extra").join("segments");
-        let target_segment = extra_segments_dir.join("s_1");
-        std::fs::create_dir_all(&segments_dir).unwrap();
-        std::fs::create_dir_all(&target_segment).unwrap();
-        std::os::unix::fs::symlink(&target_segment, segments_dir.join("s_1")).unwrap();
-
-        let probes = disk_space_probe_paths(&data_dir);
-
-        assert!(probes.contains(&data_dir.canonicalize().unwrap()));
-        assert!(probes.contains(&segments_dir.canonicalize().unwrap()));
-        assert!(!probes.contains(&extra_segments_dir.canonicalize().unwrap()));
-
-        std::fs::remove_dir_all(&base).unwrap();
     }
 
     #[test]

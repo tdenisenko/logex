@@ -1,4 +1,7 @@
-use super::{LowDiskSpace, mark_sync_stopped_for_runtime_failure, wait_for_runtime_failure};
+use super::{
+    mark_sync_stopped_for_runtime_failure, storage_health::StorageHealthFailure,
+    wait_for_runtime_failure,
+};
 use futures_util::FutureExt;
 use logex_types::SyncStatus;
 use std::fmt::Display;
@@ -23,7 +26,7 @@ pub(super) struct SyncSupervisor<'a, F> {
 enum StopTrigger {
     Engine(Result<(), String>),
     Signal(&'static str),
-    LowDisk(LowDiskSpace),
+    StorageHealth(StorageHealthFailure),
     RuntimeFailure {
         component: &'static str,
         error: Arc<str>,
@@ -36,7 +39,7 @@ impl<F: FnOnce()> SyncSupervisor<'_, F> {
         self,
         engine: impl Future<Output = Result<(), E>>,
         signal: impl Future<Output = &'static str>,
-        low_disk: impl Future<Output = LowDiskSpace>,
+        storage_health: impl Future<Output = StorageHealthFailure>,
         mut on_failure: impl FnMut(&str),
     ) -> ExitCode {
         // Treat an engine unwind as terminal: never poll that future again.
@@ -69,7 +72,7 @@ impl<F: FnOnce()> SyncSupervisor<'_, F> {
             },
             result = &mut engine => StopTrigger::Engine(result),
             signal = signal => StopTrigger::Signal(signal),
-            low_disk = low_disk => StopTrigger::LowDisk(low_disk),
+            failure = storage_health => StopTrigger::StorageHealth(failure),
         };
 
         // Arm the independent whole-shutdown deadline before logs, locks or
@@ -92,17 +95,8 @@ impl<F: FnOnce()> SyncSupervisor<'_, F> {
                 tracing::info!(signal, "shutdown requested, stopping node gracefully");
                 false
             }
-            StopTrigger::LowDisk(low_disk) => {
-                record_failure(
-                    &mut exit,
-                    &mut on_failure,
-                    format!(
-                        "disk space below safety threshold at {}: {} free bytes, minimum {}",
-                        low_disk.path.display(),
-                        low_disk.free_bytes,
-                        low_disk.min_free_bytes,
-                    ),
-                );
+            StopTrigger::StorageHealth(failure) => {
+                record_failure(&mut exit, &mut on_failure, failure.to_string());
                 false
             }
             StopTrigger::RuntimeFailure {
