@@ -102,7 +102,7 @@ head restoration. Merged in PR #189 (`e17bd1bf`) after the component comparison,
 
 The [execution worker lifecycle review](execution-task-lifecycle.md) records B4-34–36:
 completed-stream retirement, owned worker cancellation and fatal task supervision.
-Focused controls pass; workspace gates and merge remain pending.
+All 329 focused tests and eight local gates pass; CI/merge remain pending.
 
 ## Baseline findings
 

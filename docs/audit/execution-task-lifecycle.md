@@ -81,7 +81,10 @@ throughput claim is made. All eight initial local gates pass on `c7e3e112`, with
 (24 ignored). Review then strengthened the owner-drop control to await explicit
 completion with a deadline instead of relying on a single scheduler yield, and
 covered both activity-selection branches with DNS present/absent. Production
-code is unchanged; final validation and PR/CI/merge follow.
+code is unchanged. All eight final gates pass on `5c89efae`: vendor integrity,
+workspace and patched-vendor formatting, all-target check, strict Clippy,
+1,596 workspace tests (24 ignored), documentation tests and release build.
+PR/CI/merge remain pending.
 
 ## Remaining scope
 
