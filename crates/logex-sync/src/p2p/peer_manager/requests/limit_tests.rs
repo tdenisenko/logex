@@ -1,6 +1,38 @@
 use super::*;
 use std::task::Poll;
 
+/// Reuse the dormant network fixture for engine lifecycle tests. The returned
+/// resources keep its local channels, listener and temporary directory alive.
+pub(crate) async fn engine_peer_fixture() -> (PeerManager, impl Sized) {
+    let Fixture {
+        manager,
+        _network,
+        _directory,
+        receivers,
+    } = Fixture::new().await;
+    (manager, (_network, _directory, receivers))
+}
+
+pub(crate) fn empty_body_receipt_outcome() -> BodyReceiptRequestOutcome {
+    BodyReceiptRequestOutcome {
+        total_hashes: 0,
+        return_blocks: 0,
+        planned_return_blocks: 0,
+        chunks: BTreeMap::new(),
+        failures: Default::default(),
+        stats: Default::default(),
+        accounting_forwarded: false,
+        sessions: HashMap::new(),
+    }
+}
+
+pub(crate) fn empty_header_outcome() -> ReverseHeaderPagesRequestOutcome {
+    ReverseHeaderPagesRequestOutcome {
+        page_results: Vec::new(),
+        sessions: HashMap::new(),
+    }
+}
+
 /// Reth requires a real listener to construct its public handle. This manager is
 /// normally retained without polling; publication tests explicitly poll once to
 /// drain local commands. A TCP listener is bound on localhost:0, but no connection

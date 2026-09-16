@@ -8839,7 +8839,7 @@ mod ownership_tests;
 mod deadline_tests;
 
 #[cfg(test)]
-mod limit_tests;
+pub(super) mod limit_tests;
 
 #[cfg(test)]
 mod source_tests;
