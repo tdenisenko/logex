@@ -117,8 +117,9 @@ volume, unrelated files or other processes were changed. Mac-mini work is done.
 Linux CI additionally builds the same fixture driver and runs disposable ext4 loop
 images through equivalent lifecycle cases, including lazy detach. It verifies
 actual loop attachments before cleanup; only new owned regular image files are
-formatted. CI also validates the systemd template without installation. Final
-workspace gates and Linux results are pending in the initial implementation record.
+formatted. CI also validates the systemd template without installation. All eight local gates pass on `099ca405`: vendor verification, workspace and
+patched-vendor formatting, check, strict Clippy, 1,827 workspace tests (24 ignored),
+documentation tests and release build. Linux CI and merge remain pending.
 
 The launchd plist passed syntax validation and its fields were checked against
 the installed platform manual. Both templates restart with backoff and logs outside

@@ -1,5 +1,5 @@
 {
-  "status": "Implementation complete; final local gates and Linux CI pending",
+  "status": "All eight local gates pass; Linux CI and merge pending",
   "base": {
     "commit": "0b611c2df1899abf4d2a21ab8113285ee96a200e"
   },
@@ -20,7 +20,9 @@
     "cl_ignored": 1,
     "node_before_final_monitor_controls_passed": 200,
     "server_before_final_session_control_passed": 96,
-    "final_volume_controls_passed": 13
+    "final_volume_controls_passed": 13,
+    "final_node_passed": 202,
+    "final_server_passed": 97
   },
   "macos_mounts": {
     "results": [
@@ -201,6 +203,180 @@
     "source.json": {
       "bytes": 106,
       "sha256": "ad6eec4675faba63cc0b13e64aa786b2ba66167a78b6e66104b182166ed70aa3"
+    },
+    "gates/results.json": {
+      "bytes": 4837,
+      "sha256": "649ed1bab0673ea49735ff916ef238e0cdbe92220550394d6e4f2bd20385aceb"
+    },
+    "run-gates.py": {
+      "bytes": 2183,
+      "sha256": "b9e6b39097ea36d4bdc3045e360917885c87d5dfe64d4e667a36e67839867bc5"
+    },
+    "logex-volume-session-drop.log": {
+      "bytes": 1635,
+      "sha256": "ea81b5f7fb94753a7cc95b37e80e0c59c5680fc1da810f0d3efd311cdacde2d6"
+    },
+    "record-gates.py": {
+      "bytes": 3132,
+      "sha256": "797fb25593b07b6725dd39868e240705bdaecfda7da3d43d1420af3aa3a80661"
     }
-  }
+  },
+  "source_commit": "099ca40502c5411523dfe7d831ae3bc51ffbb066",
+  "validation": {
+    "commit": "099ca40502c5411523dfe7d831ae3bc51ffbb066",
+    "rustc": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+    "gates": [
+      {
+        "name": "vendor",
+        "command": [
+          "python3",
+          "tools/verify_datafusion_vendor.py"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-16T23:16:37.660315+00:00",
+        "finished": "2026-09-16T23:16:37.728949+00:00",
+        "sha256": "5de30a03a2c21d0dd165f1d3f30b23ef080e06616866e0a02f37198cff7f3a16",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-expected-volume-cjc4xw2a/gates/vendor.log"
+      },
+      {
+        "name": "format",
+        "command": [
+          "cargo",
+          "fmt",
+          "--all",
+          "--",
+          "--check"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-16T23:16:37.729335+00:00",
+        "finished": "2026-09-16T23:16:38.693672+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-expected-volume-cjc4xw2a/gates/format.log"
+      },
+      {
+        "name": "vendor-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2024",
+          "--config-path",
+          "vendor/reth-network/rustfmt.toml",
+          "--config",
+          "skip_children=true",
+          "vendor/reth-network/src/eth_requests.rs",
+          "vendor/reth-network/src/session/active.rs",
+          "vendor/reth-network/src/session/mod.rs",
+          "vendor/reth-network/src/session/types.rs",
+          "vendor/reth-network/src/session/range_update.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-16T23:16:38.694078+00:00",
+        "finished": "2026-09-16T23:16:38.755333+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-expected-volume-cjc4xw2a/gates/vendor-format.log"
+      },
+      {
+        "name": "check",
+        "command": [
+          "cargo",
+          "check",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-16T23:16:38.755692+00:00",
+        "finished": "2026-09-16T23:16:48.853826+00:00",
+        "sha256": "060ee274a47f03eae419cb500e4834b1c5e176108e4d7eab9005e7b5f1c858da",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-expected-volume-cjc4xw2a/gates/check.log"
+      },
+      {
+        "name": "clippy",
+        "command": [
+          "cargo",
+          "clippy",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-16T23:16:48.854577+00:00",
+        "finished": "2026-09-16T23:17:03.194738+00:00",
+        "sha256": "26b155ba2c0172b618a7dd748620810eaa3fe84565b08cd2813e665f21b767f7",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-expected-volume-cjc4xw2a/gates/clippy.log"
+      },
+      {
+        "name": "test",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-16T23:17:03.195216+00:00",
+        "finished": "2026-09-16T23:22:20.215385+00:00",
+        "sha256": "10b2748f77206c620b53e3423a474f9c4f1cec19a7da68c601c72301fd2b2d4d",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-expected-volume-cjc4xw2a/gates/test.log"
+      },
+      {
+        "name": "doc",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--doc",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-16T23:22:20.219227+00:00",
+        "finished": "2026-09-16T23:22:36.899394+00:00",
+        "sha256": "e45ac1148a0d712e9b2b2dd9a558402d66d4df1f4d311be9759c4c0217b5af89",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-expected-volume-cjc4xw2a/gates/doc.log"
+      },
+      {
+        "name": "release-build",
+        "command": [
+          "cargo",
+          "build",
+          "-p",
+          "logex-node",
+          "--release",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-16T23:22:36.900176+00:00",
+        "finished": "2026-09-16T23:24:28.463207+00:00",
+        "sha256": "9f7fb05413957d2637455ca8cbab31ac3f8977955371343362eab521c196abac",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-expected-volume-cjc4xw2a/gates/release-build.log"
+      }
+    ]
+  },
+  "workspace_tests": {
+    "passed": 1827,
+    "ignored": 24,
+    "groups": 27
+  },
+  "validation_followup": "After local Rust gates, the Linux fixture verifier adds --recursive-errors=no so warnings in the reviewed systemd unit fail CI. Rust source unchanged; actual fixture/template validation is an exact-head Linux CI gate.",
+  "linux_fixture_sha256": "84fd85c07517073fa629ad599ab04d64e02d4b73eb97bddc9c80d9d651e28e2f"
 }

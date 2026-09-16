@@ -236,7 +236,8 @@ def main():
         unit = Path(__file__).resolve().parent.parent / "deploy/logex.service"
         rendered = root / "logex.service"
         rendered.write_text(unit.read_text().replace("/usr/local/bin/logex", str(binary)))
-        verified = run(["systemd-analyze", "verify", "--man=no", "--generators=no", str(rendered)])
+        verified = run(["systemd-analyze", "verify", "--man=no", "--generators=no",
+                        "--recursive-errors=no", str(rendered)])
         results.append({"case": "systemd template validation", "passed": True,
                         "diagnostic": verified.stderr.decode(errors="replace")})
         exercise(binary, root, results, images, children)
