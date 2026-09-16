@@ -110,7 +110,7 @@ Merged in PR #191 (`e5eb60ac`) after 290 focused tests, eight local gates and si
 
 The [session endpoint reporting review](execution-session-endpoints.md) records B4-39:
 connection metrics and logs use the actual socket while retaining advertised retry hints.
-All 294 focused tests pass; full gates and merge remain pending.
+All 294 focused tests and eight local gates pass; CI/merge remain pending.
 
 ## Baseline findings
 
