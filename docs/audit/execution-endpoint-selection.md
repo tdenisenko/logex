@@ -77,7 +77,8 @@ full node startup were not exercised. No Mac mini or external volume was used.
 
 All eight local gates pass on `377d45f3`: vendor integrity, workspace and
 patched-vendor formatting, all-target check, strict Clippy, 1,606 workspace tests
-(24 ignored), documentation tests and release build. PR/CI/merge remain pending. Remaining peer rehabilitation,
+(24 ignored), documentation tests and release build. All six CI jobs passed on `958cc60d`;
+[PR #191](https://github.com/tdenisenko/logex/pull/191) merged as `e5eb60ac`. Remaining peer rehabilitation,
 request resources and other discovery paths still need their audit dispositions;
 this milestone does not close the whole execution networking batch.
 

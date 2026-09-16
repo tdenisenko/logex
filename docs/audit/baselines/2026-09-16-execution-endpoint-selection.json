@@ -1,5 +1,5 @@
 {
-  "status": "All eight local gates pass; PR/CI/merge pending",
+  "status": "Merged after all eight local gates and six exact-head CI jobs passed",
   "branch": "audit/execution-peer-recovery",
   "baseline_commit": "eb326cfb551d5bd71433e4b28756c342018468ad",
   "findings": [
@@ -88,6 +88,22 @@
     "gates/test-summary.json": {
       "sha256": "12988ece90a0a1b7370e51cebb5950874847411d141d375aaa9389114cbf43fa",
       "bytes": 69
+    },
+    "premerge.json": {
+      "sha256": "5a7d6068786ceff5d10c11d125a8cd8c787b9e9f857e01c1a92d482942b9b9d1",
+      "bytes": 1894
+    },
+    "merged.json": {
+      "sha256": "499cccb29134632adff54851d9aa996c95448847beb5578b35ef64821aad2f18",
+      "bytes": 240
+    },
+    "ci-watch.log": {
+      "sha256": "2c5312be96eab409cf515adfe154b04256344c07019e534a849e089190c4fc37",
+      "bytes": 14136
+    },
+    "publication-inventory.json": {
+      "sha256": "ba18322a150daacb7a211b866a68667ceab8dbdf8fe440a4f7032321a3d9ab53",
+      "bytes": 1655
     }
   },
   "source_commit": "377d45f3e30a6562faccd2d2f127c1dca47cc5eb",
@@ -246,5 +262,51 @@
     "passed": 1606,
     "failed": 0,
     "ignored": 24
+  },
+  "pull_request": {
+    "headRefOid": "958cc60d9b2a83c3800602f1e032503884a75c0d",
+    "mergeCommit": {
+      "oid": "e5eb60ace0a7b4704115f541750a0c956a6a05c4"
+    },
+    "mergedAt": "2026-09-16T11:32:53Z",
+    "number": 191,
+    "state": "MERGED",
+    "url": "https://github.com/tdenisenko/logex/pull/191"
+  },
+  "ci": {
+    "run": 35090171747,
+    "head": "958cc60d9b2a83c3800602f1e032503884a75c0d",
+    "checks": [
+      {
+        "name": "Check",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS"
+      },
+      {
+        "name": "Format",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS"
+      },
+      {
+        "name": "Clippy",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS"
+      },
+      {
+        "name": "Test",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS"
+      },
+      {
+        "name": "macOS Test",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS"
+      },
+      {
+        "name": "Release Build",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS"
+      }
+    ]
   }
 }
