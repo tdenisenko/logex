@@ -114,7 +114,7 @@ Merged in PR #192 (`2e547fc9`) after 294 focused tests, eight local gates and si
 
 The [peer rehabilitation review](execution-peer-rehabilitation.md) records B4-40–41:
 retain longer active backoffs and admit restart hints after quarantine expiry.
-All 301 focused tests pass; full gates and merge remain pending.
+All 301 focused tests and eight local gates pass; CI/merge remain pending.
 
 ## Baseline findings
 

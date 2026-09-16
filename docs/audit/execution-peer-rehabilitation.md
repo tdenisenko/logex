@@ -64,6 +64,8 @@ Retained network state and outgoing/transient response allocation still need
 separate dispositions. Time-based pruning alone is not a strict global entry or
 resident-memory bound. This milestone does not close the whole execution batch.
 
-Full workspace gates and PR/CI/merge are pending.
+All eight local gates pass on `46078c53`: vendor integrity, workspace and
+patched-vendor formatting, all-target check, strict Clippy, 1,617 workspace tests
+(24 ignored), documentation tests and release build. PR/CI/merge remain pending.
 
 [Validation record](baselines/2026-09-16-execution-peer-rehabilitation.json).
