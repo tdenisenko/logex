@@ -758,12 +758,10 @@ fn write_snapshot(path: &Path, snapshot: &ConsensusSnapshot) -> io::Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| io::Error::other("consensus state has no parent"))?;
-    let mut staged = tempfile::Builder::new()
-        .prefix(".consensus-state-")
-        .tempfile_in(parent)?;
+    let mut staged = logex_fs::StagedFile::new_in(parent, ".consensus-state-")?;
     snapshot_format::write(staged.as_file_mut(), snapshot)?;
     staged.as_file().sync_all()?;
-    let _published = staged.persist(path).map_err(|error| error.error)?;
+    staged.persist(path)?;
     fs::File::open(parent)?.sync_all()
 }
 

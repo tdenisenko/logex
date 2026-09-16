@@ -142,6 +142,8 @@ impl LocalP2pAddressCandidates {
 
 pub struct RunSyncOptions {
     pub pm_config: PartitionManagerConfig,
+    pub expected_volume: Option<Arc<crate::volume::ExpectedVolume>>,
+    pub startup_volume_monitor: Option<crate::volume::VolumeMonitor>,
     pub checkpoint: Option<String>,
     pub checkpoint_sync_url: Option<String>,
     pub http_host: IpAddr,
@@ -166,6 +168,8 @@ pub struct RunSyncOptions {
 pub async fn run_sync(options: RunSyncOptions) -> cleanup::RuntimeShutdown {
     let RunSyncOptions {
         pm_config,
+        expected_volume,
+        startup_volume_monitor,
         checkpoint,
         checkpoint_sync_url,
         http_host,
@@ -622,6 +626,9 @@ pub async fn run_sync(options: RunSyncOptions) -> cleanup::RuntimeShutdown {
         shutdown_rx.clone(),
     );
 
+    // Startup filesystem work was guarded independently of the async runtime.
+    // The supervisor's first health probe now takes over without a polling delay.
+    drop(startup_volume_monitor);
     let mut shutdown_guard = None;
     let mut engine_exit_code = supervision::SyncSupervisor {
         on_shutdown: || {
@@ -646,8 +653,8 @@ pub async fn run_sync(options: RunSyncOptions) -> cleanup::RuntimeShutdown {
     .run(
         engine.run(),
         wait_for_shutdown_signal(),
-        storage_health::wait_for_failure(data_dir.clone()),
-        |_| {},
+        storage_health::wait_for_failure(data_dir.clone(), expected_volume),
+        |reason| state.mark_storage_unavailable(reason),
     )
     .await;
 
@@ -1528,9 +1535,7 @@ fn archive_consensus_state(
     }
 
     let parent = path.parent().unwrap_or(data_dir);
-    let archive = tempfile::Builder::new()
-        .prefix(&format!(".consensus-state-{reason}-"))
-        .tempdir_in(parent)
+    let archive = logex_fs::StagedDirectory::new_in(parent, &format!(".consensus-state-{reason}-"))
         .map_err(|source| ConsensusStateError::PersistState {
             path: parent.to_path_buf(),
             source,

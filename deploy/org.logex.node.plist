@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>org.logex.node</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/logex</string>
+        <string>--config</string><string>/usr/local/etc/logex/config.toml</string>
+        <string>sync</string>
+    </array>
+    <key>WorkingDirectory</key><string>/</string>
+    <key>RunAtLoad</key><true/>
+    <key>KeepAlive</key><true/>
+    <key>ThrottleInterval</key><integer>30</integer>
+    <key>ExitTimeOut</key><integer>195</integer>
+    <key>ProcessType</key><string>Standard</string>
+    <key>Umask</key><integer>63</integer>
+    <key>StandardOutPath</key><string>/usr/local/var/log/logex/stdout.log</string>
+    <key>StandardErrorPath</key><string>/usr/local/var/log/logex/stderr.log</string>
+    <key>SoftResourceLimits</key>
+    <dict><key>NumberOfFiles</key><integer>16384</integer></dict>
+</dict>
+</plist>

@@ -3,6 +3,7 @@ mod checkpoint;
 mod cli;
 mod commands;
 mod runtime;
+mod volume;
 
 use clap::{CommandFactory, FromArgMatches};
 use std::net::IpAddr;
@@ -44,10 +45,37 @@ fn main() {
 
     raise_file_descriptor_limit();
 
-    let data_dir = cli.data_dir.unwrap_or_else(default_data_dir);
+    let mut data_dir = cli.data_dir.unwrap_or_else(default_data_dir);
     let partition_target_rows = cli.partition_target_rows;
-    let checkpoint = cli.checkpoint;
+    let mut checkpoint = cli.checkpoint;
     let checkpoint_sync_url = cli.checkpoint_sync_url;
+
+    let expected_volume =
+        match volume::configured(cli.expected_volume_mount, cli.expected_volume_uuid).and_then(
+            |configured| {
+                configured
+                    .map(|(mount, uuid)| {
+                        volume::ExpectedVolume::prepare(&mount, &uuid, &data_dir, &mut checkpoint)
+                            .map(std::sync::Arc::new)
+                    })
+                    .transpose()
+            },
+        ) {
+            Ok(volume) => volume,
+            Err(error) => {
+                eprintln!("Error: storage volume preflight failed: {error}");
+                std::process::exit(1);
+            }
+        };
+    if expected_volume.is_some() {
+        data_dir = std::path::PathBuf::from(".");
+    }
+    let volume_monitor = expected_volume.as_ref().map(|volume| {
+        volume::VolumeMonitor::start(std::sync::Arc::clone(volume)).unwrap_or_else(|error| {
+            eprintln!("Error: cannot supervise storage volume: {error}");
+            std::process::exit(1);
+        })
+    });
 
     let pm_config = PartitionManagerConfig {
         data_dir,
@@ -100,6 +128,8 @@ fn main() {
             let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
             let shutdown = rt.block_on(runtime::run_sync(runtime::RunSyncOptions {
                 pm_config,
+                expected_volume,
+                startup_volume_monitor: volume_monitor,
                 checkpoint,
                 checkpoint_sync_url,
                 http_host,

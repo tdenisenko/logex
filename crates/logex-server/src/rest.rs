@@ -71,6 +71,9 @@ pub async fn handle_query(
     Json(req): Json<QueryRequest>,
 ) -> Response {
     let Some(query_guard) = state.query_control.start() else {
+        if let Some(reason) = state.storage_failure() {
+            return storage_unavailable_response(reason);
+        }
         return (
             StatusCode::CONFLICT,
             Json(ErrorResponse {
@@ -82,7 +85,10 @@ pub async fn handle_query(
     };
     let cancel_check = query_guard.cancel_check();
     let (storage_snapshot, head_block) = {
-        let storage = state.storage.read().await;
+        let storage = match state.read_storage().await {
+            Ok(storage) => storage,
+            Err(reason) => return storage_unavailable_response(reason),
+        };
         (
             logex_query::NativeStorageSnapshot::from_storage(&storage),
             storage.head_block().unwrap_or(0),
@@ -90,15 +96,18 @@ pub async fn handle_query(
     };
     let requested_limit = req.limit;
     let page = SqlQueryPage::new(requested_limit, req.offset);
-    let result = match logex_query::execute_sql_page_on_snapshot(
+    let execution = logex_query::execute_sql_page_on_snapshot(
         &req.sql,
         storage_snapshot,
         head_block,
         page,
         Some(cancel_check),
-    )
-    .await
-    {
+    );
+    let result = match tokio::select! {
+        biased;
+        reason = state.storage_unavailable() => return storage_unavailable_response(reason),
+        result = execution => result,
+    } {
         Ok(r) => r,
         Err(error @ SqlQueryError::SnapshotChanged) => {
             return (
@@ -167,19 +176,37 @@ pub async fn handle_query_cancel(State(state): State<Arc<AppState>>) -> Json<Que
     })
 }
 
+pub(crate) fn storage_unavailable_response(reason: String) -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(serde_json::json!({
+            "status": "storage_unavailable",
+            "error": reason,
+        })),
+    )
+        .into_response()
+}
+
 /// Handle GET /health.
-pub async fn handle_health(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
-    let storage = state.storage.read().await;
+pub async fn handle_health(State(state): State<Arc<AppState>>) -> Response {
+    let storage = match state.read_storage().await {
+        Ok(storage) => storage,
+        Err(reason) => return storage_unavailable_response(reason),
+    };
     Json(serde_json::json!({
         "status": "ok",
         "total_rows": storage.total_rows(),
         "sealed_partitions": storage.sealed_count(),
         "head_block": storage.head_block(),
     }))
+    .into_response()
 }
 
 /// Handle GET /status — return detailed sync and storage status.
-pub async fn handle_status(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+pub async fn handle_status(State(state): State<Arc<AppState>>) -> Response {
+    if let Some(reason) = state.storage_failure() {
+        return storage_unavailable_response(reason);
+    }
     let sync = state.sync_status.lock().unwrap().clone();
     let consensus_status_stale = consensus_status_is_stale(
         sync.checkpoint.is_some(),
@@ -204,7 +231,10 @@ pub async fn handle_status(State(state): State<Arc<AppState>>) -> Json<serde_jso
         chain_anchors,
         data_dir,
     ) = {
-        let storage = state.storage.read().await;
+        let storage = match state.read_storage().await {
+            Ok(storage) => storage,
+            Err(reason) => return storage_unavailable_response(reason),
+        };
         let sync_head = storage.sync_head();
         (
             storage.total_rows(),
@@ -219,8 +249,11 @@ pub async fn handle_status(State(state): State<Arc<AppState>>) -> Json<serde_jso
             storage.data_dir().to_path_buf(),
         )
     };
-    let storage_metrics =
-        storage_metrics::load_or_refresh(Arc::clone(&state.storage_metrics), data_dir).await;
+    let storage_metrics = tokio::select! {
+        biased;
+        reason = state.storage_unavailable() => return storage_unavailable_response(reason),
+        metrics = storage_metrics::load_or_refresh(Arc::clone(&state.storage_metrics), data_dir) => metrics,
+    };
     let live_target_block =
         (live_head_available && sync.target_block > 0).then_some(sync.target_block);
     let progress_pct = if let Some(target_block) = live_target_block {
@@ -399,6 +432,7 @@ pub async fn handle_status(State(state): State<Arc<AppState>>) -> Json<serde_jso
         "finality_lag_blocks": finality_lag_blocks,
         "storage_chain_anchors": chain_anchors,
     }))
+    .into_response()
 }
 
 fn rest_execution_network_status(
@@ -847,6 +881,68 @@ mod tests {
             limit: None,
             offset: 0,
         })
+    }
+
+    #[tokio::test]
+    async fn failed_storage_endpoints_return_unavailable_without_storage_lock() {
+        let (_tmp, state) = setup_query_cancellation_state();
+        let _writer = state.storage.write().await;
+        state.mark_storage_unavailable("test storage failure");
+        let health = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            handle_health(State(state.clone())),
+        )
+        .await
+        .unwrap();
+        assert_eq!(health.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let status = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            handle_status(State(state.clone())),
+        )
+        .await
+        .unwrap();
+        assert_eq!(status.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let query = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            handle_query(
+                State(state.clone()),
+                Json(QueryRequest {
+                    sql: "SELECT * FROM logs".into(),
+                    limit: None,
+                    offset: 0,
+                }),
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(query.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn failed_storage_rejects_live_subscription_admission_and_reads() {
+        let (_tmp, state) = setup_query_cancellation_state();
+        let _writer = state.storage.write().await;
+        state.mark_storage_unavailable("test storage failure");
+        let app = crate::build_router(state.clone());
+        for (method, uri, body) in [
+            ("POST", "/live/erc20-transfers/subscriptions", "{}"),
+            ("GET", "/live/erc20-transfers/subscriptions/example", ""),
+        ] {
+            let request = Request::builder()
+                .method(method)
+                .uri(uri)
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap();
+            let response = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                app.clone().oneshot(request),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        }
     }
 
     #[tokio::test]

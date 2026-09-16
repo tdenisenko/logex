@@ -79,7 +79,8 @@ No independent review is claimed.
 
 All eight local gates pass on `37b8b7f3`: vendor integrity, workspace and
 patched-vendor formatting, check, strict Clippy, 1,781 workspace tests (24 ignored),
-documentation tests and release build. CI and merge are pending. Evidence is recorded in the
+documentation tests and release build. All six CI jobs passed on `20dbfa4a`;
+[PR #206](https://github.com/tdenisenko/logex/pull/206) merged as `0b611c2d`. Evidence is recorded in the
 [validation ledger](baselines/2026-09-17-sync-mode-persistence.json). This introduces
 startup-only synchronization, with no per-block writes, changed ingestion batches,
 query work or dependencies. No benchmark or throughput claim is made. Broader

@@ -6972,9 +6972,7 @@ fn quarantine_known_peers(path: &Path) -> io::Result<PathBuf> {
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
-    let directory = tempfile::Builder::new()
-        .prefix(".known-peers-quarantine-")
-        .tempdir_in(parent)?;
+    let directory = logex_fs::StagedDirectory::new_in(parent, ".known-peers-quarantine-")?;
     let retained = directory.path().join(KNOWN_PEERS_FILE);
     fs::rename(path, &retained)?;
     // Once the original moves, no subsequent cleanup may remove this evidence.
@@ -7005,13 +7003,10 @@ fn persist_known_peers(path: &Path, peers: &[PersistedPeer]) -> Result<(), Conse
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
             .unwrap_or_else(|| Path::new("."));
-        fs::create_dir_all(parent)?;
-        let mut temporary = tempfile::Builder::new()
-            .prefix(".known-peers-")
-            .tempfile_in(parent)?;
-        temporary.write_all(&json)?;
+        let mut temporary = logex_fs::StagedFile::new_in(parent, ".known-peers-")?;
+        temporary.as_file_mut().write_all(&json)?;
         // These derived hints need atomic visibility, not periodic power-loss barriers.
-        temporary.persist(path).map_err(|error| error.error)?;
+        temporary.persist(path)?;
         Ok(())
     };
     write().map_err(|source| ConsensusNetworkError::PersistKnownPeers {
@@ -9433,6 +9428,7 @@ mod tests {
     fn known_peers_round_trip() {
         let temp = TempDir::new().unwrap();
         let path = known_peers_path(temp.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
         let peers = vec![
             PersistedPeer {
                 enr: MAINNET_BOOTNODES[0].to_string(),
@@ -9556,6 +9552,7 @@ mod tests {
     fn peer_cache_recovery_enforces_the_writer_record_limit() {
         let temp = TempDir::new().unwrap();
         let path = known_peers_path(temp.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
         let peers = vec![peer_cache_test_record(); MAX_PERSISTED_KNOWN_PEERS];
         persist_known_peers(&path, &peers).unwrap();
         assert_eq!(load_known_peers(&path).unwrap(), peers);
@@ -9623,6 +9620,16 @@ mod tests {
     }
 
     #[test]
+    fn peer_cache_writer_does_not_recreate_missing_storage() {
+        let temp = TempDir::new().unwrap();
+        let missing = temp.path().join("unavailable");
+        assert!(
+            persist_known_peers(&known_peers_path(&missing), &[peer_cache_test_record()]).is_err()
+        );
+        assert!(!missing.exists());
+    }
+
+    #[test]
     fn peer_cache_recovery_preserves_artifacts_on_io_failures() {
         let temp = TempDir::new().unwrap();
         let parent_file = temp.path().join("parent-file");
@@ -9649,6 +9656,7 @@ mod tests {
     fn peer_cache_recovery_rejects_invalid_writer_input_without_replacement() {
         let temp = TempDir::new().unwrap();
         let path = known_peers_path(temp.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
         let peers = vec![peer_cache_test_record()];
         persist_known_peers(&path, &peers).unwrap();
         let original = fs::read(&path).unwrap();
@@ -10911,6 +10919,7 @@ mod tests {
     fn peer_scoring_restored_success_counters_saturate() {
         let temp = TempDir::new().unwrap();
         let path = known_peers_path(temp.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
         let cached = PersistedPeer {
             enr: MAINNET_BOOTNODES[0].to_string(),
             support: None,

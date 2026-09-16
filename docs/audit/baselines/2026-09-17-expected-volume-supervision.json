@@ -1,0 +1,206 @@
+{
+  "status": "Implementation complete; final local gates and Linux CI pending",
+  "base": {
+    "commit": "0b611c2df1899abf4d2a21ab8113285ee96a200e"
+  },
+  "findings": [
+    "B10-16",
+    "B10-17",
+    "B10-18"
+  ],
+  "original_controls": {
+    "base": "0b611c2df1899abf4d2a21ab8113285ee96a200e",
+    "production_file_sha256": "c60bad90a2657d4305cf7874a6936feb2db04dc21a4b78c68182153068c940a9",
+    "added_test_sha256": "b3a040fde8036caf90bcef3ff6a0a41c433a97d2a51a9f015db8aae16ecda50e",
+    "exit_code": 101
+  },
+  "focused": {
+    "staging_passed": 10,
+    "cl_passed": 354,
+    "cl_ignored": 1,
+    "node_before_final_monitor_controls_passed": 200,
+    "server_before_final_session_control_passed": 96,
+    "final_volume_controls_passed": 13
+  },
+  "macos_mounts": {
+    "results": [
+      {
+        "case": "missing mount",
+        "passed": true,
+        "exit_code": 1,
+        "stderr": "Error: Os { code: 2, kind: NotFound, message: \"No such file or directory\" }\n"
+      },
+      {
+        "case": "low space",
+        "passed": true,
+        "exit_code": 1,
+        "stderr": "Error: Custom { kind: Other, error: \"expected volume has 536608768 free bytes; at least 10737418240 are required\" }\n"
+      },
+      {
+        "case": "wrong UUID",
+        "passed": true,
+        "exit_code": 1,
+        "stderr": "Error: Custom { kind: InvalidInput, error: \"expected volume UUID abcd-1234 at \\\"/private/tmp/logex-audit-volume-20260917.UNHsNT/mount\\\", found 5cd407f1-5919-38ab-aa19-c0fbb55076f6\" }\n"
+      },
+      {
+        "case": "real ExFAT preflight, anchored write and availability check",
+        "passed": true
+      },
+      {
+        "case": "forced detach retains underlay contents",
+        "passed": true,
+        "check": "error: Operation not supported (os error 45)",
+        "inflight_write": "error: No such file or directory (os error 2)"
+      },
+      {
+        "case": "unmounted path cannot initialize storage",
+        "passed": true,
+        "exit_code": 1,
+        "stderr": "Error: Custom { kind: InvalidInput, error: \"expected mount \\\"/private/tmp/logex-audit-volume-20260917.UNHsNT/mount\\\" is not a mounted filesystem (opened filesystem is mounted at \\\"/System/Volumes/Data\\\")\" }\n"
+      },
+      {
+        "case": "different volume at same path",
+        "passed": true,
+        "exit_code": 1,
+        "stderr": "Error: Custom { kind: InvalidInput, error: \"expected volume UUID 5cd407f1-5919-38ab-aa19-c0fbb55076f6 at \\\"/private/tmp/logex-audit-volume-20260917.UNHsNT/mount\\\", found 4ab0706b-ea0e-36ca-9760-f015bf9c4f79\" }\n"
+      },
+      {
+        "case": "replacement volume receives no writes from old owner",
+        "passed": true,
+        "inflight_write": "error: No such file or directory (os error 2)"
+      },
+      {
+        "case": "correct volume remount and restart",
+        "passed": true
+      }
+    ],
+    "cleanup": [],
+    "still_mounted": [],
+    "binary_sha256": "f3383bf518fe275b6cc2a01fe65d69de6663376b8aff5b20f4695d8f790e2e24"
+  },
+  "macos_tested_source": {
+    "scope": "Exact current production volume and staging sources; generated minimal fixture manifests pin production libc/getrandom versions; no network client or actual node started.",
+    "files": [
+      {
+        "path": "crates/logex-fs/src/lib.rs",
+        "sha256": "f8fab59c58731d090f65af349b22e9906914e855fd21bee2539114b0a8e884e9",
+        "bytes": 4624
+      },
+      {
+        "path": "crates/logex-node/src/volume.rs",
+        "sha256": "076333321116c1940f50052d36239be997a1ed383e8f2652d125ffc26b699048",
+        "bytes": 6574
+      },
+      {
+        "path": "crates/logex-node/examples/volume_probe.rs",
+        "sha256": "143b896e92ae2fdc6a7a7c2f644c26da07500b7d9d1e251e549f80f79be6f230",
+        "bytes": 1576
+      },
+      {
+        "path": "crates/logex-node/src/volume/unix.rs",
+        "sha256": "c05ac11a4ce44c717174dbf527cff95e44917b26eabce9818b4269201fc261a3",
+        "bytes": 13468
+      },
+      {
+        "path": "crates/logex-node/src/volume/macos.rs",
+        "sha256": "ae673f54197b3fda3734af14237676f1978eb793e1ca20080b83e662ef70a35c",
+        "bytes": 4455
+      },
+      {
+        "path": "crates/logex-node/src/volume/deadline.rs",
+        "sha256": "bec26383a701c6979566f91765226c3961379e7ab8ff4f3a74c68a6da585a42d",
+        "bytes": 2799
+      },
+      {
+        "path": "crates/logex-node/src/volume/linux.rs",
+        "sha256": "0a38dfdc1ca877a84c9f9676b368f2d482f205de53b149646ff2af81a9383d17",
+        "bytes": 7419
+      },
+      {
+        "path": "crates/logex-node/src/volume/tests.rs",
+        "sha256": "ce052f2b4191bf7f616ef1a2a5ee7dc10840c61622c883320ae0064b273763c4",
+        "bytes": 1524
+      }
+    ]
+  },
+  "macos_final_source_difference": "Common wrapper now covers checkpoint resolution and startup monitoring; fixture passes no checkpoint; Unix production I/O, macOS identity and staging unchanged. Added unit tests and safety comment.",
+  "remote_cleanup": {
+    "host": "mac-mini",
+    "owned_root": "/private/tmp/logex-audit-volume-20260917.UNHsNT",
+    "root_removed": true,
+    "owned_images_detached": true,
+    "removed_files": 933,
+    "removed_file_bytes": 17739526958,
+    "evidence_archive_bytes": 215040,
+    "evidence_archive_sha256": "da0a7c02736b7f4fec619c6c2451cb74a39edba9b179b648b707da0b515a7696",
+    "scope": "Observed cleanup result from this task; no unrelated files, processes or physical external volume changed."
+  },
+  "linux_mounts": "Pending exact-head CI",
+  "evidence_directory": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-expected-volume-cjc4xw2a",
+  "evidence": {
+    "design-research.md": {
+      "bytes": 7064,
+      "sha256": "3de7736d20a6e49dddaf98605ef97bc4366122e6a44564cae2d99d9c9affbf69"
+    },
+    "fd-path-probe.json": {
+      "bytes": 181,
+      "sha256": "281ae9e5ec530fa08942d98d7a176a6a35032cc85d8d7024e7d16e2d8c1220fc"
+    },
+    "image-create.json": {
+      "bytes": 387,
+      "sha256": "690456254f982bb73fa7d5cc4d41e569a734dd595d43bdfcc891b706c3c5449a"
+    },
+    "logex-volume-all-targets.log": {
+      "bytes": 2960,
+      "sha256": "613e6865aaa81e5303207438bf988be4ea9e942a4b7698903b209e8c4c116679"
+    },
+    "logex-volume-clippy-final.log": {
+      "bytes": 457,
+      "sha256": "fe08dfa8da8a3ff5479ab186fc00bd02f5f06f8a909ca0953823c8259d80c700"
+    },
+    "logex-volume-final-controls.log": {
+      "bytes": 2251,
+      "sha256": "ade0d884de4f9b804525cc8fc7ea6e1ca0e06a85ecf3b347146705fc06368bce"
+    },
+    "logex-volume-focused-packages-retry.log": {
+      "bytes": 57313,
+      "sha256": "14513fe7f58c8fb3da1503a0d82998a4c794db3269e4cb59b9074d7c6fa94ded"
+    },
+    "macos-getattr-probe.json": {
+      "bytes": 169,
+      "sha256": "bff4fc0e3c5085a4c9616e23c6d52bb90ae8cb92e8e69ca67d07d85761e2963c"
+    },
+    "original-peer-parent.json": {
+      "bytes": 264,
+      "sha256": "b7db66daa0066476453682c7ed8f534391bec7bff509bba2c42ec664f5fb5fab"
+    },
+    "original-peer-parent.log": {
+      "bytes": 1388,
+      "sha256": "434b0d5448e87b5658c538b8837c370a35b137d181aa62ee60a6af12057f104b"
+    },
+    "remote-cleanup-result.json": {
+      "bytes": 464,
+      "sha256": "480c96265406d3aca073297ad3ac1d222c296fac64c8eca9aa72cc063e6a62da"
+    },
+    "remote-dependency-inventory.json": {
+      "bytes": 1007,
+      "sha256": "f1275f98ddc84a3b9700065875d38f7f7e35ce9b746ea732438892c65637b4f4"
+    },
+    "remote-payload.json": {
+      "bytes": 1331,
+      "sha256": "66b05fb40b007b6e2df0fcd86ad2587e1fdb2e2bbcbac6fa389858d0a6f6defc"
+    },
+    "remote-source-inventory-initial.json": {
+      "bytes": 1572,
+      "sha256": "8c7aab00d00d90c49a03f22af861caa92f7ca504be3dd9fb7815aacd354a8303"
+    },
+    "remote-source-inventory.json": {
+      "bytes": 1572,
+      "sha256": "eb7baa2821d3643ad3b84ff99d0deb53dd1241f78b8d7a9c9019c553d35d1fea"
+    },
+    "source.json": {
+      "bytes": 106,
+      "sha256": "ad6eec4675faba63cc0b13e64aa786b2ba66167a78b6e66104b182166ed70aa3"
+    }
+  }
+}

@@ -1,5 +1,5 @@
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 use axum::extract::State;
 use axum::response::Json;
@@ -41,43 +41,130 @@ impl AppState {
             query_control: Arc::new(QueryControl::default()),
         }
     }
+
+    /// Permanently close storage admission and cancel outstanding queries.
+    /// This never accesses storage or waits for its lock. Restart after repair.
+    pub fn mark_storage_unavailable(&self, reason: impl Into<String>) {
+        self.query_control.fail_storage(reason.into());
+    }
+
+    pub(crate) fn storage_failure(&self) -> Option<String> {
+        self.query_control.failure.borrow().clone()
+    }
+
+    pub(crate) async fn storage_unavailable(&self) -> String {
+        let mut failure = self.query_control.failure.subscribe();
+        loop {
+            if let Some(reason) = failure.borrow_and_update().clone() {
+                return reason;
+            }
+            failure
+                .changed()
+                .await
+                .expect("AppState owns failure sender");
+        }
+    }
+
+    pub(crate) async fn read_storage(
+        &self,
+    ) -> Result<tokio::sync::RwLockReadGuard<'_, PartitionManager>, String> {
+        tokio::select! {
+            biased;
+            reason = self.storage_unavailable() => Err(reason),
+            storage = self.storage.read() => {
+                match self.storage_failure() {
+                    Some(reason) => Err(reason),
+                    None => Ok(storage),
+                }
+            }
+        }
+    }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct QueryControl {
     // Admission, cancellation and completion share one linearization point.
     // The query's hot cancellation checks only read its own atomic token.
     // Critical sections only replace owned pointers/read or write atomics; no
     // user code runs under the lock, so recovering its value after poison is safe.
-    active: Mutex<Option<Arc<AtomicBool>>>,
+    active: Mutex<QueryAdmissions>,
+    failure: tokio::sync::watch::Sender<Option<String>>,
+}
+
+#[derive(Debug, Default)]
+struct QueryAdmissions {
+    exclusive: Option<Arc<AtomicBool>>,
+    concurrent: Vec<Weak<AtomicBool>>,
+    failed: bool,
+}
+
+impl Default for QueryControl {
+    fn default() -> Self {
+        Self {
+            active: Mutex::new(QueryAdmissions::default()),
+            failure: tokio::sync::watch::channel(None).0,
+        }
+    }
 }
 
 impl QueryControl {
     pub(crate) fn start(self: &Arc<Self>) -> Option<ActiveQueryGuard> {
         let mut active = self.active.lock().unwrap_or_else(|err| err.into_inner());
-        if active.is_some() {
+        if active.failed || active.exclusive.is_some() {
             return None;
         }
         let canceled = Arc::new(AtomicBool::new(false));
-        *active = Some(Arc::clone(&canceled));
+        active.exclusive = Some(Arc::clone(&canceled));
         Some(ActiveQueryGuard {
             control: Arc::clone(self),
             canceled,
+            exclusive: true,
         })
+    }
+
+    pub(crate) fn start_concurrent(self: &Arc<Self>) -> Result<ActiveQueryGuard, String> {
+        let mut active = self.active.lock().unwrap_or_else(|err| err.into_inner());
+        if active.failed {
+            return Err(self.failure.borrow().clone().expect("failure is latched"));
+        }
+        active.concurrent.retain(|token| token.strong_count() > 0);
+        let canceled = Arc::new(AtomicBool::new(false));
+        active.concurrent.push(Arc::downgrade(&canceled));
+        Ok(ActiveQueryGuard {
+            control: Arc::clone(self),
+            canceled,
+            exclusive: false,
+        })
+    }
+
+    fn fail_storage(&self, reason: String) {
+        let mut active = self.active.lock().unwrap_or_else(|err| err.into_inner());
+        if active.failed {
+            return;
+        }
+        active.failed = true;
+        if let Some(token) = &active.exclusive {
+            token.store(true, Ordering::Release);
+        }
+        for token in active.concurrent.iter().filter_map(Weak::upgrade) {
+            token.store(true, Ordering::Release);
+        }
+        self.failure.send_replace(Some(reason));
     }
 
     pub(crate) fn cancel_active(&self) -> bool {
         let active = self.active.lock().unwrap_or_else(|err| err.into_inner());
-        if let Some(canceled) = active.as_ref() {
+        if let Some(canceled) = active.exclusive.as_ref() {
             canceled.store(true, Ordering::Release);
         }
-        active.is_some()
+        active.exclusive.is_some()
     }
 }
 
 pub(crate) struct ActiveQueryGuard {
     control: Arc<QueryControl>,
     canceled: Arc<AtomicBool>,
+    exclusive: bool,
 }
 
 impl ActiveQueryGuard {
@@ -102,7 +189,9 @@ impl Drop for ActiveQueryGuard {
         // This token is never reused or reset for a later request.
         self.canceled.store(true, Ordering::Release);
         // Admission permits exactly one non-cloneable guard until this drop.
-        *active = None;
+        if self.exclusive {
+            active.exclusive = None;
+        }
     }
 }
 
@@ -112,28 +201,39 @@ pub async fn handle_jsonrpc(
     Json(request): Json<JsonRpcRequest>,
 ) -> Json<JsonRpcResponse> {
     let id = request.id.clone();
-    let storage = state.storage.read().await;
+    // Metadata methods remain available without opening storage.
+    if !matches!(request.method.as_str(), "eth_getLogs" | "eth_blockNumber") {
+        return Json(match request.method.as_str() {
+            "web3_clientVersion" => JsonRpcResponse::success(id, LOGEX_CLIENT_VERSION.into()),
+            "net_version" => JsonRpcResponse::success(id, "1".into()),
+            _ => JsonRpcResponse::method_not_found(id),
+        });
+    }
+    let query = match state.query_control.start_concurrent() {
+        Ok(query) => query,
+        Err(reason) => return Json(JsonRpcResponse::internal_error(id, reason)),
+    };
+    let storage = match state.read_storage().await {
+        Ok(storage) => storage,
+        Err(reason) => return Json(JsonRpcResponse::internal_error(id, reason)),
+    };
 
     let response = match request.method.as_str() {
-        "eth_getLogs" => handle_eth_get_logs(&storage, &request),
+        "eth_getLogs" => handle_eth_get_logs(&storage, &request, &query.cancel_check()),
         "eth_blockNumber" => handle_eth_block_number(&storage, &request),
-        "web3_clientVersion" => Ok(JsonRpcResponse::success(
-            id.clone(),
-            serde_json::Value::String(LOGEX_CLIENT_VERSION.into()),
-        )),
-        "net_version" => Ok(JsonRpcResponse::success(
-            id.clone(),
-            serde_json::Value::String("1".into()),
-        )),
         _ => Ok(JsonRpcResponse::method_not_found(id.clone())),
     };
 
+    if let Some(reason) = state.storage_failure() {
+        return Json(JsonRpcResponse::internal_error(id, reason));
+    }
     Json(response.unwrap_or_else(|e: String| JsonRpcResponse::internal_error(id, e)))
 }
 
 fn handle_eth_get_logs(
     storage: &PartitionManager,
     req: &JsonRpcRequest,
+    cancel: &logex_query::QueryCancelCheck,
 ) -> Result<JsonRpcResponse, String> {
     let id = req.id.clone();
     let params = req
@@ -170,7 +270,7 @@ fn handle_eth_get_logs(
             .min(MAX_LOG_FILTER_LIMIT - filter.offset),
     );
     native_filter.offset = filter.offset;
-    let rows = logex_query::execute_log_filter(storage, &native_filter)
+    let rows = logex_query::execute_log_filter_with_cancel(storage, &native_filter, Some(cancel))
         .map_err(|error| error.to_string())?;
     let logs: Vec<RpcLog> = rows.iter().map(RpcLog::from).collect();
 
@@ -199,6 +299,62 @@ mod tests {
     use tempfile::TempDir;
 
     use crate::eth_filter::{AddressFilter, BlockId};
+
+    #[test]
+    fn storage_failure_permanently_closes_all_admission_and_cancels_tokens() {
+        let control = Arc::new(QueryControl::default());
+        let exclusive = control.start().unwrap();
+        let concurrent = control.start_concurrent().unwrap();
+        let retained = concurrent.cancel_check();
+        control.fail_storage("volume unavailable".into());
+        assert!(exclusive.was_canceled() && concurrent.was_canceled() && retained());
+        drop(exclusive);
+        drop(concurrent);
+        control.fail_storage("later failure".into());
+        assert!(control.start().is_none());
+        assert_eq!(
+            control.start_concurrent().err().as_deref(),
+            Some("volume unavailable")
+        );
+        assert!(retained());
+    }
+
+    #[tokio::test]
+    async fn failure_wakes_requests_waiting_for_storage_and_rejects_rpc() {
+        use std::task::Poll;
+        let (_tmp, storage) = setup_storage();
+        let state = Arc::new(AppState::new(storage, None, SyncStatus::default()));
+        let _writer = state.storage.write().await;
+        let mut pending = Box::pin(state.read_storage());
+        assert!(
+            std::future::poll_fn(|cx| Poll::Ready(pending.as_mut().poll(cx)))
+                .await
+                .is_pending()
+        );
+        state.mark_storage_unavailable("volume unavailable");
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), pending)
+            .await
+            .unwrap();
+        assert_eq!(result.err().as_deref(), Some("volume unavailable"));
+        for method in [
+            "eth_getLogs",
+            "eth_blockNumber",
+            "web3_clientVersion",
+            "net_version",
+        ] {
+            let request = serde_json::from_value(serde_json::json!({
+                "jsonrpc": "2.0", "method": method, "params": [{}], "id": 1,
+            }))
+            .unwrap();
+            let Json(response) = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                handle_jsonrpc(State(Arc::clone(&state)), Json(request)),
+            )
+            .await
+            .unwrap();
+            assert_eq!(response.error.is_some(), method.starts_with("eth_"));
+        }
+    }
 
     #[test]
     fn acknowledged_query_cancellation_survives_concurrent_start() {

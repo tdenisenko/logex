@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+logex-fs = { workspace = true }
 alloy-rpc-types-beacon = { version = "1.8.3", features = ["ssz"] }
 alloy-primitives = { workspace = true }
 async-trait = { workspace = true }
@@ -19,7 +20,6 @@ sha2 = { workspace = true }
 tokio = { workspace = true }
 toml = { workspace = true }
 thiserror = { workspace = true }
-tempfile = "3"
 tracing = { workspace = true }
 snap = "1.1"
 ssz = { package = "ethereum_ssz", version = "0.9" }
@@ -30,3 +30,6 @@ unsigned-varint = "0.8"
 blst = "0.3"
 ssz_types = "0.11"
 typenum = "1"
+
+[dev-dependencies]
+tempfile = "3"
