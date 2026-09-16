@@ -140,7 +140,10 @@ first-reason retention, a blocked callback's terminal deadline and nonzero exit
 even if teardown begins first. A cleanup regression covers remaining owner teardown
 inside the existing watchdog. The ordinary unconfigured health path still uses
 its existing async timer; that broader runtime finding remains on the roadmap.
-Final gates on the corrected source and new exact-head CI are pending.
+All eight local gates pass on corrected source `de1a42f2`: vendor verification,
+workspace/patched-vendor formatting, check, strict Clippy, 1,829 workspace tests
+(24 ignored), documentation tests and release build. New exact-head CI and merge
+remain pending.
 
 The launchd plist passed syntax validation and its fields were checked against
 the installed platform manual. Both templates restart with backoff and logs outside
