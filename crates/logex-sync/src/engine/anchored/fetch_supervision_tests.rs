@@ -4,6 +4,7 @@ use crate::p2p::peer_manager::{
 };
 use logex_storage::PartitionManagerConfig;
 use tokio::sync::oneshot;
+use tokio::task::JoinHandle;
 
 async fn fixture() -> (SyncEngine, impl Sized) {
     let (peers, resources) = engine_peer_fixture().await;
@@ -47,7 +48,7 @@ fn install_body(engine: &mut SyncEngine, sequence: u64, attempt: u64, handle: Jo
             HistoricalFetchAttemptHandle {
                 child_header: child(),
                 owner: 0,
-                handle,
+                handle: AbortOnDropHandle::new(handle),
             },
         );
 }
@@ -57,7 +58,7 @@ fn install_header(engine: &mut SyncEngine, handle: JoinHandle<()>) {
         sequence: 0,
         attempt: 0,
         child_header: child(),
-        handle,
+        handle: AbortOnDropHandle::new(handle),
     });
 }
 
@@ -405,7 +406,7 @@ async fn stopped_real_fetch_plan(header_failure: bool) {
             .handle
     };
     handle.abort();
-    wait_finished(handle).await;
+    wait_finished(handle.as_ref()).await;
     let result = engine.wait_for_historical_fetch_outcome(&child()).await;
     assert!(result.is_err());
     assert_eq!(engine.active_historical_fetch_count(), 0);

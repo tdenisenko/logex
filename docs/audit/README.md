@@ -128,9 +128,13 @@ The [serving cancellation review](execution-serving-cancellation.md) records B4-
 skip provider reads and response construction for receivers already closed in the queue.
 Merged in PR #196 (`cc1bb889`) after 372 focused P2P tests, eight local gates and six CI jobs.
 
+The [historical work cancellation review](historical-work-cancellation.md) records
+B5-04–06: owned jobs, retained write results on stop and consistent shutdown
+channels; all eight local gates pass (1,747 tests, 24 ignored); CI/merge pending.
+
 The [historical memory probe review](historical-memory-probes.md) records B5-02/B5-03:
 bounded host-reference ownership and nonoverlapping macOS page accounting;
-all eight local gates pass (1,731 tests, 24 ignored); CI/merge pending.
+merged in PR #203 (`fd57def9`) after eight local gates (1,731 tests, 24 ignored) and six CI jobs.
 
 The [historical fetch supervision review](historical-fetch-supervision.md) records B5-01:
 report workers that finish without a result while preserving queued successes and cancellation.

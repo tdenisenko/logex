@@ -202,7 +202,17 @@ impl SyncEngine {
 }
 
 pub(super) fn shutdown_requested(shutdown: &watch::Receiver<bool>) -> bool {
-    *shutdown.borrow()
+    *shutdown.borrow() || shutdown.has_changed().is_err()
+}
+
+pub(super) async fn wait_for_shutdown(shutdown: &mut watch::Receiver<bool>) {
+    if shutdown_requested(shutdown) {
+        return;
+    }
+    // `wait_for` checks even an already-observed value, ignores false updates,
+    // and returns an error when the sender closes. Both true and closure stop
+    // the engine. Drop its temporary Ref here, before the caller can await.
+    let _ = shutdown.wait_for(|requested| *requested).await;
 }
 
 pub(super) fn should_mark_historical_complete(
@@ -268,10 +278,7 @@ pub(super) async fn cancelable<T>(
 ) -> Option<T> {
     tokio::select! {
         biased;
-        changed = shutdown.changed() => {
-            let _ = changed;
-            None
-        }
+        _ = wait_for_shutdown(shutdown) => None,
         result = future => Some(result),
     }
 }
@@ -618,5 +625,53 @@ mod tests {
         rx.changed().await.unwrap();
 
         assert!(shutdown_requested(&rx));
+    }
+}
+
+#[cfg(test)]
+mod shutdown_contract_controls {
+    use super::*;
+
+    #[tokio::test]
+    async fn already_observed_shutdown_preempts_ready_work() {
+        let (sender, mut receiver) = watch::channel(false);
+        sender.send(true).unwrap();
+        receiver.changed().await.unwrap();
+        assert_eq!(cancelable(&mut receiver, async { 42 }).await, None);
+    }
+
+    #[tokio::test]
+    async fn false_update_does_not_cancel_work() {
+        let (sender, mut receiver) = watch::channel(false);
+        sender.send(false).unwrap();
+        assert_eq!(cancelable(&mut receiver, async { 42 }).await, Some(42));
+    }
+
+    #[test]
+    fn closed_shutdown_owner_requests_stop() {
+        let (sender, receiver) = watch::channel(false);
+        drop(sender);
+        assert!(shutdown_requested(&receiver));
+    }
+
+    #[tokio::test]
+    async fn closed_owner_cancels_pending_work() {
+        let (sender, mut receiver) = watch::channel(false);
+        drop(sender);
+        assert_eq!(
+            cancelable(&mut receiver, std::future::pending::<()>()).await,
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn false_notification_keeps_pending_work_until_true() {
+        let (sender, mut receiver) = watch::channel(false);
+        let mut work = Box::pin(cancelable(&mut receiver, std::future::pending::<()>()));
+        assert!(futures_util::poll!(work.as_mut()).is_pending());
+        sender.send(false).unwrap();
+        assert!(futures_util::poll!(work.as_mut()).is_pending());
+        sender.send(true).unwrap();
+        assert_eq!(work.await, None);
     }
 }

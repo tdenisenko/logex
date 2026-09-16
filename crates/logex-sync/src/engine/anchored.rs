@@ -13,6 +13,9 @@ use tokio::task::JoinSet;
 #[cfg(test)]
 mod fetch_supervision_tests;
 
+#[cfg(test)]
+mod cancellation_tests;
+
 fn historical_fetch_worker_exit_error(
     kind: &str,
     sequence: u64,
@@ -1607,7 +1610,7 @@ fn spawn_historical_prepare_task(
     HistoricalPrepareTask {
         sequence,
         next_child_header,
-        handle,
+        handle: AbortOnDropHandle::new(handle),
     }
 }
 
@@ -2605,12 +2608,10 @@ impl SyncEngine {
                         None => {}
                     }
                 }
-                changed = self.shutdown.changed() => {
-                    if changed.is_ok() && self.shutdown_requested() {
-                        active_fetches.abort_all();
-                        self.finish_shutdown()?;
-                        return Ok((progressed, last_validated_header, last_head));
-                    }
+                _ = wait_for_shutdown(&mut self.shutdown) => {
+                    active_fetches.abort_all();
+                    self.finish_shutdown()?;
+                    return Ok((progressed, last_validated_header, last_head));
                 }
             }
         }
@@ -3446,14 +3447,11 @@ impl SyncEngine {
     }
 
     pub(super) fn reset_historical_fetch_pipeline(&mut self) {
-        if let Some(fetch) = self.historical_header_fetch_handle.take() {
-            fetch.handle.abort();
-        }
+        self.historical_header_fetch_handle = None;
         self.historical_fetch_ready_plans.clear();
         for (_, fetch) in self.historical_fetch_handles.drain() {
             for (_, attempt) in fetch.attempts {
                 self.peers.retire_body_receipt_owner(attempt.owner);
-                attempt.handle.abort();
             }
         }
         self.reset_historical_prepare_pipeline();
@@ -3473,9 +3471,7 @@ impl SyncEngine {
     }
 
     fn reset_historical_prepare_pipeline(&mut self) {
-        for (_, task) in std::mem::take(&mut self.historical_prepare_handles) {
-            task.handle.abort();
-        }
+        self.historical_prepare_handles.clear();
         self.historical_prepare_expected_sequence = self.historical_fetch_expected_sequence;
         self.historical_prepare_completed.clear();
     }
@@ -3525,7 +3521,6 @@ impl SyncEngine {
         for (attempt_id, attempt) in fetch.attempts {
             if attempt_id != outcome.attempt {
                 self.peers.retire_body_receipt_owner(attempt.owner);
-                attempt.handle.abort();
             }
         }
         if outcome.sequence < self.historical_fetch_expected_sequence {
@@ -3548,7 +3543,6 @@ impl SyncEngine {
         let fetch = self.historical_fetch_handles.get_mut(&sequence)?;
         if let Some(attempt) = fetch.attempts.remove(&attempt) {
             self.peers.retire_body_receipt_owner(attempt.owner);
-            attempt.handle.abort();
         }
         let remaining_attempts = fetch.attempts.len();
         if remaining_attempts == 0 {
@@ -3608,9 +3602,8 @@ impl SyncEngine {
             .historical_header_fetch_handle
             .as_ref()
             .is_some_and(|fetch| fetch.sequence < expected_sequence)
-            && let Some(fetch) = self.historical_header_fetch_handle.take()
         {
-            fetch.handle.abort();
+            self.historical_header_fetch_handle = None;
             aborted = aborted.saturating_add(1);
         }
 
@@ -3648,7 +3641,6 @@ impl SyncEngine {
             };
             for (_, attempt) in fetch.attempts {
                 self.peers.retire_body_receipt_owner(attempt.owner);
-                attempt.handle.abort();
                 aborted = aborted.saturating_add(1);
             }
         }
@@ -4385,7 +4377,6 @@ impl SyncEngine {
         {
             for (_, previous_attempt) in previous.attempts {
                 self.peers.retire_body_receipt_owner(previous_attempt.owner);
-                previous_attempt.handle.abort();
             }
         }
 
@@ -4400,11 +4391,10 @@ impl SyncEngine {
             HistoricalFetchAttemptHandle {
                 child_header,
                 owner,
-                handle,
+                handle: AbortOnDropHandle::new(handle),
             },
         ) {
             self.peers.retire_body_receipt_owner(previous.owner);
-            previous.handle.abort();
         }
     }
 
@@ -4487,17 +4477,12 @@ impl SyncEngine {
                 outcome,
             });
         });
-        if let Some(previous) =
-            self.historical_header_fetch_handle
-                .replace(HistoricalHeaderFetchHandle {
-                    sequence,
-                    attempt,
-                    child_header,
-                    handle,
-                })
-        {
-            previous.handle.abort();
-        }
+        self.historical_header_fetch_handle = Some(HistoricalHeaderFetchHandle {
+            sequence,
+            attempt,
+            child_header,
+            handle: AbortOnDropHandle::new(handle),
+        });
     }
 
     async fn store_historical_header_fetch_outcome(
@@ -4990,11 +4975,9 @@ impl SyncEngine {
                     )
                     .await?;
                 }
-                changed = self.shutdown.changed() => {
-                    if changed.is_ok() && self.shutdown_requested() {
-                        self.finish_shutdown()?;
-                        return Ok(None);
-                    }
+                _ = wait_for_shutdown(&mut self.shutdown) => {
+                    self.finish_shutdown()?;
+                    return Ok(None);
                 }
             }
         }
@@ -5666,11 +5649,9 @@ impl SyncEngine {
                             .await?;
                     }
                 }
-                changed = self.shutdown.changed() => {
-                    if changed.is_ok() && self.shutdown_requested() {
-                        self.finish_shutdown()?;
-                        return Ok(false);
-                    }
+                _ = wait_for_shutdown(&mut self.shutdown) => {
+                    self.finish_shutdown()?;
+                    return Ok(false);
                 }
             }
         };
@@ -5701,6 +5682,10 @@ impl SyncEngine {
         prepared: HistoricalPrepareResult,
         prefetched: bool,
     ) -> Result<bool> {
+        if self.shutdown_requested() {
+            self.finish_shutdown()?;
+            return Ok(false);
+        }
         let batch_started = std::time::Instant::now();
         let overlap_started = std::time::Instant::now();
         self.spawn_ready_historical_prepare_tasks_without_refill()
@@ -5750,6 +5735,7 @@ impl SyncEngine {
             Arc::clone(&self.storage),
         ));
         let mut last_write_refill = std::time::Instant::now();
+        let mut stopping = false;
         let write_result = loop {
             tokio::select! {
                 result = &mut write_task => {
@@ -5781,11 +5767,12 @@ impl SyncEngine {
                             .await?;
                     }
                 }
-                changed = self.shutdown.changed() => {
-                    if changed.is_ok() && self.shutdown_requested() {
-                        self.finish_shutdown()?;
-                        return Ok(false);
-                    }
+                _ = wait_for_shutdown(&mut self.shutdown) => {
+                    // Finish this verified batch and retain its result. The node's
+                    // engine/runtime deadlines still bound an unresponsive write;
+                    // a started storage commit must never be interrupted halfway.
+                    stopping = true;
+                    break write_task.await;
                 }
             }
         };
@@ -5793,6 +5780,10 @@ impl SyncEngine {
         self.historical_ingest_started_at = None;
         self.sync_status_peers();
         let mut written = write_result?;
+        if stopping {
+            self.finish_shutdown()?;
+            return Ok(false);
+        }
         written.prepare_wait_elapsed = prepare_wait_started.elapsed();
         self.advance_historical_fetch_position_after_ordered_write(
             sequence,
