@@ -64,9 +64,12 @@ Tests do not access existing user data, mac-mini or the physical external volume
 All **552 sync crate tests pass**, with two existing ignored workloads.
 
 Implementer review traced every task spawn, replacement, reset and result-drain
-caller. No independent review is claimed. Removed redundant stale-work scans from
-the candidate; no existing runtime helper became obsolete. Full workspace gates
-and PR/CI/merge are pending.
+caller. The pinned Tokio 1.51.0 source confirms the completion state uses an
+Acquire load and channel `try_recv` waits for an in-progress send instead of
+reporting that queue state as empty. No independent review is claimed. Removed redundant stale-work scans from
+the candidate; no existing runtime helper became obsolete. All eight local gates pass on `5514fe1b`: vendor integrity, workspace and
+patched-vendor formatting, all-target check, strict Clippy, 1,657 workspace tests
+(24 ignored), documentation tests and release build. PR/CI/merge remain pending.
 
 ## Remaining boundaries
 
