@@ -3,6 +3,7 @@ use std::future::{pending, ready};
 use std::path::PathBuf;
 
 struct Fixture {
+    workers: logex_sync::tasks::TaskMonitor,
     shutdown: watch::Sender<bool>,
     status: Arc<Mutex<SyncStatus>>,
     consensus: Option<watch::Receiver<Option<Arc<str>>>>,
@@ -12,6 +13,7 @@ struct Fixture {
 impl Fixture {
     fn new() -> Self {
         Self {
+            workers: Default::default(),
             shutdown: watch::channel(false).0,
             status: Arc::new(Mutex::new(SyncStatus {
                 syncing: true,
@@ -27,6 +29,7 @@ impl Fixture {
 
     fn supervisor(&mut self) -> SyncSupervisor<'_> {
         SyncSupervisor {
+            node_workers: &self.workers,
             shutdown_tx: &self.shutdown,
             sync_status: &self.status,
             consensus_storage_failure: &mut self.consensus,
@@ -392,4 +395,180 @@ async fn final_engine_progress_cannot_restore_healthy_failure_status() {
         .await;
     assert_eq!(exit, ExitCode::FAILURE);
     fixture.assert_stopped();
+}
+
+fn service_state(path: &std::path::Path) -> Arc<logex_server::AppState> {
+    Arc::new(logex_server::AppState::new(
+        logex_storage::PartitionManager::open(logex_storage::PartitionManagerConfig {
+            data_dir: path.to_owned(),
+            ..Default::default()
+        })
+        .unwrap(),
+        None,
+        SyncStatus::default(),
+    ))
+}
+
+#[tokio::test]
+async fn http_bind_failure_stops_sync() {
+    listener_failure_stops_sync(false).await;
+}
+
+#[tokio::test]
+async fn grpc_bind_failure_stops_sync() {
+    listener_failure_stops_sync(true).await;
+}
+
+async fn listener_failure_stops_sync(grpc: bool) {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = service_state(tmp.path());
+    // Own the ephemeral loopback port for the entire attempt, avoiding a
+    // release/rebind race. No requests or external connections are made.
+    let occupied = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = occupied.local_addr().unwrap();
+    let mut fixture = Fixture::new();
+    let task = if grpc {
+        super::super::services::spawn_grpc(
+            &fixture.workers,
+            state,
+            addr,
+            fixture.shutdown.subscribe(),
+        )
+    } else {
+        super::super::services::spawn_http(
+            &fixture.workers,
+            state,
+            addr,
+            fixture.shutdown.subscribe(),
+            Default::default(),
+        )
+    };
+    tokio::time::timeout(Duration::from_secs(2), task)
+        .await
+        .unwrap()
+        .unwrap();
+    let failures = fixture.workers.subscribe();
+    let failure = failures.borrow().clone().unwrap();
+    assert!(failure.starts_with(if grpc {
+        "gRPC server failed:"
+    } else {
+        "HTTP server failed:"
+    }));
+    let engine = engine_after_shutdown(fixture.shutdown.subscribe(), Ok(()));
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(1),
+        fixture
+            .supervisor()
+            .run(engine, pending(), pending(), |_| {}),
+    )
+    .await;
+    assert_eq!(
+        outcome.expect("listener failure must stop sync"),
+        ExitCode::FAILURE
+    );
+}
+
+#[tokio::test]
+async fn requested_shutdown_stops_services_without_false_failure() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = service_state(tmp.path());
+    let mut fixture = Fixture::new();
+    let http = super::super::services::spawn_http(
+        &fixture.workers,
+        Arc::clone(&state),
+        "127.0.0.1:0".parse().unwrap(),
+        fixture.shutdown.subscribe(),
+        Default::default(),
+    );
+    let grpc = super::super::services::spawn_grpc(
+        &fixture.workers,
+        Arc::clone(&state),
+        "127.0.0.1:0".parse().unwrap(),
+        fixture.shutdown.subscribe(),
+    );
+    let indexer = fixture.workers.spawn_result(
+        "background indexer",
+        crate::background::run_background_indexer(state, fixture.shutdown.subscribe()),
+    );
+    let engine = engine_after_shutdown(fixture.shutdown.subscribe(), Ok(()));
+    let exit = fixture
+        .supervisor()
+        .run(engine, ready("test signal"), pending(), |_| {})
+        .await;
+    assert_eq!(exit, ExitCode::SUCCESS);
+    for task in [http, grpc, indexer] {
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    assert!(fixture.workers.subscribe().borrow().is_none());
+}
+
+#[tokio::test]
+async fn worker_failure_before_supervisor_poll_arms_independent_watchdog() {
+    let fixture = Fixture::new();
+    let (expired, observed) = std::sync::mpsc::channel();
+    let _watchdog = super::super::start_runtime_failure_watchdog(
+        fixture.workers.subscribe(),
+        Duration::ZERO,
+        move || expired.send(()).unwrap(),
+    )
+    .unwrap();
+    fixture
+        .workers
+        .spawn_result("startup service", async {
+            Err::<(), _>("isolated startup failure")
+        })
+        .await
+        .unwrap();
+    // The main runtime is deliberately not polling the supervisor here.
+    observed.recv_timeout(Duration::from_secs(2)).unwrap();
+}
+
+#[tokio::test]
+async fn unexpected_worker_return_stops_engine_and_marks_failure() {
+    let mut fixture = Fixture::new();
+    fixture.workers.spawn("indexer", async {}).await.unwrap();
+    let engine = engine_after_shutdown(fixture.shutdown.subscribe(), Ok(()));
+    let mut failures = vec![];
+    let exit = fixture
+        .supervisor()
+        .run(engine, pending(), pending(), |message| {
+            failures.push(message.to_owned());
+        })
+        .await;
+    assert_eq!(exit, ExitCode::FAILURE);
+    assert_eq!(
+        failures,
+        ["node worker failed: indexer exited unexpectedly"]
+    );
+    fixture.assert_stopped();
+}
+
+#[tokio::test]
+async fn explicit_worker_failure_during_engine_cleanup_remains_latched() {
+    let mut fixture = Fixture::new();
+    let (fail, waiting) = tokio::sync::oneshot::channel();
+    let worker = fixture.workers.spawn_result("service", async move {
+        waiting.await.unwrap();
+        Err::<(), _>("service cleanup failed")
+    });
+    let mut shutdown = fixture.shutdown.subscribe();
+    let engine = async move {
+        shutdown.changed().await.unwrap();
+        fail.send(()).unwrap();
+        worker.await.unwrap();
+        Ok::<(), String>(())
+    };
+    let _ = fixture
+        .supervisor()
+        .run(engine, ready("test signal"), pending(), |_| {})
+        .await;
+    // run_sync checks this permanent latch again after the shared cleanup;
+    // the independently armed worker watchdog stays alive until process exit.
+    assert_eq!(
+        fixture.workers.subscribe().borrow().as_deref(),
+        Some("service failed: service cleanup failed")
+    );
 }

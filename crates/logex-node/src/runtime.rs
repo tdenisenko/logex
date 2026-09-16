@@ -24,6 +24,7 @@ use logex_sync::p2p::{
         persist_known_peers,
     },
 };
+use logex_sync::tasks::TaskMonitor;
 use logex_types::{ChainAnchors, ExecutionAnchor, SyncStatus};
 use reth_chainspec::{EthChainSpec, MAINNET};
 use reth_discv4::NatResolver;
@@ -33,6 +34,7 @@ use serde::{Deserialize, Serialize};
 use crate::background::{log_task_exit, run_background_indexer};
 use crate::checkpoint::{RECENT_CHECKPOINT_MAX_FINALIZED_EPOCH_LAG, resolve_checkpoint};
 
+mod services;
 mod supervision;
 
 const SYNC_ENGINE_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(120);
@@ -520,40 +522,49 @@ pub async fn run_sync(options: RunSyncOptions) {
         None => None,
     };
 
-    let http_addr = SocketAddr::new(http_host, http_port);
-    let http_state = Arc::clone(&state);
-    let http_shutdown = shutdown_rx.clone();
-    let http_handle = tokio::spawn(async move {
-        tracing::info!(%http_addr, "HTTP server starting");
-        let http_config = logex_server::HttpServerConfig {
-            dashboard_enabled,
-            dashboard_password,
-        };
-        if let Err(e) =
-            logex_server::serve_with_config(http_state, http_addr, http_shutdown, http_config).await
-        {
-            tracing::error!(error = %e, "HTTP server error");
-        }
+    let node_workers = TaskMonitor::default();
+    // Start before spawning services so an early bind failure is retained and
+    // bounded even if execution-network initialization is still in progress.
+    let _node_worker_watchdog = start_runtime_failure_watchdog(
+        node_workers.subscribe(),
+        RUNTIME_FAILURE_CLEANUP_GRACE,
+        || std::process::exit(1),
+    )
+    .unwrap_or_else(|error| {
+        tracing::error!(%error, "failed to start node worker shutdown watchdog");
+        std::process::exit(1);
     });
 
+    let http_addr = SocketAddr::new(http_host, http_port);
+    let http_handle = services::spawn_http(
+        &node_workers,
+        Arc::clone(&state),
+        http_addr,
+        shutdown_rx.clone(),
+        logex_server::HttpServerConfig {
+            dashboard_enabled,
+            dashboard_password,
+        },
+    );
     let grpc_addr = SocketAddr::new(grpc_host, grpc_port);
-    let grpc_state = Arc::clone(&state);
-    let grpc_shutdown = shutdown_rx.clone();
-    let grpc_handle = tokio::spawn(async move {
-        tracing::info!(%grpc_addr, "gRPC server starting");
-        if let Err(e) = logex_server::grpc::serve_grpc(grpc_state, grpc_addr, grpc_shutdown).await {
-            tracing::error!(error = %e, "gRPC server error");
-        }
-    });
+    let grpc_handle = services::spawn_grpc(
+        &node_workers,
+        Arc::clone(&state),
+        grpc_addr,
+        shutdown_rx.clone(),
+    );
 
     let index_state = Arc::clone(&state);
     let index_shutdown = shutdown_rx.clone();
-    let index_handle = tokio::spawn(run_background_indexer(index_state, index_shutdown));
+    let index_handle = node_workers.spawn_result(
+        "background indexer",
+        run_background_indexer(index_state, index_shutdown),
+    );
 
     tracing::info!(
         http = %format!("http://{http_addr}"),
         grpc = %format!("http://{grpc_addr}"),
-        "query endpoints ready"
+        "query endpoints starting"
     );
 
     let our_head = startup_network_head(sync_head, consensus.as_deref());
@@ -610,6 +621,7 @@ pub async fn run_sync(options: RunSyncOptions) {
     let mut _runtime_failure_watchdog = None;
     let engine_exit_code = supervision::SyncSupervisor {
         shutdown_tx: &shutdown_tx,
+        node_workers: &node_workers,
         sync_status: &state.sync_status,
         consensus_storage_failure: &mut consensus_storage_failure,
         execution_network_failure: &mut execution_network_failure,
@@ -676,6 +688,10 @@ pub async fn run_sync(options: RunSyncOptions) {
         .and_then(|receiver| receiver.borrow().clone())
     {
         tracing::error!(%error, "node stopped after fatal execution network failure");
+        std::process::exit(1);
+    }
+    if let Some(error) = node_workers.subscribe().borrow().clone() {
+        tracing::error!(%error, "node stopped after fatal worker failure");
         std::process::exit(1);
     }
     if engine_exit_code != std::process::ExitCode::SUCCESS {

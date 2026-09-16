@@ -75,7 +75,7 @@ impl Fixture {
         let directory = tempfile::tempdir().unwrap();
         let local_head = Head::default();
         let mut manager = PeerManager {
-            task_monitor: super::super::tasks::TaskMonitor::default(),
+            task_monitor: crate::tasks::TaskMonitor::default(),
             network: network.handle().clone(),
             network_task: None,
             eth_request_task: None,

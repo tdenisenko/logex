@@ -46,6 +46,7 @@ use tracing::{info, trace};
 
 use crate::p2p::serve_cache::ServeCacheProvider;
 use crate::primitives::LogexNetworkPrimitives;
+use crate::tasks;
 
 #[cfg(test)]
 mod address_selection_tests;
@@ -59,7 +60,6 @@ mod requests;
 #[cfg(test)]
 mod serving_tests;
 mod state;
-mod tasks;
 
 #[cfg(test)]
 pub(crate) use self::requests::limit_tests::{
