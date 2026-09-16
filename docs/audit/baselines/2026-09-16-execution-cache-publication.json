@@ -1,0 +1,105 @@
+{
+  "base_commit": "e07fb45148f5cd61348355470b5883f90fe5177a",
+  "branch": "audit/execution-cache-publication",
+  "finding": "B4-33",
+  "classification": "Confirmed redundant implementation work; measured component optimization, no new correctness failure claimed",
+  "status": "316 focused tests pass; full gates and merge pending",
+  "focused_tests": {
+    "passed": 316,
+    "failed": 0,
+    "ignored": 1,
+    "new_correctness_controls": 7,
+    "new_ignored_benchmark": 1
+  },
+  "performance": {
+    "environment": {
+      "base_commit": "e07fb45148f5cd61348355470b5883f90fe5177a",
+      "source_sha256": "9d31a025c9a10f9531f57758d0d7c801a1156ac93f8ceec2046f077a069d7b72",
+      "production": "unchanged; one added ignored in-memory release fixture",
+      "rustc": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+      "platform": "macOS-26.6.2-arm64-arm-64bit-Mach-O",
+      "hardware": "Mac14,15\nApple M2\n17179869184",
+      "filesystem": "Filesystem      Size    Used   Avail Capacity iused ifree %iused  Mounted on\n/dev/disk3s5   926Gi   758Gi   137Gi    85%    4.7M  1.4G    0%   /System/Volumes/Data",
+      "recorded_at": "2026-09-16T00:36:24.645229+00:00",
+      "workload": "4096 synthetic empty blocks;5samples x10000 repeated warm range queries; setup excluded; no filesystem data IO; no full ingestion benchmark"
+    },
+    "getter_source_after": "dad7fb6e1f143cc96f74ae4e9a225cc7d750dbec98f63bc760fbc58de52f7205",
+    "samples": {
+      "original": {
+        "elapsed_ns_per_10000_queries": [
+          1156653959,
+          1171541125,
+          1208255125,
+          1190235750,
+          1188158584
+        ],
+        "median_ns_per_query": 118815.8584,
+        "min_ns_per_query": 115665.3959,
+        "max_ns_per_query": 120825.5125,
+        "log_sha256": "dbc0b75d2a91421541c86b7f802982c1661ced23e67d0efdbded18b3b75e9666"
+      },
+      "candidate": {
+        "elapsed_ns_per_10000_queries": [
+          147958,
+          148667,
+          148750,
+          147834,
+          147667
+        ],
+        "median_ns_per_query": 14.7958,
+        "min_ns_per_query": 14.7667,
+        "max_ns_per_query": 14.875,
+        "log_sha256": "127801f7fd1910969f0231080b8a88788ca5c222a5b6c04ce8351222bb07e3ff"
+      }
+    },
+    "scope": "Warm repeated availability getter only; not ingestion throughput, allocation, RSS or mutation-path latency; same4096 synthetic empty-block inventory and5x10000queries, setup excluded.",
+    "median_component_ratio": 8030.377431433244
+  },
+  "evidence_directory": "/private/tmp/logex-execution-cache-publication-5mi81ucw",
+  "evidence": {
+    "baseline-environment.json": {
+      "sha256": "bd3da1be6d0992a2cd99b32cfebd3c875c02b9ef3704cd230a9e0a8cfaea64c2",
+      "bytes": 951
+    },
+    "baseline-serve_cache.rs": {
+      "sha256": "9d31a025c9a10f9531f57758d0d7c801a1156ac93f8ceec2046f077a069d7b72",
+      "bytes": 57959
+    },
+    "original-range-lookup.log": {
+      "sha256": "dbc0b75d2a91421541c86b7f802982c1661ced23e67d0efdbded18b3b75e9666",
+      "bytes": 6529
+    },
+    "candidate-range-lookup.log": {
+      "sha256": "127801f7fd1910969f0231080b8a88788ca5c222a5b6c04ce8351222bb07e3ff",
+      "bytes": 1146
+    },
+    "comparison.json": {
+      "sha256": "e3f12cffc785682edfa643df2a455753e76f0bd7f5088d62e4e5fe53c30e5aee",
+      "bytes": 2077
+    },
+    "focused.log": {
+      "sha256": "8ed7f7c10b65b2d1444d13b8377106a483c097c7188931093da13a8df267393d",
+      "bytes": 34114
+    },
+    "final-focused.log": {
+      "sha256": "300ef16773152132f56a2631c12da6486c313996f6d938cabdf5f82a2a88b8a0",
+      "bytes": 33872
+    },
+    "cache-mutation-review.json": {
+      "sha256": "d2c5fb34d15a6275dc22dead222fb951f88d6df82a95bda48319de9cccde90ac",
+      "bytes": 5058
+    },
+    "publication-order-review.json": {
+      "sha256": "10d44b1a4af642a22e832643cbcf531925f4245f6383a4394ff2868fcfd1d2ec",
+      "bytes": 9060
+    },
+    "implementation-review.json": {
+      "sha256": "2c5819c3cb6f63fe97247ccf877ba21213b4f0a70f240684cbb23c20581d9cb8",
+      "bytes": 5807
+    },
+    "tracker-cleanup.json": {
+      "sha256": "55da9b485a50e3143cec6a8aaa2a41f88e81ffa6122c6f54d71d09d8e83c7898",
+      "bytes": 696
+    }
+  }
+}

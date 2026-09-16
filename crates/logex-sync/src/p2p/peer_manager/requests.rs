@@ -8861,3 +8861,6 @@ mod partial_progress_tests;
 
 #[cfg(test)]
 mod failure_context_tests;
+
+#[cfg(test)]
+mod publication_tests;
