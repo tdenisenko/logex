@@ -1,0 +1,65 @@
+{
+  "base": "ba4957f26baa3b97ab22bf9cd000e8127f4853fc",
+  "status": "Implemented; focused validation passed, workspace gates pending",
+  "findings": [
+    "B5-02",
+    "B5-03"
+  ],
+  "evidence_root": "/private/tmp/logex-historical-memory-probes-8h4m2c0a",
+  "evidence": {
+    "original-source.json": {
+      "sha256": "a0f0876e251699861f7eacbb709a29f23dd9ace7a7491623950c1f029010689b",
+      "bytes": 304
+    },
+    "original-reference-controls.patch": {
+      "sha256": "b84b7023eaeec3e04986f1801895dc9aecac3e4126b4ed684f53aeec65204243",
+      "bytes": 5244
+    },
+    "original-reference-controls.log": {
+      "sha256": "03aa79a0b3ddd58d233ff3cad9b96e794547ef3611998e25c5e731f564943df8",
+      "bytes": 3073
+    },
+    "original-accounting.rs": {
+      "sha256": "ba2edf738e47fb9e99aff527a41139215daeac4238dc8a1770038bd256de572f",
+      "bytes": 676
+    },
+    "original-accounting.log": {
+      "sha256": "7f3ea46ad5473d1b9ba3b7b0617d9ea59f03f4e3a8e05540985cf622fa4a7097",
+      "bytes": 638
+    },
+    "focused-memory.log": {
+      "sha256": "687d78d2cf2b704a24e6a9f2125e6af6377dd0df702ff712e081b4b9ed4651e2",
+      "bytes": 1520
+    },
+    "focused-sync.log": {
+      "sha256": "44ce42956f67eccdcadcf5a4f74097df0ce2ecc2baba630967f4ad28a542c623",
+      "bytes": 58579
+    },
+    "final-memory.log": {
+      "sha256": "79d359636ff703fcad137832b67bfc8ecbb1141c22a948c8798c4aa7ac1d8e2c",
+      "bytes": 1519
+    }
+  },
+  "original_controls": {
+    "actual_helpers": {
+      "passed": 0,
+      "failed": 2
+    },
+    "extracted_accounting": {
+      "passed": 0,
+      "failed": 1
+    }
+  },
+  "benchmark": "Not run; implementation correctness and resource ownership, no throughput claim",
+  "remote_work": false,
+  "focused": {
+    "sync": {
+      "passed": 570,
+      "ignored": 2
+    },
+    "final_memory": {
+      "passed": 9,
+      "ignored": 0
+    }
+  }
+}
