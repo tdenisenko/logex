@@ -130,7 +130,7 @@ Merged in PR #196 (`cc1bb889`) after 372 focused P2P tests, eight local gates an
 
 The [historical work cancellation review](historical-work-cancellation.md) records
 B5-04–06: owned jobs, retained write results on stop and consistent shutdown
-channels; implemented, workspace validation and merge pending.
+channels; all eight local gates pass (1,747 tests, 24 ignored); CI/merge pending.
 
 The [historical memory probe review](historical-memory-probes.md) records B5-02/B5-03:
 bounded host-reference ownership and nonoverlapping macOS page accounting;

@@ -84,7 +84,10 @@ scripted response. That success fixture now finishes at the history target
 (genesis), which tests normal completion without an unintended network wait.
 Both its initial failure and the corrected passing runs are retained. The
 shutdown regressions keep their original block-100 fixture. Final cleanup also
-passes all 586 tests. Workspace gates are pending.
+passes all 586 tests. All eight local gates pass on `71d13dc5`:
+vendor integrity, workspace/patched-vendor formatting, check, strict Clippy,
+1,747 workspace tests (24 ignored), documentation tests and release build.
+PR/CI/merge remain pending.
 
 Implementer review traced constructor-to-owner moves, resets, removal on success,
 late/stale outcome checks, queued versus started blocking semantics, ordinary
