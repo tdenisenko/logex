@@ -56,12 +56,12 @@ PACKAGES = (
         inventory_checksum="12c15956c224e85aca12c00b90c33b13254df65913695f4495a53169dbb43be0",
         modified={
             PurePosixPath("Cargo.toml"): "41475c2237ce54f86ee60f30c0ef672a741bc1079e394b32715d95e9b960a302",
-            PurePosixPath("src/eth_requests.rs"): "e1526e03d76643b115677eafc9a0b67a3529b88b24a7c7061ed4c5e7083e0b4d",
+            PurePosixPath("src/eth_requests.rs"): "c6af5374770f9429be3b81c663c2dbceb2dcee89fd1d8a424dc37c7996f91c79",
             PurePosixPath("src/session/active.rs"): "a4c0d8b50fbe7cb3895723d6f935abd1c13f44fcd8471463f7aad1c4dcf93534",
             PurePosixPath("src/session/mod.rs"): "fc8dc897438d2d4ce8f6bfd90455250110af1c036483fe23bb22e8758dac688b",
             PurePosixPath("src/session/types.rs"): "584a6bff5d489f973dfecd96d5f5334943f4403a348eba30a863b86053d3f8d1",
         },
-        patch_checksum="6c14b3f9c7db7dbc67da9ac229f1936175376eec8e49bf0b644b2377d3174ac7",
+        patch_checksum="ff61b88877851c5cb10382559c239f35dd607e280730378fac526d3842301d97",
         added={
             PurePosixPath("src/session/range_update.rs"): "5518a3cc920616fe298bd4fb2ce859ef57364bbabfd45823515cd665730ba527",
         },

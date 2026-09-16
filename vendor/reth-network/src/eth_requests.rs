@@ -1,5 +1,5 @@
 //! Blocks/Headers management for the p2p network.
-// LogEx patch: ETH70 soft-limit pagination must make progress and report actual remainder.
+// LogEx patch: preserve ETH70 progress and skip already-cancelled serving work.
 
 use crate::{
     budget::DEFAULT_BUDGET_TRY_DRAIN_DOWNLOADERS, metered_poll_nested_stream_with_budget,
@@ -156,6 +156,9 @@ where
         response: oneshot::Sender<RequestResult<BlockHeaders<C::Header>>>,
     ) {
         self.metrics.eth_headers_requests_received_total.increment(1);
+        if response.is_closed() {
+            return
+        }
         let headers = self.get_headers_response(request);
         let _ = response.send(Ok(BlockHeaders(headers)));
     }
@@ -167,6 +170,9 @@ where
         response: oneshot::Sender<RequestResult<BlockBodies<<C::Block as Block>::Body>>>,
     ) {
         self.metrics.eth_bodies_requests_received_total.increment(1);
+        if response.is_closed() {
+            return
+        }
         let mut bodies = Vec::new();
 
         let mut total_bytes = 0;
@@ -195,6 +201,9 @@ where
         response: oneshot::Sender<RequestResult<Receipts<C::Receipt>>>,
     ) {
         self.metrics.eth_receipts_requests_received_total.increment(1);
+        if response.is_closed() {
+            return
+        }
 
         let receipts = self.get_receipts_response(request, |receipts_by_block| {
             receipts_by_block.into_iter().map(ReceiptWithBloom::from).collect::<Vec<_>>()
@@ -210,6 +219,9 @@ where
         response: oneshot::Sender<RequestResult<Receipts69<C::Receipt>>>,
     ) {
         self.metrics.eth_receipts_requests_received_total.increment(1);
+        if response.is_closed() {
+            return
+        }
 
         let receipts = self.get_receipts_response(request, |receipts_by_block| {
             // skip bloom filter for eth69
@@ -230,6 +242,9 @@ where
         response: oneshot::Sender<RequestResult<Receipts70<C::Receipt>>>,
     ) {
         self.metrics.eth_receipts_requests_received_total.increment(1);
+        if response.is_closed() {
+            return
+        }
 
         let GetReceipts70 { first_block_receipt_index, block_hashes } = request;
 

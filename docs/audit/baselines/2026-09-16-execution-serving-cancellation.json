@@ -1,0 +1,52 @@
+{
+  "status": "Focused controls pass; full gates and PR/CI/merge pending",
+  "branch": "audit/execution-serving-cancellation",
+  "baseline_commit": "a03e2d519ab023a95c6c01c71f09e3e18451dce0",
+  "findings": [
+    "B4-46"
+  ],
+  "original_controls": {
+    "passed": 0,
+    "failed": 5,
+    "production_unchanged": true
+  },
+  "focused_final": {
+    "passed": 372,
+    "failed": 0,
+    "ignored": 1,
+    "new_controls": 5
+  },
+  "review": "Implementer source review only",
+  "cost_evidence": "Already-closed requests make no provider read; live replies remain exact. No timing or throughput measurement.",
+  "limitations": [
+    "Closure after the entry check may leave synchronous work in progress",
+    "No strict process memory bound or live-peer result",
+    "Full transient allocation and engine admission remain open"
+  ],
+  "evidence": {
+    "original-source.json": {
+      "sha256": "14bc33d2002f2923e130d3282ea4d136fffbef0b916939a77e15020224d86461",
+      "bytes": 403
+    },
+    "original-serving-tests.rs": {
+      "sha256": "9939965ae9a828977ec3d756a827df0086d8847370acee0661d264c988405551",
+      "bytes": 12894
+    },
+    "original-cancellation.log": {
+      "sha256": "0cb111db4455bb50bd46e85da2716db8bb3bd7be0a142bb6b56e2260490b3da5",
+      "bytes": 4062
+    },
+    "focused-final.log": {
+      "sha256": "08f4adb4dbcd8a07a2dce6fd6c5600417789a5c49ecb85fd7da1d6b7044b7ba3",
+      "bytes": 40529
+    },
+    "vendor-freeze.json": {
+      "sha256": "2a9f7d87f6f4b24c02f67ea9aba54729d5f8ed6fc0c7c8d61b60dafc35cf17c7",
+      "bytes": 416
+    },
+    "patch-application.json": {
+      "sha256": "0b2210b902d6189f340d2e902397e82b09d23808a4a1232c80df1997f4c95f08",
+      "bytes": 373
+    }
+  }
+}

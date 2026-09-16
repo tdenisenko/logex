@@ -21,13 +21,13 @@
 +"homepage" = "https://paradigmxyz.github.io/reth"
 +"repository" = "https://github.com/paradigmxyz/reth"
 +"description" = "Ethereum network support"
- 
+
  [lints]
 -workspace = true
 +"rust" = { "missing_debug_implementations" = "warn", "missing_docs" = "warn", "rust_2018_idioms" = { "level" = "deny", "priority" = -1 }, "unreachable_pub" = "warn", "unused_must_use" = "deny", "rust_2024_incompatible_pat" = "warn" }
 +"rustdoc" = { "all" = "warn" }
 +"clippy" = { "borrow_as_ptr" = "warn", "branches_sharing_code" = "warn", "clear_with_drain" = "warn", "cloned_instead_of_copied" = "warn", "collection_is_never_read" = "warn", "dbg_macro" = "warn", "derive_partial_eq_without_eq" = "warn", "doc_markdown" = "warn", "empty_line_after_doc_comments" = "warn", "empty_line_after_outer_attr" = "warn", "enum_glob_use" = "warn", "equatable_if_let" = "warn", "explicit_into_iter_loop" = "warn", "explicit_iter_loop" = "warn", "flat_map_option" = "warn", "from_iter_instead_of_collect" = "warn", "if_not_else" = "warn", "if_then_some_else_none" = "warn", "implicit_clone" = "warn", "imprecise_flops" = "warn", "iter_on_empty_collections" = "warn", "iter_on_single_items" = "warn", "iter_with_drain" = "warn", "iter_without_into_iter" = "warn", "large_stack_frames" = "warn", "manual_assert" = "warn", "manual_clamp" = "warn", "manual_is_variant_and" = "warn", "manual_string_new" = "warn", "match_same_arms" = "warn", "missing-const-for-fn" = "warn", "mutex_integer" = "warn", "naive_bytecount" = "warn", "needless_bitwise_bool" = "warn", "needless_continue" = "warn", "needless_for_each" = "warn", "needless_pass_by_ref_mut" = "warn", "nonstandard_macro_braces" = "warn", "option_as_ref_cloned" = "warn", "or_fun_call" = "warn", "path_buf_push_overwrite" = "warn", "read_zero_byte_vec" = "warn", "result_large_err" = "allow", "redundant_clone" = "warn", "redundant_else" = "warn", "single_char_pattern" = "warn", "string_lit_as_bytes" = "warn", "string_lit_chars_any" = "warn", "suboptimal_flops" = "warn", "suspicious_operation_groupings" = "warn", "trailing_empty_array" = "warn", "trait_duplication_in_bounds" = "warn", "transmute_undefined_repr" = "warn", "trivial_regex" = "warn", "tuple_array_conversions" = "warn", "type_repetition_in_bounds" = "warn", "uninhabited_references" = "warn", "unnecessary_self_imports" = "warn", "unnecessary_struct_initialization" = "warn", "unnested_or_patterns" = "warn", "unused_peekable" = "warn", "unused_rounding" = "warn", "use_self" = "warn", "useless_let_if_seq" = "warn", "while_float" = "warn", "zero_sized_map_values" = "warn", "as_ptr_cast_mut" = "allow", "cognitive_complexity" = "allow", "debug_assert_with_mut_call" = "allow", "fallible_impl_from" = "allow", "future_not_send" = "allow", "needless_collect" = "allow", "non_send_fields_in_send_ty" = "allow", "redundant_pub_crate" = "allow", "significant_drop_in_scrutinee" = "allow", "significant_drop_tightening" = "allow", "too_long_first_doc_paragraph" = "allow" }
- 
+
  [dependencies]
 -# reth
 -reth-chainspec.workspace = true
@@ -142,7 +142,7 @@
 +"schnellru" = { "version" = "0.2" }
 +"itertools" = { "version" = "0.14", "default-features" = false }
 +"smallvec" = { "version" = "1" }
- 
+
  [dev-dependencies]
 -# reth
 -reth-discv4 = { workspace = true, features = ["test-utils"] }
@@ -177,7 +177,7 @@
 +"url" = { "version" = "2.3", "default-features" = false }
 +"secp256k1" = { "version" = "0.30", "default-features" = false, "features" = ["global-context", "recovery", "rand"] }
 +"criterion" = { "package" = "codspeed-criterion-compat", "version" = "4.3", "features" = ["async_tokio", "html_reports"] }
- 
+
  [features]
 -serde = [
 -    "dep:serde",
@@ -221,7 +221,7 @@
 -]
 +"serde" = ["dep:serde", "secp256k1/serde", "enr/serde", "reth-network-types/serde", "reth-dns-discovery/serde", "reth-eth-wire/serde", "reth-eth-wire-types/serde", "alloy-consensus/serde", "alloy-eips/serde", "alloy-primitives/serde", "discv5/serde", "parking_lot/serde", "rand/serde", "smallvec/serde", "url/serde", "reth-primitives-traits/serde", "reth-ethereum-forks/serde", "reth-network/serde", "reth-transaction-pool/serde", "reth-ethereum-primitives/serde", "reth-network-api/serde", "rand_08/serde", "reth-storage-api/serde"]
 +"test-utils" = ["reth-transaction-pool/test-utils", "reth-network-types/test-utils", "reth-chainspec/test-utils", "reth-consensus/test-utils", "reth-discv4/test-utils", "reth-network/test-utils", "reth-network-p2p/test-utils", "reth-primitives-traits/test-utils", "reth-provider/test-utils", "reth-ethereum-primitives/test-utils", "dep:reth-evm-ethereum", "reth-evm-ethereum?/test-utils", "reth-tasks/test-utils"]
- 
+
  [[bench]]
 -name = "broadcast"
 -required-features = ["test-utils"]
@@ -229,7 +229,7 @@
 +"name" = "broadcast"
 +"required-features" = ["test-utils"]
 +"harness" = false
- 
+
  [[bench]]
 -name = "tx_manager_hash_fetching"
 -required-features = ["test-utils"]
@@ -241,12 +241,52 @@
 +++ b/src/eth_requests.rs
 @@ -1,4 +1,5 @@
  //! Blocks/Headers management for the p2p network.
-+// LogEx patch: ETH70 soft-limit pagination must make progress and report actual remainder.
- 
++// LogEx patch: preserve ETH70 progress and skip already-cancelled serving work.
+
  use crate::{
      budget::DEFAULT_BUDGET_TRY_DRAIN_DOWNLOADERS, metered_poll_nested_stream_with_budget,
-@@ -220,7 +221,8 @@
- 
+@@ -155,6 +156,9 @@
+         response: oneshot::Sender<RequestResult<BlockHeaders<C::Header>>>,
+     ) {
+         self.metrics.eth_headers_requests_received_total.increment(1);
++        if response.is_closed() {
++            return
++        }
+         let headers = self.get_headers_response(request);
+         let _ = response.send(Ok(BlockHeaders(headers)));
+     }
+@@ -166,6 +170,9 @@
+         response: oneshot::Sender<RequestResult<BlockBodies<<C::Block as Block>::Body>>>,
+     ) {
+         self.metrics.eth_bodies_requests_received_total.increment(1);
++        if response.is_closed() {
++            return
++        }
+         let mut bodies = Vec::new();
+
+         let mut total_bytes = 0;
+@@ -194,6 +201,9 @@
+         response: oneshot::Sender<RequestResult<Receipts<C::Receipt>>>,
+     ) {
+         self.metrics.eth_receipts_requests_received_total.increment(1);
++        if response.is_closed() {
++            return
++        }
+
+         let receipts = self.get_receipts_response(request, |receipts_by_block| {
+             receipts_by_block.into_iter().map(ReceiptWithBloom::from).collect::<Vec<_>>()
+@@ -209,6 +219,9 @@
+         response: oneshot::Sender<RequestResult<Receipts69<C::Receipt>>>,
+     ) {
+         self.metrics.eth_receipts_requests_received_total.increment(1);
++        if response.is_closed() {
++            return
++        }
+
+         let receipts = self.get_receipts_response(request, |receipts_by_block| {
+             // skip bloom filter for eth69
+@@ -220,7 +233,8 @@
+
      /// Handles partial responses for [`GetReceipts70`] queries.
      ///
 -    /// This will adhere to the soft limit but allow filling the last vec partially.
@@ -255,10 +295,20 @@
      fn on_receipts70_request(
          &self,
          _peer_id: PeerId,
-@@ -263,18 +265,25 @@
+@@ -228,6 +242,9 @@
+         response: oneshot::Sender<RequestResult<Receipts70<C::Receipt>>>,
+     ) {
+         self.metrics.eth_receipts_requests_received_total.increment(1);
++        if response.is_closed() {
++            return
++        }
+
+         let GetReceipts70 { first_block_receipt_index, block_hashes } = request;
+
+@@ -263,18 +280,25 @@
                  continue;
              }
- 
+
 +            let remaining_count = block_receipts.len();
              let mut partial_block = Vec::new();
              for receipt in block_receipts {
@@ -275,7 +325,7 @@
 +                total_bytes = total_bytes.saturating_add(receipt_size);
                  partial_block.push(receipt);
              }
- 
+
 -            receipts.push(partial_block);
 -            last_block_incomplete = true;
 +            if !partial_block.is_empty() {
@@ -284,13 +334,13 @@
 +            }
              break;
          }
- 
+
 --- a/src/session/active.rs
 +++ b/src/session/active.rs
 @@ -1,4 +1,5 @@
  //! Represents an established session.
 +// LogEx patch: announce coherent changed ranges on the existing epoch interval.
- 
+
  use core::sync::atomic::Ordering;
  use std::{
 @@ -16,6 +17,7 @@
@@ -320,7 +370,7 @@
 +/// Changed ranges are announced at most once per epoch duration. This includes
 +/// history pruning, reorgs and regressions, not just forward head progress.
  pub(super) const RANGE_UPDATE_INTERVAL: Duration = Duration::from_secs(EPOCH_SLOTS * 12);
- 
+
  // Constants for timeout updating.
 @@ -129,12 +132,10 @@
      /// This represents the range of blocks that this node can serve to other peers.
@@ -336,11 +386,11 @@
 +    /// The exact snapshot last queued for announcement; unchanged tuples are suppressed.
 +    pub(crate) last_sent_range: Option<BlockRangeUpdate>,
  }
- 
+
  impl<N: NetworkPrimitives> ActiveSession<N> {
 @@ -741,21 +742,14 @@
          }
- 
+
          if let Some(interval) = &mut this.range_update_interval {
 -            // Check if we should send a range update based on block height changes
              while interval.poll_tick(cx).is_ready() {
@@ -381,7 +431,7 @@
 @@ -1,9 +1,11 @@
  //! Support for handling peer sessions.
 +// LogEx patch: remember the complete last announced range.
- 
+
  mod active;
  mod conn;
  mod counter;
@@ -389,7 +439,7 @@
 +mod range_update;
  mod types;
  pub use types::BlockRangeInfo;
- 
+
 @@ -574,7 +576,7 @@
                      range_info: None,
                      local_range_info: self.local_range_info.clone(),
@@ -397,14 +447,14 @@
 -                    last_sent_latest_block: None,
 +                    last_sent_range: None,
                  };
- 
+
                  self.spawn(session);
 --- a/src/session/types.rs
 +++ b/src/session/types.rs
 @@ -1,36 +1,24 @@
  //! Shared types for network sessions.
 +// LogEx patch: publish and read complete range tuples under one lock.
- 
+
  use alloy_primitives::B256;
  use parking_lot::RwLock;
  use reth_eth_wire::BlockRangeUpdate;
@@ -416,7 +466,7 @@
 -    },
 -};
 +use std::{ops::RangeInclusive, sync::Arc};
- 
+
  /// Information about the range of full blocks available from a peer.
  ///
 -/// This represents the announced `eth69`
@@ -429,7 +479,7 @@
 +    /// Range numbers and hash belong to the same publication.
 +    inner: Arc<RwLock<BlockRangeUpdate>>,
  }
- 
+
  impl BlockRangeInfo {
      /// Creates a new range information.
      pub fn new(earliest: u64, latest: u64, latest_hash: B256) -> Self {
@@ -442,10 +492,10 @@
 -        }
 +        Self { inner: Arc::new(RwLock::new(BlockRangeUpdate { earliest, latest, latest_hash })) }
      }
- 
+
      /// Returns true if the block number is within the range of blocks available from the peer.
 @@ -40,24 +28,23 @@
- 
+
      /// Returns the range of blocks available from the peer.
      pub fn range(&self) -> RangeInclusive<u64> {
 -        let earliest = self.earliest();
@@ -454,30 +504,30 @@
 +        let snapshot = self.inner.read();
 +        snapshot.earliest..=snapshot.latest
      }
- 
+
      /// Returns the earliest full block number available from the peer.
      pub fn earliest(&self) -> u64 {
 -        self.inner.earliest.load(Ordering::Relaxed)
 +        self.inner.read().earliest
      }
- 
+
      /// Returns the latest full block number available from the peer.
      pub fn latest(&self) -> u64 {
 -        self.inner.latest.load(Ordering::Relaxed)
 +        self.inner.read().latest
      }
- 
+
      /// Returns the latest block hash available from the peer.
      pub fn latest_hash(&self) -> B256 {
 -        *self.inner.latest_hash.read()
 +        self.inner.read().latest_hash
      }
- 
+
      /// Returns true if the peer has the full history available.
 @@ -65,30 +52,13 @@
          self.earliest() == 0
      }
- 
+
 -    /// Updates the range information.
 +    /// Updates the range information as one publication.
      pub fn update(&self, earliest: u64, latest: u64, latest_hash: B256) {
@@ -486,7 +536,7 @@
 -        *self.inner.latest_hash.write() = latest_hash;
 +        *self.inner.write() = BlockRangeUpdate { earliest, latest, latest_hash };
      }
- 
+
 -    /// Converts the current range information to an Eth69 [`BlockRangeUpdate`] message.
 +    /// Returns a coherent Eth69 [`BlockRangeUpdate`] snapshot.
      pub fn to_message(&self) -> BlockRangeUpdate {

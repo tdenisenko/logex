@@ -20,7 +20,11 @@ files and one added private helper:
   earliest bounds, reorg hashes and regressions, then wake the session to flush.
 - `eth_requests.rs`: ETH70 pagination permits one receipt above the soft target
   when no progress would otherwise occur, omits unstarted trailing blocks after
-  earlier complete blocks, and marks incomplete only when receipts remain.
+  earlier complete blocks, and marks incomplete only when receipts remain. Header,
+  body and ETH68/69/70 receipt handlers skip provider work if their response
+  receiver is already closed after queueing. Received-request counters are still
+  incremented; live response contents and limits are unchanged. A receiver
+  closing after the entry check can still leave synchronous work in progress.
 
 The 2 MiB response target remains soft. An arbitrary oversized receipt is not
 promised to fit a remote hard message limit. No message-size, queue, concurrency,
