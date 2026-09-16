@@ -54,7 +54,9 @@ two duplicate window constants and separate snapshot structures. No independent
 review is claimed. This is bounded telemetry accounting; no measured ingestion
 speedup, total network-memory limit or whole-batch completion is claimed.
 
-Full workspace gates and PR/CI/merge are pending.
+All eight local gates pass on `d6215997`: vendor integrity, workspace and
+patched-vendor formatting, all-target check, strict Clippy, 1,624 workspace tests
+(24 ignored), documentation tests and release build. PR/CI/merge remain pending.
 
 The separate retained-state inventory still includes negative peer hints,
 request-accounting queues and outgoing/transient response ownership. Their limits
