@@ -80,7 +80,9 @@ The candidate initially used `AtomicU8::fetch_update`; the pinned nightly report
 that spelling as deprecated. It now uses the recommended `try_update`, without
 changing the pinned toolchain. Implementer review inspected monitor lifetime,
 shutdown ordering, late error checks, worker ownership and obsolete call sites.
-No independent review is claimed. Full workspace gates and PR/CI/merge are pending.
+No independent review is claimed. All eight local gates pass on `1103832c`: vendor integrity, workspace and
+patched-vendor formatting, all-target check, strict Clippy, 1,686 workspace tests
+(24 ignored), documentation tests and release build. PR/CI/merge remain pending.
 
 Removed the old private monitor module, duplicate service error-discard blocks,
 checkpoint error-and-continue paths and premature readiness wording. The small
