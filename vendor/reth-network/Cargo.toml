@@ -1,0 +1,96 @@
+# Normalized from exact Reth v1.11.3 commit d6324d63e27ef6b7c49cdc9b1977c1b808234c7b.
+# Standalone normalization preserves the original git + tag dependency identity.
+
+[package]
+"name" = "reth-network"
+"version" = "1.11.3"
+"edition" = "2024"
+"rust-version" = "1.88"
+"license" = "MIT OR Apache-2.0"
+"homepage" = "https://paradigmxyz.github.io/reth"
+"repository" = "https://github.com/paradigmxyz/reth"
+"description" = "Ethereum network support"
+
+[lints]
+"rust" = { "missing_debug_implementations" = "warn", "missing_docs" = "warn", "rust_2018_idioms" = { "level" = "deny", "priority" = -1 }, "unreachable_pub" = "warn", "unused_must_use" = "deny", "rust_2024_incompatible_pat" = "warn" }
+"rustdoc" = { "all" = "warn" }
+"clippy" = { "borrow_as_ptr" = "warn", "branches_sharing_code" = "warn", "clear_with_drain" = "warn", "cloned_instead_of_copied" = "warn", "collection_is_never_read" = "warn", "dbg_macro" = "warn", "derive_partial_eq_without_eq" = "warn", "doc_markdown" = "warn", "empty_line_after_doc_comments" = "warn", "empty_line_after_outer_attr" = "warn", "enum_glob_use" = "warn", "equatable_if_let" = "warn", "explicit_into_iter_loop" = "warn", "explicit_iter_loop" = "warn", "flat_map_option" = "warn", "from_iter_instead_of_collect" = "warn", "if_not_else" = "warn", "if_then_some_else_none" = "warn", "implicit_clone" = "warn", "imprecise_flops" = "warn", "iter_on_empty_collections" = "warn", "iter_on_single_items" = "warn", "iter_with_drain" = "warn", "iter_without_into_iter" = "warn", "large_stack_frames" = "warn", "manual_assert" = "warn", "manual_clamp" = "warn", "manual_is_variant_and" = "warn", "manual_string_new" = "warn", "match_same_arms" = "warn", "missing-const-for-fn" = "warn", "mutex_integer" = "warn", "naive_bytecount" = "warn", "needless_bitwise_bool" = "warn", "needless_continue" = "warn", "needless_for_each" = "warn", "needless_pass_by_ref_mut" = "warn", "nonstandard_macro_braces" = "warn", "option_as_ref_cloned" = "warn", "or_fun_call" = "warn", "path_buf_push_overwrite" = "warn", "read_zero_byte_vec" = "warn", "result_large_err" = "allow", "redundant_clone" = "warn", "redundant_else" = "warn", "single_char_pattern" = "warn", "string_lit_as_bytes" = "warn", "string_lit_chars_any" = "warn", "suboptimal_flops" = "warn", "suspicious_operation_groupings" = "warn", "trailing_empty_array" = "warn", "trait_duplication_in_bounds" = "warn", "transmute_undefined_repr" = "warn", "trivial_regex" = "warn", "tuple_array_conversions" = "warn", "type_repetition_in_bounds" = "warn", "uninhabited_references" = "warn", "unnecessary_self_imports" = "warn", "unnecessary_struct_initialization" = "warn", "unnested_or_patterns" = "warn", "unused_peekable" = "warn", "unused_rounding" = "warn", "use_self" = "warn", "useless_let_if_seq" = "warn", "while_float" = "warn", "zero_sized_map_values" = "warn", "as_ptr_cast_mut" = "allow", "cognitive_complexity" = "allow", "debug_assert_with_mut_call" = "allow", "fallible_impl_from" = "allow", "future_not_send" = "allow", "needless_collect" = "allow", "non_send_fields_in_send_ty" = "allow", "redundant_pub_crate" = "allow", "significant_drop_in_scrutinee" = "allow", "significant_drop_tightening" = "allow", "too_long_first_doc_paragraph" = "allow" }
+
+[dependencies]
+"reth-chainspec" = { "default-features" = false, "git" = "https://github.com/paradigmxyz/reth.git", "tag" = "v1.11.3" }
+"reth-evm-ethereum" = { "default-features" = false, "optional" = true, "git" = "https://github.com/paradigmxyz/reth.git", "tag" = "v1.11.3" }
+"reth-fs-util" = { "git" = "https://github.com/paradigmxyz/reth.git", "tag" = "v1.11.3" }
+"reth-primitives-traits" = { "default-features" = false, "git" = "https://github.com/paradigmxyz/reth.git", "tag" = "v1.11.3" }
+"reth-net-banlist" = { "git" = "https://github.com/paradigmxyz/reth.git", "tag" = "v1.11.3" }
+"reth-network-api" = { "git" = "https://github.com/paradigmxyz/reth.git", "tag" = "v1.11.3" }
+"reth-network-p2p" = { "git" = "https://github.com/paradigmxyz/reth.git", "tag" = "v1.11.3" }
+"reth-discv4" = { "git" = "https://github.com/paradigmxyz/reth.git", "tag" = "v1.11.3" }
+"reth-discv5" = { "git" = "https://github.com/paradigmxyz/reth.git", "tag" = "v1.11.3" }
+"reth-dns-discovery" = { "git" = "https://github.com/paradigmxyz/reth.git", "tag" = "v1.11.3" }
+"reth-ethereum-forks" = { "default-features" = false, "git" = "https://github.com/paradigmxyz/reth.git", "tag" = "v1.11.3" }
+"reth-eth-wire" = { "git" = "https://github.com/paradigmxyz/reth.git", "tag" = "v1.11.3" }
+"reth-eth-wire-types" = { "git" = "https://github.com/paradigmxyz/reth.git", "tag" = "v1.11.3" }
+"reth-ecies" = { "git" = "https://github.com/paradigmxyz/reth.git", "tag" = "v1.11.3" }
+"reth-tasks" = { "git" = "https://github.com/paradigmxyz/reth.git", "tag" = "v1.11.3" }
+"reth-transaction-pool" = { "git" = "https://github.com/paradigmxyz/reth.git", "tag" = "v1.11.3" }
+"reth-storage-api" = { "default-features" = false, "git" = "https://github.com/paradigmxyz/reth.git", "tag" = "v1.11.3" }
+"reth-tokio-util" = { "git" = "https://github.com/paradigmxyz/reth.git", "tag" = "v1.11.3" }
+"reth-consensus" = { "default-features" = false, "git" = "https://github.com/paradigmxyz/reth.git", "tag" = "v1.11.3" }
+"reth-network-peers" = { "default-features" = false, "features" = ["net"], "git" = "https://github.com/paradigmxyz/reth.git", "tag" = "v1.11.3" }
+"reth-network-types" = { "git" = "https://github.com/paradigmxyz/reth.git", "tag" = "v1.11.3" }
+"alloy-consensus" = { "version" = "1.6.3", "default-features" = false }
+"alloy-eips" = { "version" = "1.6.3", "default-features" = false }
+"alloy-primitives" = { "version" = "1.5.6", "default-features" = false, "features" = ["map-foldhash"] }
+"alloy-rlp" = { "version" = "0.3.13", "default-features" = false, "features" = ["core-net"] }
+"enr" = { "version" = "0.13", "default-features" = false, "features" = ["serde", "rust-secp256k1"] }
+"discv5" = { "version" = "0.10" }
+"reth-ethereum-primitives" = { "default-features" = false, "git" = "https://github.com/paradigmxyz/reth.git", "tag" = "v1.11.3" }
+"futures" = { "version" = "0.3" }
+"pin-project" = { "version" = "1.0.12" }
+"tokio" = { "version" = "1.44.2", "default-features" = false, "features" = ["io-util", "net", "macros", "rt-multi-thread", "time"] }
+"tokio-stream" = { "version" = "0.1.11" }
+"tokio-util" = { "version" = "0.7.4", "features" = ["codec"] }
+"serde" = { "version" = "1.0", "default-features" = false, "optional" = true }
+"reth-metrics" = { "features" = ["common"], "git" = "https://github.com/paradigmxyz/reth.git", "tag" = "v1.11.3" }
+"metrics" = { "version" = "0.24.0" }
+"auto_impl" = { "version" = "1" }
+"aquamarine" = { "version" = "0.6" }
+"tracing" = { "version" = "0.1.0", "default-features" = false, "features" = ["attributes"] }
+"rustc-hash" = { "version" = "2.0", "default-features" = false }
+"thiserror" = { "version" = "2.0.0", "default-features" = false }
+"parking_lot" = { "version" = "0.12" }
+"rayon" = { "version" = "1.7" }
+"rand" = { "version" = "0.9" }
+"rand_08" = { "package" = "rand", "version" = "0.8" }
+"secp256k1" = { "version" = "0.30", "default-features" = false, "features" = ["global-context", "recovery", "std"] }
+"derive_more" = { "version" = "2", "default-features" = false, "features" = ["full"] }
+"schnellru" = { "version" = "0.2" }
+"itertools" = { "version" = "0.14", "default-features" = false }
+"smallvec" = { "version" = "1" }
+
+[dev-dependencies]
+"reth-discv4" = { "features" = ["test-utils"], "git" = "https://github.com/paradigmxyz/reth.git", "tag" = "v1.11.3" }
+"reth-network" = { "features" = ["test-utils"], "git" = "https://github.com/paradigmxyz/reth.git", "tag" = "v1.11.3" }
+"reth-network-p2p" = { "features" = ["test-utils"], "git" = "https://github.com/paradigmxyz/reth.git", "tag" = "v1.11.3" }
+"reth-network-types" = { "features" = ["test-utils"], "git" = "https://github.com/paradigmxyz/reth.git", "tag" = "v1.11.3" }
+"reth-provider" = { "features" = ["test-utils"], "git" = "https://github.com/paradigmxyz/reth.git", "tag" = "v1.11.3" }
+"reth-tracing" = { "default-features" = false, "git" = "https://github.com/paradigmxyz/reth.git", "tag" = "v1.11.3" }
+"reth-transaction-pool" = { "features" = ["test-utils"], "git" = "https://github.com/paradigmxyz/reth.git", "tag" = "v1.11.3" }
+"alloy-genesis" = { "version" = "1.6.3", "default-features" = false }
+"url" = { "version" = "2.3", "default-features" = false }
+"secp256k1" = { "version" = "0.30", "default-features" = false, "features" = ["global-context", "recovery", "rand"] }
+"criterion" = { "package" = "codspeed-criterion-compat", "version" = "4.3", "features" = ["async_tokio", "html_reports"] }
+
+[features]
+"serde" = ["dep:serde", "secp256k1/serde", "enr/serde", "reth-network-types/serde", "reth-dns-discovery/serde", "reth-eth-wire/serde", "reth-eth-wire-types/serde", "alloy-consensus/serde", "alloy-eips/serde", "alloy-primitives/serde", "discv5/serde", "parking_lot/serde", "rand/serde", "smallvec/serde", "url/serde", "reth-primitives-traits/serde", "reth-ethereum-forks/serde", "reth-network/serde", "reth-transaction-pool/serde", "reth-ethereum-primitives/serde", "reth-network-api/serde", "rand_08/serde", "reth-storage-api/serde"]
+"test-utils" = ["reth-transaction-pool/test-utils", "reth-network-types/test-utils", "reth-chainspec/test-utils", "reth-consensus/test-utils", "reth-discv4/test-utils", "reth-network/test-utils", "reth-network-p2p/test-utils", "reth-primitives-traits/test-utils", "reth-provider/test-utils", "reth-ethereum-primitives/test-utils", "dep:reth-evm-ethereum", "reth-evm-ethereum?/test-utils", "reth-tasks/test-utils"]
+
+[[bench]]
+"name" = "broadcast"
+"required-features" = ["test-utils"]
+"harness" = false
+
+[[bench]]
+"name" = "tx_manager_hash_fetching"
+"required-features" = ["test-utils"]
+"harness" = false

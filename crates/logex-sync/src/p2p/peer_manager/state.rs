@@ -1415,23 +1415,17 @@ pub(crate) fn execution_client_family(client_version: &str) -> ExecutionClientFa
     }
 }
 
-pub(super) fn advertised_status_range(
-    cached_range: Option<(u64, u64, B256)>,
-    head: Head,
-) -> Option<(u64, u64, B256)> {
+pub(super) fn advertised_status_range(cached_range: Option<(u64, u64, B256)>) -> (u64, u64, B256) {
     if let Some((earliest, latest, latest_hash)) = cached_range
         && earliest <= latest
         && !latest_hash.is_zero()
     {
-        return Some((earliest, latest, latest_hash));
+        return (earliest, latest, latest_hash);
     }
 
-    let head = normalize_network_head(head);
-    if !head.hash.is_zero() {
-        return Some((head.number, head.number, head.hash));
-    }
-
-    None
+    // Consensus head knowledge does not imply body/receipt availability. The
+    // provider always serves mainnet genesis, even when its optional cache is empty.
+    (0, 0, MAINNET.genesis_hash())
 }
 
 pub(super) fn peer_receipts_are_quarantined(peer: &ActivePeer) -> bool {
@@ -2036,60 +2030,31 @@ mod tests {
 
     #[test]
     fn advertised_status_range_uses_cached_window_when_available() {
-        let head = Head {
-            number: 10,
-            hash: B256::repeat_byte(0x10),
-            ..Default::default()
-        };
-        let cached = Some((7, 9, B256::repeat_byte(0x09)));
-
         assert_eq!(
-            advertised_status_range(cached, head),
-            Some((7, 9, B256::repeat_byte(0x09)))
+            advertised_status_range(Some((7, 9, B256::repeat_byte(9)))),
+            (7, 9, B256::repeat_byte(9)),
         );
     }
 
     #[test]
-    fn advertised_status_range_falls_back_to_head_when_body_cache_is_empty() {
-        let head = Head {
-            number: 10,
-            hash: B256::repeat_byte(0x10),
-            ..Default::default()
-        };
-
+    fn advertised_status_range_empty_cache_serves_genesis() {
         assert_eq!(
-            advertised_status_range(None, head),
-            Some((10, 10, B256::repeat_byte(0x10)))
-        );
-    }
-
-    #[test]
-    fn advertised_status_range_allows_genesis_fallback() {
-        let head = Head {
-            number: 0,
-            hash: B256::repeat_byte(0x10),
-            ..Default::default()
-        };
-
-        assert_eq!(
-            advertised_status_range(None, head),
-            Some((0, 0, B256::repeat_byte(0x10)))
+            advertised_status_range(None),
+            (0, 0, MAINNET.genesis_hash())
         );
     }
 
     #[test]
     fn advertised_status_range_ignores_invalid_cached_window() {
-        let head = Head {
-            number: 10,
-            hash: B256::repeat_byte(0x10),
-            ..Default::default()
-        };
-        let cached = Some((11, 9, B256::repeat_byte(0x09)));
-
-        assert_eq!(
-            advertised_status_range(cached, head),
-            Some((10, 10, B256::repeat_byte(0x10)))
-        );
+        for cached in [
+            Some((11, 9, B256::repeat_byte(9))),
+            Some((9, 9, B256::ZERO)),
+        ] {
+            assert_eq!(
+                advertised_status_range(cached),
+                (0, 0, MAINNET.genesis_hash())
+            );
+        }
     }
 
     #[test]

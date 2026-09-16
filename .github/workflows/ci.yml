@@ -17,7 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Verify vendored DataFusion crates
+      - name: Verify vendored crates
         run: python3 tools/verify_datafusion_vendor.py
       - uses: dtolnay/rust-toolchain@7c8d7d138f5c09cef361f8214cf96882cd029cdb
         with:
@@ -38,6 +38,16 @@ jobs:
           toolchain: nightly-2026-08-24
           components: rustfmt
       - run: cargo fmt --all -- --check
+      - name: Check patched Reth formatting
+        run: >-
+          rustfmt --check --edition 2024
+          --config-path vendor/reth-network/rustfmt.toml
+          --config skip_children=true
+          vendor/reth-network/src/eth_requests.rs
+          vendor/reth-network/src/session/active.rs
+          vendor/reth-network/src/session/mod.rs
+          vendor/reth-network/src/session/types.rs
+          vendor/reth-network/src/session/range_update.rs
 
   clippy:
     name: Clippy

@@ -1,0 +1,391 @@
+{
+  "base_commit": "02a812e4cced800b1f140ea5f2ad71f1bb4533d0",
+  "branch": "audit/execution-serving-contracts",
+  "findings": [
+    "B4-28",
+    "B4-29",
+    "B4-30",
+    "B4-31",
+    "B4-32"
+  ],
+  "status": "All eight local gates pass; PR/CI/merge pending",
+  "original_controls": {
+    "advertisement_tests": {
+      "source_sha256": "1d6d4496aa3fb677ca58db76da2c7da61854f552822dddf678ec9c391821c2aa"
+    },
+    "serving_tests": {
+      "source_sha256": "a50c6ab250b8bbf7e151b84acef74ffd0eba8ecee740511c429083b8eb0aad7a"
+    },
+    "original-advertisement.log": {
+      "bytes": 3242,
+      "sha256": "8953854f21c0d4bdb85d19a3b96d00a2723886327d7108786db1ba3e5438f372"
+    },
+    "original-serving.log": {
+      "bytes": 4196588,
+      "sha256": "713c84d86d265d66ef982c12ebcda123bc0ec9f1335547fb56a4788d917e19cc"
+    },
+    "base": "02a812e4cced800b1f140ea5f2ad71f1bb4533d0",
+    "reth_pin": "d6324d63e27ef6b7c49cdc9b1977c1b808234c7b",
+    "outcome": {
+      "advertisement": {
+        "passed": 1,
+        "failed": 4
+      },
+      "serving": {
+        "passed": 1,
+        "failed": 2
+      },
+      "range_policy_extracted_original_predicate": {
+        "passed": 2,
+        "failed": 4,
+        "limitation": "Same old decision predicate, not full session socket test"
+      },
+      "range_snapshot_exact_source": {
+        "passed": 1,
+        "failed": 1,
+        "observed": "new numbers20..30 combined with old hash01",
+        "limitation": "Probabilistic concurrency control; previous per-round barrier run saw no inconsistency"
+      }
+    },
+    "production_unchanged": true,
+    "original-range-policy.log": {
+      "sha256": "d837aa0a01cffe4850f9c247acc0624fbaae10895768445e97d5524385c4ac0b",
+      "bytes": 3692
+    },
+    "original-range-snapshot.log": {
+      "sha256": "1e6834ce8adf48ad8af6d18204323284b531b51b2d38960912d66c6deb017a2c",
+      "bytes": 1713
+    },
+    "original-range_snapshot_tests.rs": {
+      "sha256": "af503fd3cca590a4107ba4771303cc2ee3dc86a120913af6cf948f261ea6ea02",
+      "bytes": 3154
+    }
+  },
+  "focused_tests": {
+    "passed": 266,
+    "failed": 0,
+    "ignored": 0,
+    "new_controls": 20,
+    "obsolete_test_removed": 1
+  },
+  "vendor": {
+    "pin": "d6324d63e27ef6b7c49cdc9b1977c1b808234c7b",
+    "upstream_crate_files": 54,
+    "upstream_root_assets": [
+      "LICENSE-MIT",
+      "LICENSE-APACHE",
+      "rustfmt.toml"
+    ],
+    "changed": {
+      "Cargo.toml": "41475c2237ce54f86ee60f30c0ef672a741bc1079e394b32715d95e9b960a302",
+      "src/eth_requests.rs": "e1526e03d76643b115677eafc9a0b67a3529b88b24a7c7061ed4c5e7083e0b4d",
+      "src/session/active.rs": "a4c0d8b50fbe7cb3895723d6f935abd1c13f44fcd8471463f7aad1c4dcf93534",
+      "src/session/mod.rs": "fc8dc897438d2d4ce8f6bfd90455250110af1c036483fe23bb22e8758dac688b",
+      "src/session/types.rs": "584a6bff5d489f973dfecd96d5f5334943f4403a348eba30a863b86053d3f8d1"
+    },
+    "added": {
+      "src/session/range_update.rs": "5518a3cc920616fe298bd4fb2ce859ef57364bbabfd45823515cd665730ba527"
+    },
+    "inventory_sha256": "12c15956c224e85aca12c00b90c33b13254df65913695f4495a53169dbb43be0",
+    "patch_sha256": "6c14b3f9c7db7dbc67da9ac229f1936175376eec8e49bf0b644b2377d3174ac7"
+  },
+  "evidence_directory": "/private/tmp/logex-execution-serving-contracts-std4vj1d",
+  "evidence": {
+    "serving-final-review.json": {
+      "sha256": "586d8f1faa0e6fb7c98f3f0d0a2fa30462c502daa6721bf64fdb3149b15febeb",
+      "bytes": 5371
+    },
+    "implementation-review.json": {
+      "sha256": "74406c5c67708d34daa79a5a0d4e57d3bb689ab75e115f64dc8b4c449e118bd6",
+      "bytes": 5389
+    },
+    "vendor-freeze.json": {
+      "sha256": "d8da38ac45afbeec6e796ea0722f0b790f33f3031630ecf5b574f88df8c6bdbb",
+      "bytes": 962
+    },
+    "original-range_snapshot_tests.rs": {
+      "sha256": "af503fd3cca590a4107ba4771303cc2ee3dc86a120913af6cf948f261ea6ea02",
+      "bytes": 3154
+    },
+    "range_update.rs": {
+      "sha256": "5518a3cc920616fe298bd4fb2ce859ef57364bbabfd45823515cd665730ba527",
+      "bytes": 1804
+    },
+    "original-controls.json": {
+      "sha256": "3123291f6b7db4a5f68749542da68c70944a2892bbef75e127b66a67f5c120f3",
+      "bytes": 1657
+    },
+    "range-snapshot-and-copy-disposition.json": {
+      "sha256": "9f568920b75a8dadfc208bb7d992175a2a230be0171483f77bf5e3e14ebc77e1",
+      "bytes": 1662
+    },
+    "pagination-algorithm-review.json": {
+      "sha256": "14ace1a5847da351e820e0345986f740be0b1dcd8582ea6a3ea244ff87a800b4",
+      "bytes": 2472
+    },
+    "original-range-snapshot-per-round.log": {
+      "sha256": "e5beca94a67b2f1c73cbb195bf719b3b8ca6806b3ada0f8eea937f9bac334256",
+      "bytes": 908
+    },
+    "range-update-policy-review.json": {
+      "sha256": "a3a3765c41d72f17a45f4ec795222ca6c1a155a438dae7e128027bd1d41855e4",
+      "bytes": 1659
+    },
+    "original-range-policy.log": {
+      "sha256": "d837aa0a01cffe4850f9c247acc0624fbaae10895768445e97d5524385c4ac0b",
+      "bytes": 3692
+    },
+    "original-serving_tests.rs": {
+      "sha256": "a50c6ab250b8bbf7e151b84acef74ffd0eba8ecee740511c429083b8eb0aad7a",
+      "bytes": 5117
+    },
+    "handler-controls-design.json": {
+      "sha256": "b50a18278a74be95da8ecc3f7b299241c203e00222bafa026363f83f65cdbf55",
+      "bytes": 1606
+    },
+    "range-snapshot-per-round-barrier-tests.rs": {
+      "sha256": "34761d7333af1260615255819383fae56b60af511d154b12b83f2bca6b3b91f3",
+      "bytes": 3224
+    },
+    "original-advertisement.log": {
+      "sha256": "8953854f21c0d4bdb85d19a3b96d00a2723886327d7108786db1ba3e5438f372",
+      "bytes": 3242
+    },
+    "original-serving.log": {
+      "sha256": "713c84d86d265d66ef982c12ebcda123bc0ec9f1335547fb56a4788d917e19cc",
+      "bytes": 4196588
+    },
+    "range-snapshot-control-revision.json": {
+      "sha256": "4b8f04ab891183aa9c6670f099d23ec34bd1a335bbd21e0461b6b200bda203c6",
+      "bytes": 653
+    },
+    "serving_tests.rs": {
+      "sha256": "83dd2929205549b1f17abd352bf8a836737b935df4a44a6b47f05935ddd350cb",
+      "bytes": 7915
+    },
+    "serving-ownership-review.json": {
+      "sha256": "3eed1b86f9b41d5fe08497c2ee3435ebef80ffc076b8b0f0728e743a0b610cf8",
+      "bytes": 9524
+    },
+    "final-focused.log": {
+      "sha256": "9238286fcc9e4eb10b267da5caf3a51f52e58066d05c500105368312122b43ad",
+      "bytes": 28973
+    },
+    "availability-contract-review.json": {
+      "sha256": "05813aca361f6cc0598af44af5795b9a9f8376d8cceaebfdb101cd18cd0ed1b9",
+      "bytes": 5914
+    },
+    "availability-lifecycle-addendum.json": {
+      "sha256": "7295d82f84f1f63ba7ea52761fab5e7c51a9c51b7c28b3733c0aed68cbcec006",
+      "bytes": 3457
+    },
+    "patch-check.log": {
+      "sha256": "bb4f68e523597d2577f4f368493d0eaf377463d020f462de40e2b33e7d95b2b4",
+      "bytes": 5639
+    },
+    "compile-attempt-original-range-snapshot.log": {
+      "sha256": "1fdc5607f97d891157697b51c3430e53e442f04704b7b63d73bff03853a9ce98",
+      "bytes": 763
+    },
+    "original-advertisement_tests.rs": {
+      "sha256": "1d6d4496aa3fb677ca58db76da2c7da61854f552822dddf678ec9c391821c2aa",
+      "bytes": 3767
+    },
+    "original-range-snapshot.log": {
+      "sha256": "1e6834ce8adf48ad8af6d18204323284b531b51b2d38960912d66c6deb017a2c",
+      "bytes": 1713
+    },
+    "range_update-original-predicate.rs": {
+      "sha256": "d834f0c51b731896e0be230e72c5cdd0df197387851363f6330e111cdccc60f3",
+      "bytes": 2231
+    },
+    "final-review.json": {
+      "sha256": "1f03114ad733aa5c20c14519ba8f47d9cb3dd597315085f272efeff8ee9257a2",
+      "bytes": 4431
+    },
+    "vendor-preparation/final-verifier-controls.log": {
+      "sha256": "446d1e9d0ea705ff35e1c0c231e2ec79e451d1f9d25045f751493d2e9134cbb1",
+      "bytes": 564
+    },
+    "lockfile-delta.json": {
+      "sha256": "2ba11334b5f8ae080bcdc6aced2be388210b775a24e542cacd064b84e599f9fd",
+      "bytes": 4887
+    },
+    "gates/results.json": {
+      "sha256": "9f77014d231ad9ee2541be380d4315bee76733e4120bbb20b7f097934b17e038",
+      "bytes": 4645
+    },
+    "gates/test-summary.json": {
+      "sha256": "752d3659f16387495b4e1632e82968deb75fe3285aaa0b32da3e0c00dd9d6ef6",
+      "bytes": 69
+    },
+    "post-review-cleanup.json": {
+      "sha256": "28fc84c3b2029502555f10c3a5a89f668ad7bafb80d5b68ae0fc72b49aa19a7e",
+      "bytes": 445
+    }
+  },
+  "limits": [
+    "No live transport or complete upstream network test suite",
+    "Race reproduction is probabilistic; original predicate test is extracted",
+    "No benchmark or throughput claim; scalar range reads now lock",
+    "Soft response target is not global RSS or arbitrary receipt hard-frame promise",
+    "Broader offline audit, volume supervision and verified repair incomplete"
+  ],
+  "source_commit": "7d5d826af37293d9fdf01d0320692be0f251dd98",
+  "gates": {
+    "commit": "7d5d826af37293d9fdf01d0320692be0f251dd98",
+    "rustc": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+    "gates": [
+      {
+        "name": "vendor",
+        "command": [
+          "python3",
+          "tools/verify_datafusion_vendor.py"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-16T00:20:28.046295+00:00",
+        "finished": "2026-09-16T00:20:28.112555+00:00",
+        "sha256": "5de30a03a2c21d0dd165f1d3f30b23ef080e06616866e0a02f37198cff7f3a16",
+        "log": "/private/tmp/logex-execution-serving-contracts-std4vj1d/gates/vendor.log"
+      },
+      {
+        "name": "format",
+        "command": [
+          "cargo",
+          "fmt",
+          "--all",
+          "--",
+          "--check"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-16T00:20:28.112900+00:00",
+        "finished": "2026-09-16T00:20:28.993132+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-execution-serving-contracts-std4vj1d/gates/format.log"
+      },
+      {
+        "name": "vendor-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2024",
+          "--config-path",
+          "vendor/reth-network/rustfmt.toml",
+          "--config",
+          "skip_children=true",
+          "vendor/reth-network/src/eth_requests.rs",
+          "vendor/reth-network/src/session/active.rs",
+          "vendor/reth-network/src/session/mod.rs",
+          "vendor/reth-network/src/session/types.rs",
+          "vendor/reth-network/src/session/range_update.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-16T00:20:28.993506+00:00",
+        "finished": "2026-09-16T00:20:29.103361+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-execution-serving-contracts-std4vj1d/gates/vendor-format.log"
+      },
+      {
+        "name": "check",
+        "command": [
+          "cargo",
+          "check",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-16T00:20:29.103783+00:00",
+        "finished": "2026-09-16T00:20:30.462862+00:00",
+        "sha256": "f553012e04352a72cc82d2a57af23bee917947ede82cd462c81ce517de743f35",
+        "log": "/private/tmp/logex-execution-serving-contracts-std4vj1d/gates/check.log"
+      },
+      {
+        "name": "clippy",
+        "command": [
+          "cargo",
+          "clippy",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-16T00:20:30.463186+00:00",
+        "finished": "2026-09-16T00:20:42.879983+00:00",
+        "sha256": "f88e8b9e05ac343d5696bd97ae34b5538ad8fc051141ca1a482c4e893dc5b3a9",
+        "log": "/private/tmp/logex-execution-serving-contracts-std4vj1d/gates/clippy.log"
+      },
+      {
+        "name": "test",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-16T00:20:42.880821+00:00",
+        "finished": "2026-09-16T00:23:41.564394+00:00",
+        "sha256": "eec306970938370d08bd97f796a59595dfc9715d72ef16a05d0a34d9425a4152",
+        "log": "/private/tmp/logex-execution-serving-contracts-std4vj1d/gates/test.log"
+      },
+      {
+        "name": "doc",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--doc",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-16T00:23:41.565391+00:00",
+        "finished": "2026-09-16T00:23:54.008681+00:00",
+        "sha256": "7d00ef57c3ce419149aafcb00d518b4dad7bb24c131084f6ad99919ea4a1f984",
+        "log": "/private/tmp/logex-execution-serving-contracts-std4vj1d/gates/doc.log"
+      },
+      {
+        "name": "release-build",
+        "command": [
+          "cargo",
+          "build",
+          "-p",
+          "logex-node",
+          "--release",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-16T00:23:54.009514+00:00",
+        "finished": "2026-09-16T00:24:40.413337+00:00",
+        "sha256": "90d7dd97161e2209dfa81d6e6fc8a6379920cfc868084eee79a0af759cefad24",
+        "log": "/private/tmp/logex-execution-serving-contracts-std4vj1d/gates/release-build.log"
+      }
+    ]
+  },
+  "workspace_tests": {
+    "groups": 25,
+    "passed": 1577,
+    "failed": 0,
+    "ignored": 23
+  }
+}

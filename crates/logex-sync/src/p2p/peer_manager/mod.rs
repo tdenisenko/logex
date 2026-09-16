@@ -46,8 +46,15 @@ use tracing::{info, trace};
 use crate::p2p::serve_cache::ServeCacheProvider;
 use crate::primitives::LogexNetworkPrimitives;
 
+#[cfg(test)]
+mod advertisement_tests;
+
 mod lifecycle;
+#[cfg(test)]
+mod range_snapshot_tests;
 mod requests;
+#[cfg(test)]
+mod serving_tests;
 mod state;
 
 pub use self::requests::ReceiptRequestContext;
@@ -588,12 +595,10 @@ impl PeerManager {
             .build();
 
         let mut config = builder.hello_message(hello).build(Arc::clone(&serve_cache));
-        if let Some((earliest, latest, latest_hash)) =
-            advertised_status_range(serve_cache.advertised_history_range(), network_head)
-        {
-            config.status.set_history_range(earliest, latest);
-            config.status.blockhash = latest_hash;
-        }
+        let (earliest, latest, latest_hash) =
+            advertised_status_range(serve_cache.advertised_history_range());
+        config.status.set_history_range(earliest, latest);
+        config.status.blockhash = latest_hash;
 
         let builder = NetworkManager::builder(config)
             .await
@@ -744,15 +749,13 @@ impl PeerManager {
     }
 
     fn sync_advertised_history_range(&self) {
-        if let Some((earliest, latest, latest_hash)) =
-            advertised_status_range(self.serve_cache.advertised_history_range(), self.local_head)
-        {
-            self.network.update_block_range(BlockRangeUpdate {
-                earliest,
-                latest,
-                latest_hash,
-            });
-        }
+        let (earliest, latest, latest_hash) =
+            advertised_status_range(self.serve_cache.advertised_history_range());
+        self.network.update_block_range(BlockRangeUpdate {
+            earliest,
+            latest,
+            latest_hash,
+        });
     }
 
     fn is_compatible_fork_id(&self, fork_id: ForkId) -> bool {
@@ -2220,3 +2223,13 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[rustfmt::skip]
+#[path = "../../../../../vendor/reth-network/src/session/range_update.rs"]
+mod range_policy_tests;
+
+#[cfg(test)]
+#[rustfmt::skip]
+#[path = "../../../../../vendor/reth-network/src/session/types.rs"]
+mod range_snapshot_types;
