@@ -60,11 +60,15 @@ impl TaskMonitor {
     ) -> JoinHandle<()> {
         // Construct outside the future so cancellation before its first poll
         // still reports the worker's disappearance.
-        let guard = TaskExitGuard {
-            state: Arc::clone(&self.inner),
-            name,
+        let task = GuardedTask {
+            future,
+            guard: TaskExitGuard {
+                state: Arc::clone(&self.inner),
+                name,
+            },
         };
         tokio::spawn(async move {
+            let (future, guard) = task.into_parts();
             let _guard = guard;
             future.await;
         })
@@ -76,17 +80,36 @@ impl TaskMonitor {
         name: &'static str,
         future: impl Future<Output = Result<(), E>> + Send + 'static,
     ) -> JoinHandle<()> {
-        let guard = TaskExitGuard {
-            state: Arc::clone(&self.inner),
-            name,
+        let task = GuardedTask {
+            future,
+            guard: TaskExitGuard {
+                state: Arc::clone(&self.inner),
+                name,
+            },
         };
         tokio::spawn(async move {
+            let (future, guard) = task.into_parts();
             if let Err(error) = future.await {
                 guard.report_failure(format!("{name} failed: {error}"), true);
             }
             // Keep the guard until completion (including cancellation/unwind).
             drop(guard);
         })
+    }
+}
+
+// Field order keeps the guard alive while the unpolled future is dropped. A
+// cleanup unwind must still report failure after intentional shutdown begins.
+struct GuardedTask<F> {
+    future: F,
+    guard: TaskExitGuard,
+}
+
+impl<F> GuardedTask<F> {
+    fn into_parts(self) -> (F, TaskExitGuard) {
+        // Consuming self makes the spawned closure capture the complete owner,
+        // rather than independently capturing its fields in use order.
+        (self.future, self.guard)
     }
 }
 
@@ -289,5 +312,53 @@ mod tests {
             monitor.subscribe().borrow().as_deref(),
             Some("first failed: initial failure")
         );
+    }
+
+    #[tokio::test]
+    async fn cancellation_drop_unwind_during_shutdown_is_retained() {
+        struct DropFailure(Option<tokio::sync::oneshot::Sender<()>>);
+        impl Future for DropFailure {
+            type Output = Result<(), &'static str>;
+            fn poll(
+                self: std::pin::Pin<&mut Self>,
+                _: &mut std::task::Context<'_>,
+            ) -> std::task::Poll<Self::Output> {
+                if let Some(polled) = self.get_mut().0.take() {
+                    let _ = polled.send(());
+                }
+                std::task::Poll::Pending
+            }
+        }
+        impl Drop for DropFailure {
+            fn drop(&mut self) {
+                panic!("isolated worker cleanup failure control");
+            }
+        }
+        for fallible in [false, true] {
+            for poll_first in [false, true] {
+                let monitor = TaskMonitor::default();
+                let (started, polled) = tokio::sync::oneshot::channel();
+                let future = DropFailure(Some(started));
+                let task = if fallible {
+                    monitor.spawn_result("service", future)
+                } else {
+                    monitor.spawn("service", async move {
+                        let _ = future.await;
+                    })
+                };
+                if poll_first {
+                    polled.await.unwrap();
+                }
+                monitor.begin_shutdown();
+                // Without the explicit await above, this current-thread runtime
+                // has not yet polled the spawned future.
+                task.abort();
+                assert!(task.await.unwrap_err().is_panic());
+                assert_eq!(
+                    monitor.subscribe().borrow().as_deref(),
+                    Some("service panicked")
+                );
+            }
+        }
     }
 }

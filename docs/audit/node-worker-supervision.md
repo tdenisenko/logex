@@ -42,7 +42,10 @@ atomic lifecycle still arbitrates ordinary completion against requested shutdown
 and retains the first failure before or after subscription. The new fallible
 spawn method retains component/error text. An explicit error or unwind remains a
 failure after shutdown begins; normal return and owned cancellation do not.
-Tokio still receives the original unwind as a task join error. No failed worker
+An explicit owner stores the future before its exit guard and is captured as a
+whole before the first poll. This preserves the guard through a future destructor
+unwind, including cancellation before polling; it adds no allocation or unsafe
+projection. Tokio still receives the original unwind as a task join error. No failed worker
 is resumed and no storage state is treated as repaired.
 
 The node monitors HTTP, gRPC and the background indexer. Checkpoint I/O and join
@@ -68,21 +71,25 @@ startup, and the engine cannot proceed past an already recorded worker failure.
 
 ## Validation and cleanup
 
-All 131 node tests and 558 sync tests pass (two existing ignored sync workloads).
-Thirteen new controls cover the four original failures, fallible normal return,
+The first candidate passed 131 node and 558 sync tests (two ignored), and all
+eight local gates: 1,686 workspace tests, 24 ignored. Further implementer review
+then reproduced a future-destructor unwind escaping the monitor when a task was
+canceled before its first poll. The future and guard could be independently
+captured and dropped in the wrong order. This is now corrected by a shared owner.
+
+Fourteen new controls cover the four original failures, fallible normal return,
 cancellation before first poll, first-error retention, explicit failure during
 shutdown, successful HTTP/gRPC/indexer shutdown, an independent watchdog before
 the supervisor is polled, node stop/status propagation, and errors arriving during
-engine cleanup. Actual listener controls retain their component-specific error.
-The five original execution-worker monitor tests remain in the shared module.
+engine cleanup. The new destructor control covers both spawn methods, before and
+after the first poll. Actual listener controls retain their component-specific
+error. The five original execution-worker tests remain in the shared module.
 
 The candidate initially used `AtomicU8::fetch_update`; the pinned nightly reports
 that spelling as deprecated. It now uses the recommended `try_update`, without
 changing the pinned toolchain. Implementer review inspected monitor lifetime,
 shutdown ordering, late error checks, worker ownership and obsolete call sites.
-No independent review is claimed. All eight local gates pass on `1103832c`: vendor integrity, workspace and
-patched-vendor formatting, all-target check, strict Clippy, 1,686 workspace tests
-(24 ignored), documentation tests and release build. PR/CI/merge remain pending.
+No independent review is claimed. Final-source workspace gates and PR/CI/merge remain pending.
 
 Removed the old private monitor module, duplicate service error-discard blocks,
 checkpoint error-and-continue paths and premature readiness wording. The small
