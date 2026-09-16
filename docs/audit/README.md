@@ -98,7 +98,7 @@ progressing ETH70 receipt pagination. Merged in PR #188 (`e07fb451`) after all l
 
 The [cache publication review](execution-cache-publication.md) records B4-33:
 lazy availability lookup and suppression of unchanged submissions, preserving forced
-head restoration. Component comparison and 316 focused tests pass; gates/merge pending.
+head restoration. Component comparison, 316 focused tests and eight local gates pass; CI/merge pending.
 
 ## Baseline findings
 
