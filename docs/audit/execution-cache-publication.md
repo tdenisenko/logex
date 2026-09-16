@@ -56,7 +56,12 @@ macOS 26.6.2, the same fixture and warm in-memory data. Baseline production is
 `e07fb451`, with only the measurement fixture added; its source hash and exact
 samples are retained in the validation record. The first release test build had to
 compile its dependency feature graph; that build time is outside the measurement.
-The original fixture needed a formatting-only adjustment before final validation.
+The original fixture needed a formatting-only adjustment. The first strict Clippy
+run then flagged its intentional constant release-mode assertion. A local explained
+lint expectation keeps that runtime guard without failing debug compilation;
+measurement behavior is unchanged. Rust ignores that attribute on the assertion
+macro itself, so it is attached to the benchmark function. Both initial gate
+attempts are retained separately.
 
 Reproduce the component workload explicitly:
 

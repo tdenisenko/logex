@@ -1088,6 +1088,10 @@ mod tests {
     /// Setup and the initial availability query are outside all timed samples.
     #[test]
     #[ignore = "bounded release-only availability lookup microbenchmark"]
+    #[expect(
+        clippy::assertions_on_constants,
+        reason = "ignored benchmark must compile in debug builds but run only in release"
+    )]
     fn availability_lookup_repeated_full_cache_microbenchmark() {
         assert!(!cfg!(debug_assertions), "run this control in release mode");
         const SAMPLES: usize = 5;
