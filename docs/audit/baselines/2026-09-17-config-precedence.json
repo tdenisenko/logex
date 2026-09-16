@@ -1,0 +1,70 @@
+{
+  "status": "Focused validation passes; workspace gates and publication pending",
+  "base": "8d7426aa0272525cb320752d7c29c59903b8dc7b",
+  "findings": [
+    "B10-10",
+    "B10-11",
+    "B10-12"
+  ],
+  "original": {
+    "production_source_sha256": {
+      "main.rs": "2e5fd7d20d02815f3c5c5f09b7133ab789afe59c34d71563fdf6c4eaa5cff96c",
+      "cli.rs": "1383e32d4033e8f6f1bd33da2e9fed02ef83346f993f85b5f43d445a4bdcda3f"
+    },
+    "precedence_reproduction": "Behavior-preserving extraction from main; not unchanged-main execution",
+    "loader_reproduction": "Config::load production unchanged",
+    "result": {
+      "passed": 2,
+      "failed": 10
+    },
+    "merge_extraction": "impl Cli {\n    // Behavior-preserving extraction for the configuration regression controls.\n    pub fn apply_config(&mut self, file_config: Config, _matches: &clap::ArgMatches) {\n        self.data_dir = file_config.data_dir.or(self.data_dir.take());\n        self.log_level = super::effective_log_filter(&self.log_level, file_config.log_level);\n        self.partition_target_rows = file_config\n            .partition_target_rows\n            .unwrap_or(self.partition_target_rows);\n        self.checkpoint = file_config.checkpoint.or(self.checkpoint.take());\n        self.checkpoint_sync_url = file_config\n            .checkpoint_sync_url\n            .or(self.checkpoint_sync_url.take());\n        if let Command::Sync {\n            http_host,\n            grpc_host,\n            nat,\n            p2p_bind_ip,\n            execution_bootnodes,\n            execution_discv5_port,\n            allow_public_grpc,\n            disable_dashboard,\n            dashboard_password,\n            ..\n        } = &mut self.command\n        {\n            if nat == \"any\" {\n                *nat = file_config.nat.unwrap_or_else(|| std::mem::take(nat));\n            }\n            *http_host = file_config.http_host.unwrap_or(*http_host);\n            *grpc_host = file_config.grpc_host.unwrap_or(*grpc_host);\n            *p2p_bind_ip = file_config.p2p_bind_ip.or(*p2p_bind_ip);\n            if execution_bootnodes.is_empty() {\n                *execution_bootnodes = file_config.execution_bootnodes.unwrap_or_default();\n            }\n            *execution_discv5_port = file_config\n                .execution_discv5_port\n                .unwrap_or(*execution_discv5_port);\n            *allow_public_grpc = file_config.allow_public_grpc.unwrap_or(*allow_public_grpc);\n            *disable_dashboard =\n                !(file_config.dashboard_enabled.unwrap_or(true) && !*disable_dashboard);\n            *dashboard_password = dashboard_password.take().or(file_config.dashboard_password);\n        }\n    }\n}\n"
+  },
+  "focused": {
+    "configuration_passed": 12,
+    "node_passed": 172,
+    "new_tests": 18
+  },
+  "evidence_directory": "/private/tmp/logex-config-precedence-woewr1h9",
+  "evidence": {
+    "extracted-original-cli.rs": {
+      "bytes": 20996,
+      "sha256": "48cf40da10f1fa968bfc37bc639960941502f522548c1eda622a83463cbcccb4"
+    },
+    "extracted-original-controls.patch": {
+      "bytes": 5845,
+      "sha256": "3ee2f25190398fa5106ba6ad68f9fb6a6a6ab069ebcce419a143a41a604925bd"
+    },
+    "extracted-original-main.rs": {
+      "bytes": 11393,
+      "sha256": "b3f814ada5223269b19ca1ad5715a4148ab358fa27bc2b41a277d87a89e95ffc"
+    },
+    "focused-config.log": {
+      "bytes": 1960,
+      "sha256": "beff5967a5d4e3a8615e0556c6b912b36a4c84ca5e1b2c611ec27681d48c9151"
+    },
+    "focused-node.log": {
+      "bytes": 15568,
+      "sha256": "5e3eefa992ece0ff193b5c6417a3f62f2b943b2f78f9e122b7f0af00831ab24a"
+    },
+    "original-cli.rs": {
+      "bytes": 18984,
+      "sha256": "1383e32d4033e8f6f1bd33da2e9fed02ef83346f993f85b5f43d445a4bdcda3f"
+    },
+    "original-config-tests.rs": {
+      "bytes": 6620,
+      "sha256": "4ca4cb506dcf2d6c3eb92eeaf682da4f81cddc277cd5b37731023d2f8cf7677e"
+    },
+    "original-controls.log": {
+      "bytes": 8436,
+      "sha256": "a16cbf460c8196747a8ab74d736777ff8c82f222319bb3a77401d578bf0b8808"
+    },
+    "original-main.rs": {
+      "bytes": 12436,
+      "sha256": "2e5fd7d20d02815f3c5c5f09b7133ab789afe59c34d71563fdf6c4eaa5cff96c"
+    },
+    "original-source.json": {
+      "bytes": 241,
+      "sha256": "a4604df6cd655ed5de9b1dc3b2e845b08232974712a286c18b5120d5961a4de8"
+    }
+  }
+}
