@@ -41,7 +41,7 @@ pub use light_client::{
 };
 pub use network::{
     ConsensusDialAddressFamilies, ConsensusNetworkConfig, ConsensusNetworkError,
-    spawn_consensus_network,
+    prepare_consensus_network,
 };
 use rpc::RawRpcResponse;
 

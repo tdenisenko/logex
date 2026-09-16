@@ -1,3 +1,5 @@
+mod supervision;
+
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::convert::Infallible;
 use std::fs;
@@ -30,7 +32,6 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::sync::{mpsc, watch};
-use tokio::task::JoinHandle;
 
 use crate::beacon_cache::{BeaconPayloadCache, CachedBeaconPayload};
 use crate::candidate_metadata::CandidateMetadata;
@@ -193,6 +194,8 @@ pub enum ConsensusNetworkError {
     ListenRpcTransport(String),
     #[error("failed to derive libp2p identity from consensus secret key: {0}")]
     Libp2pIdentity(String),
+    #[error("consensus network worker failed during shutdown: {0}")]
+    WorkerShutdown(#[source] tokio::task::JoinError),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -485,65 +488,40 @@ struct InboundRateLimitBucket {
     used: u64,
 }
 
-pub fn spawn_consensus_network(
+/// Prepare the restart supervisor without spawning it. The caller owns and
+/// monitors this future; dropping it also aborts its active network worker.
+pub fn prepare_consensus_network(
     config: ConsensusNetworkConfig,
     consensus: Arc<ConsensusStore>,
     sync_status: Arc<Mutex<SyncStatus>>,
     shutdown: watch::Receiver<bool>,
-) -> Result<JoinHandle<()>, ConsensusNetworkError> {
+) -> Result<
+    impl std::future::Future<Output = Result<(), ConsensusNetworkError>> + Send + 'static,
+    ConsensusNetworkError,
+> {
     let network = ConsensusNetwork::new(
         config.clone(),
         Arc::clone(&consensus),
         Arc::clone(&sync_status),
     )?;
-    Ok(tokio::spawn(async move {
-        let mut shutdown = shutdown;
-        let mut network = network;
-        loop {
-            let outcome = tokio::spawn(network.run(shutdown.clone())).await;
-            if *shutdown.borrow() {
-                break;
-            }
-
-            mark_consensus_network_unavailable(&sync_status);
-            match outcome {
-                Ok(Ok(())) => {
-                    tracing::error!("consensus network exited unexpectedly; restarting");
-                }
-                Ok(Err(error)) => {
-                    tracing::error!(%error, "consensus network exited with an error; restarting");
-                }
-                Err(error) => {
-                    tracing::error!(
-                        %error,
-                        panicked = error.is_panic(),
-                        "consensus network task failed; restarting"
-                    );
-                }
-            }
-
-            loop {
-                tokio::select! {
-                    _ = tokio::time::sleep(CONSENSUS_NETWORK_RESTART_DELAY) => {}
-                    _ = wait_for_shutdown(&mut shutdown) => return,
-                }
-                match ConsensusNetwork::new(
-                    config.clone(),
-                    Arc::clone(&consensus),
-                    Arc::clone(&sync_status),
-                ) {
-                    Ok(next_network) => {
-                        network = next_network;
-                        tracing::info!("consensus network supervisor restarted the network task");
-                        break;
-                    }
-                    Err(error) => {
-                        tracing::error!(%error, "failed to reconstruct consensus network; retrying");
-                    }
-                }
-            }
-        }
-    }))
+    let initial = network.run(shutdown.clone());
+    let restart_shutdown = shutdown.clone();
+    let restart_status = Arc::clone(&sync_status);
+    let rebuild = move || {
+        ConsensusNetwork::new(
+            config.clone(),
+            Arc::clone(&consensus),
+            Arc::clone(&restart_status),
+        )
+        .map(|network| network.run(restart_shutdown.clone()))
+    };
+    Ok(supervision::supervise(
+        initial,
+        rebuild,
+        sync_status,
+        shutdown,
+        CONSENSUS_NETWORK_RESTART_DELAY,
+    ))
 }
 
 fn mark_consensus_network_unavailable(sync_status: &Arc<Mutex<SyncStatus>>) {

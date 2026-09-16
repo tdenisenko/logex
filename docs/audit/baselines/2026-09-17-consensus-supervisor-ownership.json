@@ -1,0 +1,225 @@
+{
+  "status": "All eight local gates pass; PR/CI/merge pending",
+  "base": "0e94d900b0e6fdc769362aa5b4ce2140908ca23d",
+  "findings": [
+    "B3-64",
+    "B3-65",
+    "B3-66"
+  ],
+  "evidence_root": "/private/tmp/logex-consensus-supervisor-ownership-02whx4b4",
+  "original_reproduction": {
+    "method": "Behavior-preserving extraction of original supervisor control flow",
+    "passed": 0,
+    "failed": 3
+  },
+  "evidence": {
+    "original-source.json": {
+      "sha256": "f8e2321f22b03bf2b7150736b82bbf33efbcd014ec1572b5149d5e6c97f9630c",
+      "bytes": 530
+    },
+    "original-extraction.patch": {
+      "sha256": "b147fe0ab7e1408af3eed665b08891ed8f8e1fa32cf4be396bdd1b3b6edd09d5",
+      "bytes": 2903
+    },
+    "original-supervision.rs": {
+      "sha256": "bcdf43b200da7c544ffc31929a09d00faa97a145404723f5cc7d57e1b79b7872",
+      "bytes": 4855
+    },
+    "original-controls.log": {
+      "sha256": "7cc76397f4080874eb90f1a9f7d7b0ebe6d2ec1cc58bf639ac6c230461cacd94",
+      "bytes": 2497
+    },
+    "candidate-controls.log": {
+      "sha256": "71502a4ee499c6e0e1f0dc084558b8c5b4de060f527613633c562d956fe8f125",
+      "bytes": 932
+    },
+    "final-controls.log": {
+      "sha256": "864430855566607ed141456b165cdc1d06e09ac929dd9518adc2d96721292e22",
+      "bytes": 1477
+    },
+    "focused-suites.log": {
+      "sha256": "65e734f2d76cba52cf9215ddbc31e16788e2df7ebfc15791f3c5d6dde4f686a8",
+      "bytes": 50216
+    },
+    "focused-node.log": {
+      "sha256": "1da4ea8d2c5beb41abf6a89196388679c3aaa2749092d3a072473b6a7b3117f5",
+      "bytes": 12846
+    },
+    "gates/results.json": {
+      "sha256": "b46afee5c9898a290308121cce92c3459a3d4a2193a7e82ac75956d04fdbe8e5",
+      "bytes": 4669
+    },
+    "gates/test-summary.json": {
+      "sha256": "ef7daf399111b2238414636d8eb00af539ee186b283522a0e9517ec628622fa9",
+      "bytes": 69
+    }
+  },
+  "focused": {
+    "consensus": {
+      "passed": 353,
+      "ignored": 1
+    },
+    "node": {
+      "passed": 142,
+      "ignored": 0
+    },
+    "sandbox_attempt": "14 node failures from loopback binding denial; permitted rerun passes all 142"
+  },
+  "source_commit": "b8c770e69ecf9374b286cfbb3f99c599a6360e78",
+  "gates": {
+    "commit": "b8c770e69ecf9374b286cfbb3f99c599a6360e78",
+    "rustc": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+    "gates": [
+      {
+        "name": "vendor",
+        "command": [
+          "python3",
+          "tools/verify_datafusion_vendor.py"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-16T19:20:11.730889+00:00",
+        "finished": "2026-09-16T19:20:11.845173+00:00",
+        "sha256": "5de30a03a2c21d0dd165f1d3f30b23ef080e06616866e0a02f37198cff7f3a16",
+        "log": "/private/tmp/logex-consensus-supervisor-ownership-02whx4b4/gates/vendor.log"
+      },
+      {
+        "name": "format",
+        "command": [
+          "cargo",
+          "fmt",
+          "--all",
+          "--",
+          "--check"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-16T19:20:11.845675+00:00",
+        "finished": "2026-09-16T19:20:12.866077+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-consensus-supervisor-ownership-02whx4b4/gates/format.log"
+      },
+      {
+        "name": "vendor-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2024",
+          "--config-path",
+          "vendor/reth-network/rustfmt.toml",
+          "--config",
+          "skip_children=true",
+          "vendor/reth-network/src/eth_requests.rs",
+          "vendor/reth-network/src/session/active.rs",
+          "vendor/reth-network/src/session/mod.rs",
+          "vendor/reth-network/src/session/types.rs",
+          "vendor/reth-network/src/session/range_update.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-16T19:20:12.866530+00:00",
+        "finished": "2026-09-16T19:20:12.942610+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-consensus-supervisor-ownership-02whx4b4/gates/vendor-format.log"
+      },
+      {
+        "name": "check",
+        "command": [
+          "cargo",
+          "check",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-16T19:20:12.943206+00:00",
+        "finished": "2026-09-16T19:20:20.269516+00:00",
+        "sha256": "c74de0a3d4a116bbc7601ed4da5ed22247339ad70c8f272d0daf44b21f3c426a",
+        "log": "/private/tmp/logex-consensus-supervisor-ownership-02whx4b4/gates/check.log"
+      },
+      {
+        "name": "clippy",
+        "command": [
+          "cargo",
+          "clippy",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-16T19:20:20.270072+00:00",
+        "finished": "2026-09-16T19:20:28.275214+00:00",
+        "sha256": "b3b2b3d9cc4a6cadad0835d1609f0c84868a10db9e59dcfa02df684b9cb503ca",
+        "log": "/private/tmp/logex-consensus-supervisor-ownership-02whx4b4/gates/clippy.log"
+      },
+      {
+        "name": "test",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-16T19:20:28.276456+00:00",
+        "finished": "2026-09-16T19:23:54.645818+00:00",
+        "sha256": "dc8a633ef26eb5c5bf44ee92c367ea3b7f4fa69d6d8b43d08f1fb31fd5ae4032",
+        "log": "/private/tmp/logex-consensus-supervisor-ownership-02whx4b4/gates/test.log"
+      },
+      {
+        "name": "doc",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--doc",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-16T19:23:54.649882+00:00",
+        "finished": "2026-09-16T19:24:10.814013+00:00",
+        "sha256": "43d17c4e71e8ea4072210cc49d790335a4464eba94005fa9dbc60a9b2250cacb",
+        "log": "/private/tmp/logex-consensus-supervisor-ownership-02whx4b4/gates/doc.log"
+      },
+      {
+        "name": "release-build",
+        "command": [
+          "cargo",
+          "build",
+          "-p",
+          "logex-node",
+          "--release",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-16T19:24:10.814856+00:00",
+        "finished": "2026-09-16T19:25:33.045008+00:00",
+        "sha256": "489b6a23ec0881b1c994de54ce097c9aab88f63b526acb98799540c8832baccb",
+        "log": "/private/tmp/logex-consensus-supervisor-ownership-02whx4b4/gates/release-build.log"
+      }
+    ]
+  },
+  "workspace_tests": {
+    "groups": 25,
+    "passed": 1710,
+    "failed": 0,
+    "ignored": 24
+  }
+}
