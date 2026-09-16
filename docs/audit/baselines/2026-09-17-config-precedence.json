@@ -1,5 +1,5 @@
 {
-  "status": "All eight local gates pass; CI and merge pending",
+  "status": "Diagnostic counters widened during final review; revised source gates pending",
   "base": "8d7426aa0272525cb320752d7c29c59903b8dc7b",
   "findings": [
     "B10-10",
@@ -75,8 +75,12 @@
       "sha256": "b962801da268e0fb3ab4ffbdccd1231e014a66fdc716f0049d808413f55e37fa"
     }
   },
-  "source_commit": "4b5939571fe26fe26400ce412091a59ea62e0aaf",
-  "validation": {
+  "workspace_tests": {
+    "passed": 1765,
+    "ignored": 24,
+    "groups": 25
+  },
+  "initial_validation": {
     "commit": "4b5939571fe26fe26400ce412091a59ea62e0aaf",
     "rustc": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
     "gates": [
@@ -226,9 +230,10 @@
       }
     ]
   },
-  "workspace_tests": {
-    "passed": 1765,
-    "ignored": 24,
-    "groups": 25
+  "initial_source_commit": "4b5939571fe26fe26400ce412091a59ea62e0aaf",
+  "initial_ci": {
+    "run": 35153002369,
+    "head": "c36c77d9b2f5ae56d49be0bcaa066e4a82370d17",
+    "disposition": "Canceled before merge after final review corrected inferred i32 location counters to usize; no giant-file reproduction claimed"
   }
 }

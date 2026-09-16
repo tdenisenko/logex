@@ -455,7 +455,7 @@ impl Config {
             let location = error.span().map(|span| {
                 let (line, column) = contents.char_indices()
                     .take_while(|(offset, _)| *offset < span.start)
-                    .fold((1, 1), |(line, column), (_, character)| {
+                    .fold((1_usize, 1_usize), |(line, column), (_, character)| {
                         if character == '\n' { (line + 1, 1) } else { (line, column + 1) }
                     });
                 format!(" at line {line}, column {column}")
