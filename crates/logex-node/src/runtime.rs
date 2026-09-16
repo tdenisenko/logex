@@ -31,12 +31,16 @@ use reth_discv4::NatResolver;
 use reth_ethereum_forks::Head;
 use serde::{Deserialize, Serialize};
 
-use crate::background::{log_task_exit, run_background_indexer};
+use crate::background::{join_task, run_background_indexer};
 use crate::checkpoint::{RECENT_CHECKPOINT_MAX_FINALIZED_EPOCH_LAG, resolve_checkpoint};
 
+mod cleanup;
 mod services;
 mod supervision;
 
+pub use cleanup::finish_runtime_shutdown;
+
+const ENGINE_CLEANUP_TIMEOUT: Duration = Duration::from_secs(60);
 const SYNC_ENGINE_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(120);
 // Runtime failures allow the engine's 120-second grace plus 60 seconds
 // for shared cleanup. An independent thread enforces this even if startup,
@@ -161,7 +165,7 @@ pub struct RunSyncOptions {
     pub disable_historical_sync: bool,
 }
 
-pub async fn run_sync(options: RunSyncOptions) {
+pub async fn run_sync(options: RunSyncOptions) -> cleanup::RuntimeShutdown {
     let RunSyncOptions {
         pm_config,
         checkpoint,
@@ -618,8 +622,20 @@ pub async fn run_sync(options: RunSyncOptions) {
         shutdown_rx.clone(),
     );
 
-    let mut _runtime_failure_watchdog = None;
-    let engine_exit_code = supervision::SyncSupervisor {
+    let mut shutdown_guard = None;
+    let mut engine_exit_code = supervision::SyncSupervisor {
+        on_shutdown: || {
+            shutdown_guard = Some(
+                cleanup::start_shutdown_watchdog(RUNTIME_FAILURE_CLEANUP_GRACE, || {
+                    std::process::exit(1)
+                })
+                .unwrap_or_else(|_| {
+                    // Without an independent deadline, logging or cleanup
+                    // could block indefinitely. Fail before acquiring locks.
+                    std::process::exit(1);
+                }),
+            );
+        },
         shutdown_tx: &shutdown_tx,
         node_workers: &node_workers,
         sync_status: &state.sync_status,
@@ -631,24 +647,19 @@ pub async fn run_sync(options: RunSyncOptions) {
         engine.run(),
         wait_for_shutdown_signal(),
         wait_for_low_disk_space(data_dir.clone()),
-        |error| {
-            // Arm before status locks or cleanup. The failure is already latched,
-            // so this adds a watchdog thread only when shutdown has failed.
-            let (_, receiver) = tokio::sync::watch::channel(Some(Arc::<str>::from(error)));
-            _runtime_failure_watchdog = Some(
-                start_runtime_failure_watchdog(receiver, RUNTIME_FAILURE_CLEANUP_GRACE, || {
-                    std::process::exit(1)
-                })
-                .unwrap_or_else(|error| {
-                    tracing::error!(%error, "failed to start sync failure shutdown watchdog");
-                    std::process::exit(1);
-                }),
-            );
-        },
+        |_| {},
     )
     .await;
 
-    engine.shutdown().await;
+    match tokio::time::timeout(ENGINE_CLEANUP_TIMEOUT, engine.shutdown()).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => cleanup::record_failure(&mut engine_exit_code, &state.sync_status, error),
+        Err(_) => cleanup::record_failure(
+            &mut engine_exit_code,
+            &state.sync_status,
+            format!("sync engine cleanup exceeded {ENGINE_CLEANUP_TIMEOUT:?}"),
+        ),
+    }
 
     let known_peers = engine.known_peers();
     if let Err(e) = persist_known_peers(&known_peers_file, &known_peers) {
@@ -667,11 +678,26 @@ pub async fn run_sync(options: RunSyncOptions) {
 
     let _ = shutdown_tx.send(true);
     tracing::info!("waiting for HTTP, gRPC, and indexing tasks to stop");
-    log_task_exit("HTTP server", http_handle).await;
-    log_task_exit("gRPC server", grpc_handle).await;
-    log_task_exit("background indexer", index_handle).await;
+    let mut tasks = vec![
+        ("HTTP server", http_handle),
+        ("gRPC server", grpc_handle),
+        ("background indexer", index_handle),
+    ];
     if let Some(handle) = consensus_network_handle {
-        log_task_exit("consensus network", handle).await;
+        tasks.push(("consensus network", handle));
+    }
+    // These workers are already stopping independently. Await them together so
+    // their cleanup windows do not multiply with the number of services.
+    for result in futures_util::future::join_all(
+        tasks
+            .into_iter()
+            .map(|(name, handle)| join_task(name, handle)),
+    )
+    .await
+    {
+        if let Err(error) = result {
+            cleanup::record_failure(&mut engine_exit_code, &state.sync_status, error);
+        }
     }
     tracing::info!("shutting down");
     // Inspect the permanent latch again: a failure may also arrive while a
@@ -699,6 +725,7 @@ pub async fn run_sync(options: RunSyncOptions) {
         // instead could wait indefinitely for unfinished blocking work.
         std::process::exit(1);
     }
+    shutdown_guard.expect("the supervisor arms shutdown before completing")
 }
 
 async fn wait_for_runtime_failure(

@@ -27,8 +27,13 @@ impl Fixture {
         }
     }
 
-    fn supervisor(&mut self) -> SyncSupervisor<'_> {
+    fn supervisor(&mut self) -> SyncSupervisor<'_, fn()> {
+        self.supervisor_with_hook(|| {})
+    }
+
+    fn supervisor_with_hook<F: FnOnce()>(&mut self, on_shutdown: F) -> SyncSupervisor<'_, F> {
         SyncSupervisor {
+            on_shutdown,
             node_workers: &self.workers,
             shutdown_tx: &self.shutdown,
             sync_status: &self.status,
@@ -571,4 +576,47 @@ async fn explicit_worker_failure_during_engine_cleanup_remains_latched() {
         fixture.workers.subscribe().borrow().as_deref(),
         Some("service failed: service cleanup failed")
     );
+}
+
+#[tokio::test]
+async fn every_stop_trigger_arms_deadline_once_before_shutdown_notification() {
+    for trigger in 0..4 {
+        let mut fixture = Fixture::new();
+        let shutdown = fixture.shutdown.subscribe();
+        let armed = std::cell::Cell::new(0);
+        let immediate = trigger < 2;
+        let engine = async {
+            if immediate {
+                if trigger == 0 {
+                    Ok(())
+                } else {
+                    Err("engine error")
+                }
+            } else {
+                engine_after_shutdown(shutdown.clone(), Ok(())).await
+            }
+        };
+        let signal = async {
+            if trigger == 2 {
+                "test signal"
+            } else {
+                pending().await
+            }
+        };
+        let disk = async {
+            if trigger == 3 {
+                low_disk()
+            } else {
+                pending().await
+            }
+        };
+        let _ = fixture
+            .supervisor_with_hook(|| {
+                assert!(!*shutdown.borrow());
+                armed.set(armed.get() + 1);
+            })
+            .run(engine, signal, disk, |_| assert_eq!(armed.get(), 1))
+            .await;
+        assert_eq!(armed.get(), 1);
+    }
 }

@@ -1,0 +1,96 @@
+{
+  "status": "Implementation and focused checks pass; workspace gates and PR/CI/merge pending",
+  "base": "4915ad577a325d611455b90f7c8fea3f859391d9",
+  "findings": [
+    "B10-06",
+    "B10-07"
+  ],
+  "evidence_directory": "/private/tmp/logex-runtime-cleanup-deadlines-m9cxics7",
+  "original_control": {
+    "failed": 1,
+    "method": "Behavior-preserving extraction of the node join helper; production retains 60-second timeout, isolated control uses zero grace and always releases owned blocking worker"
+  },
+  "new_controls": 13,
+  "focused_node": {
+    "passed": 142,
+    "ignored": 0
+  },
+  "focused_sync_supervision": {
+    "passed": 24,
+    "ignored": 0
+  },
+  "review": "Implementer review; no independent review claimed",
+  "performance": "New watchdog starts only while stopping and replaces the previous engine failure-only guard. No normal-ingestion I/O, recurring timer or benchmark claim.",
+  "limitations": [
+    "No full-node process or live-sync test; exit callback is source-reviewed and reports through channels in tests",
+    "Deadline starts at observed shutdown; no real-time OS scheduling guarantee",
+    "Peer-hint persistence remains advisory; no new final checkpoint",
+    "Outer consensus supervisor, low-disk probe errors, in-flight write ownership, volume supervision and repair remain open"
+  ],
+  "evidence": {
+    "0-runtime.rs": {
+      "sha256": "dfd02abaf9327f39e75cbdf029d2e07742eee531e221e785d2e7f725775e3a11",
+      "bytes": 97543
+    },
+    "1-supervision.rs": {
+      "sha256": "1f09cf5a1d8ed96c342de298b0518a8c2ab049c35ee9198af0f5e261168e7ff4",
+      "bytes": 6552
+    },
+    "2-background.rs": {
+      "sha256": "e476ca0218059d0761f0ef138b12927c4f07988854098b3550fa5846bd634357",
+      "bytes": 29550
+    },
+    "3-main.rs": {
+      "sha256": "1812600ffccc6b263293bc71ba89acab4d20796ed0f48940075c08ca6d87e17f",
+      "bytes": 12295
+    },
+    "4-mod.rs": {
+      "sha256": "d006b5d3f3fda45b35d903cd58aa6a414a4587fb24451ab691ced6cb81e1d790",
+      "bytes": 10617
+    },
+    "5-lifecycle.rs": {
+      "sha256": "c66ba5d80965ebc6e0841a323093e3fabde3a8752774695c7c3a6a32443ce0fa",
+      "bytes": 42337
+    },
+    "candidate-reviewed.patch": {
+      "sha256": "c1156d8b020772ebb003f9611e645268c231f5554d947270be8bf8b6924ca7bc",
+      "bytes": 21279
+    },
+    "focused-node-candidate.log": {
+      "sha256": "cc8dbe10ec53cfa55067c70e2b905d596a324b89ed5a310f646464333eacc0b6",
+      "bytes": 12820
+    },
+    "focused-node-final.log": {
+      "sha256": "d9a98e37567c9bd438cabf39f0366e338a374c58d45d4000943ea0672bb362fa",
+      "bytes": 12927
+    },
+    "focused-sync-cleanup.log": {
+      "sha256": "02bd14c2516cce3723cf21600a3f7db7c31e959cd494f706da5ec8416b4a735c",
+      "bytes": 3219
+    },
+    "original-join-control.log": {
+      "sha256": "8b9e13aedaedf682b9f9915535e15aa3165fc92e41312438029498396627272c",
+      "bytes": 1697
+    },
+    "original-join-control.rs": {
+      "sha256": "d5e7df2ee24a3d1b3956bb8e8651bbd174c4bfd49e87bf90527b3ce5ed07a321",
+      "bytes": 30608
+    },
+    "original-join-extraction.patch": {
+      "sha256": "c105a55be548cffc880e1005bcce5fb737b98bf88a6ca83431ecf9bafdd37cde",
+      "bytes": 2391
+    },
+    "original-source.json": {
+      "sha256": "7de5a43f45a288c53ecfb036388a131ae08d504c6ca555af03db8eabc597aaa4",
+      "bytes": 758
+    },
+    "review-notes.md": {
+      "sha256": "72fd2d1cd7972f27283ceff42876e140904579b673b38bcf5e2d14a55248539b",
+      "bytes": 5057
+    },
+    "candidate-cleanup.rs": {
+      "sha256": "fb311562a0959a4fe4a9cbcac1f14e5a5c0b68c2409229377e535ff8f6d4cde1",
+      "bytes": 7058
+    }
+  }
+}
