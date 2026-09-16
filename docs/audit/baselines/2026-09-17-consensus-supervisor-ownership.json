@@ -1,0 +1,60 @@
+{
+  "status": "Focused suites passed; final workspace gates pending",
+  "base": "0e94d900b0e6fdc769362aa5b4ce2140908ca23d",
+  "findings": [
+    "B3-64",
+    "B3-65",
+    "B3-66"
+  ],
+  "evidence_root": "/private/tmp/logex-consensus-supervisor-ownership-02whx4b4",
+  "original_reproduction": {
+    "method": "Behavior-preserving extraction of original supervisor control flow",
+    "passed": 0,
+    "failed": 3
+  },
+  "evidence": {
+    "original-source.json": {
+      "sha256": "f8e2321f22b03bf2b7150736b82bbf33efbcd014ec1572b5149d5e6c97f9630c",
+      "bytes": 530
+    },
+    "original-extraction.patch": {
+      "sha256": "b147fe0ab7e1408af3eed665b08891ed8f8e1fa32cf4be396bdd1b3b6edd09d5",
+      "bytes": 2903
+    },
+    "original-supervision.rs": {
+      "sha256": "bcdf43b200da7c544ffc31929a09d00faa97a145404723f5cc7d57e1b79b7872",
+      "bytes": 4855
+    },
+    "original-controls.log": {
+      "sha256": "7cc76397f4080874eb90f1a9f7d7b0ebe6d2ec1cc58bf639ac6c230461cacd94",
+      "bytes": 2497
+    },
+    "candidate-controls.log": {
+      "sha256": "71502a4ee499c6e0e1f0dc084558b8c5b4de060f527613633c562d956fe8f125",
+      "bytes": 932
+    },
+    "final-controls.log": {
+      "sha256": "864430855566607ed141456b165cdc1d06e09ac929dd9518adc2d96721292e22",
+      "bytes": 1477
+    },
+    "focused-suites.log": {
+      "sha256": "65e734f2d76cba52cf9215ddbc31e16788e2df7ebfc15791f3c5d6dde4f686a8",
+      "bytes": 50216
+    },
+    "focused-node.log": {
+      "sha256": "1da4ea8d2c5beb41abf6a89196388679c3aaa2749092d3a072473b6a7b3117f5",
+      "bytes": 12846
+    }
+  },
+  "focused": {
+    "consensus": {
+      "passed": 353,
+      "ignored": 1
+    },
+    "node": {
+      "passed": 142,
+      "ignored": 0
+    },
+    "sandbox_attempt": "14 node failures from loopback binding denial; permitted rerun passes all 142"
+  }
+}

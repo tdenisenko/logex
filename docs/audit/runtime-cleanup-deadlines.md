@@ -78,7 +78,8 @@ blocked on owned work, explicit successful completion, guard abandonment, cleanu
 unwind, failure status and delayed/expired completion. Test workers are released
 before assertions; no test callback exits the test process. All eight local gates pass on `9fb27264`: vendor integrity, workspace and
 patched-vendor formatting, all-target check, strict Clippy, 1,700 workspace tests
-(24 ignored), documentation tests and release build. PR/CI/merge remain pending.
+(24 ignored), documentation tests and release build. All six CI jobs passed on `d511994c`;
+[PR #200](https://github.com/tdenisenko/logex/pull/200) merged as `0e94d900`.
 
 Implementer review traced all shutdown callers, normal/error event ordering,
 watchdog ownership across `block_on`/runtime destruction, source/result lifetimes

@@ -11,7 +11,7 @@ use alloy_primitives::U256;
 use logex_cl::{
     AnchorCoverage, ConsensusDialAddressFamilies, ConsensusNetworkConfig, ConsensusStateError,
     ConsensusStore, MAINNET_CONSENSUS_CHAIN_SPEC, consensus_state_exists, consensus_state_path,
-    spawn_consensus_network,
+    prepare_consensus_network,
 };
 use logex_server::{AppState, SubscriptionManager};
 use logex_storage::{PartitionManager, PartitionManagerConfig, SyncHead};
@@ -500,8 +500,21 @@ pub async fn run_sync(options: RunSyncOptions) -> cleanup::RuntimeShutdown {
         })
     });
 
+    let node_workers = TaskMonitor::default();
+    // Start before spawning services so an early bind failure is retained and
+    // bounded even if execution-network initialization is still in progress.
+    let _node_worker_watchdog = start_runtime_failure_watchdog(
+        node_workers.subscribe(),
+        RUNTIME_FAILURE_CLEANUP_GRACE,
+        || std::process::exit(1),
+    )
+    .unwrap_or_else(|error| {
+        tracing::error!(%error, "failed to start node worker shutdown watchdog");
+        std::process::exit(1);
+    });
+
     let consensus_network_handle = consensus.as_ref().map(|consensus| {
-        spawn_consensus_network(
+        prepare_consensus_network(
             ConsensusNetworkConfig {
                 data_dir: data_dir.clone(),
                 checkpoint: consensus.checkpoint(),
@@ -518,26 +531,15 @@ pub async fn run_sync(options: RunSyncOptions) -> cleanup::RuntimeShutdown {
         )
     });
     let consensus_network_handle = match consensus_network_handle {
-        Some(Ok(handle)) => Some(handle),
+        Some(Ok(network)) => {
+            Some(node_workers.spawn_result("consensus network supervisor", network))
+        }
         Some(Err(error)) => {
             tracing::error!(%error, "failed to start consensus network");
             std::process::exit(1);
         }
         None => None,
     };
-
-    let node_workers = TaskMonitor::default();
-    // Start before spawning services so an early bind failure is retained and
-    // bounded even if execution-network initialization is still in progress.
-    let _node_worker_watchdog = start_runtime_failure_watchdog(
-        node_workers.subscribe(),
-        RUNTIME_FAILURE_CLEANUP_GRACE,
-        || std::process::exit(1),
-    )
-    .unwrap_or_else(|error| {
-        tracing::error!(%error, "failed to start node worker shutdown watchdog");
-        std::process::exit(1);
-    });
 
     let http_addr = SocketAddr::new(http_host, http_port);
     let http_handle = services::spawn_http(
