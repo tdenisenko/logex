@@ -28,7 +28,6 @@ use logex_types::{ChainAnchors, ExecutionAnchor, SyncStatus};
 use reth_chainspec::{EthChainSpec, MAINNET};
 use reth_discv4::NatResolver;
 use reth_ethereum_forks::Head;
-use serde::{Deserialize, Serialize};
 
 use crate::background::{join_task, run_background_indexer};
 use crate::checkpoint::{RECENT_CHECKPOINT_MAX_FINALIZED_EPOCH_LAG, resolve_checkpoint};
@@ -37,6 +36,13 @@ mod cleanup;
 mod services;
 mod storage_health;
 mod supervision;
+mod sync_mode;
+#[cfg(test)]
+mod sync_mode_tests;
+
+use sync_mode::{
+    SyncModeState, read_sync_mode_state, remove_sync_mode_state, write_sync_mode_state,
+};
 
 pub use cleanup::finish_runtime_shutdown;
 
@@ -46,7 +52,6 @@ const SYNC_ENGINE_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(120);
 // for shared cleanup. An independent thread enforces this even if startup,
 // filesystem calls or post-abort joins block application runtime workers.
 const RUNTIME_FAILURE_CLEANUP_GRACE: Duration = Duration::from_secs(180);
-const SYNC_MODE_FILE_NAME: &str = "sync-mode.json";
 const MAINNET_SECONDS_PER_SLOT: u64 = 12;
 const MAINNET_SLOTS_PER_EPOCH: u64 = 32;
 const IPV4_REACHABILITY_PROBE: (Ipv4Addr, u16) = (Ipv4Addr::new(1, 1, 1, 1), 80);
@@ -133,11 +138,6 @@ impl LocalP2pAddressCandidates {
             IpAddr::V4(Ipv4Addr::UNSPECIFIED)
         }
     }
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct SyncModeState {
-    historical_sync_disabled: bool,
 }
 
 pub struct RunSyncOptions {
@@ -1345,40 +1345,6 @@ fn storage_is_fresh_for_sync_mode(
         && storage.indexed_head_block().is_none()
         && storage.historical_floor().is_none()
         && storage.historical_anchor().is_none()
-}
-
-fn sync_mode_state_path(data_dir: &Path) -> PathBuf {
-    data_dir.join(SYNC_MODE_FILE_NAME)
-}
-
-fn read_sync_mode_state(data_dir: &Path) -> Result<Option<SyncModeState>, String> {
-    let path = sync_mode_state_path(data_dir);
-    match fs::read_to_string(&path) {
-        Ok(contents) => serde_json::from_str(&contents)
-            .map(Some)
-            .map_err(|error| format!("failed to parse {}: {error}", path.display())),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(format!("failed to read {}: {error}", path.display())),
-    }
-}
-
-fn write_sync_mode_state(data_dir: &Path, state: &SyncModeState) -> Result<(), String> {
-    fs::create_dir_all(data_dir)
-        .map_err(|error| format!("failed to create {}: {error}", data_dir.display()))?;
-    let path = sync_mode_state_path(data_dir);
-    let contents = serde_json::to_vec_pretty(state)
-        .map_err(|error| format!("failed to encode {}: {error}", path.display()))?;
-    fs::write(&path, contents)
-        .map_err(|error| format!("failed to write {}: {error}", path.display()))
-}
-
-fn remove_sync_mode_state(data_dir: &Path) -> Result<(), String> {
-    let path = sync_mode_state_path(data_dir);
-    match fs::remove_file(&path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(format!("failed to remove {}: {error}", path.display())),
-    }
 }
 
 fn startup_network_head(sync_head: Option<SyncHead>, consensus: Option<&ConsensusStore>) -> Head {

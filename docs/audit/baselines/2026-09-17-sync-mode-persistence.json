@@ -1,0 +1,221 @@
+{
+  "status": "All eight local gates pass; CI/merge pending",
+  "base": {
+    "commit": "c63d9c273b811d9837d016ac0c9a9d4326e790fe",
+    "runtime_sha256": "89222b31026c1839b965472dfdd90a49659d7652e5afd6b90a4c99f1e5f6b938"
+  },
+  "findings": [
+    "B10-13",
+    "B10-14",
+    "B10-15"
+  ],
+  "original_controls": {
+    "passed": 2,
+    "failed": 5,
+    "runtime_production": "Unchanged except test-module declaration",
+    "power_loss_reproduction": false
+  },
+  "focused": {
+    "new_tests": 16,
+    "node_passed": 188
+  },
+  "evidence_directory": "/private/tmp/logex-sync-mode-persistence-fsfg4fw1",
+  "evidence": {
+    "focused-mode.log": {
+      "bytes": 1560,
+      "sha256": "8fb32146a08677f45b54984ea1466ae1ea231fb20c8bc153ed4ebb3c147a9ed2"
+    },
+    "focused-node-final.log": {
+      "bytes": 16946,
+      "sha256": "8fc150fceb38270c29353706d0ca961e957649110ff0b565974f65f3b3f0ffcc"
+    },
+    "focused-node.log": {
+      "bytes": 16847,
+      "sha256": "6b350b3deb8aeff38388e73e300bc24a5d1b250d033f893abb987f4867bd769b"
+    },
+    "original-controls.log": {
+      "bytes": 4006,
+      "sha256": "1aa3a3e701201751d55d73651032b9852beec63c636f19e87dc9492e57426bcb"
+    },
+    "original-controls.patch": {
+      "bytes": 359,
+      "sha256": "2a1969443d74e0a797088bab16463ea5339f64c9f42f564764af8c20b8f1dfac"
+    },
+    "original-runtime.rs": {
+      "bytes": 94526,
+      "sha256": "89222b31026c1839b965472dfdd90a49659d7652e5afd6b90a4c99f1e5f6b938"
+    },
+    "original-source.json": {
+      "bytes": 147,
+      "sha256": "b4d39486c7b8ddce2ae88adbce8a4f14d7977206c36c691b896d8d217b8833c5"
+    },
+    "original-sync-mode-tests.rs": {
+      "bytes": 2671,
+      "sha256": "d661d38e6eef8a95a7eaad09542336a0ec889294e54732c5f6d13ff8afa49e60"
+    },
+    "gates/results.json": {
+      "bytes": 4597,
+      "sha256": "e04bc127d5196d099608c08158a97becaaf6747cf5fd36c5201e03e860d79704"
+    },
+    "run-gates.py": {
+      "bytes": 2153,
+      "sha256": "01281cfa93e852b06ccfa033189af366813916851c5ae8d748cd03ecd7525532"
+    }
+  },
+  "source_commit": "37b8b7f31ec701bc530c7e1f59fdf2a7f01f0d79",
+  "validation": {
+    "commit": "37b8b7f31ec701bc530c7e1f59fdf2a7f01f0d79",
+    "rustc": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+    "gates": [
+      {
+        "name": "vendor",
+        "command": [
+          "python3",
+          "tools/verify_datafusion_vendor.py"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-16T21:58:26.598349+00:00",
+        "finished": "2026-09-16T21:58:26.664153+00:00",
+        "sha256": "5de30a03a2c21d0dd165f1d3f30b23ef080e06616866e0a02f37198cff7f3a16",
+        "log": "/private/tmp/logex-sync-mode-persistence-fsfg4fw1/gates/vendor.log"
+      },
+      {
+        "name": "format",
+        "command": [
+          "cargo",
+          "fmt",
+          "--all",
+          "--",
+          "--check"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-16T21:58:26.664479+00:00",
+        "finished": "2026-09-16T21:58:27.591228+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-sync-mode-persistence-fsfg4fw1/gates/format.log"
+      },
+      {
+        "name": "vendor-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2024",
+          "--config-path",
+          "vendor/reth-network/rustfmt.toml",
+          "--config",
+          "skip_children=true",
+          "vendor/reth-network/src/eth_requests.rs",
+          "vendor/reth-network/src/session/active.rs",
+          "vendor/reth-network/src/session/mod.rs",
+          "vendor/reth-network/src/session/types.rs",
+          "vendor/reth-network/src/session/range_update.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-16T21:58:27.591577+00:00",
+        "finished": "2026-09-16T21:58:27.654388+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-sync-mode-persistence-fsfg4fw1/gates/vendor-format.log"
+      },
+      {
+        "name": "check",
+        "command": [
+          "cargo",
+          "check",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-16T21:58:27.654809+00:00",
+        "finished": "2026-09-16T21:58:30.766063+00:00",
+        "sha256": "a5cb2dce69b2302f2e250346ad5dcdba35532ef50a425123fc315f30a1307a46",
+        "log": "/private/tmp/logex-sync-mode-persistence-fsfg4fw1/gates/check.log"
+      },
+      {
+        "name": "clippy",
+        "command": [
+          "cargo",
+          "clippy",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-16T21:58:30.766695+00:00",
+        "finished": "2026-09-16T21:58:33.700608+00:00",
+        "sha256": "b5ec99f7bbcfa56e3035a7c562873a5d908e5f0b3af2edb9664d84f134306891",
+        "log": "/private/tmp/logex-sync-mode-persistence-fsfg4fw1/gates/clippy.log"
+      },
+      {
+        "name": "test",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-16T21:58:33.701021+00:00",
+        "finished": "2026-09-16T22:01:27.287429+00:00",
+        "sha256": "4d84b02ce03d6bd342f21f9e3eef5d00960f9b3c00c2f25043c9e1ab87367911",
+        "log": "/private/tmp/logex-sync-mode-persistence-fsfg4fw1/gates/test.log"
+      },
+      {
+        "name": "doc",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--doc",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-16T22:01:27.289577+00:00",
+        "finished": "2026-09-16T22:01:30.816975+00:00",
+        "sha256": "6911ae2fc3554a72a1e7fad2487a5cd371de7284c76985f12c7ac615d3727900",
+        "log": "/private/tmp/logex-sync-mode-persistence-fsfg4fw1/gates/doc.log"
+      },
+      {
+        "name": "release-build",
+        "command": [
+          "cargo",
+          "build",
+          "-p",
+          "logex-node",
+          "--release",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-16T22:01:30.817372+00:00",
+        "finished": "2026-09-16T22:02:10.277350+00:00",
+        "sha256": "25b911ab8df09dd68d8fc8783b8f7882cc6dc3ca487c12c48a077185fa45b2ab",
+        "log": "/private/tmp/logex-sync-mode-persistence-fsfg4fw1/gates/release-build.log"
+      }
+    ]
+  },
+  "workspace_tests": {
+    "passed": 1781,
+    "ignored": 24,
+    "groups": 25
+  }
+}
