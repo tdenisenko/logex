@@ -98,7 +98,11 @@ progressing ETH70 receipt pagination. Merged in PR #188 (`e07fb451`) after all l
 
 The [cache publication review](execution-cache-publication.md) records B4-33:
 lazy availability lookup and suppression of unchanged submissions, preserving forced
-head restoration. Component comparison, 316 focused tests and eight local gates pass; CI/merge pending.
+head restoration. Merged in PR #189 (`e17bd1bf`) after the component comparison, local gates and CI.
+
+The [execution worker lifecycle review](execution-task-lifecycle.md) records B4-34–36:
+completed-stream retirement, owned worker cancellation and fatal task supervision.
+All 329 focused tests and eight local gates pass; CI/merge remain pending.
 
 ## Baseline findings
 
