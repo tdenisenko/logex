@@ -6,6 +6,24 @@ use std::sync::{
 };
 
 #[tokio::test]
+async fn independent_volume_failure_is_retained_without_another_filesystem_probe() {
+    for closed in [false, true] {
+        let (sender, receiver) = tokio::sync::watch::channel(None);
+        if !closed {
+            sender.send_replace(Some("owned volume unavailable".to_owned()));
+        }
+        drop(sender);
+        let failure = wait_for_failure(PathBuf::from("unused-volume-path"), Some(receiver)).await;
+        let text = failure.to_string();
+        assert!(text.contains(if closed {
+            "notification channel closed"
+        } else {
+            "owned volume unavailable"
+        }));
+    }
+}
+
+#[tokio::test]
 async fn queued_completion_after_deadline_is_not_healthy() {
     let deadline = tokio::time::Instant::now() - Duration::from_secs(1);
     let mut work = JoinSet::new();

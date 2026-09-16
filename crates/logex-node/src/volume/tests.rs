@@ -51,7 +51,15 @@ fn inline_checkpoints_and_absolute_descriptor_paths_keep_their_meaning() {
 
 #[test]
 fn command_setup_and_monitor_cases_run_in_owned_children() {
-    for case in ["checkpoint", "idle_drop", "failure", "blocked", "panic"] {
+    for case in [
+        "checkpoint",
+        "idle_drop",
+        "failure",
+        "blocked",
+        "panic",
+        "runtime_blocked",
+        "callback_blocked",
+    ] {
         let directory = tempfile::tempdir().unwrap();
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
@@ -69,6 +77,15 @@ fn command_setup_and_monitor_cases_run_in_owned_children() {
             1
         };
         assert_eq!(output.status.code(), Some(expected), "{case}: {output:?}");
+        if case == "runtime_blocked" {
+            assert_eq!(
+                std::fs::read(directory.path().join("verified")).unwrap(),
+                b"failure observed without async progress"
+            );
+        } else if case == "callback_blocked" {
+            assert!(directory.path().join("callback_entered").exists());
+            assert!(!directory.path().join("callback_returned").exists());
+        }
     }
 }
 
@@ -91,6 +108,59 @@ fn command_setup_child() {
         );
         return;
     }
+    if ["runtime_blocked", "callback_blocked"].contains(&case.as_str()) {
+        let (begin, allowed) = mpsc::channel();
+        let (reported, failure) = mpsc::channel();
+        let monitor = VolumeMonitor::start_with(
+            Duration::from_millis(1),
+            Duration::from_secs(5),
+            Duration::from_secs(1),
+            move || {
+                allowed.recv_timeout(Duration::from_secs(5)).unwrap();
+                Err(io::Error::other("owned runtime probe failure"))
+            },
+        )
+        .unwrap();
+        let blocked = case == "callback_blocked";
+        monitor
+            .handle()
+            .set_failure_handler(move |reason| {
+                std::fs::write("callback_entered", reason).unwrap();
+                reported.send(reason.to_owned()).unwrap();
+                if blocked {
+                    std::thread::sleep(Duration::from_secs(5));
+                    std::fs::write("callback_returned", b"unexpected completion").unwrap();
+                }
+            })
+            .unwrap();
+        assert!(monitor.handle().set_failure_handler(|_| {}).is_err());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            begin.send(()).unwrap();
+            // This models a synchronous engine I/O poll. The observer must
+            // notify from outside the async runtime, with no timer progress.
+            assert_eq!(
+                failure.recv_timeout(Duration::from_secs(5)).unwrap(),
+                "owned runtime probe failure"
+            );
+        });
+        if blocked {
+            std::thread::sleep(Duration::from_secs(5));
+            panic!("terminal deadline did not bound the blocked callback");
+        }
+        monitor.handle().report("later failure".into());
+        assert_eq!(
+            std::fs::read("callback_entered").unwrap(),
+            b"owned runtime probe failure"
+        );
+        assert!(monitor.handle().set_failure_handler(|_| {}).is_err());
+        std::fs::write("verified", b"failure observed without async progress").unwrap();
+        // A latched failure remains exit 1 even if main reaches teardown first.
+        drop(monitor);
+        panic!("volume failure became a successful command exit");
+    }
     let idle = case == "idle_drop";
     let guard = VolumeMonitor::start_with(
         if idle {
@@ -99,6 +169,7 @@ fn command_setup_child() {
             Duration::from_millis(1)
         },
         Duration::from_millis(50),
+        Duration::from_secs(1),
         move || match case.as_str() {
             "failure" => Err(io::Error::other("owned probe failure")),
             "blocked" => {

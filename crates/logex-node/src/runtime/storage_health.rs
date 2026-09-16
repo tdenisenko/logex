@@ -1,14 +1,13 @@
 use std::collections::BTreeSet;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::task::JoinSet;
 
 const POLL_INTERVAL: Duration = Duration::from_secs(10);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
-use crate::volume::{ExpectedVolume, MIN_FREE_BYTES};
+use crate::volume::MIN_FREE_BYTES;
 
 #[derive(Debug, thiserror::Error)]
 pub(super) enum StorageHealthFailure {
@@ -30,24 +29,28 @@ pub(super) enum StorageHealthFailure {
 
 pub(super) async fn wait_for_failure(
     path: PathBuf,
-    volume: Option<Arc<ExpectedVolume>>,
+    volume: Option<tokio::sync::watch::Receiver<Option<String>>>,
 ) -> StorageHealthFailure {
+    if let Some(mut volume) = volume {
+        let reason = loop {
+            if let Some(reason) = volume.borrow_and_update().clone() {
+                break reason;
+            }
+            if volume.changed().await.is_err() {
+                break "volume monitor notification channel closed".into();
+            }
+        };
+        return StorageHealthFailure::Probe {
+            path,
+            source: io::Error::other(reason),
+        };
+    }
     let mut interval = tokio::time::interval(POLL_INTERVAL);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         interval.tick().await;
-        let volume = volume.clone();
-        if let Err(failure) = run_probe(path.clone(), PROBE_TIMEOUT, move |path| {
-            if let Some(volume) = volume {
-                volume
-                    .check()
-                    .map_err(|source| StorageHealthFailure::Probe {
-                        path: path.to_owned(),
-                        source,
-                    })
-            } else {
-                check_paths(path, MIN_FREE_BYTES, free_space_bytes)
-            }
+        if let Err(failure) = run_probe(path.clone(), PROBE_TIMEOUT, |path| {
+            check_paths(path, MIN_FREE_BYTES, free_space_bytes)
         })
         .await
         {

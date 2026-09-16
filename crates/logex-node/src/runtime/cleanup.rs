@@ -38,12 +38,14 @@ pub(super) fn start_shutdown_watchdog(
     })
 }
 
-/// Keep the deadline alive while Tokio joins all remaining blocking work.
+/// Keep the deadline alive through Tokio and remaining process-owner teardown.
 pub fn finish_runtime_shutdown(
     runtime: tokio::runtime::Runtime,
     guard: RuntimeShutdown,
+    finish_owners: impl FnOnce(),
 ) -> std::io::Result<()> {
     drop(runtime);
+    finish_owners();
     let completed = Instant::now();
     let expired = || {
         std::io::Error::new(
@@ -97,7 +99,7 @@ mod tests {
             let _ = failed.send(());
         })
         .unwrap();
-        let cleanup = std::thread::spawn(move || finish_runtime_shutdown(runtime, guard));
+        let cleanup = std::thread::spawn(move || finish_runtime_shutdown(runtime, guard, || {}));
         let outcome = observed.recv_timeout(Duration::from_secs(5));
         // Release this test's blocking worker even when the observation failed.
         drop(release);
@@ -115,11 +117,33 @@ mod tests {
             let _ = failed.send(());
         })
         .unwrap();
-        finish_runtime_shutdown(runtime, guard).unwrap();
+        finish_runtime_shutdown(runtime, guard, || {}).unwrap();
         assert_eq!(
             observed.recv_timeout(Duration::from_secs(5)),
             Err(mpsc::RecvTimeoutError::Disconnected)
         );
+    }
+
+    #[test]
+    fn process_owner_teardown_remains_inside_the_shutdown_deadline() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let (failed, observed) = mpsc::channel();
+        let (release, blocked) = mpsc::channel::<()>();
+        let guard = start_shutdown_watchdog(Duration::from_millis(20), move || {
+            let _ = failed.send(());
+        })
+        .unwrap();
+        let cleanup = std::thread::spawn(move || {
+            finish_runtime_shutdown(runtime, guard, || {
+                let _ = blocked.recv();
+            })
+        });
+        let outcome = observed.recv_timeout(Duration::from_secs(5));
+        drop(release);
+        assert!(cleanup.join().unwrap().is_err());
+        assert_eq!(outcome, Ok(()));
     }
 
     #[test]
@@ -196,7 +220,7 @@ mod tests {
             let _ = failed.send(());
         })
         .unwrap();
-        let error = finish_runtime_shutdown(runtime, guard).unwrap_err();
+        let error = finish_runtime_shutdown(runtime, guard, || {}).unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
         assert_eq!(observed.recv_timeout(Duration::from_secs(5)), Ok(()));
     }

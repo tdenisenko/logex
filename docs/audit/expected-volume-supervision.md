@@ -64,14 +64,19 @@ original artifact already moved into it. Production tempfile dependencies become
 dev-only in CL, sync and node; the lockfile adds no external package/version.
 
 Preflight has an independent 180-second deadline. An owned thread monitors volume
-availability during sync startup and offline commands, including a separate
-10-second deadline for each probe. Sync hands this responsibility to its existing
-supervisor when ready. Runtime retains its 10-second interval and probe deadline,
+availability through startup, runtime destruction and offline commands, with an
+independent 10-second deadline for each probe. It retains its 10-second interval,
 checking identity, configured directory identity, free space, read-only state and
 a tiny write/delete operation. A missing or replacement mount never becomes a new
 storage root. Permission or write failure is terminal. The existing independent
-180-second whole-node cleanup deadline remains in force. A blocked OS call cannot
-be cooperatively canceled; the process deadline bounds shutdown.
+180-second whole-node cleanup deadline remains in force. Volume failure also
+arms an independent terminal deadline before invoking the notification callback.
+The callback wakes the supervisor and closes query admission directly, without
+requiring the engine to yield. A blocked OS call cannot be cooperatively canceled;
+this deadline bounds terminal volume failure even if the engine poll is stuck.
+Main retains monitor ownership through runtime and monitor teardown, both inside
+the ordinary-shutdown deadline. The callback holds only a weak application-state
+reference, so it does not extend storage lifetime through normal shutdown.
 
 Fatal runtime failure latches the first reason, closes query admission and cancels
 owned work. REST health/status return 503 without taking the storage lock or
@@ -106,7 +111,7 @@ about partition layout and attach metadata were corrected, with failed runs kept
 in evidence; final detach uses verified image/device associations.
 
 After those runs, review extended the common preflight wrapper to cover checkpoint
-resolution and added startup monitoring, plus tests and a safety comment. The
+resolution and added independent lifetime-wide monitoring, plus tests and a safety comment. The
 macOS identity implementation, staging implementation and production Unix I/O
 sequence are unchanged from the tested source. This distinction is retained in
 the inventory instead of claiming the entire final node ran on those images.
@@ -117,9 +122,25 @@ volume, unrelated files or other processes were changed. Mac-mini work is done.
 Linux CI additionally builds the same fixture driver and runs disposable ext4 loop
 images through equivalent lifecycle cases, including lazy detach. It verifies
 actual loop attachments before cleanup; only new owned regular image files are
-formatted. CI also validates the systemd template without installation. All eight local gates pass on `099ca405`: vendor verification, workspace and
-patched-vendor formatting, check, strict Clippy, 1,827 workspace tests (24 ignored),
-documentation tests and release build. Linux CI and merge remain pending.
+formatted. CI also validates the systemd template without installation. Initial local gates
+passed on `099ca405` (1,827 tests / 24 ignored). Initial CI on `e6c0b08a` passed
+five jobs and all ten Linux mount/template controls, but failed fixture cleanup:
+the cleanup required literal absolute UUID symlink targets, while device-manager
+links may use relative targets. Cleanup now verifies the resolved owned device,
+always attempts owned-image detach, and retains diagnostic tracebacks. The initial
+report explicitly records incomplete cleanup; it is not treated as passing CI.
+
+Final review also reproduced a same-poll supervision gap on `e6c0b08a`: a bounded
+synchronous engine operation prevents its sibling async health future from
+running. Actual ingestion, historical metadata and reorg writes contain synchronous
+I/O in that engine. Expected-volume mode now retains independent monitoring for
+the whole process lifetime, instead of handing it to that async future. Owned
+controls demonstrate notification while a current-thread runtime is blocked,
+first-reason retention, a blocked callback's terminal deadline and nonzero exit
+even if teardown begins first. A cleanup regression covers remaining owner teardown
+inside the existing watchdog. The ordinary unconfigured health path still uses
+its existing async timer; that broader runtime finding remains on the roadmap.
+Final gates on the corrected source and new exact-head CI are pending.
 
 The launchd plist passed syntax validation and its fields were checked against
 the installed platform manual. Both templates restart with backoff and logs outside

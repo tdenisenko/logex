@@ -18,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import traceback
 import uuid
 
 
@@ -99,21 +100,27 @@ class Image:
         if len(devices) > 1:
             raise RuntimeError("owned image unexpectedly has multiple loop attachments")
         self.device = devices[0] if devices else None
-        if self.created_link and os.path.lexists(self.link):
-            assert self.device and self.link.is_symlink() and os.readlink(self.link) == self.device
-            privileged("rm", "--", str(self.link))
-            self.created_link = False
         if self.device:
             self.verify_device()
-            privileged("losetup", "--detach", self.device)
-            # Detach can request deferred autoclear. Never delete the backing
-            # file until the kernel actually releases our exact image.
-            deadline = time.monotonic() + 10
-            while loop_devices(self.path):
-                if time.monotonic() >= deadline:
-                    raise RuntimeError("owned image remains attached after detach")
-                time.sleep(0.1)
-            self.device = None
+            try:
+                if self.created_link and os.path.lexists(self.link):
+                    # udev can replace our absolute spelling with ../../loopN.
+                    # Compare the resolved verified device, not symlink text.
+                    if not self.link.is_symlink() or self.link.resolve() != Path(self.device).resolve():
+                        raise RuntimeError(f"fixture UUID link no longer resolves to {self.device}")
+                    privileged("rm", "-f", "--", str(self.link))
+                    self.created_link = False
+            finally:
+                # Even a UUID-link cleanup diagnostic must release our image.
+                privileged("losetup", "--detach", self.device)
+                # Detach can request deferred autoclear. Never delete the backing
+                # file until the kernel actually releases our exact image.
+                deadline = time.monotonic() + 10
+                while loop_devices(self.path):
+                    if time.monotonic() >= deadline:
+                        raise RuntimeError("owned image remains attached after detach")
+                    time.sleep(0.1)
+                self.device = None
 
 
 def response(process):
@@ -259,7 +266,7 @@ def main():
             try:
                 image.close()
             except BaseException as error:
-                errors.append(f"cleanup {image.path.name}: {error!r}")
+                errors.append(f"cleanup {image.path.name}: {error!r}\n{traceback.format_exc()}")
         try:
             # Inspect actual attachments as well as our command bookkeeping.
             detached = (not os.path.ismount(root / "mount")

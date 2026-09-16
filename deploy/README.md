@@ -41,9 +41,12 @@ flushes or per-block barriers. A terminal failure closes query admission,
 cancels outstanding query work and reports unavailable storage with its reason.
 The existing whole-node shutdown deadline is 180 seconds. Individual blocked OS
 filesystem calls cannot be canceled; the process deadline bounds their lifetime.
-An independent monitor also covers sync startup and offline maintenance, then
-hands over to the async supervisor when sync is ready. It terminates on failure
-before that supervisor is available. Preflight itself has a 180-second limit.
+The independent monitor remains active through startup, runtime destruction and
+offline maintenance. Once the node can serve requests, it notifies the supervisor
+and closes query admission directly, so synchronous engine I/O cannot delay
+detection. A terminal 180-second deadline is armed before notification or logging.
+Before the supervisor is available, failure ends the command. Preflight itself
+has a 180-second limit.
 
 For systemd, customize `logex.service` and place the config at its `--config`
 path. Run as the dedicated `logex` account. Keep journald storage on the system

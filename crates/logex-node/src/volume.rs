@@ -7,7 +7,7 @@
 use std::fs::File;
 use std::io;
 use std::path::{Component, Path, PathBuf};
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
 #[path = "volume/deadline.rs"]
@@ -77,12 +77,79 @@ impl ExpectedVolume {
     }
 }
 
-/// Startup and offline commands have no async service supervisor. Keep one owned
-/// monitor until the async supervisor takes over, or until maintenance finishes.
+/// Retained by main through startup, runtime destruction and command completion.
+/// Its observer never depends on the engine or an async worker making progress.
 /// Interrupted writes retain the same recovery guarantees as process loss.
 pub(crate) struct VolumeMonitor {
     stop: Option<mpsc::Sender<()>>,
     worker: Option<std::thread::JoinHandle<()>>,
+    handle: MonitorHandle,
+}
+
+type FailureCallback = Arc<dyn Fn(&str) + Send + Sync>;
+
+#[derive(Default)]
+struct MonitorState {
+    callback: Option<FailureCallback>,
+    failure: Option<String>,
+    // Never disarm a terminal volume failure. This stays owned through main's
+    // teardown; an early drop/unwind also expires it rather than losing failure.
+    _terminal_deadline: Option<deadline::Deadline>,
+}
+
+#[derive(Clone)]
+pub(crate) struct MonitorHandle {
+    state: Arc<Mutex<MonitorState>>,
+    failure_grace: Duration,
+}
+
+impl MonitorHandle {
+    pub(crate) fn set_failure_handler(
+        &self,
+        callback: impl Fn(&str) + Send + Sync + 'static,
+    ) -> io::Result<()> {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        if let Some(reason) = &state.failure {
+            return Err(io::Error::other(reason.clone()));
+        }
+        if state.callback.is_some() {
+            return Err(invalid("volume failure handler is already registered"));
+        }
+        state.callback = Some(Arc::new(callback));
+        Ok(())
+    }
+
+    fn report(&self, reason: String) {
+        let callback = {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            if state.failure.is_some() {
+                return;
+            }
+            // Arm an independent whole-process deadline before notification,
+            // logging or locks owned by the node. A blocked callback cannot
+            // postpone process termination, even if the async engine is stuck.
+            state._terminal_deadline = Some(
+                deadline::Deadline::start(self.failure_grace)
+                    .unwrap_or_else(|_| std::process::exit(1)),
+            );
+            state.failure = Some(reason.clone());
+            state.callback.clone()
+        };
+        if let Some(callback) = callback {
+            callback(&reason);
+        } else {
+            eprintln!("Error: storage volume became unavailable: {reason}");
+            std::process::exit(1);
+        }
+    }
+
+    fn failed(&self) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .failure
+            .is_some()
+    }
 }
 
 impl VolumeMonitor {
@@ -90,6 +157,7 @@ impl VolumeMonitor {
         Self::start_with(
             Duration::from_secs(10),
             Duration::from_secs(10),
+            Duration::from_secs(180),
             move || volume.check(),
         )
     }
@@ -97,9 +165,15 @@ impl VolumeMonitor {
     fn start_with(
         interval: Duration,
         timeout: Duration,
+        failure_grace: Duration,
         mut check: impl FnMut() -> io::Result<()> + Send + 'static,
     ) -> io::Result<Self> {
         let (stop, receiver) = mpsc::channel();
+        let handle = MonitorHandle {
+            state: Arc::new(Mutex::new(MonitorState::default())),
+            failure_grace,
+        };
+        let reporting = handle.clone();
         let worker = std::thread::Builder::new()
             .name("volume-monitor".into())
             .spawn(move || {
@@ -108,23 +182,28 @@ impl VolumeMonitor {
                         Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => return,
                         Err(mpsc::RecvTimeoutError::Timeout) => {}
                     }
-                    let deadline = deadline::Deadline::start(timeout)
-                        .unwrap_or_else(|_| std::process::exit(1));
-                    if let Err(error) = check() {
-                        // The independent deadline stays armed even if stderr or
-                        // tracing stalls. No further probe is queued after failure.
-                        eprintln!("Error: storage volume became unavailable: {error}");
-                        std::process::exit(1);
-                    }
-                    if deadline.complete().is_err() {
-                        std::process::exit(1);
+                    let expired = reporting.clone();
+                    let deadline = deadline::Deadline::start_with(timeout, move || {
+                        expired
+                            .report("volume probe timed out or stopped before completion".into());
+                    })
+                    .unwrap_or_else(|_| std::process::exit(1));
+                    let result = check();
+                    if let Err(error) = deadline.complete().and(result) {
+                        reporting.report(error.to_string());
+                        return;
                     }
                 }
             })?;
         Ok(Self {
             stop: Some(stop),
             worker: Some(worker),
+            handle,
         })
+    }
+
+    pub(crate) fn handle(&self) -> MonitorHandle {
+        self.handle.clone()
     }
 }
 
@@ -137,6 +216,7 @@ impl Drop for VolumeMonitor {
             .worker
             .take()
             .is_some_and(|worker| worker.join().is_err())
+            || self.handle.failed()
         {
             std::process::exit(1);
         }

@@ -15,7 +15,10 @@ impl Deadline {
         Self::start_with(timeout, || std::process::exit(1))
     }
 
-    fn start_with(timeout: Duration, expired: impl FnOnce() + Send + 'static) -> io::Result<Self> {
+    pub(super) fn start_with(
+        timeout: Duration,
+        expired: impl FnOnce() + Send + 'static,
+    ) -> io::Result<Self> {
         let expires = Instant::now().checked_add(timeout).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "volume deadline is too large")
         })?;
