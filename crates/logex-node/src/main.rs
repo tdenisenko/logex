@@ -4,7 +4,7 @@ mod cli;
 mod commands;
 mod runtime;
 
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches};
 use std::net::IpAddr;
 
 use checkpoint::DEFAULT_CHECKPOINT_SYNC_URL;
@@ -21,16 +21,19 @@ const DEFAULT_LOG_FILTER: &str = "info,discv5=error";
 const MIN_FILE_DESCRIPTOR_LIMIT: u64 = 16_384;
 
 fn main() {
-    let cli = Cli::parse();
+    let matches = Cli::command().get_matches();
+    let mut cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
 
-    let file_config = cli.config.as_ref().map(Config::load);
+    let file_config = cli.config.as_deref().map(Config::load);
     if let Some(Err(e)) = &file_config {
         eprintln!("Error: {e}");
         std::process::exit(1);
     }
     let file_config = file_config.and_then(|r| r.ok()).unwrap_or_default();
 
-    let log_level = effective_log_filter(&cli.log_level, file_config.log_level);
+    cli.apply_config(file_config, &matches);
+    drop(matches);
+    let log_level = normalize_info_log_filter(cli.log_level);
 
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -41,15 +44,10 @@ fn main() {
 
     raise_file_descriptor_limit();
 
-    let data_dir = file_config
-        .data_dir
-        .unwrap_or_else(|| cli.data_dir.unwrap_or_else(default_data_dir));
-    let partition_target_rows = file_config
-        .partition_target_rows
-        .unwrap_or(cli.partition_target_rows);
-    let checkpoint = file_config.checkpoint.or(cli.checkpoint);
-    let checkpoint_sync_url = file_config.checkpoint_sync_url.or(cli.checkpoint_sync_url);
-    let config_nat = file_config.nat;
+    let data_dir = cli.data_dir.unwrap_or_else(default_data_dir);
+    let partition_target_rows = cli.partition_target_rows;
+    let checkpoint = cli.checkpoint;
+    let checkpoint_sync_url = cli.checkpoint_sync_url;
 
     let pm_config = PartitionManagerConfig {
         data_dir,
@@ -79,26 +77,7 @@ fn main() {
             allow_public_grpc,
             disable_historical_sync,
         } => {
-            let nat = if nat == "any" {
-                config_nat.unwrap_or(nat)
-            } else {
-                nat
-            };
-            let http_host = file_config.http_host.unwrap_or(http_host);
-            let grpc_host = file_config.grpc_host.unwrap_or(grpc_host);
-            let p2p_bind_ip = file_config.p2p_bind_ip.or(p2p_bind_ip);
-            let execution_bootnodes = if execution_bootnodes.is_empty() {
-                file_config.execution_bootnodes.unwrap_or_default()
-            } else {
-                execution_bootnodes
-            };
-            let execution_discv5_port = file_config
-                .execution_discv5_port
-                .unwrap_or(execution_discv5_port);
-            let allow_public_grpc = file_config.allow_public_grpc.unwrap_or(allow_public_grpc);
-            let dashboard_enabled =
-                file_config.dashboard_enabled.unwrap_or(true) && !disable_dashboard;
-            let dashboard_password = dashboard_password.or(file_config.dashboard_password);
+            let dashboard_enabled = !disable_dashboard;
             let checkpoint_sync_url = checkpoint_sync_url
                 .filter(|url| !url.trim().is_empty())
                 .or_else(|| Some(DEFAULT_CHECKPOINT_SYNC_URL.to_owned()));
@@ -174,15 +153,6 @@ fn main() {
         Command::Compact { limit } => commands::run_compact(pm_config, limit),
         Command::Info => commands::run_info(pm_config),
     }
-}
-
-fn effective_log_filter(cli_log_level: &str, config_log_level: Option<String>) -> String {
-    let requested = if cli_log_level != DEFAULT_LOG_LEVEL {
-        cli_log_level.to_owned()
-    } else {
-        config_log_level.unwrap_or_else(|| DEFAULT_LOG_FILTER.to_owned())
-    };
-    normalize_info_log_filter(requested)
 }
 
 fn normalize_info_log_filter(filter: String) -> String {
@@ -288,27 +258,28 @@ fn desired_file_descriptor_soft_limit(current_soft: u64, hard: u64, minimum: u64
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_LOG_FILTER, desired_file_descriptor_soft_limit, effective_log_filter,
+        DEFAULT_LOG_FILTER, desired_file_descriptor_soft_limit, normalize_info_log_filter,
         validate_listener_policy,
     };
     use std::net::IpAddr;
 
     #[test]
-    fn default_info_log_filter_suppresses_noisy_discovery_warnings() {
-        assert_eq!(effective_log_filter("info", None), DEFAULT_LOG_FILTER);
+    fn info_log_filter_suppresses_noisy_discovery_warnings() {
         assert_eq!(
-            effective_log_filter("info", Some("info".to_owned())),
+            normalize_info_log_filter("info".to_owned()),
+            DEFAULT_LOG_FILTER
+        );
+        assert_eq!(
+            normalize_info_log_filter(" info ".to_owned()),
             DEFAULT_LOG_FILTER
         );
     }
 
     #[test]
-    fn explicit_log_filters_are_preserved() {
-        assert_eq!(effective_log_filter("debug", None), "debug");
-        assert_eq!(
-            effective_log_filter("info", Some("info,discv5=warn".to_owned())),
-            "info,discv5=warn"
-        );
+    fn custom_log_filters_are_preserved() {
+        for filter in ["debug", "warn", "info,discv5=warn"] {
+            assert_eq!(normalize_info_log_filter(filter.to_owned()), filter);
+        }
     }
 
     #[test]

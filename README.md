@@ -390,6 +390,19 @@ no downgrade migration is provided.
 
 ## Config File
 
+Settings resolve in this order: explicitly supplied command-line options,
+config-file values, then built-in defaults. An explicit option still wins when
+its value equals the default, such as `--nat any` or `--log-level info`. Global
+options can appear before or after the subcommand. Relative paths remain relative
+to the process working directory.
+
+A valid `RUST_LOG` filter takes precedence over the resolved log setting. The
+plain `info` setting continues to suppress discovery warnings. `--disable-dashboard`
+always disables the dashboard; command-line bootnodes replace the configured
+extra bootnode list. Unknown config keys are errors. Parse errors identify the
+file and location without printing config contents; check the supported keys and
+types below when correcting them.
+
 Example `logex.toml`:
 
 ```toml

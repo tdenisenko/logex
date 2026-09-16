@@ -1,7 +1,7 @@
 use std::net::IpAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{ArgMatches, Parser, Subcommand, ValueEnum, parser::ValueSource};
 use serde::Deserialize;
 
 #[derive(Parser, Debug)]
@@ -42,6 +42,8 @@ pub struct Cli {
 
     /// Path to an optional TOML config file.
     ///
+    /// Explicit command-line options override file settings; unknown keys are errors.
+    ///
     /// Supported keys: data_dir, log_level, partition_target_rows, checkpoint,
     /// checkpoint_sync_url, nat, p2p_bind_ip, execution_bootnodes, execution_discv5_port,
     /// http_host, grpc_host, allow_public_grpc, dashboard_enabled, dashboard_password.
@@ -66,6 +68,80 @@ pub struct Cli {
 
     #[command(subcommand)]
     pub command: Command,
+}
+
+impl Cli {
+    /// Resolve explicit command-line values, then file values, then CLI defaults.
+    /// `matches` must be the same parse used to construct this `Cli`.
+    pub fn apply_config(&mut self, file_config: Config, matches: &ArgMatches) {
+        self.data_dir = self.data_dir.take().or(file_config.data_dir);
+        apply_file_default(
+            &mut self.log_level,
+            file_config.log_level,
+            matches,
+            "log_level",
+        );
+        apply_file_default(
+            &mut self.partition_target_rows,
+            file_config.partition_target_rows,
+            matches,
+            "partition_target_rows",
+        );
+        self.checkpoint = self.checkpoint.take().or(file_config.checkpoint);
+        self.checkpoint_sync_url = self
+            .checkpoint_sync_url
+            .take()
+            .or(file_config.checkpoint_sync_url);
+        if let Command::Sync {
+            http_host,
+            grpc_host,
+            nat,
+            p2p_bind_ip,
+            execution_bootnodes,
+            execution_discv5_port,
+            allow_public_grpc,
+            disable_dashboard,
+            dashboard_password,
+            ..
+        } = &mut self.command
+        {
+            let matches = matches
+                .subcommand_matches("sync")
+                .expect("sync options come from the same CLI parse");
+            apply_file_default(nat, file_config.nat, matches, "nat");
+            apply_file_default(http_host, file_config.http_host, matches, "http_host");
+            apply_file_default(grpc_host, file_config.grpc_host, matches, "grpc_host");
+            *p2p_bind_ip = p2p_bind_ip.or(file_config.p2p_bind_ip);
+            apply_file_default(
+                execution_bootnodes,
+                file_config.execution_bootnodes,
+                matches,
+                "execution_bootnodes",
+            );
+            apply_file_default(
+                execution_discv5_port,
+                file_config.execution_discv5_port,
+                matches,
+                "execution_discv5_port",
+            );
+            apply_file_default(
+                allow_public_grpc,
+                file_config.allow_public_grpc,
+                matches,
+                "allow_public_grpc",
+            );
+            *disable_dashboard |= file_config.dashboard_enabled == Some(false);
+            *dashboard_password = dashboard_password.take().or(file_config.dashboard_password);
+        }
+    }
+}
+
+fn apply_file_default<T>(target: &mut T, configured: Option<T>, matches: &ArgMatches, id: &str) {
+    if matches.value_source(id) != Some(ValueSource::CommandLine)
+        && let Some(value) = configured
+    {
+        *target = value;
+    }
 }
 
 pub fn default_data_dir() -> PathBuf {
@@ -337,6 +413,7 @@ pub enum IndexProfile {
 
 /// TOML config file structure.
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     #[serde(default)]
     pub data_dir: Option<PathBuf>,
@@ -369,10 +446,22 @@ pub struct Config {
 }
 
 impl Config {
-    pub fn load(path: &PathBuf) -> Result<Self, String> {
-        let contents =
-            std::fs::read_to_string(path).map_err(|e| format!("failed to read config: {e}"))?;
-        toml::from_str(&contents).map_err(|e| format!("failed to parse config: {e}"))
+    pub fn load(path: &Path) -> Result<Self, String> {
+        let contents = std::fs::read_to_string(path)
+            .map_err(|error| format!("failed to read config {path:?}: {error}"))?;
+        toml::from_str(&contents).map_err(|error: toml::de::Error| {
+            // Both Display and message() can contain configuration values.
+            // Report a location without copying password-bearing source text.
+            let location = error.span().map(|span| {
+                let (line, column) = contents.char_indices()
+                    .take_while(|(offset, _)| *offset < span.start)
+                    .fold((1_usize, 1_usize), |(line, column), (_, character)| {
+                        if character == '\n' { (line + 1, 1) } else { (line, column + 1) }
+                    });
+                format!(" at line {line}, column {column}")
+            }).unwrap_or_default();
+            format!("failed to parse config {path:?}{location}; check TOML syntax, supported keys and value types")
+        })
     }
 }
 
@@ -527,3 +616,6 @@ mod tests {
         assert!(help.contains("--to-timestamp <TO_TIMESTAMP>"));
     }
 }
+
+#[cfg(test)]
+mod config_tests;

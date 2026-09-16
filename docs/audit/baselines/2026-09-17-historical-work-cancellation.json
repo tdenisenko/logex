@@ -5,7 +5,7 @@
     "B5-05",
     "B5-06"
   ],
-  "status": "All eight local gates passed; publication/CI/merge pending",
+  "status": "Merged after all eight local gates and six exact-head CI jobs passed",
   "original_controls": {
     "passed": 1,
     "failed": 8,
@@ -105,6 +105,22 @@
     "gates/release-build.log": {
       "sha256": "31ab938db47534b158b4c3d7023b8a28c52b51f3e12994980aca5401a0e258c8",
       "bytes": 2950
+    },
+    "premerge.json": {
+      "sha256": "2c68057c6524e062ab3e846f595d87399da2b93d14c7f5504232681581f87dc5",
+      "bytes": 1894
+    },
+    "merged.json": {
+      "sha256": "a8aa83b11e06a9d0f450e708b83393ccfe4e5abdce4db0154e26f060681953f8",
+      "bytes": 240
+    },
+    "ci-watch.log": {
+      "sha256": "1bf033f910dac4e9e88c11859c3d7c7dcba1272443fd09b2305e772e1c122cd4",
+      "bytes": 22021
+    },
+    "publication-inventory.json": {
+      "sha256": "40a801ab4fa5d5a8e24e1394f5a337a8d29e595e22d5779528ca8288b3d2bf7a",
+      "bytes": 2706
     }
   },
   "benchmark": "Not run; ownership and shutdown correctness, no throughput claim",
@@ -264,5 +280,56 @@
     "passed": 1747,
     "ignored": 24,
     "groups": 25
+  },
+  "pull_request": {
+    "headRefOid": "775915db1ba67dab031820748a38ea0d49458aa0",
+    "mergeCommit": {
+      "oid": "8d7426aa0272525cb320752d7c29c59903b8dc7b"
+    },
+    "mergedAt": "2026-09-16T21:20:31Z",
+    "number": 204,
+    "state": "MERGED",
+    "url": "https://github.com/tdenisenko/logex/pull/204"
+  },
+  "ci": {
+    "head": "775915db1ba67dab031820748a38ea0d49458aa0",
+    "checks": [
+      {
+        "name": "Check",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS",
+        "detailsUrl": "https://github.com/tdenisenko/logex/actions/runs/35150688698/job/104977953451"
+      },
+      {
+        "name": "Format",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS",
+        "detailsUrl": "https://github.com/tdenisenko/logex/actions/runs/35150688698/job/104977953382"
+      },
+      {
+        "name": "Clippy",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS",
+        "detailsUrl": "https://github.com/tdenisenko/logex/actions/runs/35150688698/job/104977953349"
+      },
+      {
+        "name": "Test",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS",
+        "detailsUrl": "https://github.com/tdenisenko/logex/actions/runs/35150688698/job/104977953368"
+      },
+      {
+        "name": "macOS Test",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS",
+        "detailsUrl": "https://github.com/tdenisenko/logex/actions/runs/35150688698/job/104977953319"
+      },
+      {
+        "name": "Release Build",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS",
+        "detailsUrl": "https://github.com/tdenisenko/logex/actions/runs/35150688698/job/104977953079"
+      }
+    ]
   }
 }
