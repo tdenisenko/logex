@@ -122,7 +122,7 @@ Merged in PR #194 (`840338b3`) after 355 focused P2P tests, eight local gates an
 
 The [execution retry history review](execution-backoff-retention.md) records B4-43–45:
 bound disconnected history, preserve active deadlines and separate cooldowns from dial capacity.
-All 367 focused P2P tests pass; full gates and merge remain pending.
+All 367 focused P2P tests and eight local gates pass; CI/merge remain pending.
 
 ## Baseline findings
 

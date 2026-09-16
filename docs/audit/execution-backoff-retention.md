@@ -92,6 +92,8 @@ No independent review, full-node connectivity test, Mac mini work or external
 volume access is claimed. Outgoing response retention and other audit batches
 remain open.
 
-Full workspace gates and PR/CI/merge are pending.
+All eight local gates pass on `38ee2c73`: vendor integrity, workspace and
+patched-vendor formatting, all-target check, strict Clippy, 1,636 workspace tests
+(24 ignored), documentation tests and release build. PR/CI/merge remain pending.
 
 [Validation record](baselines/2026-09-16-execution-backoff-retention.json).
