@@ -126,9 +126,10 @@ formatted. CI also validates the systemd template without installation. Initial 
 passed on `099ca405` (1,827 tests / 24 ignored). Initial CI on `e6c0b08a` passed
 five jobs and all ten Linux mount/template controls, but failed fixture cleanup:
 the cleanup required literal absolute UUID symlink targets, while device-manager
-links may use relative targets. Cleanup now verifies the resolved owned device,
-always attempts owned-image detach, and retains diagnostic tracebacks. The initial
-report explicitly records incomplete cleanup; it is not treated as passing CI.
+links may use relative targets. A second run exposed concurrent UUID-link creation by udev; its images and root
+were cleaned successfully. The harness now leaves UUID links entirely to udev,
+waits for device events to settle, and verifies the kernel image associations
+before removal. Both failed runs remain recorded; neither is treated as passing CI.
 
 Final review also reproduced a same-poll supervision gap on `e6c0b08a`: a bounded
 synchronous engine operation prevents its sibling async health future from
@@ -140,10 +141,10 @@ first-reason retention, a blocked callback's terminal deadline and nonzero exit
 even if teardown begins first. A cleanup regression covers remaining owner teardown
 inside the existing watchdog. The ordinary unconfigured health path still uses
 its existing async timer; that broader runtime finding remains on the roadmap.
-All eight local gates pass on corrected source `de1a42f2`: vendor verification,
+All eight local Rust gates pass on corrected source `de1a42f2`: vendor verification,
 workspace/patched-vendor formatting, check, strict Clippy, 1,829 workspace tests
-(24 ignored), documentation tests and release build. New exact-head CI and merge
-remain pending.
+(24 ignored), documentation tests and release build. Only the Linux fixture controller changed afterward; its syntax/help controls
+pass, and new exact-head CI and merge remain pending.
 
 The launchd plist passed syntax validation and its fields were checked against
 the installed platform manual. Both templates restart with backoff and logs outside

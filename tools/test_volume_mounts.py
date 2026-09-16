@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Exercise volume protection using newly created Linux loopback fixtures only.
 
-Requires a disposable Linux CI/staging host with noninteractive sudo for loopback
-attachment and mount operations. Filesystem formatting targets owned image files,
-never a device. No service or existing data directory is opened.
+Requires a disposable Linux CI/staging host with udev and noninteractive sudo for
+loopback attachment and mount operations. Filesystem formatting targets owned
+image files, never a device. No service or existing data directory is opened.
 """
 
 import argparse
@@ -46,7 +46,6 @@ class Image:
         self.device = None
         self.mount = None
         self.link = Path("/dev/disk/by-uuid") / self.uuid
-        self.created_link = False
         with self.path.open("xb") as image:
             image.truncate(size)
         # The exact owned regular file is the formatting target.
@@ -56,16 +55,11 @@ class Image:
     def connect(self):
         self.device = privileged("losetup", "--find", "--show", str(self.path)).stdout.decode().strip()
         self.verify_device()
-        if not self.link.parent.is_dir():
-            raise RuntimeError("fixture host needs /dev/disk/by-uuid")
-        if not os.path.lexists(self.link):
-            # CI loop devices do not always trigger a udev filesystem probe.
-            # Add only this fixture's fresh UUID after verifying it on the device.
-            actual = privileged("blkid", "-s", "UUID", "-o", "value", self.device).stdout.decode().strip()
-            assert actual == self.uuid
-            # Record intent before the command: a timeout can follow its effect.
-            self.created_link = True
-            privileged("ln", "-s", self.device, str(self.link))
+        # The device manager owns these links. Wait for its loop-device event;
+        # never race it by creating, replacing or removing a UUID link ourselves.
+        privileged("udevadm", "settle", "--timeout=15")
+        actual = privileged("blkid", "-s", "UUID", "-o", "value", self.device).stdout.decode().strip()
+        assert actual == self.uuid
         assert os.stat(self.link).st_rdev == os.stat(self.device).st_rdev
 
     def verify_device(self):
@@ -102,25 +96,18 @@ class Image:
         self.device = devices[0] if devices else None
         if self.device:
             self.verify_device()
-            try:
-                if self.created_link and os.path.lexists(self.link):
-                    # udev can replace our absolute spelling with ../../loopN.
-                    # Compare the resolved verified device, not symlink text.
-                    if not self.link.is_symlink() or self.link.resolve() != Path(self.device).resolve():
-                        raise RuntimeError(f"fixture UUID link no longer resolves to {self.device}")
-                    privileged("rm", "-f", "--", str(self.link))
-                    self.created_link = False
-            finally:
-                # Even a UUID-link cleanup diagnostic must release our image.
-                privileged("losetup", "--detach", self.device)
-                # Detach can request deferred autoclear. Never delete the backing
-                # file until the kernel actually releases our exact image.
-                deadline = time.monotonic() + 10
-                while loop_devices(self.path):
-                    if time.monotonic() >= deadline:
-                        raise RuntimeError("owned image remains attached after detach")
-                    time.sleep(0.1)
-                self.device = None
+            privileged("losetup", "--detach", self.device)
+            # Detach can request deferred autoclear. Never delete the backing
+            # file until the kernel actually releases our exact image.
+            deadline = time.monotonic() + 10
+            while loop_devices(self.path):
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("owned image remains attached after detach")
+                time.sleep(0.1)
+            self.device = None
+            privileged("udevadm", "settle", "--timeout=15")
+            if os.path.lexists(self.link):
+                raise RuntimeError(f"device manager retained fixture UUID link {self.link}")
 
 
 def response(process):

@@ -1,5 +1,5 @@
 {
-  "status": "All eight corrected-source local gates pass; new exact-head CI and merge pending",
+  "status": "All local Rust gates pass; Linux fixture device-manager synchronization updated; exact-head CI and merge pending",
   "base": {
     "commit": "0b611c2df1899abf4d2a21ab8113285ee96a200e"
   },
@@ -259,9 +259,21 @@
     "record-final-gates.py": {
       "bytes": 3171,
       "sha256": "253b932f9973414eda4ab993d6e7e4af50b4aa12dbad84acf31917e0be3c20e4"
+    },
+    "ci-second-failure.log": {
+      "bytes": 10845,
+      "sha256": "76143ae9588e77fe6d16d211500b2c0376338c3f82f4f06b98a6bff5d7d43ee4"
+    },
+    "ci-linux-second/volume-mount-results.json": {
+      "bytes": 747,
+      "sha256": "27c87f9230161ebff46b35c55dd74c8f648552abdb638d06bbc6b745af33fa8d"
+    },
+    "linux-fixture-help.log": {
+      "bytes": 479,
+      "sha256": "12c2f290d14e6e7ca45185941c9a968cf95a0ea4e5f21fa5b12c57e6a8692573"
     }
   },
-  "linux_fixture_sha256": "fde870a0cfec85aa5228bb460e6b12ce70052f7f400f497d9e2228f6cb18cf14",
+  "linux_fixture_sha256": "9118a70746ea5a3de47534afc9aa5fcf69ff6966bb51118bee1ad7ff99f947ae",
   "initial_validation": {
     "commit": "099ca40502c5411523dfe7d831ae3bc51ffbb066",
     "rustc": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
@@ -644,5 +656,35 @@
     "ignored": 24,
     "groups": 27
   },
-  "initial_validation_followup": "After local Rust gates, the Linux fixture verifier adds --recursive-errors=no so warnings in the reviewed systemd unit fail CI. Rust source unchanged; actual fixture/template validation is an exact-head Linux CI gate."
+  "initial_validation_followup": "After local Rust gates, the Linux fixture verifier adds --recursive-errors=no so warnings in the reviewed systemd unit fail CI. Rust source unchanged; actual fixture/template validation is an exact-head Linux CI gate.",
+  "second_linux_mounts": {
+    "results": [
+      {
+        "case": "systemd template validation",
+        "passed": true,
+        "diagnostic": ""
+      },
+      {
+        "case": "missing mount",
+        "passed": true,
+        "diagnostic": "Error: Os { code: 2, kind: NotFound, message: \"No such file or directory\" }\n"
+      }
+    ],
+    "errors": [
+      "RuntimeError(\"['sudo', '-n', 'ln', '-s', '/dev/loop0', '/dev/disk/by-uuid/8bc5c91a-bf4c-4fb2-8a0e-db04c7053627']: ln: failed to create symbolic link '/dev/disk/by-uuid/8bc5c91a-bf4c-4fb2-8a0e-db04c7053627': File exists\\n\")"
+    ],
+    "fixtures_detached": true,
+    "fixture_root_removed": true,
+    "fixture_root": "/tmp/logex-volume-mounts-z11byqrj",
+    "binary_sha256": "f67eede630f8716febdd40a2b4796fe8c7b83f4696a9c9295128ecf9c5353288"
+  },
+  "second_ci": {
+    "run": 35163764502,
+    "head": "827b9aa1c7936c136efd6ba21257e1e34fc5a71a",
+    "passed_jobs": 5,
+    "failed_job": "Test: fixture UUID link creation raced udev",
+    "fixtures_detached": true,
+    "fixture_root_removed": true
+  },
+  "fixture_followup": "Delegate UUID links entirely to udev and wait for device events to settle; no manual creation/removal. Rust sources remain identical to the final local gate source de1a42f2. Python syntax and --help pass; actual lifecycle verification remains required in CI."
 }
