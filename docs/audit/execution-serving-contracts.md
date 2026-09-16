@@ -124,7 +124,9 @@ Cleanup removed the independent range atomics/inner wrapper, latest-only remembe
 state, ambiguous constant-incomplete flag and head-based advertisement fallback.
 Existing wire and cache APIs remain. Independent source review found no behavioral
 defect; its stale soft-limit comment was corrected. Vendor verification passes for
-all 156 upstream files across three crates. Full local gates and CI/merge are pending.
+all 156 upstream files across three crates. All eight local gates pass on `7d5d826a`: vendor integrity, workspace and
+patched-vendor formatting, all-target check, strict Clippy, 1,577 workspace tests
+(23 ignored), doc tests and the release node build. CI and merge remain pending.
 
 [Validation record](baselines/2026-09-16-execution-serving-contracts.json).
 No Mac mini work or new benchmark was performed. Its earlier cleanup remains complete.

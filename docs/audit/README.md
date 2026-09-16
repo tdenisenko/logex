@@ -94,7 +94,7 @@ cleanup, merged in PR #187 (`02a812e4`) after all local and CI gates.
 
 The [execution serving review](execution-serving-contracts.md) records B4-28–32:
 truthful empty-cache availability, coherent periodic range announcements and
-progressing ETH70 receipt pagination. Focused tests pass; full gates/merge pending.
+progressing ETH70 receipt pagination. All 266 focused controls and eight local gates pass; CI and merge are pending.
 
 ## Baseline findings
 
