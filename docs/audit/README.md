@@ -130,7 +130,11 @@ Merged in PR #196 (`cc1bb889`) after 372 focused P2P tests, eight local gates an
 
 The [historical fetch supervision review](historical-fetch-supervision.md) records B5-01:
 report workers that finish without a result while preserving queued successes and cancellation.
-All 552 focused sync tests and eight local gates pass; CI/merge remain pending.
+Merged in PR #197 (`f6f05acc`) after 552 focused sync tests, eight local gates and six CI jobs.
+
+The [runtime failure-exit review](runtime-failure-exit.md) records B10-01/B10-02:
+preserve failure exit status, bound cleanup after engine/disk failures and tolerate interrupted telemetry updates.
+All 124 focused node tests and eight local gates pass; CI/merge remain pending.
 
 ## Baseline findings
 
