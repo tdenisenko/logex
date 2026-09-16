@@ -114,7 +114,11 @@ Merged in PR #192 (`2e547fc9`) after 294 focused tests, eight local gates and si
 
 The [peer rehabilitation review](execution-peer-rehabilitation.md) records B4-40–41:
 retain longer active backoffs and admit restart hints after quarantine expiry.
-All 301 focused tests and eight local gates pass; CI/merge remain pending.
+Merged in PR #193 (`bedfed0d`) after 301 focused tests, eight local gates and six CI jobs.
+
+The [execution bandwidth retention review](execution-bandwidth-retention.md) records B4-42:
+bounded shared telemetry buckets with explicit recent-rate precision.
+All 355 focused P2P tests pass; full gates and merge remain pending.
 
 ## Baseline findings
 

@@ -1,0 +1,53 @@
+{
+  "status": "Focused checks pass; full gates and PR/CI/merge pending",
+  "branch": "audit/execution-retained-state",
+  "baseline_commit": "bedfed0d1b87b380d2631926810c7695b7695d55",
+  "findings": [
+    "B4-42"
+  ],
+  "original_controls": {
+    "passed": 0,
+    "failed": 2,
+    "production_unchanged": true
+  },
+  "precision": {
+    "rate_window_seconds": 15,
+    "bucket_milliseconds": 250,
+    "max_retained_buckets": 61,
+    "expiry_delay": "less than 250 ms; not a percentage-error guarantee",
+    "cumulative_totals": "same u64 saturation; no bucketing approximation"
+  },
+  "review": "Implementer source review only",
+  "limitations": [
+    "No timing or ingestion-throughput measurement",
+    "Other network retained-state and response allocations remain open"
+  ],
+  "evidence": {
+    "original-source.json": {
+      "sha256": "8c1af5f9a030e290e28a85f78ab6572d05299840fd199c0edd33f8ceb52ab696",
+      "bytes": 362
+    },
+    "original-controls.diff": {
+      "sha256": "9fa8a79968e2a447f06c38737f020bdead269ffbb9824027788f1629dee8850e",
+      "bytes": 1597
+    },
+    "original-bandwidth.log": {
+      "sha256": "e2fd74308a0ab479828921aeac09a5fab803a33420abfd39d103f608e07b4fcc",
+      "bytes": 1844
+    },
+    "focused-bandwidth.log": {
+      "sha256": "225adc0ae46bf590d16c762d28f4aa9db62e529ef168bbe76bc5c6b2cd692923",
+      "bytes": 38693
+    },
+    "focused-final.log": {
+      "sha256": "e59bd42d3b83f91c5d10adccf68afe19436ceb5d5f344c8cc1645f3f5f9443b7",
+      "bytes": 38768
+    }
+  },
+  "focused_final": {
+    "passed": 355,
+    "failed": 0,
+    "ignored": 1,
+    "new_controls": 7
+  }
+}
