@@ -77,7 +77,11 @@ The previous detached spawn sites, completion-losing drain loops and store-speci
 watchdog helper names are removed. Request queues, worker count, peer scoring,
 cache policy, ingestion/storage formats and successful-query behavior are unchanged.
 The monitor adds constant ownership state and one idle watchdog thread; no measured
-throughput claim is made. Full workspace gates and PR/CI/merge are pending.
+throughput claim is made. All eight initial local gates pass on `c7e3e112`, with 1,596 workspace tests
+(24 ignored). Review then strengthened the owner-drop control to await explicit
+completion with a deadline instead of relying on a single scheduler yield, and
+covered both activity-selection branches with DNS present/absent. Production
+code is unchanged; final validation and PR/CI/merge follow.
 
 ## Remaining scope
 

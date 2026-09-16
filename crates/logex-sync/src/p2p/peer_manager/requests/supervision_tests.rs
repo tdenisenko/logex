@@ -1,27 +1,31 @@
 //! Local lifecycle controls; no connection, discovery or remote service is started.
 use super::limit_tests::Fixture;
 use super::*;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 async fn assert_closed_stream_is_retired(network_stream: bool) {
-    let mut fixture = Fixture::new().await;
-    if network_stream {
-        fixture.manager.network_events = Box::pin(futures_util::stream::empty());
-    } else {
-        fixture.manager.discovery_events = Box::pin(futures_util::stream::empty());
+    for dns_enabled in [false, true] {
+        let mut fixture = Fixture::new().await;
+        if dns_enabled {
+            fixture.manager.dns_discovery_events = Some(Box::pin(futures_util::stream::pending()));
+        }
+        if network_stream {
+            fixture.manager.network_events = Box::pin(futures_util::stream::empty());
+        } else {
+            fixture.manager.discovery_events = Box::pin(futures_util::stream::empty());
+        }
+        assert!(
+            !fixture
+                .manager
+                .wait_for_activity(Duration::from_secs(1))
+                .await
+        );
+        let waiting = fixture.manager.wait_for_activity(Duration::from_secs(1));
+        tokio::pin!(waiting);
+        assert!(
+            futures_util::poll!(&mut waiting).is_pending(),
+            "an exhausted stream must not repeatedly bypass the peer-wait timer"
+        );
     }
-    assert!(
-        !fixture
-            .manager
-            .wait_for_activity(Duration::from_secs(1))
-            .await
-    );
-    let waiting = fixture.manager.wait_for_activity(Duration::from_secs(1));
-    tokio::pin!(waiting);
-    assert!(
-        futures_util::poll!(&mut waiting).is_pending(),
-        "an exhausted stream must not repeatedly bypass the peer-wait timer"
-    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -34,11 +38,13 @@ async fn supervision_closed_discovery_stream_is_retired() {
     assert_closed_stream_is_retired(false).await;
 }
 
-struct ExitMarker(Arc<AtomicBool>);
+struct ExitMarker(Option<tokio::sync::oneshot::Sender<()>>);
 
 impl Drop for ExitMarker {
     fn drop(&mut self) {
-        self.0.store(true, Ordering::SeqCst);
+        if let Some(exited) = self.0.take() {
+            let _ = exited.send(());
+        }
     }
 }
 
@@ -46,15 +52,15 @@ impl Drop for ExitMarker {
 async fn supervision_dropping_manager_stops_owned_background_tasks() {
     let mut fixture = Fixture::new().await;
     let failure = fixture.manager.task_failure_receiver();
-    let mut markers = Vec::new();
+    let mut completions = Vec::new();
     let mut aborts = Vec::new();
     for slot in [
         &mut fixture.manager.network_task,
         &mut fixture.manager.eth_request_task,
         &mut fixture.manager.dns_discovery_task,
     ] {
-        let exited = Arc::new(AtomicBool::new(false));
-        let marker = ExitMarker(Arc::clone(&exited));
+        let (exited, completion) = tokio::sync::oneshot::channel();
+        let marker = ExitMarker(Some(exited));
         let (started, ready) = tokio::sync::oneshot::channel();
         let task = fixture
             .manager
@@ -67,11 +73,19 @@ async fn supervision_dropping_manager_stops_owned_background_tasks() {
         aborts.push(task.abort_handle());
         *slot = Some(task);
         ready.await.unwrap();
-        markers.push(exited);
+        completions.push(completion);
     }
     drop(fixture);
-    tokio::task::yield_now().await;
-    let all_stopped = markers.iter().all(|marker| marker.load(Ordering::SeqCst));
+    // Cancellation is scheduled asynchronously; observe completion instead of
+    // assuming that a single scheduler yield polls every worker.
+    let all_stopped = matches!(
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            futures_util::future::try_join_all(completions),
+        )
+        .await,
+        Ok(Ok(_))
+    );
     // Clean up even when the original implementation leaves tasks detached.
     for abort in aborts {
         abort.abort();
