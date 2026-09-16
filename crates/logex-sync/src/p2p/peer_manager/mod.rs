@@ -97,6 +97,8 @@ const SATURATED_PEER_RETRY_DELAY: Duration = Duration::from_secs(60);
 const USELESS_PEER_GRACE_PERIOD: Duration = Duration::from_secs(5);
 const SUBMITTED_DIAL_SUPPRESSION_INTERVAL: Duration = Duration::from_secs(15);
 const MAX_TRACKED_PENDING: usize = 4096;
+// Disconnected retry history is a scheduling hint, separate from active sessions.
+const MAX_RETAINED_PEER_BACKOFFS: usize = 4096;
 const MAX_CONSECUTIVE_TIMEOUTS: u32 = 8;
 const OUTBOUND_DIAL_RATIO: usize = 3;
 const MAX_CONCURRENT_OUTBOUND_DIALS: usize = 96;
@@ -155,8 +157,10 @@ pub struct PeerManager {
     request_cursor: usize,
     pending: HashMap<PeerId, NodeRecord>,
     pending_dials: HashMap<PeerId, SubmittedDial>,
+    disconnected_retries: HashMap<PeerId, DisconnectedRetry>,
     saturated_peers: HashMap<PeerId, Instant>,
-    receipt_quarantined_peers: HashMap<PeerId, Instant>,
+    /// Quarantine deadlines for disconnected peers; active deadlines live in ActivePeer.
+    receipt_quarantine_history: HashMap<PeerId, Instant>,
     productive: VecDeque<NodeRecord>,
     known_peers: Vec<NodeRecord>,
     configured_peer_ids: HashSet<PeerId>,
@@ -200,6 +204,12 @@ struct ExecutionPeerSessionMetrics {
 struct SubmittedDial {
     node: NodeRecord,
     submitted_at: Instant,
+}
+
+#[derive(Clone, Copy)]
+struct DisconnectedRetry {
+    node: NodeRecord,
+    retry_at: Instant,
 }
 
 #[derive(Default)]
@@ -594,8 +604,9 @@ impl PeerManager {
             request_cursor: 0,
             pending: HashMap::new(),
             pending_dials: HashMap::new(),
+            disconnected_retries: HashMap::new(),
             saturated_peers: HashMap::new(),
-            receipt_quarantined_peers: HashMap::new(),
+            receipt_quarantine_history: HashMap::new(),
             productive,
             known_peers,
             configured_peer_ids,
@@ -738,15 +749,27 @@ impl PeerManager {
         self.fork_filter.validate(fork_id).is_ok()
     }
 
-    fn recently_submitted(&self, peer_id: PeerId, now: Instant) -> bool {
+    fn dial_is_suppressed(&self, peer_id: PeerId, now: Instant) -> bool {
         self.pending_dials.get(&peer_id).is_some_and(|submitted| {
             now.duration_since(submitted.submitted_at) < SUBMITTED_DIAL_SUPPRESSION_INTERVAL
-        })
+        }) || self
+            .disconnected_retries
+            .get(&peer_id)
+            .is_some_and(|retry| retry.retry_at > now)
     }
 
     fn prune_submitted_dials(&mut self, now: Instant) {
-        let expired_nodes = take_expired_submitted_dials(&mut self.pending_dials, now);
+        let mut expired_nodes = take_expired_submitted_dials(&mut self.pending_dials, now);
         let expired = expired_nodes.len();
+        self.disconnected_retries.retain(|_, retry| {
+            if retry.retry_at > now {
+                true
+            } else {
+                expired_nodes.push(retry.node);
+                false
+            }
+        });
+        let expired_cooldowns = expired_nodes.len() - expired;
         let mut requeued = 0usize;
         for node in expired_nodes {
             if self.peers.contains_key(&node.id)
@@ -761,17 +784,18 @@ impl PeerManager {
                 requeued = requeued.saturating_add(1);
             }
         }
-        if expired > 0 {
+        if expired > 0 || expired_cooldowns > 0 {
             self.session_metrics.submitted_dial_expirations = self
                 .session_metrics
                 .submitted_dial_expirations
                 .saturating_add(expired as u64);
             trace!(
                 expired_dials = expired,
+                expired_cooldowns,
                 requeued_dials = requeued,
                 pending_dials = self.pending_dials.len(),
                 pending_peers = self.pending.len(),
-                "expired submitted execution peer dials"
+                "expired execution peer dial and retry delays"
             );
         }
     }

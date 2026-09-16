@@ -27,8 +27,10 @@ extend a pause; it cannot shorten one. Successful progress can rehabilitate a
 peer immediately without waiting for the old deadline.
 
 Session admission inherits only a quarantine deadline that remains in the future.
-An active quarantine still excludes the peer from restart seeds. An expired one
-no longer depends on which event-drain/pruning path ran first. Existing periodic
+An active quarantine prevents admission of a newly reachable restart hint. It
+does not remove an already productive hint after a short transport failure;
+the separate incomplete-service quarantine removes that hint explicitly. An
+expired quarantine no longer depends on which event-drain/pruning path ran first. Existing periodic
 map cleanup remains responsible for removing stale entries; no whole-map scan
 is added to session admission.
 

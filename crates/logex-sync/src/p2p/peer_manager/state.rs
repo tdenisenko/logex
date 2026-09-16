@@ -146,6 +146,12 @@ impl PeerManager {
 
     /// Snapshot of execution-network peer retention and dial state for status/UI metrics.
     pub fn execution_network_status(&self) -> ExecutionNetworkStatus {
+        let now = Instant::now();
+        let mut receipt_quarantined_peers = self
+            .receipt_quarantine_history
+            .values()
+            .filter(|until| **until > now)
+            .count();
         let mut client_counts = ExecutionClientFamilyCounts::default();
         let mut body_request_ready_peers = 0usize;
         let mut receipt_request_ready_peers = 0usize;
@@ -163,6 +169,11 @@ impl PeerManager {
         let mut serving_ipv4_peers = 0usize;
         let mut serving_ipv6_peers = 0usize;
         for peer in self.peers.values() {
+            let receipts_quarantined = peer
+                .receipt_quarantined_until
+                .is_some_and(|until| until > now);
+            receipt_quarantined_peers =
+                receipt_quarantined_peers.saturating_add(usize::from(receipts_quarantined));
             client_counts.record(&peer.client_version, peer.is_serving);
             if peer.remote_addr.ip().is_ipv4() {
                 connected_ipv4_peers = connected_ipv4_peers.saturating_add(1);
@@ -194,7 +205,7 @@ impl PeerManager {
             }
             if receipt_paused {
                 receipt_request_paused_peers = receipt_request_paused_peers.saturating_add(1);
-            } else if !peer_receipts_are_quarantined(peer) {
+            } else if !receipts_quarantined {
                 receipt_request_ready_peers = receipt_request_ready_peers.saturating_add(1);
             }
             active_body_requests = active_body_requests
@@ -249,7 +260,7 @@ impl PeerManager {
             productive_peers: self.productive.len(),
             known_peers: self.known_peers.len(),
             saturated_peers: self.saturated_peers.len(),
-            receipt_quarantined_peers: self.receipt_quarantined_peers.len(),
+            receipt_quarantined_peers,
             body_request_ready_peers,
             receipt_request_ready_peers,
             body_request_paused_peers,
@@ -600,7 +611,7 @@ impl PeerManager {
     ) {
         self.reset_peer_timeout(peer_id);
         if matches!(kind, PeerRequestKind::Receipts) {
-            self.receipt_quarantined_peers.remove(&peer_id);
+            self.receipt_quarantine_history.remove(&peer_id);
         }
         self.clear_peer_request_pause(peer_id, kind);
         if blocks == 0 || elapsed.is_zero() {
@@ -708,7 +719,7 @@ impl PeerManager {
 
     pub(super) fn peer_receipts_quarantined(&self, peer_id: PeerId) -> bool {
         let now = Instant::now();
-        self.receipt_quarantined_peers
+        self.receipt_quarantine_history
             .get(&peer_id)
             .is_some_and(|until| *until > now)
             || self
@@ -812,12 +823,7 @@ impl PeerManager {
     }
 
     pub(super) fn remember_productive(&mut self, node: NodeRecord) -> bool {
-        let now = Instant::now();
-        if self
-            .receipt_quarantined_peers
-            .get(&node.id)
-            .is_some_and(|until| *until > now)
-        {
+        if self.peer_receipts_quarantined(node.id) {
             return false;
         }
 
@@ -883,12 +889,25 @@ impl PeerManager {
     }
 
     fn set_receipt_quarantine(&mut self, peer_id: PeerId, duration: Duration) {
-        let quarantined_until = Instant::now() + duration;
-        self.receipt_quarantined_peers
-            .insert(peer_id, quarantined_until);
+        let now = Instant::now();
+        let quarantined_until = now + duration;
         if let Some(peer) = self.peers.get_mut(&peer_id) {
-            peer.receipt_quarantined_until = Some(quarantined_until);
+            peer.receipt_quarantined_until = Some(
+                peer.receipt_quarantined_until
+                    .map_or(quarantined_until, |previous| {
+                        previous.max(quarantined_until)
+                    }),
+            );
+            self.receipt_quarantine_history.remove(&peer_id);
             peer.receipt_blocks_per_sec = 0.0;
+        } else {
+            retain_peer_backoff(
+                &mut self.receipt_quarantine_history,
+                peer_id,
+                quarantined_until,
+                now,
+                MAX_RETAINED_PEER_BACKOFFS,
+            );
         }
     }
 
@@ -1084,6 +1103,50 @@ fn decrease_request_limit(current: usize) -> usize {
         .saturating_mul(2)
         .div_ceil(3)
         .clamp(REQUEST_LIMIT_MIN, REQUEST_LIMIT_MAX)
+}
+
+/// Keep finite disconnected scheduling history. Expiry precedes pressure eviction;
+/// active-session restrictions must not be stored exclusively in this cache.
+pub(super) fn retain_peer_backoff(
+    history: &mut HashMap<PeerId, Instant>,
+    peer_id: PeerId,
+    until: Instant,
+    now: Instant,
+    limit: usize,
+) {
+    let until = history
+        .get(&peer_id)
+        .map_or(until, |previous| (*previous).max(until));
+    insert_bounded_backoff(history, peer_id, until, now, limit, |deadline| *deadline);
+}
+
+pub(super) fn insert_bounded_backoff<T>(
+    history: &mut HashMap<PeerId, T>,
+    peer_id: PeerId,
+    value: T,
+    now: Instant,
+    limit: usize,
+    deadline: impl Fn(&T) -> Instant,
+) {
+    if deadline(&value) <= now || limit == 0 {
+        return;
+    }
+    if !history.contains_key(&peer_id) {
+        if history.len() >= limit {
+            history.retain(|_, value| deadline(value) > now);
+        }
+        while history.len() >= limit {
+            let Some(oldest) = history
+                .iter()
+                .min_by_key(|(_, value)| deadline(value))
+                .map(|(id, _)| *id)
+            else {
+                break;
+            };
+            history.remove(&oldest);
+        }
+    }
+    history.insert(peer_id, value);
 }
 
 pub(super) fn seed_productive_peers(known_peers: &[NodeRecord]) -> VecDeque<NodeRecord> {

@@ -212,7 +212,6 @@ async fn partial_progress_restores_role_state(kind: PeerRequestKind) {
         PeerRequestKind::Receipts => {
             peer.receipt_paused_until = Some(pause);
             peer.receipt_quarantined_until = Some(pause);
-            fixture.manager.receipt_quarantined_peers.insert(id, pause);
         }
         PeerRequestKind::Headers => unreachable!(),
     }
@@ -234,7 +233,7 @@ async fn partial_progress_restores_role_state(kind: PeerRequestKind) {
     assert!(peer.body_paused_until.is_none());
     assert!(peer.receipt_paused_until.is_none());
     assert!(peer.receipt_quarantined_until.is_none());
-    assert!(!fixture.manager.receipt_quarantined_peers.contains_key(&id));
+    assert!(!fixture.manager.receipt_quarantine_history.contains_key(&id));
     assert_eq!(fixture.manager.peer_order, order_before);
     assert_eq!(
         request_limit(&fixture.manager, id, kind),
@@ -267,7 +266,7 @@ async fn partial_progress_body_restores_prior_failure_state_once() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn partial_progress_receipts_restore_both_quarantines_once() {
+async fn partial_progress_receipts_restore_session_quarantine_once() {
     partial_progress_restores_role_state(PeerRequestKind::Receipts).await;
 }
 

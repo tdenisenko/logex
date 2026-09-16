@@ -90,7 +90,7 @@ impl PeerManager {
     pub(super) fn queue_known_peers(&mut self) -> usize {
         let now = Instant::now();
         self.prune_saturated_peers(now);
-        self.prune_receipt_quarantined_peers(now);
+        self.prune_receipt_quarantine_history(now);
         let (queued, cursor) = state::scan_known_hint_indices(
             self.known_peers.len(),
             self.known_scan_cursor,
@@ -102,7 +102,7 @@ impl PeerManager {
                     || self.peers.contains_key(&peer.id)
                     || self.pending.contains_key(&peer.id)
                     || self.recently_saturated(peer.id, now)
-                    || self.recently_submitted(peer.id, now)
+                    || self.dial_is_suppressed(peer.id, now)
                 {
                     return false;
                 }
@@ -140,7 +140,7 @@ impl PeerManager {
         self.drain_dns_discovery_events_now();
         let now = Instant::now();
         self.prune_saturated_peers(now);
-        self.prune_receipt_quarantined_peers(now);
+        self.prune_receipt_quarantine_history(now);
         self.prune_stale_nonserving_peers();
         self.fill_open_peer_slots();
     }
@@ -176,7 +176,7 @@ impl PeerManager {
                     && node.tcp_port > 0
                     && !self.peers.contains_key(&node.id)
                     && !self.recently_saturated(node.id, now)
-                    && !self.recently_submitted(node.id, now)
+                    && !self.dial_is_suppressed(node.id, now)
             })
             .collect();
         let candidates = select_dial_candidates(candidates, &self.productive, dial_budget);
@@ -508,14 +508,21 @@ impl PeerManager {
         let (record, remote_record_is_dialable) = session_node_record(
             self.pending.remove(&info.peer_id),
             self.pending_dials.remove(&info.peer_id),
+            self.disconnected_retries
+                .remove(&info.peer_id)
+                .map(|retry| retry.node),
             info.remote_addr,
             info.peer_id,
         );
         let was_productive = self.productive.iter().any(|peer| peer.id == info.peer_id);
         let receipt_quarantined_until = self
-            .receipt_quarantined_peers
-            .get(&info.peer_id)
-            .copied()
+            .receipt_quarantine_history
+            .remove(&info.peer_id)
+            .max(
+                self.peers
+                    .get(&info.peer_id)
+                    .and_then(|peer| peer.receipt_quarantined_until),
+            )
             .filter(|until| *until > Instant::now());
         let should_remember_reachable = is_restart_seed_peer(
             remote_record_is_dialable,
@@ -637,8 +644,9 @@ impl PeerManager {
         self.peers.remove(&peer_id);
         self.pending.remove(&peer_id);
         self.pending_dials.remove(&peer_id);
+        self.disconnected_retries.remove(&peer_id);
         self.saturated_peers.remove(&peer_id);
-        self.receipt_quarantined_peers.remove(&peer_id);
+        self.receipt_quarantine_history.remove(&peer_id);
         self.peer_order.retain(|id| *id != peer_id);
         self.rebalance_request_cursor();
         let productive_before = self.productive.len();
@@ -652,6 +660,18 @@ impl PeerManager {
         self.pending.remove(&peer_id);
         self.pending_dials.remove(&peer_id);
         let peer = self.peers.remove(&peer_id);
+        if let Some(until) = peer
+            .as_ref()
+            .and_then(|peer| peer.receipt_quarantined_until)
+        {
+            state::retain_peer_backoff(
+                &mut self.receipt_quarantine_history,
+                peer_id,
+                until,
+                Instant::now(),
+                MAX_RETAINED_PEER_BACKOFFS,
+            );
+        }
         if let Some(peer) = peer.as_ref()
             && peer.is_serving
             && !peer_receipts_are_quarantined(peer)
@@ -677,12 +697,24 @@ impl PeerManager {
             return;
         }
 
-        self.pending_dials.insert(
+        let retry_at = self
+            .disconnected_retries
+            .get(&peer.remote_record.id)
+            .map_or(now + SUBMITTED_DIAL_SUPPRESSION_INTERVAL, |previous| {
+                previous
+                    .retry_at
+                    .max(now + SUBMITTED_DIAL_SUPPRESSION_INTERVAL)
+            });
+        state::insert_bounded_backoff(
+            &mut self.disconnected_retries,
             peer.remote_record.id,
-            SubmittedDial {
+            DisconnectedRetry {
                 node: peer.remote_record,
-                submitted_at: now,
+                retry_at,
             },
+            now,
+            MAX_RETAINED_PEER_BACKOFFS,
+            |retry| retry.retry_at,
         );
         self.remember_pending(peer.remote_record);
     }
@@ -814,10 +846,17 @@ impl PeerManager {
     }
 
     pub(super) fn backoff_saturated_peer(&mut self, peer_id: PeerId) {
-        let until = Instant::now() + SATURATED_PEER_RETRY_DELAY;
-        self.saturated_peers.insert(peer_id, until);
+        let now = Instant::now();
+        state::retain_peer_backoff(
+            &mut self.saturated_peers,
+            peer_id,
+            now + SATURATED_PEER_RETRY_DELAY,
+            now,
+            MAX_RETAINED_PEER_BACKOFFS,
+        );
         self.pending.remove(&peer_id);
         self.pending_dials.remove(&peer_id);
+        self.disconnected_retries.remove(&peer_id);
         self.network.remove_peer(peer_id, PeerKind::Basic);
     }
 
@@ -831,8 +870,8 @@ impl PeerManager {
         self.saturated_peers.retain(|_, until| *until > now);
     }
 
-    pub(super) fn prune_receipt_quarantined_peers(&mut self, now: Instant) {
-        self.receipt_quarantined_peers
+    pub(super) fn prune_receipt_quarantine_history(&mut self, now: Instant) {
+        self.receipt_quarantine_history
             .retain(|_, until| *until > now);
     }
 
@@ -974,10 +1013,14 @@ fn productive_peer_priority(productive: &VecDeque<NodeRecord>, peer_id: PeerId) 
 fn session_node_record(
     pending_record: Option<NodeRecord>,
     submitted_dial: Option<SubmittedDial>,
+    disconnected_record: Option<NodeRecord>,
     remote_addr: std::net::SocketAddr,
     peer_id: PeerId,
 ) -> (NodeRecord, bool) {
-    if let Some(node) = pending_record.or_else(|| submitted_dial.map(|dial| dial.node)) {
+    if let Some(node) = pending_record
+        .or_else(|| submitted_dial.map(|dial| dial.node))
+        .or(disconnected_record)
+    {
         return (node, true);
     }
 
@@ -1103,7 +1146,7 @@ mod tests {
         );
         let remote_addr = SocketAddr::new(Ipv6Addr::LOCALHOST.into(), 40303);
 
-        let (record, dialable) = session_node_record(Some(node), None, remote_addr, node.id);
+        let (record, dialable) = session_node_record(Some(node), None, None, remote_addr, node.id);
 
         assert_eq!(record, node);
         assert!(dialable);
@@ -1125,6 +1168,7 @@ mod tests {
                 node,
                 submitted_at: Instant::now(),
             }),
+            None,
             remote_addr,
             node.id,
         );
@@ -1138,7 +1182,7 @@ mod tests {
         let peer_id = PeerId::repeat_byte(0x33);
         let remote_addr = SocketAddr::new(Ipv6Addr::LOCALHOST.into(), 40303);
 
-        let (record, dialable) = session_node_record(None, None, remote_addr, peer_id);
+        let (record, dialable) = session_node_record(None, None, None, remote_addr, peer_id);
 
         assert_eq!(record, NodeRecord::new(remote_addr, peer_id));
         assert!(!dialable);

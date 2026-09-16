@@ -1,0 +1,93 @@
+{
+  "status": "Focused validation passed; full gates and PR/CI/merge pending",
+  "branch": "audit/execution-backoff-retention",
+  "baseline_commit": "840338b31aeb17003ff620f777f340b5e90b14b9",
+  "findings": [
+    "B4-43",
+    "B4-44",
+    "B4-45"
+  ],
+  "corrected_original_controls": {
+    "passed": 1,
+    "failed": 4,
+    "production_unchanged": true
+  },
+  "rejected_oracle": "Short transport quarantine need not erase an already productive restart hint; original draft failure is not a bug.",
+  "candidate_regression": "Expiry initially lost an advertised retry hint after pending eviction; corrected before commit.",
+  "limits": {
+    "entries_per_disconnected_history": 4096,
+    "actual_submitted_dials": 96,
+    "active_quarantine": "Retained in ActivePeer, outside optional history budget",
+    "pressure_tradeoff": "Soonest-expiring disconnected hint may be retried sooner"
+  },
+  "focused_final": {
+    "passed": 367,
+    "failed": 0,
+    "ignored": 1,
+    "new_controls": 12
+  },
+  "review": "Implementer source/history review only",
+  "limitations": [
+    "No live peer connections or full-node test",
+    "No ingestion throughput measurement",
+    "Other retained/transient allocations remain open"
+  ],
+  "evidence": {
+    "original-source.json": {
+      "sha256": "c83d1e1062efa8280b6d1c8077595d6244282fcc384a70ba45b3026275c6b3ce",
+      "bytes": 205
+    },
+    "original-backoff-retention-tests.rs": {
+      "sha256": "fdbc5978d307fff9b452c015958b317a622e329023bf0b42d86dee1d2c50c242",
+      "bytes": 2324
+    },
+    "original-backoff-retention.log": {
+      "sha256": "87052dad52669564cfc1c1b7df7083f697ed2ac244f804f9a56ea7802a8f58fc",
+      "bytes": 2938
+    },
+    "before-cooldown-capacity-fix.log": {
+      "sha256": "5b0cd4c666dd13529c0538f9cb219cc6e3521a325a065b966b049d17c750a1ad",
+      "bytes": 1923
+    },
+    "before-cooldown-capacity-tests.rs": {
+      "sha256": "1a1c4b1f1756511c5313b458ccd14ac312e9c72d904ba88b3ac93b27f3887822",
+      "bytes": 3072
+    },
+    "cooldown-original-paths.json": {
+      "sha256": "780112a9224e28234734c63974b1fdde86ab93700af7b2cf6eb773b20d1ab3e4",
+      "bytes": 543
+    },
+    "first-corrected-controls.log": {
+      "sha256": "85f66b8c29b069fa9e341b7e545b57426973b156df6ce4e28dafcaede593bf3d",
+      "bytes": 1199
+    },
+    "focused-first-full.log": {
+      "sha256": "73cd4c5c60e4a14bcb0477236fa2ca28bc44260bba5d77fbc6fe69774043f203",
+      "bytes": 39880
+    },
+    "candidate-expiry-requeue.log": {
+      "sha256": "a5fb1569bc617310f302bf079a2a62fbf857e5500cab102d08e3e7101707fe79",
+      "bytes": 1519
+    },
+    "focused-corrected-policy.log": {
+      "sha256": "ae4503844b6f30fce8ef1e741c5639fca06fd28c89df840600c8ae9458f12794",
+      "bytes": 39879
+    },
+    "corrected-original-tests.rs": {
+      "sha256": "d8d3603aafd2674a7f03431c06af64ef6ede5c304eb3e01ba1c5ab3c1425a159",
+      "bytes": 3916
+    },
+    "corrected-original-controls.log": {
+      "sha256": "be5b55bf6614364e72a3a6348d64c81129f538587197b5d42479c0ad674a2437",
+      "bytes": 3788
+    },
+    "corrected-original-source.json": {
+      "sha256": "715f82f4a56e6445d9ed8ae6c978c44b0398d39676e3682867b946bf5c0b8f81",
+      "bytes": 656
+    },
+    "focused-final.log": {
+      "sha256": "b70883a1740db604c22ecace2ea312ad7fd292cf0bb5f6bc28b139117e80615e",
+      "bytes": 39880
+    }
+  }
+}

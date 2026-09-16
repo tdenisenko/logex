@@ -56,7 +56,8 @@ speedup, total network-memory limit or whole-batch completion is claimed.
 
 All eight local gates pass on `d6215997`: vendor integrity, workspace and
 patched-vendor formatting, all-target check, strict Clippy, 1,624 workspace tests
-(24 ignored), documentation tests and release build. PR/CI/merge remain pending.
+(24 ignored), documentation tests and release build. All six CI jobs passed on `57cfeb63`;
+[PR #194](https://github.com/tdenisenko/logex/pull/194) merged as `840338b3`.
 
 The separate retained-state inventory still includes negative peer hints,
 request-accounting queues and outgoing/transient response ownership. Their limits
