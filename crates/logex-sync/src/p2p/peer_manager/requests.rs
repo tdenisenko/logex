@@ -8870,3 +8870,6 @@ mod supervision_tests;
 
 #[cfg(test)]
 mod session_endpoint_tests;
+
+#[cfg(test)]
+mod rehabilitation_tests;

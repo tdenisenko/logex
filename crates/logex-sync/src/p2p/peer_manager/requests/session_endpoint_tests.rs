@@ -2,7 +2,7 @@
 use super::limit_tests::Fixture;
 use super::*;
 
-fn info(peer_id: PeerId, remote_addr: SocketAddr) -> reth_network::events::SessionInfo {
+pub(super) fn info(peer_id: PeerId, remote_addr: SocketAddr) -> reth_network::events::SessionInfo {
     reth_network::events::SessionInfo {
         peer_id,
         remote_addr,
@@ -19,7 +19,7 @@ fn info(peer_id: PeerId, remote_addr: SocketAddr) -> reth_network::events::Sessi
     }
 }
 
-fn request_channel(
+pub(super) fn request_channel(
     peer_id: PeerId,
 ) -> (
     PeerRequestSender<PeerRequest<LogexNetworkPrimitives>>,

@@ -512,7 +512,11 @@ impl PeerManager {
             info.peer_id,
         );
         let was_productive = self.productive.iter().any(|peer| peer.id == info.peer_id);
-        let receipt_quarantined_until = self.receipt_quarantined_peers.get(&info.peer_id).copied();
+        let receipt_quarantined_until = self
+            .receipt_quarantined_peers
+            .get(&info.peer_id)
+            .copied()
+            .filter(|until| *until > Instant::now());
         let should_remember_reachable = is_restart_seed_peer(
             remote_record_is_dialable,
             latest_block,
