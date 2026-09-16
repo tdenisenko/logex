@@ -1,6 +1,6 @@
 [workspace]
 members = ["crates/logex-types", "crates/logex-cl", "crates/logex-storage", "crates/logex-index", "crates/logex-query", "crates/logex-server", "crates/logex-node", "crates/logex-sync"]
-exclude = ["vendor/datafusion-optimizer", "vendor/datafusion-sql"]
+exclude = ["vendor/datafusion-optimizer", "vendor/datafusion-sql", "vendor/reth-network"]
 resolver = "2"
 
 [workspace.package]
@@ -55,6 +55,7 @@ reth-discv4 = { git = "https://github.com/paradigmxyz/reth.git", tag = "v1.11.3"
 reth-discv5 = { git = "https://github.com/paradigmxyz/reth.git", tag = "v1.11.3" }
 reth-dns-discovery = { git = "https://github.com/paradigmxyz/reth.git", tag = "v1.11.3" }
 reth-network = { git = "https://github.com/paradigmxyz/reth.git", tag = "v1.11.3" }
+reth-network-api = { git = "https://github.com/paradigmxyz/reth.git", tag = "v1.11.3" }
 reth-network-peers = { git = "https://github.com/paradigmxyz/reth.git", tag = "v1.11.3", features = ["secp256k1"] }
 reth-ethereum-forks = { git = "https://github.com/paradigmxyz/reth.git", tag = "v1.11.3" }
 reth-chainspec = { git = "https://github.com/paradigmxyz/reth.git", tag = "v1.11.3" }
@@ -79,3 +80,6 @@ logex-node = { path = "crates/logex-node" }
 [patch.crates-io]
 datafusion-optimizer = { path = "vendor/datafusion-optimizer" }
 datafusion-sql = { path = "vendor/datafusion-sql" }
+
+[patch."https://github.com/paradigmxyz/reth.git"]
+reth-network = { path = "vendor/reth-network" }

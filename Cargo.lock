@@ -5277,6 +5277,7 @@ dependencies = [
  "logex-server",
  "logex-storage",
  "logex-types",
+ "parking_lot",
  "rand 0.8.8",
  "reth-chainspec",
  "reth-consensus",
@@ -5290,6 +5291,7 @@ dependencies = [
  "reth-ethereum-forks",
  "reth-ethereum-primitives",
  "reth-network",
+ "reth-network-api",
  "reth-network-peers",
  "reth-primitives-traits",
  "reth-storage-api",
@@ -7301,7 +7303,6 @@ dependencies = [
 [[package]]
 name = "reth-network"
 version = "1.11.3"
-source = "git+https://github.com/paradigmxyz/reth.git?tag=v1.11.3#d6324d63e27ef6b7c49cdc9b1977c1b808234c7b"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",

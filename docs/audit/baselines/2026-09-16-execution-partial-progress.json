@@ -7,7 +7,7 @@
     "B4-26",
     "B4-27"
   ],
-  "status": "All seven local gates pass; PR/CI/merge pending",
+  "status": "Merged after all seven local gates and six exact-head CI jobs passed",
   "original_controls": {
     "passed": 3,
     "failed": 19,
@@ -111,6 +111,18 @@
     "gates/test-summary.json": {
       "sha256": "191cfd86a539cb14df345f02a06409ad5b34edca1dda5a901d9ab6bc96947d39",
       "bytes": 69
+    },
+    "premerge.json": {
+      "sha256": "7af578f885e1743a1fd34194f9d2573cd293f50d51242b9f85cec9dbfddf5a88",
+      "bytes": 1894
+    },
+    "merged.json": {
+      "sha256": "048cb1cd9a0d31a0b39feecc17fed7eb588fd0387fb23a33bc253ef5e5e636f9",
+      "bytes": 240
+    },
+    "ci-watch.log": {
+      "sha256": "3b47ff8d0a43481b29978d47b54080e5e96f6c7ca9f103c96380d90330d0223c",
+      "bytes": 14767
     }
   },
   "scope_limits": [
@@ -262,5 +274,51 @@
     "passed": 1558,
     "failed": 0,
     "ignored": 23
+  },
+  "pull_request": {
+    "headRefOid": "691a4649c1374c8ca71e99999998c441d0ea2057",
+    "mergeCommit": {
+      "oid": "02a812e4cced800b1f140ea5f2ad71f1bb4533d0"
+    },
+    "mergedAt": "2026-09-15T23:48:19Z",
+    "number": 187,
+    "state": "MERGED",
+    "url": "https://github.com/tdenisenko/logex/pull/187"
+  },
+  "ci": {
+    "run": 35036705070,
+    "head": "691a4649c1374c8ca71e99999998c441d0ea2057",
+    "checks": [
+      {
+        "name": "Check",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS"
+      },
+      {
+        "name": "Format",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS"
+      },
+      {
+        "name": "Clippy",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS"
+      },
+      {
+        "name": "Test",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS"
+      },
+      {
+        "name": "macOS Test",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS"
+      },
+      {
+        "name": "Release Build",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS"
+      }
+    ]
   }
 }

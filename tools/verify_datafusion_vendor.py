@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Verify complete vendored DataFusion 51 crates and reviewed local patches."""
+"""Verify complete vendored crates and reviewed local patches."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import hashlib
 from pathlib import Path, PurePosixPath
 import string
@@ -26,6 +26,7 @@ class Package:
     inventory_checksum: str
     modified: dict[PurePosixPath, str]
     patch_checksum: str
+    added: dict[PurePosixPath, str] = field(default_factory=dict)
 
     @property
     def directory(self) -> Path:
@@ -49,6 +50,21 @@ PACKAGES = (
             PurePosixPath("src/eliminate_filter.rs"): "6a50ecd0bd22c65fcc15ffa73dc722d7946c89f3ee858ae7361b027c0ad8890d",
         },
         patch_checksum="2e4fd87500b2d1f8e6984f3ffc50bf0dca478799e3b5a88b420e1f80c6311729",
+    ),
+    Package(
+        name="reth-network",
+        inventory_checksum="12c15956c224e85aca12c00b90c33b13254df65913695f4495a53169dbb43be0",
+        modified={
+            PurePosixPath("Cargo.toml"): "41475c2237ce54f86ee60f30c0ef672a741bc1079e394b32715d95e9b960a302",
+            PurePosixPath("src/eth_requests.rs"): "e1526e03d76643b115677eafc9a0b67a3529b88b24a7c7061ed4c5e7083e0b4d",
+            PurePosixPath("src/session/active.rs"): "a4c0d8b50fbe7cb3895723d6f935abd1c13f44fcd8471463f7aad1c4dcf93534",
+            PurePosixPath("src/session/mod.rs"): "fc8dc897438d2d4ce8f6bfd90455250110af1c036483fe23bb22e8758dac688b",
+            PurePosixPath("src/session/types.rs"): "584a6bff5d489f973dfecd96d5f5334943f4403a348eba30a863b86053d3f8d1",
+        },
+        patch_checksum="6c14b3f9c7db7dbc67da9ac229f1936175376eec8e49bf0b644b2377d3174ac7",
+        added={
+            PurePosixPath("src/session/range_update.rs"): "5518a3cc920616fe298bd4fb2ce859ef57364bbabfd45823515cd665730ba527",
+        },
     ),
 )
 
@@ -137,7 +153,18 @@ def verify_package(package: Package) -> int:
     validate_checksum(package.patch_checksum, f"{package.name} patch diff")
 
     expected = read_inventory(package)
-    permitted = set(expected) | set(ADDITIONS)
+    for path, checksum in package.added.items():
+        if (
+            path.is_absolute()
+            or ".." in path.parts
+            or "\\" in path.as_posix()
+            or path == PurePosixPath(".")
+            or path in expected
+            or path in ADDITIONS
+        ):
+            raise ValueError(f"{package.name} invalid added file path: {path}")
+        validate_checksum(checksum, f"{package.name} reviewed added file {path}")
+    permitted = set(expected) | set(ADDITIONS) | set(package.added)
     actual = actual_files(package)
     if actual != permitted:
         missing = sorted(str(path) for path in permitted - actual)
@@ -160,6 +187,14 @@ def verify_package(package: Package) -> int:
                 f"({found} != {wanted})"
             )
 
+    for path, wanted in package.added.items():
+        found = digest(package.directory / Path(path))
+        if found != wanted:
+            raise ValueError(
+                f"{package.name}/{path} differs from its reviewed added version "
+                f"({found} != {wanted})"
+            )
+
     patch_path = package.directory / "LOGEX-PATCH.diff"
     found_patch = digest(patch_path)
     if found_patch != package.patch_checksum:
@@ -168,7 +203,7 @@ def verify_package(package: Package) -> int:
         )
     print(
         f"verified {package.name}: {len(expected)} published files, "
-        f"{len(package.modified)} reviewed modifications"
+        f"{len(package.modified)} reviewed modifications, {len(package.added)} reviewed additions"
     )
     return len(expected)
 

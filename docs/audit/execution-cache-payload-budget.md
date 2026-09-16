@@ -50,8 +50,9 @@ transient allocation or outgoing-response bound is inferred.
 The existing status wrapper continues synchronizing its history range after
 insertion. The advertised cache history range is the contiguous suffix ending at the
 highest retained body; other retained entries may have gaps. The existing
-empty-cache status fallback to the local head is a separate policy review item;
-this milestone does not claim that fallback is cache-derived.
+empty-cache status fallback to the local head was a separate policy review item;
+B4-28 in the [serving-contract review](execution-serving-contracts.md) replaces it
+with the provider's serveable genesis range.
 
 ## Validation status
 

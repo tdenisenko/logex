@@ -79,7 +79,8 @@ as product defects. Final review and gate outcomes are recorded below.
 All 247 peer-manager tests (26 new controls) pass. Independent final source/test
 review found no remaining actionable issue. All seven local gates pass on `764dbe5e`, including
 1,558 workspace tests (23 ignored), doc tests and release linking.
-CI and merge remain pending.
+All six CI jobs passed on `691a4649`;
+[PR #187](https://github.com/tdenisenko/logex/pull/187) merged as `02a812e4`.
 
 [Validation record](baselines/2026-09-16-execution-partial-progress.json).
 No Mac mini work or additional cleanup was needed in this milestone.
