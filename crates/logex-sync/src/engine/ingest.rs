@@ -348,7 +348,7 @@ pub(super) async fn write_extracted_historical_batch(
 
 fn fill_historical_extraction_pipeline(
     blocks: &mut std::vec::IntoIter<HistoricalValidatedBlock>,
-    extraction_tasks: &mut VecDeque<tokio::task::JoinHandle<Result<HistoricalExtractedChunk>>>,
+    extraction_tasks: &mut VecDeque<AbortOnDropHandle<Result<HistoricalExtractedChunk>>>,
     pipeline_depth: usize,
 ) {
     while extraction_tasks.len() < pipeline_depth {
@@ -371,7 +371,7 @@ fn historical_extraction_pipeline_depth() -> usize {
 
 fn next_historical_extract_task(
     blocks: &mut std::vec::IntoIter<HistoricalValidatedBlock>,
-) -> Option<tokio::task::JoinHandle<Result<HistoricalExtractedChunk>>> {
+) -> Option<AbortOnDropHandle<Result<HistoricalExtractedChunk>>> {
     let mut chunk = Vec::with_capacity(HISTORICAL_EXTRACT_CHUNK_BLOCKS);
     for _ in 0..HISTORICAL_EXTRACT_CHUNK_BLOCKS {
         let Some(block) = blocks.next() else {
@@ -384,7 +384,7 @@ fn next_historical_extract_task(
         return None;
     }
 
-    Some(tokio::task::spawn_blocking(
+    Some(AbortOnDropHandle::new(tokio::task::spawn_blocking(
         move || -> Result<HistoricalExtractedChunk> {
             let lowest_header = chunk
                 .iter()
@@ -406,25 +406,30 @@ fn next_historical_extract_task(
                 extraction_elapsed,
             })
         },
-    ))
+    )))
 }
 
 async fn write_extracted_historical_chunk(
     storage: Arc<RwLock<PartitionManager>>,
     extracted: HistoricalExtractedChunk,
 ) -> Result<HistoricalChunkWriteOutcome> {
-    tokio::task::spawn_blocking(move || -> Result<HistoricalChunkWriteOutcome> {
-        let write_started = std::time::Instant::now();
-        let mut storage = storage.blocking_write();
-        storage
-            .ingest_historical_batch(&extracted.rows, &extracted.lowest_header)
-            .map_err(|e| eyre::eyre!("historical storage ingestion error: {e}"))?;
-        Ok(HistoricalChunkWriteOutcome {
-            floor: storage.historical_floor(),
-            anchor: storage.historical_anchor(),
-            write_elapsed: write_started.elapsed(),
-        })
-    })
+    // Dropping the caller cancels work that has not started. Once the blocking
+    // commit starts it runs to completion; ordinary shutdown observes that
+    // result, and the node's existing deadlines bound forced runtime teardown.
+    AbortOnDropHandle::new(tokio::task::spawn_blocking(
+        move || -> Result<HistoricalChunkWriteOutcome> {
+            let write_started = std::time::Instant::now();
+            let mut storage = storage.blocking_write();
+            storage
+                .ingest_historical_batch(&extracted.rows, &extracted.lowest_header)
+                .map_err(|e| eyre::eyre!("historical storage ingestion error: {e}"))?;
+            Ok(HistoricalChunkWriteOutcome {
+                floor: storage.historical_floor(),
+                anchor: storage.historical_anchor(),
+                write_elapsed: write_started.elapsed(),
+            })
+        },
+    ))
     .await
     .map_err(|error| eyre::eyre!("historical storage worker failed: {error}"))?
 }
@@ -636,5 +641,146 @@ mod tests {
             historical_write_chunk_row_limit_for_available_memory(None),
             HISTORICAL_WRITE_CHUNK_ROWS
         );
+    }
+}
+
+#[cfg(test)]
+mod cancellation_controls {
+    use super::*;
+    use logex_storage::PartitionManagerConfig;
+
+    #[test]
+    fn dropping_a_queued_write_does_not_publish_its_floor() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = Arc::new(RwLock::new(
+            PartitionManager::open(PartitionManagerConfig {
+                data_dir: directory.path().to_path_buf(),
+                ..Default::default()
+            })
+            .unwrap(),
+        ));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        let (release, blocked) = std::sync::mpsc::channel();
+        let (started, observed) = tokio::sync::oneshot::channel();
+        let waiting = runtime.spawn_blocking(move || {
+            started.send(()).unwrap();
+            blocked.recv().unwrap();
+        });
+        let was_pending = runtime.block_on(async {
+            observed.await.unwrap();
+            let chunk = HistoricalExtractedChunk {
+                rows: Vec::new(),
+                row_count: 0,
+                block_count: 1,
+                lowest_header: Header {
+                    number: 100,
+                    ..Default::default()
+                },
+                extraction_elapsed: Duration::ZERO,
+            };
+            let mut write = Box::pin(write_extracted_historical_chunk(
+                Arc::clone(&storage),
+                chunk,
+            ));
+            let was_pending = futures_util::poll!(write.as_mut()).is_pending();
+            drop(write);
+            was_pending
+        });
+        release.send(()).unwrap();
+        runtime.block_on(waiting).unwrap();
+        drop(runtime); // Drain started/queued blocking work before inspecting the result.
+        let floor = storage.blocking_read().historical_floor();
+        assert!(was_pending);
+        assert_eq!(
+            floor, None,
+            "dropped queued work must not publish after cancellation"
+        );
+    }
+
+    #[test]
+    fn dropping_a_started_write_still_allows_atomic_completion() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = Arc::new(RwLock::new(
+            PartitionManager::open(PartitionManagerConfig {
+                data_dir: directory.path().to_path_buf(),
+                ..Default::default()
+            })
+            .unwrap(),
+        ));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        let (pending, started) = runtime.block_on(async {
+            let reader = storage.read().await;
+            let chunk = HistoricalExtractedChunk {
+                rows: Vec::new(),
+                row_count: 0,
+                block_count: 1,
+                lowest_header: Header {
+                    number: 100,
+                    ..Default::default()
+                },
+                extraction_elapsed: Duration::ZERO,
+            };
+            let mut write = Box::pin(write_extracted_historical_chunk(
+                Arc::clone(&storage),
+                chunk,
+            ));
+            let pending = futures_util::poll!(write.as_mut()).is_pending();
+            // Tokio's fair lock refuses new readers once the blocking writer
+            // is queued. This confirms the actual commit job has started.
+            let started = tokio::time::timeout(Duration::from_secs(5), async {
+                while storage.try_read().is_ok() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .is_ok();
+            drop(write);
+            drop(reader);
+            (pending, started)
+        });
+        drop(runtime);
+        assert!(pending && started);
+        assert_eq!(
+            storage
+                .blocking_read()
+                .historical_floor()
+                .unwrap()
+                .block_number,
+            100
+        );
+    }
+
+    #[tokio::test]
+    async fn owned_extraction_retains_empty_block_count_and_floor() {
+        let count = HISTORICAL_EXTRACT_CHUNK_BLOCKS + 1;
+        let blocks = (1..=count)
+            .rev()
+            .map(|number| HistoricalValidatedBlock {
+                index: count - number,
+                header: Header {
+                    number: number as u64,
+                    ..Default::default()
+                },
+                block_hash: B256::ZERO,
+                body_peer: PeerId::ZERO,
+                body: Default::default(),
+                receipt_peer: PeerId::ZERO,
+                receipts: Vec::new(),
+            })
+            .collect();
+        let extracted = extract_validated_historical_blocks(blocks).await.unwrap();
+        assert_eq!(extracted.chunks.len(), 1);
+        assert_eq!(extracted.chunks[0].block_count, count);
+        assert_eq!(extracted.chunks[0].lowest_header.number, 1);
+        assert_eq!(extracted.chunks[0].row_count, 0);
+        assert!(extracted.chunks[0].rows.is_empty());
     }
 }

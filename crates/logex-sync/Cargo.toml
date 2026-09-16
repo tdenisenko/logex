@@ -38,6 +38,7 @@ reth-ethereum-consensus = { workspace = true }
 # Async
 tokio = { workspace = true }
 tokio-stream = "0.1"
+tokio-util = { version = "0.7", features = ["rt"] }
 futures = { workspace = true }
 futures-util = { workspace = true }
 

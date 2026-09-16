@@ -1,0 +1,76 @@
+{
+  "base": "fd57def9746c7c199ff6dbb50fa1b44f73d0920e",
+  "findings": [
+    "B5-04",
+    "B5-05",
+    "B5-06"
+  ],
+  "status": "Implemented; focused validation passed, workspace gates pending",
+  "original_controls": {
+    "passed": 1,
+    "failed": 8,
+    "production_unchanged": true
+  },
+  "focused": {
+    "passed": 586,
+    "ignored": 2,
+    "new_tests": 16
+  },
+  "evidence_root": "/private/tmp/logex-historical-work-cancellation-q50t59nw",
+  "evidence": {
+    "original-source.json": {
+      "sha256": "b586653b0424576ea4367a23fe5e591386d089f574e70c9da34d3f8336ef762e",
+      "bytes": 530
+    },
+    "original-controls.patch": {
+      "sha256": "6b6f04d3cb79dfbe7741fd0b1b69c9effbdf042372119473c1f08aad102fbafd",
+      "bytes": 3937
+    },
+    "original-cancellation-tests.rs": {
+      "sha256": "6adc6b2fabe431019fda493a9fc52bd8715bfe1390e2319d4210f90bc5d1862c",
+      "bytes": 7603
+    },
+    "original-controls.log": {
+      "sha256": "17cb49552ebaaa7da22ff5d315ec388749275bb8bfbf6abb45619f5eecbcaa98",
+      "bytes": 2794
+    },
+    "original-write-shutdown.log": {
+      "sha256": "22331c6a921ded6963aa6c4be19863f085dd200c48a745fa1edc20471ef3549a",
+      "bytes": 1806
+    },
+    "original-prepare-owner.log": {
+      "sha256": "3abd82df2d40841412fbbb115e5c5f9ff3794d69cc5839889c6dec63c5d1219c",
+      "bytes": 1326
+    },
+    "original-engine-owner.log": {
+      "sha256": "8838d724d44c55e41a7d43cb87fe3cad7b055f3eb81ea969b9cad8c60516f8dc",
+      "bytes": 1347
+    },
+    "check-initial.log": {
+      "sha256": "1f4c0c09e5d488fb629e0f0415256a2b2d0093167c723266a3cf872f8062b4e6",
+      "bytes": 2991
+    },
+    "dependency-check.json": {
+      "sha256": "a13575d856f9c40a9d0eadc1f3d2c3be0573ded4a2a7528d55aefe432ed7211e",
+      "bytes": 350
+    },
+    "focused-controls.log": {
+      "sha256": "b77b9418510e5a2adae511eb381a9e3f00f0faefd2fede15dd16843cadfed970",
+      "bytes": 4034
+    },
+    "focused-sync.log": {
+      "sha256": "966eacacf84378cee732803c2af3759a70792430ef5452b02de8d4b7546fa41d",
+      "bytes": 60836
+    },
+    "focused-sync-final.log": {
+      "sha256": "d25c5e11f49b57c6f7e3f9d96e0a53e4de1680d9e7c2d62e377b7b46c446a791",
+      "bytes": 60256
+    },
+    "focused-sync-cleanup.log": {
+      "sha256": "a0d51f6f3b35708beccce99ae82ec10b4c7b85d628b29f3ed7b35358c033afbd",
+      "bytes": 60256
+    }
+  },
+  "benchmark": "Not run; ownership and shutdown correctness, no throughput claim",
+  "remote_work": false
+}

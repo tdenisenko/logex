@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{RwLock, mpsc, watch};
-use tokio::task::JoinHandle;
+use tokio_util::task::AbortOnDropHandle;
 
 use logex_server::SubscriptionManager;
 use logex_storage::PartitionManager;
@@ -40,7 +40,7 @@ mod memory;
 use self::helpers::{
     assemble_txs, cancelable, execution_head, historical_backfill_peer_floor, peer_refill_goal,
     preferred_body_peers, refill_peer_floor, should_mark_historical_complete,
-    should_switch_to_live_without_target,
+    should_switch_to_live_without_target, wait_for_shutdown,
 };
 
 const HISTORICAL_EMPTY_THRESHOLD: u32 = 5;
@@ -103,7 +103,7 @@ pub(super) struct HistoricalQueuedFetchPlan {
 pub(super) struct HistoricalFetchAttemptHandle {
     child_header: Header,
     owner: u64,
-    handle: JoinHandle<()>,
+    handle: AbortOnDropHandle<()>,
 }
 
 pub(super) struct HistoricalFetchHandle {
@@ -114,7 +114,7 @@ pub(super) struct HistoricalHeaderFetchHandle {
     sequence: u64,
     attempt: u64,
     child_header: Header,
-    handle: JoinHandle<()>,
+    handle: AbortOnDropHandle<()>,
 }
 
 pub(super) struct HistoricalHeaderFetchOutcome {
@@ -191,7 +191,7 @@ pub(super) struct HistoricalValidationFailure {
 pub(super) struct HistoricalPrepareTask {
     sequence: u64,
     next_child_header: Option<Header>,
-    handle: JoinHandle<
+    handle: AbortOnDropHandle<
         Result<std::result::Result<PreparedHistoricalBatch, Box<HistoricalValidationFailure>>>,
     >,
 }

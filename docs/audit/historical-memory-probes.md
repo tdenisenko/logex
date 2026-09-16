@@ -71,7 +71,8 @@ concurrent ownership control to acquire its two candidates before spawning, all
 nine final memory controls pass. All eight local gates pass on `546d6d89`:
 vendor integrity, workspace/patched-vendor formatting, check, strict Clippy,
 1,731 workspace tests (24 ignored), documentation tests and release build.
-PR/CI/merge remain pending.
+All six CI jobs passed on `0a4e7019`;
+[PR #203](https://github.com/tdenisenko/logex/pull/203) merged as `fd57def9`.
 
 Implementer review traced every historical memory caller, cache initialization,
 failed queries, wrapper lifetime, ABI prefix and arithmetic. No independent review
