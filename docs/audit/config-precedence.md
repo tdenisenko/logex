@@ -70,7 +70,9 @@ and its tests. Implementer review checked every supported file key, both global
 flag positions, typed CLI values, ownership of parser matches and startup ordering.
 No independent review is claimed.
 
-Full workspace gates, CI and merge are pending. The machine-readable evidence is
+All eight local gates pass on `4b593957`: vendor integrity, workspace and
+patched-vendor formatting, check, strict Clippy, 1,765 workspace tests (24 ignored),
+documentation tests and release build. CI and merge are pending. The machine-readable evidence is
 [recorded here](baselines/2026-09-17-config-precedence.json). No benchmark was run:
 this is startup-only work, with no changes to ingestion, storage writes or query
 execution. Volume identity/preflight, offline repair, broader runtime validation
