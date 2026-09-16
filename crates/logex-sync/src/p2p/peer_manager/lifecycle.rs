@@ -30,19 +30,20 @@ impl PeerManager {
         self.task_monitor.subscribe()
     }
 
-    /// Gracefully stop the network manager and wait for the background task.
-    pub async fn shutdown(&mut self) {
+    /// Stop all owned workers, returning acknowledgement or cleanup failures
+    /// after attempting every remaining worker. Requested aborts are expected.
+    pub async fn shutdown(&mut self) -> Result<()> {
+        let mut errors = Vec::new();
         self.task_monitor.begin_shutdown();
         match timeout(NETWORK_SHUTDOWN_TIMEOUT, self.network.shutdown()).await {
             Ok(Ok(())) => {}
             Ok(Err(error)) => {
-                warn!(%error, "failed to shut down p2p network cleanly");
+                errors.push(format!(
+                    "execution network shutdown acknowledgement failed: {error}"
+                ));
             }
             Err(_) => {
-                warn!(
-                    ?NETWORK_SHUTDOWN_TIMEOUT,
-                    "timed out waiting for p2p network shutdown acknowledgement"
-                );
+                errors.push(format!("execution network shutdown acknowledgement exceeded {NETWORK_SHUTDOWN_TIMEOUT:?}"));
             }
         }
 
@@ -52,8 +53,10 @@ impl PeerManager {
         self.discovery_events = Box::pin(tokio_stream::empty());
         self.dns_discovery_events = None;
 
-        if let Some(task) = self.dns_discovery_task.take() {
-            abort_and_wait(task, "execution DNS discovery task").await;
+        if let Some(task) = self.dns_discovery_task.take()
+            && let Err(error) = abort_and_wait(task, "execution DNS discovery task").await
+        {
+            errors.push(error.to_string());
         }
 
         if let Some(task) = self.network_task.take() {
@@ -61,11 +64,23 @@ impl PeerManager {
                 ?NETWORK_SHUTDOWN_DRAIN_TIMEOUT,
                 "aborting long-lived reth network task after graceful disconnect drain"
             );
-            abort_and_wait(task, "p2p network task").await;
+            if let Err(error) = abort_and_wait(task, "p2p network task").await {
+                errors.push(error.to_string());
+            }
         }
 
-        if let Some(task) = self.eth_request_task.take() {
-            abort_and_wait(task, "eth request handler task").await;
+        if let Some(task) = self.eth_request_task.take()
+            && let Err(error) = abort_and_wait(task, "eth request handler task").await
+        {
+            errors.push(error.to_string());
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(eyre::eyre!(
+                "execution cleanup failed: {}",
+                errors.join("; ")
+            ))
         }
     }
 
@@ -945,21 +960,15 @@ impl PeerManager {
     }
 }
 
-pub(super) async fn abort_and_wait(task: JoinHandle<()>, task_name: &'static str) {
+pub(super) async fn abort_and_wait(task: JoinHandle<()>, task_name: &'static str) -> Result<()> {
     task.abort();
     match timeout(REQUEST_HANDLER_SHUTDOWN_TIMEOUT, task).await {
-        Ok(Ok(())) => {}
-        Ok(Err(error)) => {
-            if !error.is_cancelled() {
-                warn!(%error, task = task_name, "task exited unexpectedly during shutdown");
-            }
-        }
-        Err(_) => {
-            debug!(
-                task = task_name,
-                "task abort is still pending after timeout"
-            );
-        }
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) if error.is_cancelled() => Ok(()),
+        Ok(Err(error)) => Err(eyre::eyre!("{task_name} failed during cleanup: {error}")),
+        Err(_) => Err(eyre::eyre!(
+            "{task_name} abort exceeded {REQUEST_HANDLER_SHUTDOWN_TIMEOUT:?}"
+        )),
     }
 }
 

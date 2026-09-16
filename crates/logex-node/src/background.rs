@@ -437,21 +437,29 @@ fn should_defer_for_historical_floor(floor_block: Option<u64>) -> bool {
     floor_block.is_some_and(|block| block > EXECUTION_HISTORY_TARGET_BLOCK)
 }
 
-pub async fn log_task_exit(name: &str, handle: tokio::task::JoinHandle<()>) {
-    let mut handle = handle;
-    match tokio::time::timeout(TASK_SHUTDOWN_TIMEOUT, &mut handle).await {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => {
-            tracing::warn!(task = name, error = %e, "task exited unexpectedly");
-        }
+pub async fn join_task(name: &str, handle: tokio::task::JoinHandle<()>) -> io::Result<()> {
+    join_task_with_timeout(name, handle, TASK_SHUTDOWN_TIMEOUT).await
+}
+
+async fn join_task_with_timeout(
+    name: &str,
+    mut handle: tokio::task::JoinHandle<()>,
+    shutdown_timeout: Duration,
+) -> io::Result<()> {
+    match tokio::time::timeout(shutdown_timeout, &mut handle).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(io::Error::other(format!(
+            "{name} failed during cleanup: {error}"
+        ))),
         Err(_) => {
-            tracing::warn!(
-                task = name,
-                ?TASK_SHUTDOWN_TIMEOUT,
-                "task did not stop in time, aborting it"
-            );
             handle.abort();
-            let _ = handle.await;
+            // Started blocking work cannot be forcibly canceled. Do not await
+            // it again here; the node's independent shutdown deadline remains
+            // armed through runtime destruction and this result forces failure.
+            Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!("{name} did not stop within {shutdown_timeout:?}"),
+            ))
         }
     }
 }
@@ -537,6 +545,58 @@ fn query_indexes_missing(path: &Path) -> Option<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn cleanup_deadline_does_not_await_started_blocking_work_again() {
+        let (release, blocked) = std::sync::mpsc::channel::<()>();
+        let (started, observed) = tokio::sync::oneshot::channel();
+        let task = tokio::task::spawn_blocking(move || {
+            started.send(()).unwrap();
+            let _ = blocked.recv();
+        });
+        observed.await.unwrap();
+        let outcome = tokio::time::timeout(
+            Duration::from_millis(200),
+            join_task_with_timeout("owned blocking control", task, Duration::ZERO),
+        )
+        .await;
+        // Always release our own worker before asserting, including a failed
+        // control. No test-runtime teardown or external process remains stuck.
+        drop(release);
+        let error = outcome
+            .expect("the post-abort join exceeded its deadline")
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+    }
+
+    #[tokio::test]
+    async fn cleanup_join_preserves_normal_completion_and_worker_failure() {
+        join_task_with_timeout(
+            "completed worker",
+            tokio::spawn(async {}),
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
+        let task = tokio::spawn(async {
+            panic!("isolated worker unwind control");
+        });
+        let error = join_task_with_timeout("failed worker", task, Duration::from_secs(2))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("failed worker"));
+        assert!(error.to_string().contains("panicked"));
+    }
+
+    #[tokio::test]
+    async fn cleanup_join_reports_unexpected_cancellation() {
+        let task = tokio::spawn(std::future::pending::<()>());
+        task.abort();
+        let error = join_task_with_timeout("canceled worker", task, Duration::from_secs(2))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("canceled worker"));
+    }
 
     #[tokio::test]
     async fn indexer_stops_when_checkpoint_requires_recovery() {

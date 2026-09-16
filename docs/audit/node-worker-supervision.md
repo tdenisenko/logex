@@ -92,7 +92,8 @@ shutdown ordering, late error checks, worker ownership and obsolete call sites.
 No independent review is claimed. All eight final-source local gates pass on `15404355`: vendor integrity,
 workspace and patched-vendor formatting, all-target check, strict Clippy,
 1,687 workspace tests (24 ignored, including 131 node and 559 sync tests),
-documentation tests and release build. PR/CI/merge remain pending.
+documentation tests and release build. All six CI jobs passed on `4e153750`;
+[PR #199](https://github.com/tdenisenko/logex/pull/199) merged as `4915ad57`.
 
 Removed the old private monitor module, duplicate service error-discard blocks,
 checkpoint error-and-continue paths and premature readiness wording. The small

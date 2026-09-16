@@ -300,8 +300,8 @@ impl SyncEngine {
         self.peers.known_peers()
     }
 
-    pub async fn shutdown(&mut self) {
+    pub async fn shutdown(&mut self) -> Result<()> {
         self.reset_historical_fetch_pipeline();
-        self.peers.shutdown().await;
+        self.peers.shutdown().await
     }
 }

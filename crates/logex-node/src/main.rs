@@ -119,7 +119,7 @@ fn main() {
                 std::process::exit(1);
             }
             let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
-            rt.block_on(runtime::run_sync(runtime::RunSyncOptions {
+            let shutdown = rt.block_on(runtime::run_sync(runtime::RunSyncOptions {
                 pm_config,
                 checkpoint,
                 checkpoint_sync_url,
@@ -141,6 +141,9 @@ fn main() {
                 dashboard_password,
                 disable_historical_sync,
             }));
+            if runtime::finish_runtime_shutdown(rt, shutdown).is_err() {
+                std::process::exit(1);
+            }
         }
         Command::BuildIndexes {
             sealed,

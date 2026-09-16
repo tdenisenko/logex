@@ -117,7 +117,7 @@ async fn supervision_immediate_drain_retires_all_closed_streams() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn supervision_shutdown_joins_workers_without_reporting_failure() {
+async fn supervision_shutdown_joins_workers_and_reports_missing_acknowledgement() {
     let mut fixture = Fixture::new().await;
     let failure = fixture.manager.task_failure_receiver();
     for slot in [
@@ -134,7 +134,7 @@ async fn supervision_shutdown_joins_workers_without_reporting_failure() {
     }
     // The dormant local network cannot acknowledge shutdown; the existing
     // acknowledgement and drain deadlines must still let cleanup complete.
-    fixture.manager.shutdown().await;
+    assert!(fixture.manager.shutdown().await.is_err());
     assert!(fixture.manager.network_task.is_none());
     assert!(fixture.manager.eth_request_task.is_none());
     assert!(fixture.manager.dns_discovery_task.is_none());
@@ -166,6 +166,39 @@ async fn supervision_failure_is_visible_without_a_network_event() {
             .now_or_never()
             .is_none()
     );
-    fixture.manager.shutdown().await;
+    assert!(fixture.manager.shutdown().await.is_err());
     assert!(failure.borrow().is_some());
+}
+
+#[tokio::test]
+async fn cleanup_abort_preserves_expected_cancellation_and_unwind() {
+    let task = tokio::spawn(std::future::pending::<()>());
+    super::super::lifecycle::abort_and_wait(task, "owned pending worker")
+        .await
+        .unwrap();
+    let task = tokio::spawn(async {
+        panic!("isolated cleanup worker control");
+    });
+    while !task.is_finished() {
+        tokio::task::yield_now().await;
+    }
+    let error = super::super::lifecycle::abort_and_wait(task, "failed worker")
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("failed worker"));
+    assert!(error.to_string().contains("panicked"));
+}
+
+#[tokio::test]
+async fn cleanup_abort_reports_started_blocking_work_timeout() {
+    let (release, blocked) = std::sync::mpsc::channel::<()>();
+    let (started, observed) = tokio::sync::oneshot::channel();
+    let task = tokio::task::spawn_blocking(move || {
+        started.send(()).unwrap();
+        let _ = blocked.recv();
+    });
+    observed.await.unwrap();
+    let outcome = super::super::lifecycle::abort_and_wait(task, "owned blocking worker").await;
+    drop(release);
+    assert!(outcome.unwrap_err().to_string().contains("abort exceeded"));
 }

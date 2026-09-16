@@ -10,7 +10,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::watch;
 
-pub(super) struct SyncSupervisor<'a> {
+pub(super) struct SyncSupervisor<'a, F> {
+    pub(super) on_shutdown: F,
     pub(super) node_workers: &'a logex_sync::tasks::TaskMonitor,
     pub(super) shutdown_tx: &'a watch::Sender<bool>,
     pub(super) sync_status: &'a Mutex<SyncStatus>,
@@ -30,7 +31,7 @@ enum StopTrigger {
     },
 }
 
-impl SyncSupervisor<'_> {
+impl<F: FnOnce()> SyncSupervisor<'_, F> {
     pub(super) async fn run<E: Display>(
         self,
         engine: impl Future<Output = Result<(), E>>,
@@ -71,6 +72,9 @@ impl SyncSupervisor<'_> {
             low_disk = low_disk => StopTrigger::LowDisk(low_disk),
         };
 
+        // Arm the independent whole-shutdown deadline before logs, locks or
+        // cleanup. This runs for successful exits and signals as well as faults.
+        (self.on_shutdown)();
         let mut exit = ExitCode::SUCCESS;
         let mut consensus_unavailable = false;
         let engine_stopped = match trigger {
