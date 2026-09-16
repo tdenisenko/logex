@@ -32,6 +32,7 @@ fn receipt_with_encoded_size(size: usize) -> LogexReceipt {
 
 struct HandlerFixture {
     hashes: Vec<B256>,
+    provider: Arc<ServeCacheProvider>,
     sender: mpsc::Sender<IncomingEthRequest<LogexNetworkPrimitives>>,
     handler: std::pin::Pin<Box<EthRequestHandler<Arc<ServeCacheProvider>, LogexNetworkPrimitives>>>,
 }
@@ -65,11 +66,12 @@ impl HandlerFixture {
         // receiver is dropped and no peer-management work is run.
         let (peer_commands, _) = mpsc::unbounded_channel();
         let handler = Box::pin(EthRequestHandler::new(
-            provider,
+            Arc::clone(&provider),
             PeersHandle::new(peer_commands),
             receiver,
         ));
         Self {
+            provider,
             hashes,
             sender,
             handler,
@@ -199,4 +201,149 @@ async fn serving_eth70_large_prefix_then_exact_remaining_receipt() {
     let suffix = fixture.response(1).await;
     assert!(suffix.receipts == vec![vec![later]]);
     assert!(!suffix.last_block_incomplete);
+}
+
+// These controls only poll a public handler over in-process channels. The
+// provider's cumulative payload counter witnesses a real cache read/copy; it is
+// not a claim that response bytes were sent to any network connection.
+async fn cancelled_serving_request<R>(
+    request: impl Fn(
+        B256,
+        tokio::sync::oneshot::Sender<reth_network::p2p::error::RequestResult<R>>,
+    ) -> IncomingEthRequest<LogexNetworkPrimitives>,
+    check_response: impl Fn(R),
+) {
+    enum ReceiverState {
+        Dropped,
+        Open,
+        Closed,
+    }
+    let mut fixture = HandlerFixture::new(&[LogexReceipt::default()]);
+    for state in [
+        ReceiverState::Dropped,
+        ReceiverState::Open,
+        ReceiverState::Closed,
+        ReceiverState::Open,
+    ] {
+        let before = fixture.provider.p2p_upload_snapshot().1;
+        let (response, receiver) = tokio::sync::oneshot::channel();
+        let mut receiver = Some(receiver);
+        fixture
+            .sender
+            .try_send(request(fixture.hashes[0], response))
+            .unwrap();
+        // Cancel after enqueue but before the handler is polled, matching a
+        // session closing while an otherwise valid request waits in the queue.
+        match state {
+            ReceiverState::Dropped => drop(receiver.take()),
+            ReceiverState::Closed => receiver.as_mut().unwrap().close(),
+            ReceiverState::Open => {}
+        }
+        assert!(futures_util::poll!(fixture.handler.as_mut()).is_pending());
+        let after = fixture.provider.p2p_upload_snapshot().1;
+        match state {
+            ReceiverState::Open => {
+                check_response(receiver.unwrap().try_recv().unwrap().unwrap());
+                assert!(after > before, "live request must still read cached data");
+            }
+            ReceiverState::Dropped | ReceiverState::Closed => {
+                assert_eq!(
+                    after, before,
+                    "closed response must not read/copy cached data"
+                );
+                if let Some(mut receiver) = receiver {
+                    assert!(matches!(
+                        receiver.try_recv(),
+                        Err(tokio::sync::oneshot::error::TryRecvError::Closed)
+                    ));
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn serving_cancellation_skips_headers_and_preserves_live_response() {
+    cancelled_serving_request(
+        |hash, response| IncomingEthRequest::GetBlockHeaders {
+            peer_id: PeerId::repeat_byte(1),
+            request: GetBlockHeaders {
+                start_block: hash.into(),
+                limit: 1,
+                skip: 0,
+                direction: reth_eth_wire::HeadersDirection::Rising,
+            },
+            response,
+        },
+        |headers| {
+            assert!(
+                headers.0
+                    == vec![Header {
+                        number: 1,
+                        ..Default::default()
+                    }]
+            );
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn serving_cancellation_skips_bodies_and_preserves_live_response() {
+    cancelled_serving_request(
+        |hash, response| IncomingEthRequest::GetBlockBodies {
+            peer_id: PeerId::repeat_byte(1),
+            request: GetBlockBodies(vec![hash]),
+            response,
+        },
+        |bodies| assert!(bodies.0 == vec![Default::default()]),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn serving_cancellation_skips_eth68_receipts_and_preserves_live_response() {
+    cancelled_serving_request(
+        |hash, response| IncomingEthRequest::GetReceipts {
+            peer_id: PeerId::repeat_byte(1),
+            request: GetReceipts(vec![hash]),
+            response,
+        },
+        |receipts| {
+            assert!(receipts.0 == vec![vec![ReceiptWithBloom::from(LogexReceipt::default())]]);
+        },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn serving_cancellation_skips_eth69_receipts_and_preserves_live_response() {
+    cancelled_serving_request(
+        |hash, response| IncomingEthRequest::GetReceipts69 {
+            peer_id: PeerId::repeat_byte(1),
+            request: GetReceipts(vec![hash]),
+            response,
+        },
+        |receipts| assert!(receipts.0 == vec![vec![LogexReceipt::default()]]),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn serving_cancellation_skips_eth70_receipts_and_preserves_live_response() {
+    cancelled_serving_request(
+        |hash, response| IncomingEthRequest::GetReceipts70 {
+            peer_id: PeerId::repeat_byte(1),
+            request: GetReceipts70 {
+                first_block_receipt_index: 0,
+                block_hashes: vec![hash],
+            },
+            response,
+        },
+        |receipts| {
+            assert!(receipts.receipts == vec![vec![LogexReceipt::default()]]);
+            assert!(!receipts.last_block_incomplete);
+        },
+    )
+    .await;
 }

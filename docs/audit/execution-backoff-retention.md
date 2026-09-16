@@ -94,6 +94,7 @@ remain open.
 
 All eight local gates pass on `38ee2c73`: vendor integrity, workspace and
 patched-vendor formatting, all-target check, strict Clippy, 1,636 workspace tests
-(24 ignored), documentation tests and release build. PR/CI/merge remain pending.
+(24 ignored), documentation tests and release build. All six CI jobs passed on `cbe824a9`;
+[PR #195](https://github.com/tdenisenko/logex/pull/195) merged as `a03e2d51`.
 
 [Validation record](baselines/2026-09-16-execution-backoff-retention.json).
