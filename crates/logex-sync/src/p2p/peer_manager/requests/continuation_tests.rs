@@ -142,7 +142,7 @@ async fn expiry_run(bodies: bool, version: EthVersion, expire: bool) -> Vec<Peer
     }
     drop(future);
     assert!(closed(&request));
-    assert!(fixture.manager.receipt_quarantined_peers.is_empty());
+    assert!(fixture.manager.receipt_quarantine_history.is_empty());
     state(&fixture.manager)
 }
 async fn expiry(bodies: bool, version: EthVersion) {
@@ -324,7 +324,7 @@ async fn continuation_local_expiry_is_neutral_and_cannot_hide_real_failure() {
             .apply_parallel_chunk_failures("test", vec![local.clone()], &mut dead);
         assert!(dead.is_empty());
         assert_eq!(state(&fixture.manager), before);
-        assert!(fixture.manager.receipt_quarantined_peers.is_empty());
+        assert!(fixture.manager.receipt_quarantine_history.is_empty());
         let real = ChunkRequestFailure {
             kind: ChunkFailureKind::Request(RequestAttempt::Request(
                 reth_network::p2p::error::RequestError::Timeout,

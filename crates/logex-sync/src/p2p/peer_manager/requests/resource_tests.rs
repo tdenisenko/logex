@@ -344,7 +344,7 @@ async fn receipt_resource_public_versions_reject_without_peer_blame() {
             assert!(peer.receipt_paused_until.is_none());
             assert!(peer.receipt_quarantined_until.is_none());
         }
-        assert!(fixture.manager.receipt_quarantined_peers.is_empty());
+        assert!(fixture.manager.receipt_quarantine_history.is_empty());
     }
 }
 

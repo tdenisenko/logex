@@ -8873,3 +8873,6 @@ mod session_endpoint_tests;
 
 #[cfg(test)]
 mod rehabilitation_tests;
+
+#[cfg(test)]
+mod backoff_retention_tests;

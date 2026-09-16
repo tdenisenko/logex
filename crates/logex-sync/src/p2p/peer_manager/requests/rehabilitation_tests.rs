@@ -61,7 +61,7 @@ async fn reconnect_seed(quarantine_active: bool) {
     } else {
         now - Duration::from_secs(1)
     };
-    fixture.manager.receipt_quarantined_peers.insert(id, until);
+    fixture.manager.receipt_quarantine_history.insert(id, until);
     assert!(fixture.manager.remember_pending(record));
     let (sender, _receiver) = request_channel(id);
     fixture

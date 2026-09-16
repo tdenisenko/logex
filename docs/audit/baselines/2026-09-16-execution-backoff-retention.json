@@ -1,0 +1,258 @@
+{
+  "status": "All eight local gates pass; PR/CI/merge pending",
+  "branch": "audit/execution-backoff-retention",
+  "baseline_commit": "840338b31aeb17003ff620f777f340b5e90b14b9",
+  "findings": [
+    "B4-43",
+    "B4-44",
+    "B4-45"
+  ],
+  "corrected_original_controls": {
+    "passed": 1,
+    "failed": 4,
+    "production_unchanged": true
+  },
+  "rejected_oracle": "Short transport quarantine need not erase an already productive restart hint; original draft failure is not a bug.",
+  "candidate_regression": "Expiry initially lost an advertised retry hint after pending eviction; corrected before commit.",
+  "limits": {
+    "entries_per_disconnected_history": 4096,
+    "actual_submitted_dials": 96,
+    "active_quarantine": "Retained in ActivePeer, outside optional history budget",
+    "pressure_tradeoff": "Soonest-expiring disconnected hint may be retried sooner"
+  },
+  "focused_final": {
+    "passed": 367,
+    "failed": 0,
+    "ignored": 1,
+    "new_controls": 12
+  },
+  "review": "Implementer source/history review only",
+  "limitations": [
+    "No live peer connections or full-node test",
+    "No ingestion throughput measurement",
+    "Other retained/transient allocations remain open"
+  ],
+  "evidence": {
+    "original-source.json": {
+      "sha256": "c83d1e1062efa8280b6d1c8077595d6244282fcc384a70ba45b3026275c6b3ce",
+      "bytes": 205
+    },
+    "original-backoff-retention-tests.rs": {
+      "sha256": "fdbc5978d307fff9b452c015958b317a622e329023bf0b42d86dee1d2c50c242",
+      "bytes": 2324
+    },
+    "original-backoff-retention.log": {
+      "sha256": "87052dad52669564cfc1c1b7df7083f697ed2ac244f804f9a56ea7802a8f58fc",
+      "bytes": 2938
+    },
+    "before-cooldown-capacity-fix.log": {
+      "sha256": "5b0cd4c666dd13529c0538f9cb219cc6e3521a325a065b966b049d17c750a1ad",
+      "bytes": 1923
+    },
+    "before-cooldown-capacity-tests.rs": {
+      "sha256": "1a1c4b1f1756511c5313b458ccd14ac312e9c72d904ba88b3ac93b27f3887822",
+      "bytes": 3072
+    },
+    "cooldown-original-paths.json": {
+      "sha256": "780112a9224e28234734c63974b1fdde86ab93700af7b2cf6eb773b20d1ab3e4",
+      "bytes": 543
+    },
+    "first-corrected-controls.log": {
+      "sha256": "85f66b8c29b069fa9e341b7e545b57426973b156df6ce4e28dafcaede593bf3d",
+      "bytes": 1199
+    },
+    "focused-first-full.log": {
+      "sha256": "73cd4c5c60e4a14bcb0477236fa2ca28bc44260bba5d77fbc6fe69774043f203",
+      "bytes": 39880
+    },
+    "candidate-expiry-requeue.log": {
+      "sha256": "a5fb1569bc617310f302bf079a2a62fbf857e5500cab102d08e3e7101707fe79",
+      "bytes": 1519
+    },
+    "focused-corrected-policy.log": {
+      "sha256": "ae4503844b6f30fce8ef1e741c5639fca06fd28c89df840600c8ae9458f12794",
+      "bytes": 39879
+    },
+    "corrected-original-tests.rs": {
+      "sha256": "d8d3603aafd2674a7f03431c06af64ef6ede5c304eb3e01ba1c5ab3c1425a159",
+      "bytes": 3916
+    },
+    "corrected-original-controls.log": {
+      "sha256": "be5b55bf6614364e72a3a6348d64c81129f538587197b5d42479c0ad674a2437",
+      "bytes": 3788
+    },
+    "corrected-original-source.json": {
+      "sha256": "715f82f4a56e6445d9ed8ae6c978c44b0398d39676e3682867b946bf5c0b8f81",
+      "bytes": 656
+    },
+    "focused-final.log": {
+      "sha256": "b70883a1740db604c22ecace2ea312ad7fd292cf0bb5f6bc28b139117e80615e",
+      "bytes": 39880
+    },
+    "gates/results.json": {
+      "sha256": "a2f0e9177d17252c57d797c4a7275b54febea8febbb032113e7286fdb30ddf4c",
+      "bytes": 4645
+    },
+    "gates/test-summary.json": {
+      "sha256": "d423603399d026cdf86e8b513d85b689725405ea2203c6520948d6180277830a",
+      "bytes": 69
+    }
+  },
+  "source_commit": "38ee2c73ff12ad701f1dd0fd69686c5462c71850",
+  "gates": {
+    "commit": "38ee2c73ff12ad701f1dd0fd69686c5462c71850",
+    "rustc": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+    "gates": [
+      {
+        "name": "vendor",
+        "command": [
+          "python3",
+          "tools/verify_datafusion_vendor.py"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-16T13:17:04.341654+00:00",
+        "finished": "2026-09-16T13:17:04.407482+00:00",
+        "sha256": "5de30a03a2c21d0dd165f1d3f30b23ef080e06616866e0a02f37198cff7f3a16",
+        "log": "/private/tmp/logex-execution-backoff-retention-5vcnlgoj/gates/vendor.log"
+      },
+      {
+        "name": "format",
+        "command": [
+          "cargo",
+          "fmt",
+          "--all",
+          "--",
+          "--check"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-16T13:17:04.407815+00:00",
+        "finished": "2026-09-16T13:17:05.313252+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-execution-backoff-retention-5vcnlgoj/gates/format.log"
+      },
+      {
+        "name": "vendor-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2024",
+          "--config-path",
+          "vendor/reth-network/rustfmt.toml",
+          "--config",
+          "skip_children=true",
+          "vendor/reth-network/src/eth_requests.rs",
+          "vendor/reth-network/src/session/active.rs",
+          "vendor/reth-network/src/session/mod.rs",
+          "vendor/reth-network/src/session/types.rs",
+          "vendor/reth-network/src/session/range_update.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-16T13:17:05.313644+00:00",
+        "finished": "2026-09-16T13:17:05.376332+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-execution-backoff-retention-5vcnlgoj/gates/vendor-format.log"
+      },
+      {
+        "name": "check",
+        "command": [
+          "cargo",
+          "check",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-16T13:17:05.376723+00:00",
+        "finished": "2026-09-16T13:17:13.457426+00:00",
+        "sha256": "4e37cf341fe020d90511d7174087c2f3efb33439fceaf4a8d799f30102a569ff",
+        "log": "/private/tmp/logex-execution-backoff-retention-5vcnlgoj/gates/check.log"
+      },
+      {
+        "name": "clippy",
+        "command": [
+          "cargo",
+          "clippy",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-16T13:17:13.457998+00:00",
+        "finished": "2026-09-16T13:17:21.159718+00:00",
+        "sha256": "c39508b3271abd9b597f6cbf62e6f87ac478e6bbfecf9c9e683a7d9292bedd5d",
+        "log": "/private/tmp/logex-execution-backoff-retention-5vcnlgoj/gates/clippy.log"
+      },
+      {
+        "name": "test",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-16T13:17:21.160637+00:00",
+        "finished": "2026-09-16T13:20:15.801675+00:00",
+        "sha256": "b4530c575b1a5cdc43aecf39f2a35722c48bc2b27467bd9836f81a0266be67e9",
+        "log": "/private/tmp/logex-execution-backoff-retention-5vcnlgoj/gates/test.log"
+      },
+      {
+        "name": "doc",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--doc",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-16T13:20:15.802745+00:00",
+        "finished": "2026-09-16T13:20:25.673018+00:00",
+        "sha256": "4a107fa26192c0d136242203d1c909c02865bd153f87f19f32d9c68c71c6c7c8",
+        "log": "/private/tmp/logex-execution-backoff-retention-5vcnlgoj/gates/doc.log"
+      },
+      {
+        "name": "release-build",
+        "command": [
+          "cargo",
+          "build",
+          "-p",
+          "logex-node",
+          "--release",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-16T13:20:25.673513+00:00",
+        "finished": "2026-09-16T13:21:09.229643+00:00",
+        "sha256": "31e240cc8b94acf729a63bd9fcf54851d130bfb44c74baf9a6c83847a8878bd1",
+        "log": "/private/tmp/logex-execution-backoff-retention-5vcnlgoj/gates/release-build.log"
+      }
+    ]
+  },
+  "workspace_tests": {
+    "groups": 25,
+    "passed": 1636,
+    "failed": 0,
+    "ignored": 24
+  }
+}

@@ -118,7 +118,11 @@ Merged in PR #193 (`bedfed0d`) after 301 focused tests, eight local gates and si
 
 The [execution bandwidth retention review](execution-bandwidth-retention.md) records B4-42:
 bounded shared telemetry buckets with explicit recent-rate precision.
-All 355 focused P2P tests and eight local gates pass; CI/merge remain pending.
+Merged in PR #194 (`840338b3`) after 355 focused P2P tests, eight local gates and six CI jobs.
+
+The [execution retry history review](execution-backoff-retention.md) records B4-43–45:
+bound disconnected history, preserve active deadlines and separate cooldowns from dial capacity.
+All 367 focused P2P tests and eight local gates pass; CI/merge remain pending.
 
 ## Baseline findings
 
