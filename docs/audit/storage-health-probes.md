@@ -59,7 +59,9 @@ conversion, failure status/diagnostics and signal responsiveness during a held
 probe. Blocking controls own and release their workers before assertions; the
 queued-work control drops its runtime before checking that canceled work never ran.
 No physical-volume, live-node, external service or mac-mini test is claimed.
-Full workspace gates and PR/CI/merge remain pending.
+All eight local gates pass on `e56c3953`: vendor integrity, workspace and
+patched-vendor formatting, all-target check, strict Clippy, 1,720 workspace tests
+(24 ignored), documentation tests and release build. PR/CI/merge remain pending.
 
 Implementer review traced both probe roots, error and cancellation paths, exactly
 one active job, unchanged interval/threshold, supervisor outcome handling and
