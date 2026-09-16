@@ -35,6 +35,7 @@ mod helpers;
 mod historical;
 mod ingest;
 mod live;
+mod memory;
 
 use self::helpers::{
     assemble_txs, cancelable, execution_head, historical_backfill_peer_floor, peer_refill_goal,

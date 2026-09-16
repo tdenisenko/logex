@@ -1,0 +1,257 @@
+{
+  "base": "ba4957f26baa3b97ab22bf9cd000e8127f4853fc",
+  "status": "All eight local gates passed; publication/CI/merge pending",
+  "findings": [
+    "B5-02",
+    "B5-03"
+  ],
+  "evidence_root": "/private/tmp/logex-historical-memory-probes-8h4m2c0a",
+  "evidence": {
+    "original-source.json": {
+      "sha256": "a0f0876e251699861f7eacbb709a29f23dd9ace7a7491623950c1f029010689b",
+      "bytes": 304
+    },
+    "original-reference-controls.patch": {
+      "sha256": "b84b7023eaeec3e04986f1801895dc9aecac3e4126b4ed684f53aeec65204243",
+      "bytes": 5244
+    },
+    "original-reference-controls.log": {
+      "sha256": "03aa79a0b3ddd58d233ff3cad9b96e794547ef3611998e25c5e731f564943df8",
+      "bytes": 3073
+    },
+    "original-accounting.rs": {
+      "sha256": "ba2edf738e47fb9e99aff527a41139215daeac4238dc8a1770038bd256de572f",
+      "bytes": 676
+    },
+    "original-accounting.log": {
+      "sha256": "7f3ea46ad5473d1b9ba3b7b0617d9ea59f03f4e3a8e05540985cf622fa4a7097",
+      "bytes": 638
+    },
+    "focused-memory.log": {
+      "sha256": "687d78d2cf2b704a24e6a9f2125e6af6377dd0df702ff712e081b4b9ed4651e2",
+      "bytes": 1520
+    },
+    "focused-sync.log": {
+      "sha256": "44ce42956f67eccdcadcf5a4f74097df0ce2ecc2baba630967f4ad28a542c623",
+      "bytes": 58579
+    },
+    "final-memory.log": {
+      "sha256": "79d359636ff703fcad137832b67bfc8ecbb1141c22a948c8798c4aa7ac1d8e2c",
+      "bytes": 1519
+    },
+    "gates/results.json": {
+      "sha256": "34b8880fa5f15b56932c8a9475e984db195b27c744b9f312e8ed508b1f5aa196",
+      "bytes": 4621
+    },
+    "gates/vendor.log": {
+      "sha256": "5de30a03a2c21d0dd165f1d3f30b23ef080e06616866e0a02f37198cff7f3a16",
+      "bytes": 333
+    },
+    "gates/format.log": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    "gates/vendor-format.log": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    "gates/check.log": {
+      "sha256": "71b5c176d9208d18cb447ebe71e269f7a224692d7761ef8d0a2a5268f576ebf0",
+      "bytes": 537
+    },
+    "gates/clippy.log": {
+      "sha256": "cab2407358a927eb3e83eb369bb2f67bbd3f9fce686dab6c3f29a8ca48e7e53f",
+      "bytes": 537
+    },
+    "gates/test.log": {
+      "sha256": "f78cdd064a88b316a92025b08ba6a450dbf6903c415cbf08411fd80320e17f65",
+      "bytes": 164635
+    },
+    "gates/doc.log": {
+      "sha256": "a292f0656f343730ee8c15703c578bdfc8479be7a0de096eb2f19308619afb8d",
+      "bytes": 1423
+    },
+    "gates/release-build.log": {
+      "sha256": "5cc978f5c1a2253f83db8f82fd3168a80b45c3b39c4bb83590c25f2f04087462",
+      "bytes": 528
+    }
+  },
+  "original_controls": {
+    "actual_helpers": {
+      "passed": 0,
+      "failed": 2
+    },
+    "extracted_accounting": {
+      "passed": 0,
+      "failed": 1
+    }
+  },
+  "benchmark": "Not run; implementation correctness and resource ownership, no throughput claim",
+  "remote_work": false,
+  "focused": {
+    "sync": {
+      "passed": 570,
+      "ignored": 2
+    },
+    "final_memory": {
+      "passed": 9,
+      "ignored": 0
+    }
+  },
+  "source_commit": "546d6d891534844f55ce5119820f28e12cb3c691",
+  "validation": {
+    "commit": "546d6d891534844f55ce5119820f28e12cb3c691",
+    "rustc": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+    "gates": [
+      {
+        "name": "vendor",
+        "command": [
+          "python3",
+          "tools/verify_datafusion_vendor.py"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-16T20:28:55.998676+00:00",
+        "finished": "2026-09-16T20:28:56.066514+00:00",
+        "sha256": "5de30a03a2c21d0dd165f1d3f30b23ef080e06616866e0a02f37198cff7f3a16",
+        "log": "/private/tmp/logex-historical-memory-probes-8h4m2c0a/gates/vendor.log"
+      },
+      {
+        "name": "format",
+        "command": [
+          "cargo",
+          "fmt",
+          "--all",
+          "--",
+          "--check"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-16T20:28:56.066877+00:00",
+        "finished": "2026-09-16T20:28:56.975087+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-historical-memory-probes-8h4m2c0a/gates/format.log"
+      },
+      {
+        "name": "vendor-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2024",
+          "--config-path",
+          "vendor/reth-network/rustfmt.toml",
+          "--config",
+          "skip_children=true",
+          "vendor/reth-network/src/eth_requests.rs",
+          "vendor/reth-network/src/session/active.rs",
+          "vendor/reth-network/src/session/mod.rs",
+          "vendor/reth-network/src/session/types.rs",
+          "vendor/reth-network/src/session/range_update.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-16T20:28:56.975490+00:00",
+        "finished": "2026-09-16T20:28:57.038052+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-historical-memory-probes-8h4m2c0a/gates/vendor-format.log"
+      },
+      {
+        "name": "check",
+        "command": [
+          "cargo",
+          "check",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-16T20:28:57.038430+00:00",
+        "finished": "2026-09-16T20:29:02.162024+00:00",
+        "sha256": "71b5c176d9208d18cb447ebe71e269f7a224692d7761ef8d0a2a5268f576ebf0",
+        "log": "/private/tmp/logex-historical-memory-probes-8h4m2c0a/gates/check.log"
+      },
+      {
+        "name": "clippy",
+        "command": [
+          "cargo",
+          "clippy",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-16T20:29:02.162500+00:00",
+        "finished": "2026-09-16T20:29:06.617265+00:00",
+        "sha256": "cab2407358a927eb3e83eb369bb2f67bbd3f9fce686dab6c3f29a8ca48e7e53f",
+        "log": "/private/tmp/logex-historical-memory-probes-8h4m2c0a/gates/clippy.log"
+      },
+      {
+        "name": "test",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-16T20:29:06.617663+00:00",
+        "finished": "2026-09-16T20:32:02.333893+00:00",
+        "sha256": "f78cdd064a88b316a92025b08ba6a450dbf6903c415cbf08411fd80320e17f65",
+        "log": "/private/tmp/logex-historical-memory-probes-8h4m2c0a/gates/test.log"
+      },
+      {
+        "name": "doc",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--doc",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-16T20:32:02.335887+00:00",
+        "finished": "2026-09-16T20:32:10.247077+00:00",
+        "sha256": "a292f0656f343730ee8c15703c578bdfc8479be7a0de096eb2f19308619afb8d",
+        "log": "/private/tmp/logex-historical-memory-probes-8h4m2c0a/gates/doc.log"
+      },
+      {
+        "name": "release-build",
+        "command": [
+          "cargo",
+          "build",
+          "-p",
+          "logex-node",
+          "--release",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-16T20:32:10.247524+00:00",
+        "finished": "2026-09-16T20:33:00.716323+00:00",
+        "sha256": "5cc978f5c1a2253f83db8f82fd3168a80b45c3b39c4bb83590c25f2f04087462",
+        "log": "/private/tmp/logex-historical-memory-probes-8h4m2c0a/gates/release-build.log"
+      }
+    ]
+  },
+  "workspace_tests": {
+    "passed": 1731,
+    "ignored": 24,
+    "groups": 25
+  }
+}
