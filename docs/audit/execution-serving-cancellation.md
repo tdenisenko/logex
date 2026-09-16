@@ -78,6 +78,7 @@ removed. Mac mini and external-volume contents were not accessed.
 
 All eight local gates pass on `780d63be`: vendor integrity, workspace and
 patched-vendor formatting, all-target check, strict Clippy, 1,641 workspace tests
-(24 ignored), documentation tests and release build. PR/CI/merge remain pending.
+(24 ignored), documentation tests and release build. All six CI jobs passed on `858ade7b`;
+[PR #196](https://github.com/tdenisenko/logex/pull/196) merged as `cc1bb889`.
 
 [Validation record](baselines/2026-09-16-execution-serving-cancellation.json).

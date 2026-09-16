@@ -11,6 +11,22 @@ use reth_eth_wire::NetworkPrimitives;
 use std::sync::OnceLock;
 use tokio::task::JoinSet;
 
+#[cfg(test)]
+mod fetch_supervision_tests;
+
+fn historical_fetch_worker_exit_error(
+    kind: &str,
+    sequence: u64,
+    attempt: u64,
+    result: std::result::Result<(), tokio::task::JoinError>,
+) -> eyre::Report {
+    let detail = match result {
+        Ok(()) => "exited without returning an outcome".to_owned(),
+        Err(error) => format!("failed: {error}"),
+    };
+    eyre::eyre!("historical {kind} fetch worker (sequence {sequence}, attempt {attempt}) {detail}")
+}
+
 const CONSENSUS_WAIT_INTERVAL: Duration = Duration::from_secs(2);
 const CONSENSUS_ANCHOR_FORWARD_BATCH_LIMIT: u64 = 32;
 const CONSENSUS_ANCHOR_FORWARD_BATCH_LIMIT_DURING_HISTORICAL: u64 = 4;
@@ -2394,7 +2410,7 @@ impl SyncEngine {
 
         let connected_peer_floor = historical_backfill_peer_floor(self.config.max_peers);
         if self.peers.peer_count() < connected_peer_floor
-            && !self.has_ready_historical_fetch_for(&child_header)
+            && !self.has_ready_historical_fetch_for(&child_header).await?
         {
             self.refresh_connectivity_state();
             tracing::debug!(
@@ -3473,7 +3489,7 @@ impl SyncEngine {
 
         let connected_peer_floor = historical_backfill_peer_floor(self.config.max_peers);
         if self.peers.peer_count() < connected_peer_floor
-            && !self.has_ready_historical_fetch_for(&child_header)
+            && !self.has_ready_historical_fetch_for(&child_header).await?
         {
             self.refresh_connectivity_state();
             tracing::debug!(
@@ -3646,13 +3662,47 @@ impl SyncEngine {
         Some(remaining_attempts)
     }
 
-    fn drain_historical_fetch_outcomes(&mut self) {
+    async fn drain_historical_fetch_outcomes(&mut self) -> Result<()> {
         self.drain_historical_request_accounting();
-        while let Ok(outcome) = self.historical_fetch_rx.try_recv() {
-            self.store_historical_fetch_outcome(outcome);
-        }
         self.abort_stale_historical_fetch_work();
+        loop {
+            // Observe completion before draining the channel: a successful worker
+            // sends its result before finishing. Checking in the opposite order
+            // could mistake a concurrently enqueued result for a missing one.
+            let finished = self
+                .historical_fetch_handles
+                .iter()
+                .find_map(|(sequence, fetch)| {
+                    fetch.attempts.iter().find_map(|(attempt, task)| {
+                        task.handle.is_finished().then_some((*sequence, *attempt))
+                    })
+                });
+            while let Ok(outcome) = self.historical_fetch_rx.try_recv() {
+                self.store_historical_fetch_outcome(outcome);
+            }
+            let Some((sequence, attempt)) = finished else {
+                break;
+            };
+            let Some(task) = self
+                .historical_fetch_handles
+                .get_mut(&sequence)
+                .and_then(|fetch| fetch.attempts.remove(&attempt))
+            else {
+                // Its result (or a successful competing attempt) retired it.
+                continue;
+            };
+            self.peers.retire_body_receipt_owner(task.owner);
+            let result = task.handle.await;
+            self.reset_historical_fetch_pipeline();
+            return Err(historical_fetch_worker_exit_error(
+                "body/receipt",
+                sequence,
+                attempt,
+                result,
+            ));
+        }
         self.refresh_historical_fetch_head_of_line_timer();
+        Ok(())
     }
 
     fn abort_stale_historical_fetch_work(&mut self) -> usize {
@@ -3974,7 +4024,7 @@ impl SyncEngine {
         &mut self,
         refill_fetch_pipeline: bool,
     ) -> Result<bool> {
-        self.drain_historical_fetch_outcomes();
+        self.drain_historical_fetch_outcomes().await?;
         self.drain_historical_header_fetch_outcomes().await?;
         self.drain_historical_prepare_tasks().await?;
         if historical_prepare_work_blocked_by_missing_expected_fetch(
@@ -4018,7 +4068,7 @@ impl SyncEngine {
                 )
                 .await?;
             }
-            self.drain_historical_fetch_outcomes();
+            self.drain_historical_fetch_outcomes().await?;
             self.drain_historical_header_fetch_outcomes().await?;
         }
 
@@ -4036,12 +4086,12 @@ impl SyncEngine {
         )
     }
 
-    fn has_ready_historical_fetch_for(&mut self, child_header: &Header) -> bool {
-        self.drain_historical_fetch_outcomes();
-        self.historical_fetch_pipeline_matches(child_header)
+    async fn has_ready_historical_fetch_for(&mut self, child_header: &Header) -> Result<bool> {
+        self.drain_historical_fetch_outcomes().await?;
+        Ok(self.historical_fetch_pipeline_matches(child_header)
             && self
                 .historical_fetch_completed
-                .contains_key(&self.historical_fetch_expected_sequence)
+                .contains_key(&self.historical_fetch_expected_sequence))
     }
 
     fn historical_fetch_pipeline_matches(&self, child_header: &Header) -> bool {
@@ -4191,7 +4241,7 @@ impl SyncEngine {
     }
 
     async fn recover_historical_sequence_gap(&mut self, child_header: &Header) -> Result<bool> {
-        self.drain_historical_fetch_outcomes();
+        self.drain_historical_fetch_outcomes().await?;
         match self.historical_sequence_gap_action() {
             HistoricalSequenceGapAction::None => Ok(false),
             HistoricalSequenceGapAction::RefillMissingExpectedFetch => {
@@ -4630,9 +4680,36 @@ impl SyncEngine {
     }
 
     async fn drain_historical_header_fetch_outcomes(&mut self) -> Result<bool> {
+        // As with body/receipt workers, snapshot completion before reading results.
+        // Materializing a result can reset the generation, so retain its identity.
+        let finished = self
+            .historical_header_fetch_handle
+            .as_ref()
+            .and_then(|task| {
+                task.handle.is_finished().then_some((
+                    self.historical_fetch_generation,
+                    task.sequence,
+                    task.attempt,
+                ))
+            });
         let mut progressed = false;
         while let Ok(outcome) = self.historical_header_fetch_rx.try_recv() {
             progressed |= self.store_historical_header_fetch_outcome(outcome).await?;
+        }
+        if let Some((generation, sequence, attempt)) = finished
+            && sequence >= self.historical_fetch_expected_sequence
+            && generation == self.historical_fetch_generation
+            && self
+                .historical_header_fetch_handle
+                .as_ref()
+                .is_some_and(|task| task.sequence == sequence && task.attempt == attempt)
+            && let Some(task) = self.historical_header_fetch_handle.take()
+        {
+            let result = task.handle.await;
+            self.reset_historical_fetch_pipeline();
+            return Err(historical_fetch_worker_exit_error(
+                "header", sequence, attempt, result,
+            ));
         }
         Ok(progressed)
     }
@@ -4766,7 +4843,7 @@ impl SyncEngine {
         scope: HistoricalFetchRefillScope,
         max_new_fetches: usize,
     ) -> Result<()> {
-        self.drain_historical_fetch_outcomes();
+        self.drain_historical_fetch_outcomes().await?;
         self.drain_historical_header_fetch_outcomes().await?;
 
         let max_new_fetches = if matches!(scope, HistoricalFetchRefillScope::CriticalPath) {
@@ -4869,7 +4946,7 @@ impl SyncEngine {
     ) -> Result<Option<HistoricalFetchOutcome>> {
         let mut wait_started = Instant::now();
         loop {
-            self.drain_historical_fetch_outcomes();
+            self.drain_historical_fetch_outcomes().await?;
             self.drain_historical_header_fetch_outcomes().await?;
             self.drain_historical_prepare_tasks().await?;
 
@@ -5637,7 +5714,7 @@ impl SyncEngine {
     ) -> Result<Option<(u64, HistoricalFetchedBatch, bool)>> {
         self.ensure_historical_fetch_pipeline(child_header.clone())
             .await?;
-        self.drain_historical_fetch_outcomes();
+        self.drain_historical_fetch_outcomes().await?;
         let prefetched = self
             .historical_fetch_completed
             .contains_key(&self.historical_fetch_expected_sequence);

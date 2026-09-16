@@ -1,0 +1,238 @@
+{
+  "status": "All eight local gates pass; PR/CI/merge pending",
+  "finding": "B5-01",
+  "base": "cc1bb88940879e38069030f7286e222ba499349e",
+  "evidence_directory": "/private/tmp/logex-historical-fetch-supervision-7ouht6_a",
+  "original_production_sha256": "28eaa040239f644d5c341b8b7a780919e2da73b67819efe0a5abb7b97989497b",
+  "original_controls": {
+    "passed": 4,
+    "failed": 4,
+    "scope": "Stopped or normally returned local worker without outcome; controls for results before and after task completion"
+  },
+  "final_controls": 16,
+  "focused_sync_tests": {
+    "passed": 552,
+    "ignored": 2
+  },
+  "review": "Implementer review; no independent review claimed",
+  "performance": "Existing-handle completion scan; no new per-block processing, persistent write, queue or timer. No benchmark run.",
+  "limitations": [
+    "No observed production outage or remotely triggered failure claim",
+    "Task failure propagates through the existing engine error and shutdown path; generic CLI exit status remains a separate open audit item",
+    "Offline local fixtures only; no live sync or external-volume access"
+  ],
+  "evidence": {
+    "original-source.json": {
+      "sha256": "6e1c496cf6b08f50ce127e146961667540338208ce951b62e10b3dd43e239fc1",
+      "bytes": 57
+    },
+    "original-controls.log": {
+      "sha256": "879e61acb07ebde8a93c3e3255b3ce8e40351b75311804ec56090cb78279759d",
+      "bytes": 3600
+    },
+    "focused-candidate.log": {
+      "sha256": "163fbcd8f678e65c5dd420e949c7d39ad82b333139a68f3f89cd5eab639a77f5",
+      "bytes": 3355
+    },
+    "focused-revised.log": {
+      "sha256": "bbddbf5888c380f3345d42ef59cd034eacafa2bf0937514156f8741511015251",
+      "bytes": 2185
+    },
+    "focused-final.log": {
+      "sha256": "5f46d6671931081ba9a500adb610e82f720b5460b1b88df8e31708c9e3cbb8fb",
+      "bytes": 57062
+    },
+    "gates/results.json": {
+      "sha256": "61d5993b5cf9c146a2a58aec970c2e22d007aff450300ae5d1e654f185db939e",
+      "bytes": 4653
+    },
+    "gates/test-summary.json": {
+      "sha256": "07baec8823cad1fc365cd9fbe97943f9ee72000a82e054b9e7d9466c89bf65b9",
+      "bytes": 69
+    },
+    "completion-order-review.json": {
+      "sha256": "dda5ec384ce839ddb912603f0556fde6867f496a78e84528137bfc4804d09946",
+      "bytes": 856
+    }
+  },
+  "source_commit": "5514fe1b5604b293570bb06b113b4fe93194aa6a",
+  "gates": {
+    "commit": "5514fe1b5604b293570bb06b113b4fe93194aa6a",
+    "rustc": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+    "gates": [
+      {
+        "name": "vendor",
+        "command": [
+          "python3",
+          "tools/verify_datafusion_vendor.py"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-16T17:03:14.588692+00:00",
+        "finished": "2026-09-16T17:03:14.661096+00:00",
+        "sha256": "5de30a03a2c21d0dd165f1d3f30b23ef080e06616866e0a02f37198cff7f3a16",
+        "log": "/private/tmp/logex-historical-fetch-supervision-7ouht6_a/gates/vendor.log"
+      },
+      {
+        "name": "format",
+        "command": [
+          "cargo",
+          "fmt",
+          "--all",
+          "--",
+          "--check"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-16T17:03:14.661513+00:00",
+        "finished": "2026-09-16T17:03:15.547695+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-historical-fetch-supervision-7ouht6_a/gates/format.log"
+      },
+      {
+        "name": "vendor-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2024",
+          "--config-path",
+          "vendor/reth-network/rustfmt.toml",
+          "--config",
+          "skip_children=true",
+          "vendor/reth-network/src/eth_requests.rs",
+          "vendor/reth-network/src/session/active.rs",
+          "vendor/reth-network/src/session/mod.rs",
+          "vendor/reth-network/src/session/types.rs",
+          "vendor/reth-network/src/session/range_update.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-16T17:03:15.548141+00:00",
+        "finished": "2026-09-16T17:03:15.614460+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-historical-fetch-supervision-7ouht6_a/gates/vendor-format.log"
+      },
+      {
+        "name": "check",
+        "command": [
+          "cargo",
+          "check",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-16T17:03:15.614841+00:00",
+        "finished": "2026-09-16T17:03:16.684697+00:00",
+        "sha256": "7c1faf96608cfccc49f34dd0096ceb8fa247373f8d838eb4dbb1c126d4b01a99",
+        "log": "/private/tmp/logex-historical-fetch-supervision-7ouht6_a/gates/check.log"
+      },
+      {
+        "name": "clippy",
+        "command": [
+          "cargo",
+          "clippy",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-16T17:03:16.685119+00:00",
+        "finished": "2026-09-16T17:03:22.860287+00:00",
+        "sha256": "768998c57f91997058a5df6f74db3b38068a15642c0e256a8ca14e425d8b9a63",
+        "log": "/private/tmp/logex-historical-fetch-supervision-7ouht6_a/gates/clippy.log"
+      },
+      {
+        "name": "test",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-16T17:03:22.861309+00:00",
+        "finished": "2026-09-16T17:06:16.720170+00:00",
+        "sha256": "388e5d7bdb778c9060c0e350c6583a0e30cb65323e7c88cca13ef990b378c519",
+        "log": "/private/tmp/logex-historical-fetch-supervision-7ouht6_a/gates/test.log"
+      },
+      {
+        "name": "doc",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--doc",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-16T17:06:16.722159+00:00",
+        "finished": "2026-09-16T17:06:24.586830+00:00",
+        "sha256": "df88c1b573ed5b4678e6150ea2f8a02abbc34936c01aaa9bdfddcbcb68dfb2cd",
+        "log": "/private/tmp/logex-historical-fetch-supervision-7ouht6_a/gates/doc.log"
+      },
+      {
+        "name": "release-build",
+        "command": [
+          "cargo",
+          "build",
+          "-p",
+          "logex-node",
+          "--release",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-16T17:06:24.587408+00:00",
+        "finished": "2026-09-16T17:07:09.636409+00:00",
+        "sha256": "e8650f017040fc6726697106b609f2ca33536b484ece441288d0019bc25fb102",
+        "log": "/private/tmp/logex-historical-fetch-supervision-7ouht6_a/gates/release-build.log"
+      }
+    ]
+  },
+  "workspace_tests": {
+    "groups": 25,
+    "passed": 1657,
+    "failed": 0,
+    "ignored": 24
+  },
+  "completion_order_review": {
+    "crate": "tokio",
+    "locked_version": "1.51.0",
+    "observations": [
+      "JoinHandle::is_finished reads the completion state through an Acquire load",
+      "MPSC try_recv waits for an in-progress send rather than treating the Busy queue state as Empty",
+      "The LogEx worker sends its outcome before its task returns; checking completion before draining therefore preserves a published result"
+    ],
+    "files": {
+      "src/runtime/task/join.rs": {
+        "sha256": "bd6a821685645ecd7fdb8468750320aa5b544f4243d1812730d9373c91a7843d",
+        "bytes": 12249
+      },
+      "src/runtime/task/state.rs": {
+        "sha256": "438b7a077189173668729cff388b1f4fd4305b1d9c8da61c0f9ae7f2c4b16d9d",
+        "bytes": 22029
+      },
+      "src/sync/mpsc/chan.rs": {
+        "sha256": "3f3a7ceb545f4356a5f87d80d2d222dd7c0aee7eabd4432a233a535bd8df5e08",
+        "bytes": 18858
+      }
+    }
+  }
+}

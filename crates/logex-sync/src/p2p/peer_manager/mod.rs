@@ -61,6 +61,11 @@ mod serving_tests;
 mod state;
 mod tasks;
 
+#[cfg(test)]
+pub(crate) use self::requests::limit_tests::{
+    empty_body_receipt_outcome, empty_header_outcome, engine_peer_fixture,
+};
+
 pub use self::requests::ReceiptRequestContext;
 use self::requests::RequestAttempt;
 pub(crate) use self::requests::{
