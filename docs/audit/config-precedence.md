@@ -73,7 +73,13 @@ No independent review is claimed.
 The initial source `4b593957` passed all eight local gates (1,765 tests, 24 ignored).
 Final review then noticed that location counters inferred `i32`; they now use
 `usize`, matching string offsets. A giant-file runtime reproduction was not run.
-Initial CI was canceled before merge, and revised-source gates are pending. The machine-readable evidence is
+Initial CI was canceled before merge, and revised-source gates pass on `c70c2118`: vendor integrity, workspace/patched-vendor
+formatting, check, strict Clippy, 1,765 workspace tests (24 ignored), documentation
+tests and release build. CI and merge are pending. Four additional checks of the actual release executable pass:
+explicit directories before/after `info` select only the requested owned temporary
+directory, and unknown-key/syntax errors exit 1 before either candidate data
+directory is created. The syntax error does not print the fixture value. All four
+temporary fixtures were removed afterward. The machine-readable evidence is
 [recorded here](baselines/2026-09-17-config-precedence.json). No benchmark was run:
 this is startup-only work, with no changes to ingestion, storage writes or query
 execution. Volume identity/preflight, offline repair, broader runtime validation
