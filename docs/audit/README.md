@@ -134,7 +134,7 @@ Merged in PR #197 (`f6f05acc`) after 552 focused sync tests, eight local gates a
 
 The [runtime failure-exit review](runtime-failure-exit.md) records B10-01/B10-02:
 preserve failure exit status, bound cleanup after engine/disk failures and tolerate interrupted telemetry updates.
-All 124 focused node tests pass; full gates and merge remain pending.
+All 124 focused node tests and eight local gates pass; CI/merge remain pending.
 
 ## Baseline findings
 

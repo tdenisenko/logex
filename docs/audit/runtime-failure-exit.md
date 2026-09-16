@@ -81,7 +81,9 @@ The selector, grace handling and failure recording now have one private implemen
 The parent's pin import is test-only. No public CLI, API, dependency or storage
 format changed. Implementer review covered all selector branches, watchdog lifetime,
 terminal exit mapping and unchanged late-latch checks; no independent review is
-claimed. Full workspace gates and PR/CI/merge are pending.
+claimed. All eight local gates pass on `36caff48`: vendor integrity, workspace and
+patched-vendor formatting, all-target check, strict Clippy, 1,673 workspace tests
+(24 ignored), documentation tests and release build. PR/CI/merge remain pending.
 
 ## Remaining boundaries
 
