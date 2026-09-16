@@ -76,8 +76,9 @@ controls cover the original unbounded join, normal/failed/canceled joins, reques
 abort versus panic and blocking timeout, all stop-trigger hooks, an actual runtime
 blocked on owned work, explicit successful completion, guard abandonment, cleanup
 unwind, failure status and delayed/expired completion. Test workers are released
-before assertions; no test callback exits the test process. The final workspace
-gates and PR/CI/merge are pending.
+before assertions; no test callback exits the test process. All eight local gates pass on `9fb27264`: vendor integrity, workspace and
+patched-vendor formatting, all-target check, strict Clippy, 1,700 workspace tests
+(24 ignored), documentation tests and release build. PR/CI/merge remain pending.
 
 Implementer review traced all shutdown callers, normal/error event ordering,
 watchdog ownership across `block_on`/runtime destruction, source/result lifetimes
