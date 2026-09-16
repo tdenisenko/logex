@@ -62,12 +62,67 @@ async fn engine_after_shutdown(
     result
 }
 
-fn low_disk() -> LowDiskSpace {
-    LowDiskSpace {
+fn low_disk() -> StorageHealthFailure {
+    StorageHealthFailure::LowSpace {
         path: PathBuf::from("isolated-test-storage"),
         free_bytes: 5,
         min_free_bytes: 10,
     }
+}
+
+#[tokio::test]
+async fn storage_probe_error_stops_sync_and_preserves_the_diagnostic() {
+    let mut fixture = Fixture::new();
+    let engine = engine_after_shutdown(fixture.shutdown.subscribe(), Ok(()));
+    let error = StorageHealthFailure::Probe {
+        path: PathBuf::from("isolated-test-storage/segments"),
+        source: std::io::Error::new(std::io::ErrorKind::NotFound, "storage path unavailable"),
+    };
+    let mut failures = vec![];
+    let exit = fixture
+        .supervisor()
+        .run(engine, pending(), ready(error), |message| {
+            failures.push(message.to_owned())
+        })
+        .await;
+    assert_eq!(exit, ExitCode::FAILURE);
+    assert_eq!(failures.len(), 1);
+    assert!(failures[0].contains("isolated-test-storage/segments"));
+    assert!(failures[0].contains("storage path unavailable"));
+    fixture.assert_stopped();
+}
+
+#[tokio::test]
+async fn shutdown_signal_remains_responsive_during_a_storage_probe() {
+    let mut fixture = Fixture::new();
+    let engine = engine_after_shutdown(fixture.shutdown.subscribe(), Ok(()));
+    let (release, blocked) = std::sync::mpsc::channel::<()>();
+    let (started, observed) = tokio::sync::oneshot::channel();
+    let probe = async {
+        super::super::storage_health::run_probe(
+            PathBuf::from("owned-probe-control"),
+            Duration::from_secs(60),
+            move |_| {
+                let _ = started.send(());
+                let _ = blocked.recv();
+                Ok(())
+            },
+        )
+        .await
+        .unwrap_err()
+    };
+    let signal = async {
+        observed.await.unwrap();
+        "local stop control"
+    };
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        fixture.supervisor().run(engine, signal, probe, |_| {}),
+    )
+    .await;
+    drop(release);
+    assert_eq!(result.unwrap(), ExitCode::SUCCESS);
+    assert!(fixture.workers.subscribe().borrow().is_none());
 }
 
 #[tokio::test]

@@ -1,0 +1,37 @@
+{
+  "status": "Implemented; 152 node tests pass; workspace gates pending",
+  "base": "a3c57ac2d67cf707bc0ad6fb661af685a2b691a2",
+  "findings": [
+    "B10-08",
+    "B10-09"
+  ],
+  "evidence_root": "/private/tmp/logex-storage-health-probes-kfaujmz4",
+  "original_reproduction": {
+    "method": "Unchanged production prefix; missing path in a new TempDir",
+    "passed": 0,
+    "failed": 1
+  },
+  "focused_tests": {
+    "passed": 152,
+    "failed": 0,
+    "ignored": 0
+  },
+  "evidence": {
+    "original-source.json": {
+      "sha256": "7ff608d3155b878073334aabffab53b1f02a3d2a16e37f830ae28469f464e05a",
+      "bytes": 183
+    },
+    "original-control.patch": {
+      "sha256": "700418addbce57fd0270dd342fd7cf7bf145189fa624dd94123b19c9792c5361",
+      "bytes": 941
+    },
+    "original-control.log": {
+      "sha256": "a52e6b5944378fea7fe2a1b8567c1499760a7e99d5cccb42d7508ec54791dcc5",
+      "bytes": 1685
+    },
+    "candidate-node.log": {
+      "sha256": "40973a8d4f2eaca1b25af78f5f0013db5f7ffee40738210f7dc0e1e4c55ac06c",
+      "bytes": 13949
+    }
+  }
+}
