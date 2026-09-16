@@ -944,11 +944,14 @@ impl PeerManager {
         let Some(peer) = self.peers.get_mut(&peer_id) else {
             return;
         };
-        match kind {
-            PeerRequestKind::Headers => {}
-            PeerRequestKind::Bodies => peer.body_paused_until = Some(until),
-            PeerRequestKind::Receipts => peer.receipt_paused_until = Some(until),
-        }
+        let paused_until = match kind {
+            PeerRequestKind::Headers => return,
+            PeerRequestKind::Bodies => &mut peer.body_paused_until,
+            PeerRequestKind::Receipts => &mut peer.receipt_paused_until,
+        };
+        // Another in-flight request may fail after a longer pause was set.
+        // Failures can extend that deadline; useful progress clears it.
+        *paused_until = Some(paused_until.map_or(until, |previous| previous.max(until)));
     }
 
     fn clear_peer_request_pause(&mut self, peer_id: PeerId, kind: PeerRequestKind) {

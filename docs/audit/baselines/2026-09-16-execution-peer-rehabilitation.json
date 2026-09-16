@@ -1,0 +1,43 @@
+{
+  "status": "Focused checks pass; full gates and PR/CI/merge pending",
+  "branch": "audit/execution-peer-rehabilitation",
+  "baseline_commit": "2e547fc962d6cb7b168756f7458e0a474015297d",
+  "findings": [
+    "B4-40",
+    "B4-41"
+  ],
+  "original_controls": {
+    "passed": 1,
+    "failed": 2,
+    "production_unchanged": true
+  },
+  "focused_final": {
+    "passed": 301,
+    "failed": 0,
+    "new_controls": 7
+  },
+  "review": "Implementer source review only",
+  "limitations": [
+    "No full-node connectivity tests",
+    "No throughput measurement",
+    "Retained-state and transient allocation review remain open"
+  ],
+  "evidence": {
+    "original-source.json": {
+      "sha256": "0ef293ac386482f4057b3c3de3e6eae008ed710f9f49a099aac303a737562b3f",
+      "bytes": 205
+    },
+    "original-rehabilitation-tests.rs": {
+      "sha256": "c4e246b389df13059f8dcad26883326b4aaa36a0c2dda4c3419360a25c012586",
+      "bytes": 3421
+    },
+    "original-rehabilitation.log": {
+      "sha256": "e4d38e60df20196e2a45547272ab44d0a672d6218086f9a1f77f2d27b7cc658c",
+      "bytes": 2368
+    },
+    "focused-final.log": {
+      "sha256": "ed6f8a67fd7ce342857ca4b7d342546c86a8372a45f169f10e4d0a78a509d1ee",
+      "bytes": 32987
+    }
+  }
+}

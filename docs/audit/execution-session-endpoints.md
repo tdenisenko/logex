@@ -47,6 +47,7 @@ used. Broader peer rehabilitation and resource review remain open.
 
 All eight local gates pass on `fbb305f7`: vendor integrity, workspace and
 patched-vendor formatting, all-target check, strict Clippy, 1,610 workspace tests
-(24 ignored), documentation tests and release build. PR/CI/merge remain pending.
+(24 ignored), documentation tests and release build. All six CI jobs passed on `3b7ad9b5`;
+[PR #192](https://github.com/tdenisenko/logex/pull/192) merged as `2e547fc9`.
 
 [Validation record](baselines/2026-09-16-execution-session-endpoints.json).
