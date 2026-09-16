@@ -198,7 +198,7 @@ impl PeerManager {
                 node.id,
                 PeerKind::Basic,
                 node.tcp_addr(),
-                Some(node.udp_addr()),
+                (node.udp_port != 0).then(|| node.udp_addr()),
             );
         }
         self.session_metrics.submitted_dials_total = self

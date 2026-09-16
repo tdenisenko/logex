@@ -84,7 +84,8 @@ covered both activity-selection branches with DNS present/absent. Production
 code is unchanged. All eight final gates pass on `5c89efae`: vendor integrity,
 workspace and patched-vendor formatting, all-target check, strict Clippy,
 1,596 workspace tests (24 ignored), documentation tests and release build.
-PR/CI/merge remain pending.
+All six CI jobs passed on `f70047fc`;
+[PR #190](https://github.com/tdenisenko/logex/pull/190) merged as `eb326cfb`.
 
 ## Remaining scope
 

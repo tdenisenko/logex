@@ -1,0 +1,85 @@
+{
+  "status": "Focused tests pass; full gates and PR/CI/merge pending",
+  "branch": "audit/execution-peer-recovery",
+  "baseline_commit": "eb326cfb551d5bd71433e4b28756c342018468ad",
+  "findings": [
+    "B4-37",
+    "B4-38"
+  ],
+  "original_tcp_controls": {
+    "passed": 0,
+    "failed": 5,
+    "production_unchanged": true
+  },
+  "udp_control_disposition": "TCP-only candidate: five pass, three fail; two failures expose original UDP semantics, one exposes the candidate UDP-only preservation regression. Corrected before source commit.",
+  "focused_final": {
+    "passed": 290,
+    "failed": 0,
+    "new_controls": 10
+  },
+  "existing_test_updates": "Two UDP-only unsigned-discovery assertions and one invented-UDP-port assertion replaced with the corrected explicit expectations.",
+  "references": [
+    {
+      "url": "https://eips.ethereum.org/EIPS/eip-778",
+      "accessed": "2026-09-16",
+      "scope": "Separate optional TCP/UDP and protocol-preserving generic IPv6 fallback"
+    },
+    {
+      "source": "reth d6324d63e27ef6b7c49cdc9b1977c1b808234c7b",
+      "paths": [
+        "crates/net/peers/src/node_record.rs",
+        "crates/net/discv5/src/config.rs",
+        "crates/net/discv4/src/config.rs"
+      ],
+      "scope": "NodeRecord UDP default and unsigned discovery seed acceptance"
+    }
+  ],
+  "review": "Implementer source review only; no independent review claimed.",
+  "limitations": [
+    "No live dialing or full-node startup",
+    "No throughput measurement",
+    "Other execution review remains open"
+  ],
+  "evidence": {
+    "original-source.json": {
+      "sha256": "9d48aefe3078b8771d4da40536b6434c4ff767855ab1e2ae7d720743e82d5725",
+      "bytes": 812
+    },
+    "udp-controls-before-fix.rs": {
+      "sha256": "8091bb71cc7b3777ca9dd470af76094f9589b7cb010b6e4b341781b558f0b9da",
+      "bytes": 6763
+    },
+    "original-udp-controls.log": {
+      "sha256": "4d70e3de93651c4974ff90878cc54eeac602c532e36cd0cd1a087b1ca7db8dd7",
+      "bytes": 3203
+    },
+    "focused-final.log": {
+      "sha256": "53fcc2c84e4d52ba401cff33636132e8ab5a3981ad03ac1a3970036735e4a0b6",
+      "bytes": 31556
+    },
+    "original-address-selection-tests.rs": {
+      "sha256": "d61fb7c938adf3baf8242a0ae0376065d7a4060c6775c1739d131d6a241a35eb",
+      "bytes": 4330
+    },
+    "tcp-only-candidate.diff": {
+      "sha256": "3ba0e3bf502783b8fce990c5f97e949c1b09e9ff7b27f9defa18c5f86f1d7e88",
+      "bytes": 2732
+    },
+    "original-endpoints.log": {
+      "sha256": "bb24da15b018dbd3a90992ce572a66aaaedf173d3f5307d1fc610026adfc66bd",
+      "bytes": 3923
+    },
+    "focused-peer-manager.log": {
+      "sha256": "8c2a28022d74ddaec248497e9b9f420829067b48b940170289b092cce64507b2",
+      "bytes": 30984
+    },
+    "tcp-only-candidate-udp-control.log": {
+      "sha256": "7a06e33236bbd9c1ee18045d963c0d3502424363f2010851951e6d8f4d664a5d",
+      "bytes": 1427
+    },
+    "focused-separated-endpoints.log": {
+      "sha256": "95578a54412b069ef7016feba3a44da94d1df4a581a276bfa19d64cc9cab1b23",
+      "bytes": 32758
+    }
+  }
+}

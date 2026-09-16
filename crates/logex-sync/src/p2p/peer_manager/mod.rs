@@ -47,6 +47,8 @@ use crate::p2p::serve_cache::ServeCacheProvider;
 use crate::primitives::LogexNetworkPrimitives;
 
 #[cfg(test)]
+mod address_selection_tests;
+#[cfg(test)]
 mod advertisement_tests;
 
 mod lifecycle;
@@ -392,18 +394,26 @@ impl PeerManager {
         let productive = seed_productive_peers(&known_peers);
         let execution_bootnodes = parse_execution_bootnodes(&execution_bootnodes).await?;
         let mut configured_peer_ids = HashSet::new();
-        let mut filtered_execution_bootnodes = Vec::new();
+        let mut configured_direct_candidates = 0usize;
+        let mut discovery_execution_bootnodes = Vec::new();
         let mut filtered_execution_bootnode_enrs = Vec::new();
         let mut skipped_execution_bootnodes = 0usize;
         let mut skipped_execution_bootnode_enrs = 0usize;
         for node in execution_bootnodes.node_records {
-            if node_matches_dial_families(dial_families, &node) {
+            let mut accepted = false;
+            if node_matches_dial_families(dial_families, &node) && node.tcp_port != 0 {
                 if state::retry_hint_is_eligible(dial_families, &node) {
                     configured_peer_ids.insert(node.id);
                     upsert_known_peer(&mut known_peers, node);
                 }
-                filtered_execution_bootnodes.push(node);
-            } else {
+                configured_direct_candidates += 1;
+                accepted = true;
+            }
+            if node_matches_bind_ip(bind_ip, &node) && node.udp_port != 0 {
+                discovery_execution_bootnodes.push(node);
+                accepted = true;
+            }
+            if !accepted {
                 skipped_execution_bootnodes += 1;
             }
         }
@@ -414,7 +424,11 @@ impl PeerManager {
                     configured_peer_ids.insert(node.id);
                     upsert_known_peer(&mut known_peers, node);
                 }
-                filtered_execution_bootnodes.push(node);
+                configured_direct_candidates += 1;
+                accepted = true;
+            }
+            if let Some(node) = signed_enr_discovery_node_for_bind_ip(bind_ip, &enr) {
+                discovery_execution_bootnodes.push(node);
                 accepted = true;
             }
             if signed_enr_matches_discovery_bind_ip(bind_ip, &enr) {
@@ -425,13 +439,15 @@ impl PeerManager {
                 skipped_execution_bootnode_enrs += 1;
             }
         }
-        if !filtered_execution_bootnodes.is_empty()
+        if configured_direct_candidates > 0
+            || !discovery_execution_bootnodes.is_empty()
             || !filtered_execution_bootnode_enrs.is_empty()
             || skipped_execution_bootnodes > 0
             || skipped_execution_bootnode_enrs > 0
         {
             tracing::info!(
-                accepted_direct = filtered_execution_bootnodes.len(),
+                accepted_direct = configured_direct_candidates,
+                accepted_discovery_seeds = discovery_execution_bootnodes.len(),
                 accepted_signed_discovery = filtered_execution_bootnode_enrs.len(),
                 skipped_enodes = skipped_execution_bootnodes,
                 skipped_enrs = skipped_execution_bootnode_enrs,
@@ -518,11 +534,6 @@ impl PeerManager {
         if !dns_bind_compatible_boot_nodes.is_empty() {
             discovery.add_boot_nodes(dns_bind_compatible_boot_nodes.iter().copied());
         }
-        let discovery_execution_bootnodes = filtered_execution_bootnodes
-            .iter()
-            .copied()
-            .filter(|node| node_matches_bind_ip(bind_ip, node))
-            .collect::<Vec<_>>();
         if !discovery_execution_bootnodes.is_empty() {
             discovery.add_boot_nodes(discovery_execution_bootnodes.iter().copied());
         }
@@ -547,7 +558,7 @@ impl PeerManager {
                 let discv5_boot_nodes = dns_initial_boot_nodes
                     .discovery_node_records
                     .iter()
-                    .chain(filtered_execution_bootnodes.iter())
+                    .chain(discovery_execution_bootnodes.iter())
                     .filter(|node| node_matches_bind_ip(bind_ip, node))
                     .copied()
                     .collect::<Vec<_>>();
@@ -665,7 +676,7 @@ impl PeerManager {
             network_activated,
             max_peers,
             session_metrics: ExecutionPeerSessionMetrics {
-                configured_bootnode_direct_candidates: filtered_execution_bootnodes.len(),
+                configured_bootnode_direct_candidates: configured_direct_candidates,
                 configured_bootnode_discovery_enrs: filtered_execution_bootnode_enrs.len(),
                 configured_bootnode_family_rejections: skipped_execution_bootnodes
                     .saturating_add(skipped_execution_bootnode_enrs),
@@ -1079,33 +1090,65 @@ fn signed_enr_node_record_for_dial_families(
 ) -> Option<NodeRecord> {
     let peer_id = enr_to_discv4_id(enr)?;
     if families.ipv4
-        && let (Some(ip), Some(tcp_port)) = (enr.ip4(), enr.tcp4())
+        && let (Some(ip), Some(tcp_port)) = (enr.ip4(), enr.tcp4().filter(|port| *port != 0))
     {
         return Some(NodeRecord::new_with_ports(
             IpAddr::V4(ip),
             tcp_port,
-            enr.udp4(),
+            Some(enr.udp4().unwrap_or_default()),
             peer_id,
         ));
     }
     if families.ipv6
-        && let (Some(ip), Some(tcp_port)) = (enr.ip6(), signed_ipv6_tcp_port(enr))
+        && let (Some(ip), Some(tcp_port)) = (
+            enr.ip6(),
+            signed_ipv6_tcp_port(enr).filter(|port| *port != 0),
+        )
     {
         return Some(NodeRecord::new_with_ports(
             IpAddr::V6(ip),
             tcp_port,
-            signed_ipv6_udp_port(enr),
+            Some(signed_ipv6_udp_port(enr).unwrap_or_default()),
             peer_id,
         ));
     }
     None
 }
 
+/// A discovery seed needs a UDP service; its TCP service may be absent.
+fn signed_enr_discovery_node_for_bind_ip(bind_ip: IpAddr, enr: &Discv5Enr) -> Option<NodeRecord> {
+    let peer_id = enr_to_discv4_id(enr)?;
+    let (address, tcp_port, udp_port) = if bind_ip.is_ipv6() {
+        (
+            IpAddr::V6(enr.ip6()?),
+            signed_ipv6_tcp_port(enr),
+            signed_ipv6_udp_port(enr),
+        )
+    } else {
+        (IpAddr::V4(enr.ip4()?), enr.tcp4(), enr.udp4())
+    };
+    discovery_node_record(address, tcp_port, udp_port, peer_id)
+}
+
+fn discovery_node_record(
+    address: IpAddr,
+    tcp_port: Option<u16>,
+    udp_port: Option<u16>,
+    peer_id: PeerId,
+) -> Option<NodeRecord> {
+    Some(NodeRecord::new_with_ports(
+        address,
+        tcp_port.unwrap_or_default(),
+        Some(udp_port.filter(|port| *port != 0)?),
+        peer_id,
+    ))
+}
+
 fn signed_enr_matches_discovery_bind_ip(bind_ip: IpAddr, enr: &Discv5Enr) -> bool {
     if bind_ip.is_ipv6() {
-        enr.ip6().is_some() && enr.udp6().is_some()
+        enr.ip6().is_some() && enr.udp6().is_some_and(|port| port != 0)
     } else {
-        enr.ip4().is_some() && enr.udp4().is_some()
+        enr.ip4().is_some() && enr.udp4().is_some_and(|port| port != 0)
     }
 }
 
@@ -1239,21 +1282,21 @@ fn default_dns_node_record(
     enr: &reth_network_peers::Enr<SecretKey>,
     peer_id: PeerId,
 ) -> Option<NodeRecord> {
-    if let (Some(ip), Some(tcp_port)) = (enr.ip4(), enr.tcp4()) {
+    if let (Some(ip), Some(tcp_port)) = (enr.ip4(), enr.tcp4().filter(|port| *port != 0)) {
         return Some(NodeRecord::new_with_ports(
             IpAddr::V4(ip),
             tcp_port,
-            enr.udp4(),
+            Some(enr.udp4().unwrap_or_default()),
             peer_id,
         ));
     }
 
     let ip = enr.ip6()?;
-    let tcp_port = dns_ipv6_tcp_port(enr)?;
+    let tcp_port = dns_ipv6_tcp_port(enr).filter(|port| *port != 0)?;
     Some(NodeRecord::new_with_ports(
         IpAddr::V6(ip),
         tcp_port,
-        dns_ipv6_udp_port(enr),
+        Some(dns_ipv6_udp_port(enr).unwrap_or_default()),
         peer_id,
     ))
 }
@@ -1268,14 +1311,20 @@ fn dns_boot_node_for_bind_ip(
     {
         return None;
     }
-    let advertised_udp = if bind_ip.is_ipv6() {
-        dns_ipv6_udp_port(&update.enr)
+    let (address, tcp_port, udp_port) = if bind_ip.is_ipv6() {
+        (
+            IpAddr::V6(update.enr.ip6()?),
+            dns_ipv6_tcp_port(&update.enr),
+            dns_ipv6_udp_port(&update.enr),
+        )
     } else {
-        update.enr.udp4()
+        (
+            IpAddr::V4(update.enr.ip4()?),
+            update.enr.tcp4(),
+            update.enr.udp4(),
+        )
     };
-    advertised_udp?;
-    let node = dns_node_record_for_bind_ip(bind_ip, update)?;
-    Some(node)
+    discovery_node_record(address, tcp_port, udp_port, update.peer_id)
 }
 
 fn dns_initial_direct_boot_node(
@@ -1320,10 +1369,10 @@ fn dns_signed_boot_node_for_bind_ip(
 
     if bind_ip.is_ipv6() {
         update.enr.ip6()?;
-        update.enr.udp6()?;
+        update.enr.udp6().filter(|port| *port != 0)?;
     } else {
         update.enr.ip4()?;
-        update.enr.udp4()?;
+        update.enr.udp4().filter(|port| *port != 0)?;
     }
 
     Some(EnrCombinedKeyWrapper::from(update.enr.clone()).0)
@@ -1335,23 +1384,23 @@ fn dns_node_record_for_bind_ip(
 ) -> Option<NodeRecord> {
     if bind_ip.is_ipv6() {
         let ip = update.enr.ip6().map(IpAddr::V6)?;
-        let tcp_port = dns_ipv6_tcp_port(&update.enr)?;
+        let tcp_port = dns_ipv6_tcp_port(&update.enr).filter(|port| *port != 0)?;
         let udp_port = dns_ipv6_udp_port(&update.enr);
         return Some(NodeRecord::new_with_ports(
             ip,
             tcp_port,
-            udp_port,
+            Some(udp_port.unwrap_or_default()),
             update.peer_id,
         ));
     }
 
     let ip = update.enr.ip4().map(IpAddr::V4)?;
-    let tcp_port = update.enr.tcp4()?;
+    let tcp_port = update.enr.tcp4().filter(|port| *port != 0)?;
     let udp_port = update.enr.udp4();
     Some(NodeRecord::new_with_ports(
         ip,
         tcp_port,
-        udp_port,
+        Some(udp_port.unwrap_or_default()),
         update.peer_id,
     ))
 }
@@ -1675,7 +1724,7 @@ mod tests {
     }
 
     #[test]
-    fn dns_event_conversion_preserves_ipv6_udp_only_enr_for_signed_discovery() {
+    fn dns_event_conversion_preserves_ipv6_udp_only_enr_for_discovery() {
         let secret = SecretKey::from_byte_array(&[0x36; 32]).unwrap();
         let ipv6 = "2001:db8:36::1".parse::<Ipv6Addr>().unwrap();
         let fork_id = MAINNET.latest_fork_id();
@@ -1697,10 +1746,11 @@ mod tests {
         assert!(update.node_record.is_none());
         assert_eq!(update.fork_id, Some(fork_id));
         assert!(dns_node_record_for_dial_families(DialAddressFamilies::IPV6, &update).is_none());
-        assert!(
+        let unsigned =
             dns_boot_node_for_bind_ip(IpAddr::V6(Ipv6Addr::UNSPECIFIED), &fork_filter, &update)
-                .is_none()
-        );
+                .expect("UDP-only ENR should also seed discovery by address");
+        assert_eq!(unsigned.tcp_port, 0);
+        assert_eq!(unsigned.udp_port, 30303);
         let signed = dns_signed_boot_node_for_bind_ip(
             IpAddr::V6(Ipv6Addr::UNSPECIFIED),
             &fork_filter,
@@ -2082,7 +2132,7 @@ mod tests {
         .expect("IPv6 DNS ENRs with TCP should still be direct RLPx candidates");
         assert_eq!(direct.tcp_addr().ip(), IpAddr::V6(Ipv6Addr::LOCALHOST));
         assert_eq!(direct.tcp_port, 30303);
-        assert_eq!(direct.udp_port, 30303);
+        assert_eq!(direct.udp_port, 0);
     }
 
     #[test]
@@ -2110,10 +2160,11 @@ mod tests {
             ..Default::default()
         });
 
-        assert!(
+        let unsigned =
             dns_boot_node_for_bind_ip(IpAddr::V6(Ipv6Addr::UNSPECIFIED), &fork_filter, &update)
-                .is_none()
-        );
+                .expect("UDP-only ENR should also seed discovery by address");
+        assert_eq!(unsigned.tcp_port, 0);
+        assert_eq!(unsigned.udp_port, 30303);
         let signed = dns_signed_boot_node_for_bind_ip(
             IpAddr::V6(Ipv6Addr::UNSPECIFIED),
             &fork_filter,
