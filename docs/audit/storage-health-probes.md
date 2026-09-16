@@ -66,8 +66,9 @@ ready-join/expired-deadline control fails on a behavior-preserving extraction of
 the candidate's completion path. The corrected worker records its completion
 time; the original deadline is established before spawning, and late successful
 completion is rejected even if already queued. Timely completion remains valid
-when observed late. Both cases have deterministic controls. The final workspace
-gates and fresh-head CI/merge are pending.
+when observed late. Both cases have deterministic controls. All eight final-source gates pass on `32a1baa1`: vendor integrity, workspace
+and patched-vendor formatting, check, strict Clippy, 1,722 workspace tests
+(24 ignored), documentation tests and release build. PR/CI/merge remain pending.
 
 Implementer review traced both probe roots, error and cancellation paths, exactly
 one active job, unchanged interval/threshold, supervisor outcome handling and
