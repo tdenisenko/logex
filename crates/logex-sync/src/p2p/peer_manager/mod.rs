@@ -161,6 +161,7 @@ pub struct PeerManager {
     known_peers_path: PathBuf,
     persisted_known_peers: Vec<NodeRecord>,
     serve_cache: Arc<ServeCacheProvider>,
+    last_advertised_range: BlockRangeUpdate,
     fork_filter: ForkFilter,
     local_head: Head,
     bind_ip: IpAddr,
@@ -641,6 +642,11 @@ impl PeerManager {
             known_peers_path,
             persisted_known_peers,
             serve_cache,
+            last_advertised_range: BlockRangeUpdate {
+                earliest,
+                latest,
+                latest_hash,
+            },
             fork_filter,
             local_head: network_head,
             bind_ip,
@@ -702,8 +708,8 @@ impl PeerManager {
         queued
     }
 
-    /// Update our local head view and propagate it into Reth's live network
-    /// status so newly established sessions see the same canonical tip.
+    /// Update consensus head and fork selection, then restore the serving range
+    /// that Reth's status update overwrites for newly established sessions.
     pub fn set_head(&mut self, head: Head) {
         let head = normalize_network_head(head);
         self.local_head = head;
@@ -719,11 +725,11 @@ impl PeerManager {
                 "activated execution peer dialing after consensus head"
             );
         }
-        self.sync_advertised_history_range();
+        self.sync_advertised_history_range(true);
     }
 
     pub fn cache_canonical_block(
-        &self,
+        &mut self,
         header: &<LogexNetworkPrimitives as NetworkPrimitives>::BlockHeader,
         body: &<LogexNetworkPrimitives as NetworkPrimitives>::BlockBody,
         receipts: &[alloy_consensus::ReceiptWithBloom<
@@ -731,31 +737,39 @@ impl PeerManager {
         >],
     ) {
         self.serve_cache.insert_block(header, body, receipts);
-        self.sync_advertised_history_range();
+        self.sync_advertised_history_range(false);
     }
 
     pub fn cache_canonical_headers(
-        &self,
+        &mut self,
         headers: impl IntoIterator<Item = <LogexNetworkPrimitives as NetworkPrimitives>::BlockHeader>,
     ) {
         if self.serve_cache.insert_headers(headers) {
-            self.sync_advertised_history_range();
+            self.sync_advertised_history_range(false);
         }
     }
 
-    pub fn remove_cached_blocks(&self, reverted_hashes: &[B256]) {
+    pub fn remove_cached_blocks(&mut self, reverted_hashes: &[B256]) {
         self.serve_cache.remove_blocks(reverted_hashes);
-        self.sync_advertised_history_range();
+        self.sync_advertised_history_range(false);
     }
 
-    fn sync_advertised_history_range(&self) {
+    // Mutable access serializes snapshot selection, submission and remembrance.
+    // A head update must force this even when the cache range is unchanged.
+    fn sync_advertised_history_range(&mut self, force: bool) -> bool {
         let (earliest, latest, latest_hash) =
             advertised_status_range(self.serve_cache.advertised_history_range());
-        self.network.update_block_range(BlockRangeUpdate {
+        let range = BlockRangeUpdate {
             earliest,
             latest,
             latest_hash,
-        });
+        };
+        if !force && self.last_advertised_range == range {
+            return false;
+        }
+        self.network.update_block_range(range.clone());
+        self.last_advertised_range = range;
+        true
     }
 
     fn is_compatible_fork_id(&self, fork_id: ForkId) -> bool {

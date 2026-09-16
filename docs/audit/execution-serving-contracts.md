@@ -126,7 +126,8 @@ Existing wire and cache APIs remain. Independent source review found no behavior
 defect; its stale soft-limit comment was corrected. Vendor verification passes for
 all 156 upstream files across three crates. All eight local gates pass on `7d5d826a`: vendor integrity, workspace and
 patched-vendor formatting, all-target check, strict Clippy, 1,577 workspace tests
-(23 ignored), doc tests and the release node build. CI and merge remain pending.
+(23 ignored), doc tests and the release node build. All six CI jobs passed on `be102894`;
+[PR #188](https://github.com/tdenisenko/logex/pull/188) merged as `e07fb451`.
 
 [Validation record](baselines/2026-09-16-execution-serving-contracts.json).
 No Mac mini work or new benchmark was performed. Its earlier cleanup remains complete.

@@ -250,7 +250,7 @@ impl SyncEngine {
     }
 
     /// Handle a detected reorg: mark reverted blocks non-canonical.
-    pub(super) async fn handle_reorg(&self, reorg: ReorgInfo) -> Result<()> {
+    pub(super) async fn handle_reorg(&mut self, reorg: ReorgInfo) -> Result<()> {
         if reorg.reverted_hashes.is_empty() {
             return Ok(());
         }

@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::ops::{Bound, RangeBounds, RangeInclusive};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
 use alloy_consensus::{Block, BlockBody, Header, ReceiptWithBloom, RlpEncodableReceipt as _};
@@ -42,6 +42,9 @@ struct ServeCacheState {
     headers: HashMap<B256, Header>,
     blocks: HashMap<B256, CachedBlock>,
     payload_bytes: u64,
+    // Initialized under a read guard and invalidated under the same state
+    // write guard as body mappings. An initialized empty range is valid too.
+    advertised_range: OnceLock<Option<(u64, u64, B256)>>,
 }
 
 #[derive(Debug, Clone)]
@@ -197,6 +200,7 @@ impl ServeCacheState {
             && self.number_to_hash.get(&number) == Some(hash)
         {
             self.number_to_hash.remove(&number);
+            self.advertised_range.take();
         }
     }
 
@@ -359,6 +363,7 @@ impl ServeCacheProvider {
             state.remove_block(&evict_hash);
         }
         state.number_to_hash.insert(number, hash);
+        state.advertised_range.take();
         state.hash_to_number.insert(hash, number);
         state.payload_bytes += cached.payload_bytes;
         state.blocks.insert(hash, cached);
@@ -392,12 +397,18 @@ impl ServeCacheProvider {
 
     pub fn advertised_history_range(&self) -> Option<(u64, u64, B256)> {
         let state = self.inner.read().expect("serve cache poisoned");
-        let (&latest, &latest_hash) = state.number_to_hash.iter().next_back()?;
-        let mut earliest = latest;
-        while earliest > 0 && state.number_to_hash.contains_key(&(earliest - 1)) {
-            earliest -= 1;
-        }
-        Some((earliest, latest, latest_hash))
+        *state.advertised_range.get_or_init(|| {
+            let mut entries = state.number_to_hash.iter().rev();
+            let (&latest, &latest_hash) = entries.next()?;
+            let mut earliest = latest;
+            for (&number, _) in entries {
+                if number.checked_add(1) != Some(earliest) {
+                    break;
+                }
+                earliest = number;
+            }
+            Some((earliest, latest, latest_hash))
+        })
     }
 
     fn chain_info_inner(&self) -> ChainInfo {
@@ -903,6 +914,212 @@ mod tests {
             withdrawals: None,
         };
         (header, body)
+    }
+
+    fn assert_advertised_range_matches_inventory(provider: &ServeCacheProvider) {
+        // Independent ascending full-map oracle: a gap starts a new suffix.
+        let expected = {
+            let state = provider.inner.read().unwrap();
+            let mut result: Option<(u64, u64, B256)> = None;
+            for (&number, &hash) in &state.number_to_hash {
+                let first = match result {
+                    Some((first, previous, _)) if previous.checked_add(1) == Some(number) => first,
+                    _ => number,
+                };
+                result = Some((first, number, hash));
+            }
+            result
+        };
+        assert_eq!(provider.advertised_history_range(), expected);
+        assert_eq!(provider.advertised_history_range(), expected);
+        assert_eq!(
+            provider.inner.read().unwrap().advertised_range.get(),
+            Some(&expected)
+        );
+    }
+
+    #[test]
+    fn availability_memo_matches_mutations_and_extreme_heights() {
+        let provider = ServeCacheProvider::new();
+        assert_advertised_range_matches_inventory(&provider);
+        for number in [0, 1, 3, 2, u64::MAX, u64::MAX - 1] {
+            let (header, body) = test_block(number);
+            provider.insert_block(&header, &body, &[]);
+            assert_advertised_range_matches_inventory(&provider);
+        }
+        for number in [u64::MAX, u64::MAX - 1, 1, 0, 3, 2] {
+            provider.remove_blocks(&[test_block(number).0.hash_slow()]);
+            assert_advertised_range_matches_inventory(&provider);
+        }
+        for step in 0..96u64 {
+            let number = step.wrapping_mul(17) % 13;
+            let (mut header, body) = test_block(number);
+            match step % 4 {
+                0 => provider.insert_block(&header, &body, &[]),
+                1 => {
+                    header.timestamp = step;
+                    provider.insert_headers([header]);
+                }
+                2 => provider.remove_blocks(&[header.hash_slow()]),
+                _ => {
+                    header.timestamp = step;
+                    provider.insert_block(&header, &body, &[]);
+                }
+            }
+            assert_advertised_range_matches_inventory(&provider);
+        }
+    }
+
+    #[test]
+    fn availability_memo_survives_noop_headers_and_rejected_old_blocks() {
+        let provider = ServeCacheProvider::new();
+        assert_advertised_range_matches_inventory(&provider);
+        provider.insert_headers([test_block(9).0]);
+        provider.remove_blocks(&[B256::repeat_byte(0xff)]);
+        assert_eq!(
+            provider.inner.read().unwrap().advertised_range.get(),
+            Some(&None)
+        );
+        for number in 100..100 + SERVE_CACHE_BLOCK_LIMIT as u64 {
+            let (header, body) = test_block(number);
+            provider.insert_block(&header, &body, &[]);
+        }
+        assert_advertised_range_matches_inventory(&provider);
+        let memo = *provider
+            .inner
+            .read()
+            .unwrap()
+            .advertised_range
+            .get()
+            .unwrap();
+        for _ in 0..3 {
+            let (header, body) = test_block(1);
+            provider.insert_block(&header, &body, &[]);
+            provider.remove_blocks(&[header.hash_slow()]);
+            assert_eq!(
+                provider.inner.read().unwrap().advertised_range.get(),
+                Some(&memo)
+            );
+        }
+        // A real count eviction invalidates the initialized memo.
+        let (header, body) = test_block(100 + SERVE_CACHE_BLOCK_LIMIT as u64);
+        provider.insert_block(&header, &body, &[]);
+        assert!(
+            provider
+                .inner
+                .read()
+                .unwrap()
+                .advertised_range
+                .get()
+                .is_none()
+        );
+        assert_advertised_range_matches_inventory(&provider);
+        assert_eq!(provider.advertised_history_range().unwrap().0, 101);
+    }
+
+    #[test]
+    fn availability_memo_tracks_payload_eviction_and_rejected_replacement() {
+        let (header, body) = test_block(10);
+        let provider = ServeCacheProvider {
+            payload_limit: cached_payload_bytes(&header, &body, &[]),
+            ..ServeCacheProvider::new()
+        };
+        provider.insert_block(&header, &body, &[]);
+        assert_advertised_range_matches_inventory(&provider);
+        let (next, next_body) = test_block(11);
+        provider.insert_block(&next, &next_body, &[]);
+        assert_advertised_range_matches_inventory(&provider);
+        assert_eq!(
+            provider.advertised_history_range(),
+            Some((11, 11, next.hash_slow()))
+        );
+        let mut replacement = next.clone();
+        replacement.timestamp = 1;
+        let mut oversized = next_body;
+        oversized.ommers.push(header);
+        provider.insert_block(&replacement, &oversized, &[]);
+        // Rejected admission still removed the conflicting canonical body.
+        assert!(
+            provider
+                .inner
+                .read()
+                .unwrap()
+                .advertised_range
+                .get()
+                .is_none()
+        );
+        assert_advertised_range_matches_inventory(&provider);
+        assert_eq!(provider.advertised_history_range(), None);
+        assert!(provider.header(replacement.hash_slow()).unwrap().is_some());
+    }
+
+    #[test]
+    fn availability_memo_shared_clone_reads_complete_publications() {
+        let provider = ServeCacheProvider::new();
+        let (first, body) = test_block(7);
+        let mut second = first.clone();
+        second.timestamp = 1;
+        provider.insert_block(&first, &body, &[]);
+        assert_advertised_range_matches_inventory(&provider);
+        let choices = [
+            Some((7, 7, first.hash_slow())),
+            Some((7, 7, second.hash_slow())),
+        ];
+        let reader = provider.clone();
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let reader_barrier = Arc::clone(&barrier);
+        let worker = std::thread::spawn(move || {
+            reader_barrier.wait();
+            for _ in 0..512 {
+                assert!(choices.contains(&reader.advertised_history_range()));
+            }
+        });
+        barrier.wait();
+        for step in 0..512 {
+            let header = if step % 2 == 0 { &second } else { &first };
+            provider.insert_block(header, &body, &[]);
+        }
+        worker.join().unwrap();
+        assert_advertised_range_matches_inventory(&provider);
+        assert_eq!(provider.advertised_history_range(), choices[0]);
+    }
+
+    /// Component cost only: fixed repeated reads of an unchanged full cache.
+    /// Setup and the initial availability query are outside all timed samples.
+    #[test]
+    #[ignore = "bounded release-only availability lookup microbenchmark"]
+    #[expect(
+        clippy::assertions_on_constants,
+        reason = "ignored benchmark must compile in debug builds but run only in release"
+    )]
+    fn availability_lookup_repeated_full_cache_microbenchmark() {
+        assert!(!cfg!(debug_assertions), "run this control in release mode");
+        const SAMPLES: usize = 5;
+        const QUERIES_PER_SAMPLE: usize = 10_000;
+        let provider = ServeCacheProvider::new();
+        let first = 10_000;
+        let last = first + SERVE_CACHE_BLOCK_LIMIT as u64 - 1;
+        let mut latest_hash = B256::ZERO;
+        for number in first..=last {
+            let (header, body) = test_block(number);
+            latest_hash = header.hash_slow();
+            provider.insert_block(&header, &body, &[]);
+        }
+        let expected = Some((first, last, latest_hash));
+        assert_eq!(provider.advertised_history_range(), expected);
+        for sample in 0..SAMPLES {
+            let start = Instant::now();
+            for _ in 0..QUERIES_PER_SAMPLE {
+                std::hint::black_box(std::hint::black_box(&provider).advertised_history_range());
+            }
+            let elapsed = start.elapsed();
+            assert_eq!(provider.advertised_history_range(), expected);
+            println!(
+                "availability_lookup sample={sample} retained={} queries={QUERIES_PER_SAMPLE} elapsed_ns={}",
+                SERVE_CACHE_BLOCK_LIMIT,
+                elapsed.as_nanos(),
+            );
+        }
     }
 
     fn test_receipt() -> ReceiptWithBloom<LogexReceipt> {

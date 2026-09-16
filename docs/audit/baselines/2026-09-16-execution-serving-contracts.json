@@ -8,7 +8,7 @@
     "B4-31",
     "B4-32"
   ],
-  "status": "All eight local gates pass; PR/CI/merge pending",
+  "status": "Merged after all eight local gates and six exact-head CI jobs passed",
   "original_controls": {
     "advertisement_tests": {
       "source_sha256": "1d6d4496aa3fb677ca58db76da2c7da61854f552822dddf678ec9c391821c2aa"
@@ -222,6 +222,18 @@
     "post-review-cleanup.json": {
       "sha256": "28fc84c3b2029502555f10c3a5a89f668ad7bafb80d5b68ae0fc72b49aa19a7e",
       "bytes": 445
+    },
+    "premerge.json": {
+      "sha256": "1a7ecb64e5368109e09a6c2b173ecfa0c3b72d1bde62c6d8a5b3c0864e3aeb46",
+      "bytes": 1894
+    },
+    "merged.json": {
+      "sha256": "20bd61dfce5e9e6c155164fbbcd326bd54522b0c3182e4250976d8d2d7cb5c51",
+      "bytes": 240
+    },
+    "ci-watch.log": {
+      "sha256": "e964d86fbf9a55ebe9fbb82cbbeb9623df66ca28a52a5640a09e7d0dc9b78f4a",
+      "bytes": 11545
     }
   },
   "limits": [
@@ -387,5 +399,51 @@
     "passed": 1577,
     "failed": 0,
     "ignored": 23
+  },
+  "pull_request": {
+    "headRefOid": "be102894e3d98baf8dbb78bf1983ad3b046b005c",
+    "mergeCommit": {
+      "oid": "e07fb45148f5cd61348355470b5883f90fe5177a"
+    },
+    "mergedAt": "2026-09-16T00:31:53Z",
+    "number": 188,
+    "state": "MERGED",
+    "url": "https://github.com/tdenisenko/logex/pull/188"
+  },
+  "ci": {
+    "run": 35039922092,
+    "head": "be102894e3d98baf8dbb78bf1983ad3b046b005c",
+    "checks": [
+      {
+        "name": "Check",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS"
+      },
+      {
+        "name": "Format",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS"
+      },
+      {
+        "name": "Clippy",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS"
+      },
+      {
+        "name": "Test",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS"
+      },
+      {
+        "name": "macOS Test",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS"
+      },
+      {
+        "name": "Release Build",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS"
+      }
+    ]
   }
 }

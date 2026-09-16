@@ -2,8 +2,9 @@ use super::*;
 use std::task::Poll;
 
 /// Reth requires a real listener to construct its public handle. This manager is
-/// retained but never polled. A TCP listener is bound on localhost:0, but no
-/// connection task is started; discovery, DNS and network service tasks are disabled.
+/// normally retained without polling; publication tests explicitly poll once to
+/// drain local commands. A TCP listener is bound on localhost:0, but no connection
+/// task is started; discovery, DNS and network service tasks are disabled.
 pub(super) struct Fixture {
     pub(super) manager: PeerManager,
     _network: NetworkManager<LogexNetworkPrimitives>,
@@ -12,6 +13,16 @@ pub(super) struct Fixture {
 }
 
 impl Fixture {
+    pub(super) fn poll_network_status_head(&mut self) -> B256 {
+        let waker = futures_util::task::noop_waker();
+        let mut context = std::task::Context::from_waker(&waker);
+        assert!(
+            std::future::Future::poll(std::pin::Pin::new(&mut self._network), &mut context,)
+                .is_pending()
+        );
+        self._network.status().eth_protocol_info.head
+    }
+
     pub(super) async fn new() -> Self {
         let serve_cache = Arc::new(ServeCacheProvider::new());
         let config = NetworkConfigBuilder::<LogexNetworkPrimitives>::new(
@@ -54,6 +65,11 @@ impl Fixture {
             known_peers_path: directory.path().join("known-peers.json"),
             persisted_known_peers: Vec::new(),
             serve_cache,
+            last_advertised_range: BlockRangeUpdate {
+                earliest: 0,
+                latest: 0,
+                latest_hash: MAINNET.genesis_hash(),
+            },
             fork_filter: MAINNET.fork_filter(local_head),
             local_head,
             bind_ip: "127.0.0.1".parse().unwrap(),
