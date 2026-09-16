@@ -106,7 +106,7 @@ Merged in PR #190 (`eb326cfb`) after 329 focused tests, eight local gates and si
 
 The [execution endpoint review](execution-endpoint-selection.md) records B4-37–38:
 usable TCP family selection and independent UDP discovery availability.
-All 290 focused tests pass; full gates and merge remain pending.
+All 290 focused tests and eight local gates pass; CI/merge remain pending.
 
 ## Baseline findings
 

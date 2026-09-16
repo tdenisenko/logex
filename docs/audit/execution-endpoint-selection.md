@@ -35,7 +35,8 @@ existing discv4 and unsigned discv5 paths. DNS and configured records share the
 small discovery-record constructor. Their original signed identity is preserved.
 
 ENR conversions explicitly represent absent UDP as zero in `NodeRecord`, avoiding
-the constructor's bare-enode default. TCP dial submission passes no optional UDP
+the constructor's bare-enode default. Pinned serialization preserves zero UDP
+explicitly as `discport=0`; no peer-cache migration is required. TCP dial submission passes no optional UDP
 address when that field is zero. Bare enode parsing keeps its existing default;
 signed records are not rewritten or re-signed. Pinned discv5's signed-record path
 still requires explicit IPv6 UDP metadata; the existing unsigned-address path can
@@ -74,7 +75,9 @@ Reth's pinned port default and discovery-address conversion were inspected local
 This is implementer review, not independent review. Actual remote dialing and a
 full node startup were not exercised. No Mac mini or external volume was used.
 
-Full workspace gates and PR/CI/merge are pending. Remaining peer rehabilitation,
+All eight local gates pass on `377d45f3`: vendor integrity, workspace and
+patched-vendor formatting, all-target check, strict Clippy, 1,606 workspace tests
+(24 ignored), documentation tests and release build. PR/CI/merge remain pending. Remaining peer rehabilitation,
 request resources and other discovery paths still need their audit dispositions;
 this milestone does not close the whole execution networking batch.
 
