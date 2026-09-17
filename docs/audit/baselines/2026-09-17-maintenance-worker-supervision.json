@@ -1,0 +1,58 @@
+{
+  "status": "Focused controls and full node suite pass; final source gates, CI and merge pending",
+  "base": {
+    "commit": "65844f06800a17544f21c7740219a7cdb5412ad5",
+    "branch": "audit/runtime-config-lifecycle"
+  },
+  "finding": "B10-23",
+  "original_reproduction": {
+    "exit_code": 101,
+    "passed": 0,
+    "failed": 2,
+    "scope": "behavior-preserving extraction of original JoinError logging/continuation branches; no full-node failure injection"
+  },
+  "focused_tests": {
+    "passed": 4,
+    "failed": 0
+  },
+  "node_tests": {
+    "passed": 214,
+    "failed": 0
+  },
+  "review": "Implementer review only; no independent review claimed",
+  "evidence_directory": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-runtime-lifecycle-wn8boxa5",
+  "evidence": {
+    "original-background.rs": {
+      "sha256": "850a6cdfe877849d7e426ec27f82c6afb8dea51fa7a983e832d370bfccdebfee",
+      "bytes": 44739
+    },
+    "original-policy-extraction.rs": {
+      "sha256": "bdf30c4fefea8874c469bf2ba66131a3515d3dde8a812f557961c82cd9c8f13b",
+      "bytes": 420
+    },
+    "original-policy-extraction.diff": {
+      "sha256": "2e442057b54cce188b50e7bb15ed1ccc63937d801e3a4deee591bb3fac472d4b",
+      "bytes": 2198
+    },
+    "regression-tests.rs": {
+      "sha256": "bbe5e30d3869af1278a5d35cad91541a391fd4ec13c1ecf4e6a32a15662a8eb6",
+      "bytes": 1627
+    },
+    "original-policy-tests.log": {
+      "sha256": "4e169ce250b39cd82fad089b0c2ca4943ab61f1789d40112cd75246f3cae2add",
+      "bytes": 4524
+    },
+    "original-policy-result.json": {
+      "sha256": "ca5259dc3fabe12af2b6187e3699d660160728f9b2b8aa0332eaeafb9c5d7343",
+      "bytes": 165
+    },
+    "fixed-policy-tests.log": {
+      "sha256": "e09b05ae278e6ad324f987dba71522c4a4d804fe057f268f15e9b393922822aa",
+      "bytes": 2000
+    },
+    "node-tests.log": {
+      "sha256": "7a3c714645d3723a1199debf9b833678b80480db163d1feaa8d09e808bdabc36",
+      "bytes": 19828
+    }
+  }
+}

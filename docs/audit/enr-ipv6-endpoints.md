@@ -73,7 +73,7 @@ per-test runtime owns its services. Its absent-TCP case verifies the existing
 heuristic; it does not endorse a new port inference policy.
 
 The full consensus suite passes 360 tests with 1 existing ignored test; all 318 peer-manager tests pass.
-All nine local gates pass on `3b1f9cd3`: vendor integrity, workspace/Reth/ENR formatting, all-target compilation, strict Clippy, 1,844 workspace tests (24 ignored), documentation tests and release build. Exact-head Linux/macOS CI and merge remain pending.
+All nine local gates pass on `3b1f9cd3`: vendor integrity, workspace/Reth/ENR formatting, all-target compilation, strict Clippy, 1,844 workspace tests (24 ignored), documentation tests and release build. All six CI jobs passed on `2f438c6a`, including ten Linux volume/template cases with verified cleanup. [PR #211](https://github.com/tdenisenko/logex/pull/211) merged as `65844f06`.
 
 Implementer review followed CL admission/retention/dial conversion, discv5 socket
 selection/contact and observed-address verification, execution DNS/configured
