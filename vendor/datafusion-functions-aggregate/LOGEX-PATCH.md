@@ -21,7 +21,9 @@ layout and existing NULL/FILTER tracking; Float64 uses the original kernels.
 Scalar/sliding batches stage sums and counts before commit. Grouped and sliding
 DISTINCT accumulators poison partially modified state after errors.
 
-Sliding DISTINCT now skips null slots, returns NULL without valid values, and
+Sliding DISTINCT uses the pinned hashbrown 0.14.5 Entry API for one key lookup
+per change, retaining checked mutation and poisoning. It skips null slots,
+returns NULL without valid values, and
 estimates retained map allocation using peak usable capacity and the existing
 bucket estimator. Its list state repeats keys to preserve multiplicity through
 merge/retraction, with checked total/list-offset lengths and fallible reservation. A primitive

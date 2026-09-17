@@ -1,6 +1,6 @@
 --- a/src/sum.rs
 +++ b/src/sum.rs
-@@ -23,26 +23,33 @@
+@@ -23,26 +23,34 @@
  use datafusion_expr::utils::AggregateOrderSensitivity;
  use datafusion_expr::Expr;
  use std::any::Any;
@@ -21,6 +21,7 @@
 +    DECIMAL256_MAX_PRECISION,
  };
  use arrow::{array::ArrayRef, datatypes::Field};
++use datafusion_common::hash_map::Entry;
  use datafusion_common::{
 -    exec_err, not_impl_err, utils::take_function_args, HashMap, Result, ScalarValue,
 +    exec_datafusion_err, exec_err, not_impl_err, utils::take_function_args, HashMap,
@@ -41,7 +42,7 @@
  };
  use datafusion_functions_aggregate_common::aggregate::groups_accumulator::prim_op::PrimitiveGroupsAccumulator;
  use datafusion_functions_aggregate_common::aggregate::sum_distinct::DistinctSumAccumulator;
-@@ -218,7 +225,14 @@
+@@ -218,7 +226,14 @@
          if args.is_distinct {
              macro_rules! helper {
                  ($t:ty, $dt:expr) => {
@@ -57,7 +58,7 @@
                  };
              }
              downcast_sum!(args, helper)
-@@ -261,10 +275,14 @@
+@@ -261,10 +276,14 @@
      ) -> Result<Box<dyn GroupsAccumulator>> {
          macro_rules! helper {
              ($t:ty, $dt:expr) => {
@@ -76,7 +77,7 @@
              };
          }
          downcast_sum!(args, helper)
-@@ -318,19 +336,184 @@
+@@ -318,19 +337,184 @@
      }
  }
  
@@ -264,7 +265,7 @@
      fn new(data_type: DataType) -> Self {
          Self {
              sum: None,
-@@ -339,17 +522,32 @@
+@@ -339,17 +523,32 @@
      }
  }
  
@@ -302,7 +303,7 @@
          Ok(())
      }
  
-@@ -369,19 +567,19 @@
+@@ -369,19 +568,19 @@
  /// This accumulator incrementally computes sums over a sliding window
  ///
  /// This is separate from [`SumAccumulator`] as requires additional state
@@ -325,7 +326,7 @@
      fn new(data_type: DataType) -> Self {
          Self {
              sum: T::Native::usize_as(0),
-@@ -389,30 +587,58 @@
+@@ -389,30 +588,58 @@
              data_type,
          }
      }
@@ -398,7 +399,7 @@
          Ok(())
      }
  
-@@ -427,10 +653,27 @@
+@@ -427,10 +654,27 @@
  
      fn retract_batch(&mut self, values: &[ArrayRef]) -> Result<()> {
          let values = values[0].as_primitive::<T>();
@@ -430,7 +431,7 @@
          Ok(())
      }
  
-@@ -449,6 +692,9 @@
+@@ -449,6 +693,9 @@
      sum: i64,
      /// Data type (must be Int64)
      data_type: DataType,
@@ -440,7 +441,7 @@
  }
  
  impl SlidingDistinctSumAccumulator {
-@@ -462,78 +708,123 @@
+@@ -462,78 +709,133 @@
              counts: HashMap::default(),
              sum: 0,
              data_type: data_type.clone(),
@@ -455,7 +456,11 @@
 +        Ok(())
 +    }
 +    fn change_value(&mut self, value: i64, retract: bool) -> Result<()> {
-+        let old_count = self.counts.get(&value).copied().unwrap_or(0);
++        let entry = self.counts.entry(value);
++        let old_count = match &entry {
++            Entry::Occupied(entry) => *entry.get(),
++            Entry::Vacant(_) => 0,
++        };
 +        let result = if retract {
 +            old_count.checked_sub(1).ok_or_else(|| {
 +                exec_datafusion_err!("SUM DISTINCT retraction exceeds value count")
@@ -478,13 +483,19 @@
 +        match result {
 +            Ok((count, sum)) => {
 +                self.sum = sum;
-+                if count == 0 {
-+                    self.counts.remove(&value);
-+                } else {
-+                    self.counts.insert(value, count);
-+                    self.allocated_capacity =
-+                        self.allocated_capacity.max(self.counts.capacity());
++                match entry {
++                    Entry::Occupied(entry) if count == 0 => {
++                        entry.remove();
++                    }
++                    Entry::Occupied(mut entry) => {
++                        *entry.get_mut() = count;
++                    }
++                    Entry::Vacant(entry) => {
++                        entry.insert(count);
++                    }
 +                }
++                self.allocated_capacity =
++                    self.allocated_capacity.max(self.counts.capacity());
 +                Ok(())
 +            }
 +            Err(error) => {
@@ -611,7 +622,7 @@
          }
          Ok(())
      }
-@@ -542,3 +833,205 @@
+@@ -542,3 +844,205 @@
          true
      }
  }

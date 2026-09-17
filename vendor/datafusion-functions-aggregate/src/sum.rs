@@ -36,6 +36,7 @@ use arrow::datatypes::{
     DECIMAL256_MAX_PRECISION,
 };
 use arrow::{array::ArrayRef, datatypes::Field};
+use datafusion_common::hash_map::Entry;
 use datafusion_common::{
     exec_datafusion_err, exec_err, not_impl_err, utils::take_function_args, HashMap,
     Result, ScalarValue,
@@ -719,7 +720,11 @@ impl SlidingDistinctSumAccumulator {
         Ok(())
     }
     fn change_value(&mut self, value: i64, retract: bool) -> Result<()> {
-        let old_count = self.counts.get(&value).copied().unwrap_or(0);
+        let entry = self.counts.entry(value);
+        let old_count = match &entry {
+            Entry::Occupied(entry) => *entry.get(),
+            Entry::Vacant(_) => 0,
+        };
         let result = if retract {
             old_count.checked_sub(1).ok_or_else(|| {
                 exec_datafusion_err!("SUM DISTINCT retraction exceeds value count")
@@ -742,13 +747,19 @@ impl SlidingDistinctSumAccumulator {
         match result {
             Ok((count, sum)) => {
                 self.sum = sum;
-                if count == 0 {
-                    self.counts.remove(&value);
-                } else {
-                    self.counts.insert(value, count);
-                    self.allocated_capacity =
-                        self.allocated_capacity.max(self.counts.capacity());
+                match entry {
+                    Entry::Occupied(entry) if count == 0 => {
+                        entry.remove();
+                    }
+                    Entry::Occupied(mut entry) => {
+                        *entry.get_mut() = count;
+                    }
+                    Entry::Vacant(entry) => {
+                        entry.insert(count);
+                    }
                 }
+                self.allocated_capacity =
+                    self.allocated_capacity.max(self.counts.capacity());
                 Ok(())
             }
             Err(error) => {

@@ -38,9 +38,9 @@ PACKAGES = (
         name="datafusion-functions-aggregate",
         inventory_checksum="ffa15a2b3a48646a9276999ab6afc77b3a20b0917b788137262d386be1b6ce69",
         modified={
-            PurePosixPath("src/sum.rs"): "e5730897fe81fad573755a216904effc392caf59075fcd223d7e6c6ba3f134dc",
+            PurePosixPath("src/sum.rs"): "7e32b0693d0cc0f3f87ea06f8d1eec24c1a7867fc0075e739d61336dabae4f80",
         },
-        patch_checksum="53348c02bfa0a09382b3fd37e24e8275e556b5c64caf0ea23b22a0b38dbee9ce",
+        patch_checksum="71de71b771a96e9ff9956a5530774c129d62f71413e7e77729d7109430228362",
     ),
     Package(
         name="datafusion-functions-aggregate-common",
