@@ -110,5 +110,4 @@ This remaining issue prevents closing the numeric correctness audit.
 and [investigation evidence](baselines/2026-09-17-query-aggregate-contracts-evidence.json.gz)
 retain the commands, source identities, attempts and mathematical expectations.
 All original failures are classified separately from candidate compilation errors,
-fixture corrections and diagnostic-only baseline output. Exact-head CI and merge
-remain pending.
+fixture corrections and diagnostic-only baseline output. All six CI jobs passed on `4d9940db`, including ten Linux volume/template cases with verified cleanup. [PR #215](https://github.com/tdenisenko/logex/pull/215) merged as `8fd2e55f`. The merge tree is identical to the tested head.
