@@ -292,10 +292,14 @@ impl ConsensusStore {
         let snapshot = self.inner.lock().unwrap();
         let anchors = &snapshot.ordered_anchors;
         let materialized_tip = anchors.last().map(|record| record.anchor);
-        let selected = snapshot
-            .verified_light_client_store
-            .as_ref()
-            .and_then(|store| store.optimistic_anchor());
+        // Accepted store updates and restore refresh this derived anchor. Only
+        // a verified store makes it selected-head evidence; otherwise the same
+        // summary is merely the materialized fallback. Reuse its cached root.
+        let selected = if snapshot.verified_light_client_store.is_some() {
+            snapshot.anchors.optimistic_head
+        } else {
+            None
+        };
         if let Some(selected) = selected {
             let requires_complete_lineage = tracked_tip
                 .is_some_and(|(last, _)| selected.block_number <= last)
@@ -1600,7 +1604,11 @@ mod tests {
             block_hash: B256::repeat_byte(0xef),
             receipts_root: B256::ZERO,
         });
-        consensus.inner.lock().unwrap().verified_light_client_store = Some(selected);
+        {
+            let mut snapshot = consensus.inner.lock().unwrap();
+            snapshot.verified_light_client_store = Some(selected);
+            apply_verified_store(&mut snapshot);
+        }
         assert!(matches!(
             consensus
                 .reorg_anchor_snapshot(100, Some((101, old[1].anchor.block_hash)), 2)
@@ -1629,7 +1637,11 @@ mod tests {
                     receipts_root: B256::ZERO,
                 });
             let head = store.optimistic_anchor().unwrap();
-            consensus.inner.lock().unwrap().verified_light_client_store = Some(store);
+            {
+                let mut snapshot = consensus.inner.lock().unwrap();
+                snapshot.verified_light_client_store = Some(store);
+                apply_verified_store(&mut snapshot);
+            }
             head
         };
         let selected = select(100, B256::repeat_byte(0xef));
