@@ -1658,6 +1658,14 @@ impl NativeStorage {
             }
 
             let dir = self.paths.segment_dir(descriptor.id);
+            // Raw sources already acquire this same inode via SourceWriteGuard;
+            // only bundled sources need the maintenance owner here. Retain it
+            // through manifest publication, excluding already-verified tasks.
+            let _bundle_owner = if descriptor.column_bundle.is_some() {
+                super::segment::SegmentMaintenanceGuard::acquire(&self.paths, descriptor)?
+            } else {
+                None
+            };
             let raw_owner = if descriptor.column_bundle.is_none() {
                 Some(match descriptor.source_namespace {
                     Some(namespace) => crate::column::SourceWriteGuard::acquire_bound(
@@ -8972,5 +8980,105 @@ mod tests {
                 assert_reorg_state(&recovered, &headers, &rows, true);
             }
         }
+    }
+    fn reorg_compaction_fixture(
+        path: &Path,
+    ) -> (
+        NativeStorage,
+        Vec<Header>,
+        Vec<LogRow>,
+        SegmentCompactionTask,
+    ) {
+        let (mut storage, headers, rows) = reorg_fixture(path);
+        storage.finalize_active_historical_segment().unwrap();
+        storage.config.compaction_safety_margin_blocks = 0;
+        let task = storage
+            .compaction_candidates(0..storage.compaction_candidate_count())
+            .unwrap()
+            .into_iter()
+            .find(|task| task.descriptor.column_bundle.is_some())
+            .unwrap();
+        // The public task API permits this call; the normal background scheduler
+        // skips this current-profile candidate. Do not model it as a scheduler failure.
+        assert!(
+            !task
+                .needs_compaction(CompactionMode::CurrentProfile)
+                .unwrap()
+        );
+        (storage, headers, rows, task)
+    }
+
+    fn paused_reorg_compaction(
+        task: SegmentCompactionTask,
+    ) -> (
+        std::sync::mpsc::SyncSender<()>,
+        std::thread::JoinHandle<io::Result<()>>,
+    ) {
+        let (verified_tx, verified_rx) = std::sync::mpsc::sync_channel(0);
+        let (resume_tx, resume_rx) = std::sync::mpsc::sync_channel(0);
+        let worker = std::thread::spawn(move || {
+            super::super::segment::AFTER_COMPACTION_SOURCE_VERIFIED.with_borrow_mut(|hook| {
+                *hook = Some(Box::new(move || {
+                    verified_tx.send(()).unwrap();
+                    resume_rx
+                        .recv_timeout(std::time::Duration::from_secs(10))
+                        .unwrap();
+                }));
+            });
+            task.compact()
+        });
+        verified_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap();
+        (resume_tx, worker)
+    }
+
+    #[test]
+    fn canonical_reorg_excludes_verified_bundle_compaction() {
+        let tmp = TempDir::new().unwrap();
+        let (mut storage, headers, rows, task) = reorg_compaction_fixture(tmp.path());
+        let config = storage.config.clone();
+        let (resume, worker) = paused_reorg_compaction(task);
+        let hashes = headers[1..]
+            .iter()
+            .map(Header::hash_slow)
+            .collect::<Vec<_>>();
+        let mutation =
+            storage.apply_canonical_reorg(&hashes, &headers[..1], Some(reorg_anchor(&headers[0])));
+        // Always release the worker before assertions, even if exclusion failed.
+        resume.send(()).unwrap();
+        worker.join().unwrap().unwrap();
+        assert_eq!(mutation.unwrap_err().kind(), io::ErrorKind::WouldBlock);
+        assert!(storage.ensure_writable().is_err());
+        assert!(!storage.read_view_token().is_valid());
+        drop(storage);
+        for _ in 0..2 {
+            let reopened = NativeStorage::open(config.clone()).unwrap();
+            assert_reorg_state(&reopened, &headers, &rows, true);
+        }
+    }
+
+    #[test]
+    fn canonical_reorg_rejects_compaction_task_captured_before_retirement() {
+        let tmp = TempDir::new().unwrap();
+        let (mut storage, headers, rows, task) = reorg_compaction_fixture(tmp.path());
+        let hashes = headers[1..]
+            .iter()
+            .map(Header::hash_slow)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            storage
+                .apply_canonical_reorg(&hashes, &headers[..1], Some(reorg_anchor(&headers[0])))
+                .unwrap(),
+            2
+        );
+        let manifest_path = storage.paths.segment_manifest_path(task.segment_id());
+        let manifest = fs::read(&manifest_path).unwrap();
+        assert_eq!(
+            task.compact().unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        assert_eq!(fs::read(&manifest_path).unwrap(), manifest);
+        assert_reorg_state(&storage, &headers, &rows, true);
     }
 }
