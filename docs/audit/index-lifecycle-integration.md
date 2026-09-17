@@ -2,8 +2,8 @@
 
 This batch starts at PR #223 merge `1a34273c` on
 `audit/index-lifecycle-integration`. Source `8c47fa8e` corrects the public prefix
-boundary below. All ten local gates and independent review pass; CI and merge
-remain before batch-6 offline closure.
+boundary below. All ten local gates, independent review and six CI jobs pass; PR #224
+merged as `2b86b8a6`. Batch-6 offline code review is complete.
 
 The review covers builder inputs, profile expansion, read-side fallback, physical
 row identity, rotation, compaction and interrupted publication. Earlier page,
@@ -125,4 +125,6 @@ The [machine-readable record](baselines/2026-09-17-index-lifecycle-integration.j
 links hash-verified archives of the original source and test patch, original/fixed
 logs, source reviews, lifecycle dispositions and all final gate logs. Existing
 vendor/future-compatibility and debug-linker warnings are retained; final gates
-pass. Exact-head CI and merge remain before closure.
+pass. Exact-head CI and merge passed; verified closure follows.
+
+All six CI jobs passed on `c0f7a35a`, including ten Linux volume/template cases with verified cleanup. [PR #224](https://github.com/tdenisenko/logex/pull/224) merged as `2b86b8a6`. The merge tree is identical to the tested head. B6-05 and the batch-6 offline code review are closed; integrated workloads, shared resource policy and automatic repair remain in their separate scopes.

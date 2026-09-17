@@ -1,0 +1,260 @@
+{
+  "date": "2026-09-17",
+  "branch": "audit/storage-boundary-disposition",
+  "base": "2b86b8a60e163c9d5cf602f51070984fa4a06260",
+  "source_commit": "a7eae4b957520fe642832ac5bd2b52b79a229c79",
+  "source_inventory": {
+    "base": "2b86b8a60e163c9d5cf602f51070984fa4a06260",
+    "source_commit": "a7eae4b957520fe642832ac5bd2b52b79a229c79",
+    "files": [
+      {
+        "path": "crates/logex-storage/src/page.rs",
+        "sha256": "18457c8006472b4cab3b633381f73cc211a910043841f400eb0e8577d4cb871d",
+        "bytes": 36183
+      },
+      {
+        "path": "crates/logex-storage/src/reader.rs",
+        "sha256": "095765c86c98ce7448f829daf59b1b3c70deb432a20067101d8123893258f46f",
+        "bytes": 39776
+      },
+      {
+        "path": "crates/logex-storage/src/lib.rs",
+        "sha256": "313fe1edc5e30feecb0a1063f9c0ba5c337db7d73bf5eee68108ed74c14cf007",
+        "bytes": 653
+      }
+    ]
+  },
+  "findings": [
+    "B2-28"
+  ],
+  "gates": {
+    "commit": "a7eae4b957520fe642832ac5bd2b52b79a229c79",
+    "rustc": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+    "gates": [
+      {
+        "name": "vendor",
+        "command": [
+          "python3",
+          "tools/verify_datafusion_vendor.py"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T12:19:55.610221+00:00",
+        "finished": "2026-09-17T12:19:55.732599+00:00",
+        "sha256": "95ada9e22c512e8346f3d8d057e7fba429b52506f4e037dcf35657f57d7ec451",
+        "log": "/private/tmp/logex-audit-storage-boundary-20260917/gates/vendor.log"
+      },
+      {
+        "name": "format",
+        "command": [
+          "cargo",
+          "fmt",
+          "--all",
+          "--",
+          "--check"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T12:19:55.732979+00:00",
+        "finished": "2026-09-17T12:19:56.796902+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-audit-storage-boundary-20260917/gates/format.log"
+      },
+      {
+        "name": "vendor-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2024",
+          "--config-path",
+          "vendor/reth-network/rustfmt.toml",
+          "--config",
+          "skip_children=true",
+          "vendor/reth-network/src/eth_requests.rs",
+          "vendor/reth-network/src/session/active.rs",
+          "vendor/reth-network/src/session/mod.rs",
+          "vendor/reth-network/src/session/types.rs",
+          "vendor/reth-network/src/session/range_update.rs",
+          "vendor/reth-discv5/src/lib.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T12:19:56.797344+00:00",
+        "finished": "2026-09-17T12:19:56.866626+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-audit-storage-boundary-20260917/gates/vendor-format.log"
+      },
+      {
+        "name": "enr-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2021",
+          "--config",
+          "skip_children=true",
+          "vendor/enr/src/lib.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T12:19:56.866975+00:00",
+        "finished": "2026-09-17T12:19:56.918584+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-audit-storage-boundary-20260917/gates/enr-format.log"
+      },
+      {
+        "name": "aggregate-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2021",
+          "--config",
+          "max_width=90,skip_children=true",
+          "vendor/datafusion-functions-aggregate/src/sum.rs",
+          "vendor/datafusion-functions-aggregate/src/average.rs",
+          "vendor/datafusion-functions-aggregate-common/src/aggregate/sum_distinct/numeric.rs",
+          "vendor/datafusion-functions-aggregate-common/src/aggregate/avg_distinct/decimal.rs",
+          "vendor/datafusion-functions-aggregate-common/src/utils.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T12:19:56.918937+00:00",
+        "finished": "2026-09-17T12:19:56.981606+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-audit-storage-boundary-20260917/gates/aggregate-format.log"
+      },
+      {
+        "name": "check",
+        "command": [
+          "cargo",
+          "check",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T12:19:56.982006+00:00",
+        "finished": "2026-09-17T12:20:08.822404+00:00",
+        "sha256": "0d0aff042059207d562f6b7c1b68b3005b463efedd2b0dec10cbd707be1ce45d",
+        "log": "/private/tmp/logex-audit-storage-boundary-20260917/gates/check.log"
+      },
+      {
+        "name": "clippy",
+        "command": [
+          "cargo",
+          "clippy",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T12:20:08.823543+00:00",
+        "finished": "2026-09-17T12:20:21.331543+00:00",
+        "sha256": "e5070879ff483d31a174a01a719c0d5bad894cb3d090bda352c87cb360c3fce8",
+        "log": "/private/tmp/logex-audit-storage-boundary-20260917/gates/clippy.log"
+      },
+      {
+        "name": "test",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T12:20:21.332368+00:00",
+        "finished": "2026-09-17T12:26:18.894019+00:00",
+        "sha256": "18f62af722a2d1de2840ad22f08ca4f993e48b7589956f0b77e2aa5a67e02799",
+        "log": "/private/tmp/logex-audit-storage-boundary-20260917/gates/test.log"
+      },
+      {
+        "name": "doc",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--doc",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T12:26:18.898207+00:00",
+        "finished": "2026-09-17T12:26:31.971498+00:00",
+        "sha256": "2d8dbc6b226b6d2bcccd36ca2dfbdec13d19e807f9c4b523d94b773b055f7cbc",
+        "log": "/private/tmp/logex-audit-storage-boundary-20260917/gates/doc.log"
+      },
+      {
+        "name": "release-build",
+        "command": [
+          "cargo",
+          "build",
+          "-p",
+          "logex-node",
+          "--release",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T12:26:31.972360+00:00",
+        "finished": "2026-09-17T12:28:21.221997+00:00",
+        "sha256": "5a9e23ebc1272255f074d6f152dbd9534bd8f394453bd1fb25cbeeecad411eb2",
+        "log": "/private/tmp/logex-audit-storage-boundary-20260917/gates/release-build.log"
+      }
+    ]
+  },
+  "workspace_tests": {
+    "passed": 1962,
+    "failed": 0,
+    "ignored": 24,
+    "targets": 35
+  },
+  "documentation_tests": {
+    "passed": 0,
+    "failed": 0,
+    "ignored": 0,
+    "targets": 8
+  },
+  "evidence": {
+    "path": "docs/audit/baselines/2026-09-17-storage-boundary-disposition-evidence.json.gz",
+    "files": 29,
+    "bytes_uncompressed": 203486,
+    "bytes": 43427,
+    "sha256": "734e276d94458899b6e260a4f5ac6675042846e083513317bec52e2349298d55"
+  },
+  "validation": {
+    "path": "docs/audit/baselines/2026-09-17-storage-boundary-disposition-validation.json.gz",
+    "files": 12,
+    "bytes_uncompressed": 229299,
+    "bytes": 42282,
+    "sha256": "ba97115cb1d080e37ce431d33e96e9ba215b50eee23efa0aeb523353b3ff82db"
+  },
+  "publication": {
+    "state": "pending"
+  },
+  "boundaries": [
+    "Original 64KiB allocation control fails with (1,1), same probe with only the two production decoder-arm changes passes with (0,0); root and independent review verify exact base and probe source.",
+    "Thread-local >=64KiB allocation counting covers synchronous plain decoders only. No RSS, OOM, timing or ingestion throughput claim.",
+    "Temporary allocator removed final. Retained scalar shape/codec test can pass before the fix and is not presented as distinguishing allocation order.",
+    "Focused page/storage/Clippy/format runs cover the final page change before enum removal; all ten final-source gates cover all three committed source files.",
+    "ColumnData removal is a public source API cleanup under waived compatibility, not a runtime optimization. Useful readers and raw recovery paths remain.",
+    "Plain u8 error wording changes to existing fixed-width helper; InvalidData kind unchanged. Compressed code paths and formats unchanged.",
+    "No additional scoped WAL, journal, catalog, page/compression/bundle, raw-reader or reachable append-ownership defect found; finite existing tests and source review are not an exhaustive schedule or hardware proof.",
+    "Format and file-size bounds are not shared query RSS/admission guarantees. Coherently large valid data and final result accounting remain in query batches.",
+    "No ingestion writes, fsyncs, locking policy, dependencies or storage formats changed. No benchmark, live sync, remote host, production data or deployment operation.",
+    "Automatic verified repair, integrated offline workloads and broader audit remain open. Live sync and staging follow offline completion."
+  ]
+}
