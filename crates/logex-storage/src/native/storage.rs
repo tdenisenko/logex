@@ -1,5 +1,7 @@
 use std::collections::BTreeSet;
-use std::fs::{self, File, TryLockError};
+use std::fs;
+#[cfg(test)]
+use std::fs::File;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -23,6 +25,7 @@ use super::catalog::{
     NativeStorageCatalog, NativeStorageConfig, SegmentDescriptor, SegmentKind, SegmentManifest,
     StorageCatalogPaths, StorageState, validate_cached_headers,
 };
+use super::directory_lock::DataDirectoryLock;
 use super::segment::{
     append_ingest_rows, apply_row_bounds_to_descriptor, apply_rows_to_descriptor,
     compact_ingest_segment, compact_segment, persist_ingest_manifest,
@@ -68,9 +71,6 @@ enum CompactionOrder {
     NewestFirst,
 }
 
-#[derive(Debug)]
-struct DataDirectoryLock(File);
-
 /// Optimistic validity of a captured read view. Appends and compaction preserve
 /// existing row positions; callers must also retain each segment's row boundary.
 /// Canonical changes invalidate the token before mutation. Closing storage also
@@ -89,17 +89,6 @@ struct ReadViewEpoch(Arc<AtomicBool>);
 impl Drop for ReadViewEpoch {
     fn drop(&mut self) {
         self.0.store(false, Ordering::SeqCst);
-    }
-}
-
-impl Drop for DataDirectoryLock {
-    fn drop(&mut self) {
-        // Closing this fd alone can leave a lock alive in a descriptor inherited
-        // during another thread's fork/exec. Release it when the last managed
-        // storage/compaction owner disappears, regardless of such duplicates.
-        if let Err(error) = self.0.unlock() {
-            tracing::warn!(%error, "failed to explicitly unlock data directory before closing it");
-        }
     }
 }
 
@@ -276,26 +265,7 @@ pub struct NativeStorage {
 impl NativeStorage {
     pub fn open(config: NativeStorageConfig) -> std::io::Result<Self> {
         durability::create_dir_all(&config.data_dir)?;
-        // Lock the directory inode without creating a lock file. Alternative
-        // path spellings that resolve to the same directory must also conflict.
-        let directory_lock = File::open(&config.data_dir)?;
-        directory_lock.try_lock().map_err(|error| match error {
-            TryLockError::WouldBlock => io::Error::new(
-                io::ErrorKind::WouldBlock,
-                format!(
-                    "data directory {} is already in use",
-                    config.data_dir.display()
-                ),
-            ),
-            TryLockError::Error(error) => io::Error::new(
-                error.kind(),
-                format!(
-                    "cannot lock data directory {}: {error}",
-                    config.data_dir.display()
-                ),
-            ),
-        })?;
-        let directory_lock = Arc::new(DataDirectoryLock(directory_lock));
+        let directory_lock = Arc::new(DataDirectoryLock::acquire_existing(&config.data_dir)?);
         let (catalog, paths) = NativeStorageCatalog::open_or_create(&config)?;
         verify_recent_headers(&catalog.state)?;
         let wal = WriteAheadLog::open(config.data_dir.join("wal").join("pending.wal"))?;
@@ -3007,7 +2977,7 @@ fn execution_marker_from_header(header: &Header) -> ExecutionBlockMarker {
     }
 }
 
-fn verify_recent_headers(state: &StorageState) -> io::Result<()> {
+pub(super) fn verify_recent_headers(state: &StorageState) -> io::Result<()> {
     for headers in state.recent_headers.windows(2) {
         let parent = &headers[0];
         let child = &headers[1];
@@ -6435,7 +6405,7 @@ mod tests {
         let storage = NativeStorage::open(config.clone()).unwrap();
         // dup and a transient fork/exec inherit references to the same OS lock.
         // Such a descriptor is not a managed storage or compaction owner.
-        let duplicate = storage.directory_lock.0.try_clone().unwrap();
+        let duplicate = storage.directory_lock.duplicate_file_for_test().unwrap();
         drop(storage);
         let reopened = NativeStorage::open(config).unwrap();
         drop(duplicate);

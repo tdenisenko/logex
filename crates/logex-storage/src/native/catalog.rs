@@ -343,9 +343,7 @@ impl NativeStorageCatalog {
             Err(error) => return Err(error),
         };
         if let Some(file) = existing {
-            let mut bytes = Vec::new();
-            file.take(MAX_CATALOG_BYTES + 1).read_to_end(&mut bytes)?;
-            let mut catalog = Self::decode(&bytes)?;
+            let mut catalog = Self::read_file(file)?;
             if catalog.hot_target_rows != config.hot_target_rows {
                 catalog.hot_target_rows = config.hot_target_rows;
                 catalog.persist(&paths)?;
@@ -377,6 +375,33 @@ impl NativeStorageCatalog {
         };
         catalog.persist(&paths)?;
         Ok((catalog, paths))
+    }
+
+    /// Decode existing committed metadata without creating directories, changing
+    /// configuration, publishing metadata or performing recovery. Callers must
+    /// hold the data-directory lock throughout inspection and subsequent use.
+    pub(super) fn load_existing(paths: &StorageCatalogPaths) -> io::Result<Self> {
+        let path = paths.catalog_path();
+        let regular = |metadata: fs::Metadata| {
+            if metadata.is_file() {
+                Ok(())
+            } else {
+                Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "catalog inspection requires a regular file without an alias",
+                ))
+            }
+        };
+        regular(fs::symlink_metadata(&path)?)?;
+        let file = fs::File::open(path)?;
+        regular(file.metadata()?)?;
+        Self::read_file(file)
+    }
+
+    fn read_file(file: fs::File) -> io::Result<Self> {
+        let mut bytes = Vec::new();
+        file.take(MAX_CATALOG_BYTES + 1).read_to_end(&mut bytes)?;
+        Self::decode(&bytes)
     }
 
     pub fn persist(&self, paths: &StorageCatalogPaths) -> io::Result<()> {
@@ -773,6 +798,76 @@ mod tests {
         let (reloaded, _) = NativeStorageCatalog::open_or_create(&updated_config).unwrap();
 
         assert_eq!(reloaded.hot_target_rows, 1_000);
+    }
+
+    #[test]
+    fn existing_catalog_read_preserves_configuration_and_files() {
+        let tmp = TempDir::new().unwrap();
+        let config = NativeStorageConfig {
+            data_dir: tmp.path().to_path_buf(),
+            hot_target_rows: 1234,
+            ..NativeStorageConfig::default()
+        };
+        let (catalog, paths) = NativeStorageCatalog::open_or_create(&config).unwrap();
+        let bytes = fs::read(paths.catalog_path()).unwrap();
+        let modified = fs::metadata(paths.catalog_path())
+            .unwrap()
+            .modified()
+            .unwrap();
+        assert_eq!(
+            NativeStorageCatalog::load_existing(&paths).unwrap(),
+            catalog
+        );
+        assert_eq!(fs::read(paths.catalog_path()).unwrap(), bytes);
+        assert_eq!(
+            fs::metadata(paths.catalog_path())
+                .unwrap()
+                .modified()
+                .unwrap(),
+            modified
+        );
+
+        let mut damaged = bytes;
+        damaged[16] ^= 1;
+        fs::write(paths.catalog_path(), &damaged).unwrap();
+        assert!(NativeStorageCatalog::load_existing(&paths).is_err());
+        assert_eq!(fs::read(paths.catalog_path()).unwrap(), damaged);
+    }
+
+    #[test]
+    fn existing_catalog_read_never_bootstraps_missing_storage() {
+        let tmp = TempDir::new().unwrap();
+        let paths = StorageCatalogPaths::new(tmp.path().join("absent"));
+        assert_eq!(
+            NativeStorageCatalog::load_existing(&paths)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::NotFound
+        );
+        assert!(!paths.root().exists());
+
+        let paths = StorageCatalogPaths::new(tmp.path().to_owned());
+        assert_eq!(
+            NativeStorageCatalog::load_existing(&paths)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::NotFound
+        );
+        assert!(fs::read_dir(tmp.path()).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn existing_catalog_read_reports_unsupported_file_layout() {
+        let tmp = TempDir::new().unwrap();
+        let paths = StorageCatalogPaths::new(tmp.path().to_owned());
+        fs::create_dir(paths.catalog_path()).unwrap();
+        assert_eq!(
+            NativeStorageCatalog::load_existing(&paths)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::Unsupported
+        );
+        assert!(paths.catalog_path().is_dir());
     }
 
     #[test]

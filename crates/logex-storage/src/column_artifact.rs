@@ -71,6 +71,7 @@ pub(crate) struct ColumnArtifacts {
     dir: PathBuf,
     bundle: Option<BundleReader>,
     pinned: Option<Arc<BTreeMap<String, Mutex<File>>>>,
+    inspection_lengths: Option<Arc<BTreeMap<String, u64>>>,
 }
 
 #[cfg(test)]
@@ -90,6 +91,22 @@ impl ColumnArtifacts {
         manifest: Option<&SegmentManifest>,
         projection: Option<&[&str]>,
     ) -> io::Result<Self> {
+        Self::open_projected_checked(dir, manifest, projection, false)
+    }
+
+    pub(crate) fn open_for_inspection(
+        dir: &Path,
+        manifest: Option<&SegmentManifest>,
+    ) -> io::Result<Self> {
+        Self::open_projected_checked(dir, manifest, None, true)
+    }
+
+    fn open_projected_checked(
+        dir: &Path,
+        manifest: Option<&SegmentManifest>,
+        projection: Option<&[&str]>,
+        inspection: bool,
+    ) -> io::Result<Self> {
         if projection.is_some_and(|names| names.iter().any(|name| !COLUMN_NAMES.contains(name))) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -101,7 +118,7 @@ impl ColumnArtifacts {
                 names.contains(&name) || (name == "data_len" && names.contains(&"data"))
             })
         };
-        let mut artifacts = Self::open_inspected(dir, manifest, None)?;
+        let mut artifacts = Self::open_inspected_checked(dir, manifest, None, inspection)?;
         if artifacts.bundle.is_none() {
             if let Some(manifest) = manifest {
                 if manifest.source_namespace.is_some()
@@ -176,6 +193,13 @@ impl ColumnArtifacts {
                     ));
                 }
                 if let std::collections::btree_map::Entry::Vacant(entry) = files.entry(path) {
+                    if inspection {
+                        match require_regular_artifact(dir, Path::new(entry.key())) {
+                            Ok(()) => {}
+                            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                            Err(error) => return Err(error),
+                        }
+                    }
                     match File::open(dir.join(entry.key())) {
                         Ok(file) => {
                             entry.insert(Mutex::new(file));
@@ -200,6 +224,15 @@ impl ColumnArtifacts {
         dir: &Path,
         manifest: Option<&SegmentManifest>,
         inspected: Option<BundleReader>,
+    ) -> io::Result<Self> {
+        Self::open_inspected_checked(dir, manifest, inspected, false)
+    }
+
+    fn open_inspected_checked(
+        dir: &Path,
+        manifest: Option<&SegmentManifest>,
+        inspected: Option<BundleReader>,
+        inspection: bool,
     ) -> io::Result<Self> {
         if inspected.is_some()
             && manifest
@@ -245,7 +278,14 @@ impl ColumnArtifacts {
                     }
                     reader
                 } else {
-                    BundleReader::open(&bundle_path(dir, manifest.generation), reference)?
+                    let path = bundle_path(dir, manifest.generation);
+                    if inspection {
+                        let relative = path
+                            .strip_prefix(dir)
+                            .map_err(|_| invalid("invalid bundle path"))?;
+                        require_regular_artifact(dir, relative)?;
+                    }
+                    BundleReader::open(&path, reference)?
                 };
                 if !reader.has_complete_schema() {
                     return Err(invalid("incomplete bundled column streams"));
@@ -257,7 +297,38 @@ impl ColumnArtifacts {
             dir: dir.to_owned(),
             bundle,
             pinned: None,
+            inspection_lengths: None,
         })
+    }
+
+    /// Capture all retained raw lengths before reading their bodies. Bundled
+    /// streams are immutable and already constrained by their captured table.
+    pub(crate) fn inspection_artifact_lengths(&mut self) -> io::Result<Vec<u64>> {
+        if let Some(bundle) = &self.bundle {
+            let mut lengths = vec![u64::from(bundle.reference().chain_bytes)];
+            for id in 0..=CANONICAL_STREAM {
+                lengths.push(bundle.stream_len(id)?);
+                if (14..28).contains(&id) {
+                    lengths.push(crate::page::PAGE_INDEX_HEADER_BYTES as u64);
+                } else if id >= 28 {
+                    // Encoded bitmaps and their decoded row-shaped buffers can
+                    // coexist; charge both, not only their compressed bytes.
+                    lengths.push(bitmap_bytes(bundle.row_count())? as u64);
+                }
+            }
+            return Ok(lengths);
+        }
+        let files = self
+            .pinned
+            .as_ref()
+            .ok_or_else(|| invalid("inspection requires captured artifacts"))?;
+        let mut lengths = BTreeMap::new();
+        for path in files.keys() {
+            lengths.insert(path.clone(), pinned_file(files, path)?.metadata()?.len());
+        }
+        let result = lengths.values().copied().collect();
+        self.inspection_lengths = Some(Arc::new(lengths));
+        Ok(result)
     }
 
     /// Read the fixed prefix and length from the SAME pinned canonical inode.
@@ -315,6 +386,20 @@ impl ColumnArtifacts {
                 if let Some(files) = &self.pinned {
                     let mut file = pinned_file(files, path)?;
                     file.seek(SeekFrom::Start(0))?;
+                    if let Some(lengths) = &self.inspection_lengths {
+                        let expected = *lengths
+                            .get(path)
+                            .ok_or_else(|| invalid("uncaptured inspection artifact"))?;
+                        check_inspection_length(&file, expected)?;
+                        let len = usize::try_from(expected)
+                            .map_err(|_| invalid("captured column exceeds address space"))?;
+                        let mut bytes = Vec::new();
+                        bytes.try_reserve_exact(len).map_err(io::Error::other)?;
+                        bytes.resize(len, 0);
+                        file.read_exact(&mut bytes)?;
+                        check_inspection_length(&file, expected)?;
+                        return Ok(bytes);
+                    }
                     let mut bytes = Vec::new();
                     let len = usize::try_from(file.metadata()?.len())
                         .map_err(|_| invalid("captured column exceeds address space"))?;
@@ -343,6 +428,15 @@ impl ColumnArtifacts {
             return stream_id(path).and_then(|id| bundle.read_range(id, range));
         }
         let read = |file: &mut File| {
+            if let Some(lengths) = &self.inspection_lengths {
+                let expected = *lengths
+                    .get(path)
+                    .ok_or_else(|| invalid("uncaptured inspection artifact"))?;
+                check_inspection_length(file, expected)?;
+                if range.end > expected {
+                    return Err(invalid("inspection range exceeds captured artifact"));
+                }
+            }
             let len = range
                 .end
                 .checked_sub(range.start)
@@ -369,6 +463,48 @@ impl ColumnArtifacts {
             .as_ref()
             .map_or(Ok(()), BundleReader::verify_all)
     }
+}
+
+fn check_inspection_length(file: &File, expected: u64) -> io::Result<()> {
+    if file.metadata()?.len() != expected {
+        return Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "artifact length changed after inspection preflight",
+        ));
+    }
+    Ok(())
+}
+
+/// Offline inspection rejects symlinks and special files before opening them.
+/// The caller's directory lock excludes supported writers, not hostile swaps.
+pub(crate) fn require_regular_artifact(dir: &Path, relative: &Path) -> io::Result<()> {
+    let mut path = dir.to_path_buf();
+    let mut components = relative.components().peekable();
+    if components.peek().is_none() {
+        return Err(invalid("empty inspection artifact path"));
+    }
+    while let Some(component) = components.next() {
+        if !matches!(component, std::path::Component::Normal(_)) {
+            return Err(invalid(
+                "inspection artifact must remain relative to its segment",
+            ));
+        }
+        path.push(component);
+        let kind = fs::symlink_metadata(&path)?.file_type();
+        if kind.is_symlink()
+            || if components.peek().is_some() {
+                !kind.is_dir()
+            } else {
+                !kind.is_file()
+            }
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "inspection artifact must be a regular file without symlinks",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn pinned_file<'a>(

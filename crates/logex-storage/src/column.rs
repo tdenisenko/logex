@@ -8,7 +8,7 @@ use std::thread;
 use crate::native::SegmentKind;
 use logex_types::LogRow;
 
-const SOURCE_MARKER_FILE: &str = ".source-publication";
+pub(crate) const SOURCE_MARKER_FILE: &str = ".source-publication";
 const SOURCE_MARKER_MAGIC: &[u8; 8] = b"LXSRC002";
 const SOURCE_MARKER_BYTES: usize = 87;
 const SOURCE_UPDATING: u8 = 1;
