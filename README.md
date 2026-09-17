@@ -552,6 +552,13 @@ WHERE topic0 = event'Transfer(address,address,uint256)'
 
 SQL results use JSON numbers for integer and finite floating-point values, and
 strings for exact decimals (including arithmetic promoted to a decimal type).
+Exact sums of the hexadecimal data column return base-ten strings for every
+aggregate projection in a supported query, including sums of integer literals
+alongside the data total. These sums preserve arbitrary integer precision.
+Ordinary numeric-only aggregates retain the SQL engine's result types.
+Exact data aggregation supports sums, addition/subtraction of sums, conditional
+inputs and optional grouping by address. Other aggregate shapes use the general
+SQL engine, where data remains hexadecimal text; they may reject it as nonnumeric.
 Arrays and objects retain their nested values and explicit nulls. SQL temporal
 values use Arrow's textual format; SQL binary values use hexadecimal without a
 prefix. The existing log hash, address and data columns keep their `0x` prefix.

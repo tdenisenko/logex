@@ -1,7 +1,7 @@
 # Query scan execution ownership
 
 Base: `8c881b94` (merged PR #213). The remaining lazy-cursor review now has
-an actual public-query reproduction. Source `86c7e6f8` passes all nine local gates. Exact-head CI and merge remain;
+an actual public-query reproduction. Source `86c7e6f8` passes all nine local gates. PR #214 is merged;
 this is a scoped query correction, not completion of the query audit.
 
 ## Finding B7-30
@@ -79,7 +79,7 @@ manifest distinguishes fixture errors from the genuine public reproduction.
 Original manifests were recovered from the immutable base commit; the first
 successful candidate's intermediate manifests were not separately saved. Exact
 final manifests and sources were retained and compared. Final full gates include
-the readability-only follow-up made after focused checks. CI and merge remain.
+the readability-only follow-up made after focused checks. All six CI jobs passed on `2d2867d2`, including ten Linux volume/template cases with verified cleanup. [PR #214](https://github.com/tdenisenko/logex/pull/214) merged as `657c99f4`. The merge tree is identical to the tested head.
 
 The general path's per-scan `total_scanned` overwrite is a separate telemetry
 lead, pending a precise counter contract and reproduction. Broader query memory,

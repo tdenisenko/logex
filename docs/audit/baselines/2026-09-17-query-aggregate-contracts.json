@@ -1,0 +1,306 @@
+{
+  "base_commit": "657c99f4bc397e768e4b246f5145a40b1166e4ea",
+  "source_commit": "c95ed325942dafe387aba0db3103ee9b04173a9f",
+  "findings_fixed": [
+    "B7-31"
+  ],
+  "findings_remaining": [
+    "B7-32"
+  ],
+  "validation": {
+    "commit": "c95ed325942dafe387aba0db3103ee9b04173a9f",
+    "rustc": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+    "gates": [
+      {
+        "name": "vendor",
+        "command": [
+          "python3",
+          "tools/verify_datafusion_vendor.py"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T04:12:02.695374+00:00",
+        "finished": "2026-09-17T04:12:02.810359+00:00",
+        "sha256": "5ab30796f73ebe487516c1f0a99e16016635326667eae76c440d81ff3f41ad1b",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-query-aggregate-contracts-zeosc9sa/gates/vendor.log"
+      },
+      {
+        "name": "format",
+        "command": [
+          "cargo",
+          "fmt",
+          "--all",
+          "--",
+          "--check"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T04:12:02.810716+00:00",
+        "finished": "2026-09-17T04:12:03.821295+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-query-aggregate-contracts-zeosc9sa/gates/format.log"
+      },
+      {
+        "name": "vendor-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2024",
+          "--config-path",
+          "vendor/reth-network/rustfmt.toml",
+          "--config",
+          "skip_children=true",
+          "vendor/reth-network/src/eth_requests.rs",
+          "vendor/reth-network/src/session/active.rs",
+          "vendor/reth-network/src/session/mod.rs",
+          "vendor/reth-network/src/session/types.rs",
+          "vendor/reth-network/src/session/range_update.rs",
+          "vendor/reth-discv5/src/lib.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T04:12:03.821888+00:00",
+        "finished": "2026-09-17T04:12:03.893695+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-query-aggregate-contracts-zeosc9sa/gates/vendor-format.log"
+      },
+      {
+        "name": "enr-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2021",
+          "--config",
+          "skip_children=true",
+          "vendor/enr/src/lib.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T04:12:03.894249+00:00",
+        "finished": "2026-09-17T04:12:03.949623+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-query-aggregate-contracts-zeosc9sa/gates/enr-format.log"
+      },
+      {
+        "name": "check",
+        "command": [
+          "cargo",
+          "check",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T04:12:03.950915+00:00",
+        "finished": "2026-09-17T04:12:11.961130+00:00",
+        "sha256": "42fe59b3873e6f3ee870677117ee378930d627510b54773f7a8111eaef380460",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-query-aggregate-contracts-zeosc9sa/gates/check.log"
+      },
+      {
+        "name": "clippy",
+        "command": [
+          "cargo",
+          "clippy",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T04:12:11.962077+00:00",
+        "finished": "2026-09-17T04:12:18.582284+00:00",
+        "sha256": "f57b391e6f5e07be4bc78ee4a98a0ddd8cc0c868ffb9d18fc0418e2abaa7f6ae",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-query-aggregate-contracts-zeosc9sa/gates/clippy.log"
+      },
+      {
+        "name": "test",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T04:12:18.582827+00:00",
+        "finished": "2026-09-17T04:17:39.642230+00:00",
+        "sha256": "e69d3d62467e4f1285d347eb6f2dc0cef1025a121fa4a343e86569ca9e15d3a4",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-query-aggregate-contracts-zeosc9sa/gates/test.log"
+      },
+      {
+        "name": "doc",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--doc",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T04:17:39.645404+00:00",
+        "finished": "2026-09-17T04:17:50.353846+00:00",
+        "sha256": "f4285d6826c9734618c9bb5a6d93982e503d54a1f3d14948590f29e5ac58b78d",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-query-aggregate-contracts-zeosc9sa/gates/doc.log"
+      },
+      {
+        "name": "release-build",
+        "command": [
+          "cargo",
+          "build",
+          "-p",
+          "logex-node",
+          "--release",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T04:17:50.354681+00:00",
+        "finished": "2026-09-17T04:20:28.834172+00:00",
+        "sha256": "92a3830d90c75fb1cb7ee936fc2b36207a7401da7e1e09ba5a9d5e0f0c2eace0",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-query-aggregate-contracts-zeosc9sa/gates/release-build.log"
+      }
+    ]
+  },
+  "workspace_tests": {
+    "passed": 1870,
+    "failed": 0,
+    "ignored": 24,
+    "groups": 30
+  },
+  "retained_investigation": {
+    "path": "docs/audit/baselines/2026-09-17-query-aggregate-contracts-evidence.json.gz",
+    "sha256": "3afe8e39a6cb8681a7d81cd14c190791dd170ddc843704bad2578c99328aa500",
+    "compressed_bytes": 339211,
+    "decoded_bytes": 1748285,
+    "files": 74,
+    "final_source_hashes": {
+      "crates/logex-query/tests/sql_aggregate_contracts.rs": "f3b27ebbabf7cdae121e28403037a050e1dd8110f0a6397379f38b5228317a3b",
+      "vendor/datafusion-sql/src/select.rs": "cfdb952619677d91827713cc67f233493f89a2dfc37c1fe8eabf50ed45140e77",
+      "vendor/datafusion-sql/LOGEX-PATCH.diff": "4f8e501352ed8791fc0ba15f669768dedceb9ec763e9a4dd3efb2a4457ab3e42",
+      "vendor/datafusion-sql/LOGEX-PATCH.md": "b3dbb4dbfdd82bc90dca021982bf020b859a24fd1badcbd175ffa848bad569fa",
+      "tools/verify_datafusion_vendor.py": "fc216e62adb6b5a49af7c678c636655b46103c77b3c57c9e7a5ff8352997b79c"
+    },
+    "checks": {
+      "23-final-package.log": {
+        "passed": 500,
+        "failed": 0,
+        "ignored": 0,
+        "groups": 2
+      },
+      "24-final-focused.log": {
+        "passed": 28,
+        "failed": 0,
+        "ignored": 2,
+        "groups": 3
+      }
+    },
+    "base_sources_match": true,
+    "application_manifests_and_lock_unchanged": true,
+    "isolated_package_files_matching_vendor": 47,
+    "patch_roundtrip": {
+      "published_source_sha256": "56e3d5d11036b67b6cb5b00d2b386feff2a9580c88db0189d0508b2d11489088",
+      "patched_source_sha256": "cfdb952619677d91827713cc67f233493f89a2dfc37c1fe8eabf50ed45140e77",
+      "patch_sha256": "4f8e501352ed8791fc0ba15f669768dedceb9ec763e9a4dd3efb2a4457ab3e42",
+      "forward_matches": true,
+      "reverse_matches": true,
+      "temporary_fixture_removed": true
+    },
+    "handoff": {
+      "branch": "audit/query-aggregate-contracts",
+      "commit": "c95ed325942dafe387aba0db3103ee9b04173a9f",
+      "owned_files": [
+        "crates/logex-query/tests/sql_aggregate_contracts.rs",
+        "vendor/datafusion-sql/src/select.rs",
+        "vendor/datafusion-sql/LOGEX-PATCH.diff",
+        "vendor/datafusion-sql/LOGEX-PATCH.md",
+        "tools/verify_datafusion_vendor.py"
+      ],
+      "final_checks": {
+        "24-final-focused.log": "9 new contract tests +6 existing aggregates +13 existing grouping =28 passed;2 explicit benchmark tests ignored",
+        "23-final-package.log": "62 library +438 integration =500 passed, unchanged upstream test sources/snapshots, isolated published Cargo.lock",
+        "25-final-clippy.log": "focused test target with -D warnings passed; existing dependency deprecations/future-incompat warning remain",
+        "23-vendor-verification.log": "all complete vendor package inventories and reviewed patches verified; original inventory unchanged",
+        "whitespace": "git diff --check excluding standard reversible unified patch artifacts passed",
+        "vendor_format": "rustfmt --edition 2021 --config max_width=90 --check vendor/datafusion-sql/src/select.rs: PASS, no reformatting; same command on saved baseline03 also PASS; both raw logs empty"
+      },
+      "fix": "Collision-only aggregate aliases preserve structural identity/types and public names. Existing aggregation also collects hidden ORDER BY aggregates; SELECT/HAVING/QUALIFY/sorts use structural mapping. Noncolliding rewrite and original nonaggregate path retained. No dependency changes.",
+      "preserved_contracts": [
+        "Native exact-SUM family returns arbitrary-precision decimal strings, including integer companions/arithmetic; empty/all-null yields null",
+        "Ordinary numeric-only aggregate numbers and DECIMAL strings/scales remain unchanged",
+        "Native mixed grouping compares integer sums numerically; ordinary grouping/HAVING validated",
+        "Mixing data SUM with unsupported COUNT/MIN/MAX/AVG/metadata SUM/typed decimal companions remains explicit SUM(Utf8) rejection",
+        "General COUNT/MIN/MAX(data) operates on hex text; duplicate unaliased output names and aggregate-only ORDER BY forms still reject"
+      ],
+      "attempts": {
+        "01": "original baseline assertion tests4 pass1 fail; exact tests+sql.rs captured; vendor baseline preserved in03/21",
+        "02": "original baseline focused assertion isolates distinct integer/decimal SUM duplicate schema field",
+        "03": "baseline assertion matrix5 pass1 fail (eight collision queries recorded); exact select.rs/utils.rs saved; later corrected nested arithmetic JSON type expectation",
+        "04": "candidate compile failure two missing borrows, source captured",
+        "05": "candidate5 pass1 failure from fixture numeric-vs-string assumption; standalone SUM(unsigned)+signed literal later confirms retained decimal string",
+        "06": "candidate7 tests pass",
+        "07": "assertion confirms ordinary BIGINT SUM overflow wraps to -2 on then-current alias candidate with unchanged aggregate kernel; exact test/select/kernel retained",
+        "08": "candidate compile failure from inadvertently removed borrow outside changed function; restored untouched source",
+        "09": "candidate focused26 passed2 ignored",
+        "10": "snapshots only, no Cargo run",
+        "11": "candidate7 tests pass with changing-value casts",
+        "12": "rejected candidate7 pass1 fail: value-changing direct typed ORDER BY binds wrong aggregate. This is candidate evidence, not baseline wrong-order proof",
+        "13": "candidate8 pass after direct sort binding change",
+        "14": "isolated package offline unavailable proc-macro-crate3.4.0; retained failure",
+        "15": "candidate28 passed2 ignored",
+        "16": "authorized fetch only isolated published-lock test dependencies",
+        "17": "package62 library pass,437 integration pass1 existing snapshot failure due unnecessary noncolliding ORDER BY rebasing; no snapshots changed",
+        "18": "package500 pass after collision-only sort rewrite",
+        "19": "focused8 pass1 fail from only-ORDER-BY fixture assumption; baseline checked21",
+        "20": "source snapshots only; public-name restoration limited to SELECT",
+        "21": "DIAGNOSTIC PRINTING ONLY (no semantic assertions): exact original baseline planner restored for3 queries, both only-ORDER forms rejected and overflow returned -2; exact source and log retained, candidate restored afterward",
+        "22": "focused28 passed2 ignored",
+        "23": "final package500 passed; exact final source/tests and hashes retained",
+        "24": "final application28 passed2 ignored",
+        "25": "final focused Clippy passed"
+      },
+      "known_followup": {
+        "id": "B7-32",
+        "query": "SELECT SUM(x) AS total FROM (VALUES (CAST(9223372036854775807 AS BIGINT)), (CAST(9223372036854775807 AS BIGINT))) t(x)",
+        "expected": "mathematical sum18446744073709551614 must not silently wrap; result/error contract to be chosen for separate correction",
+        "actual": "JSON number -2",
+        "provenance": "candidate assertion07 and exact baseline diagnostic21 agree; pinned untouched sum.rs has add_wrapping kernels",
+        "scope": "No failing or wrapping-acceptance expectation remains in normal tests; parent records separate follow-up"
+      },
+      "provenance_limits": [
+        "Upstream SQL tests run in isolated package with its published lock, not root application dependency graph; application controls exercise root graph separately",
+        "Some attempt numbers record snapshots only; source snapshots named in folder. No omitted meaningful failing candidate identified",
+        "No assertion claims overflow was fixed. No baseline wrong-order claim made for rejected candidate12",
+        "Upstream issue3353 fetched primary GitHub page; local correction is not claimed as upstream backport"
+      ],
+      "cleanup": {
+        "removed_target": "/tmp/logex-aggregate-contracts-rFH8Rx/package/datafusion-sql/target",
+        "allocated_bytes_before_removal": 2840580096,
+        "workspace_target_retained": true
+      },
+      "cargo_free": true,
+      "source_frozen": true
+    }
+  },
+  "review": "Reviewed expression identity, alias preservation and ordering; value-changing control rejected initial candidate. Existing native exact output conventions retained.",
+  "performance": "No new row reads, ingestion or storage changes. Noncolliding expressions retain borrowed input; no benchmark campaign or timing guarantee.",
+  "publication": "pending exact-head CI and merge",
+  "gate_logs": {
+    "path": "docs/audit/baselines/2026-09-17-query-aggregate-contracts-validation.json.gz",
+    "sha256": "c12674f1bdd5777f667b9c5cd4c377ba2d912b6491b6942e5ae3076890a27616",
+    "bytes": 38891
+  }
+}
