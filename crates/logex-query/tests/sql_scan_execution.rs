@@ -59,7 +59,13 @@ async fn check(sql: &str, expected: Vec<Value>) {
 
 #[tokio::test]
 async fn repeated_cte_union_scans_preserve_both_branches() {
-    check("WITH c AS (SELECT log_index FROM logs) SELECT log_index FROM c UNION ALL SELECT log_index FROM c ORDER BY log_index", (0..3).flat_map(|i| [json!({"log_index":i}),json!({"log_index":i})]).collect()).await;
+    check(
+        "WITH c AS (SELECT log_index FROM logs) SELECT log_index FROM c UNION ALL SELECT log_index FROM c ORDER BY log_index",
+        (0..3)
+            .flat_map(|i| [json!({"log_index":i}), json!({"log_index":i})])
+            .collect(),
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -87,7 +93,11 @@ async fn repeated_scalar_subqueries_preserve_each_input() {
 
 #[tokio::test]
 async fn recursive_query_rescans_log_input_at_each_iteration() {
-    check("WITH RECURSIVE r AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM r JOIN logs ON log_index = 0 WHERE n < 4) SELECT n FROM r ORDER BY n",(1..=4).map(|n|json!({"n":n})).collect()).await;
+    check(
+        "WITH RECURSIVE r AS (SELECT 1 AS n UNION ALL SELECT n + 1 FROM r JOIN logs ON log_index = 0 WHERE n < 4) SELECT n FROM r ORDER BY n",
+        (1..=4).map(|n| json!({"n":n})).collect(),
+    )
+    .await;
 }
 
 #[tokio::test]
