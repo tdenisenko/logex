@@ -4,7 +4,9 @@ use alloy_consensus::Header;
 use alloy_primitives::B256;
 use logex_types::{ChainAnchors, ExecutionAnchor, ExecutionBlockMarker, LogRow, PartitionMeta};
 
-use crate::native::{NativeStorage, NativeStorageConfig, ReadViewToken, SegmentCompactionPlan};
+use crate::native::{
+    NativeStorage, NativeStorageConfig, ReadViewToken, SegmentCompactionPlan, SegmentCompactionTask,
+};
 use crate::state::SyncHead;
 
 /// A read-only compatibility view over a storage segment.
@@ -205,6 +207,20 @@ impl PartitionManager {
         limit: usize,
     ) -> std::io::Result<SegmentCompactionPlan> {
         self.inner.profile_rewrite_compaction_plan(limit)
+    }
+
+    /// Capture the catalog length for a finite background maintenance scan.
+    pub fn compaction_candidate_count(&self) -> usize {
+        self.inner.compaction_candidate_count()
+    }
+
+    /// Capture eligible metadata without filesystem I/O. Inspect and compact
+    /// these candidates after releasing the outer storage lock.
+    pub fn compaction_candidates(
+        &self,
+        range: std::ops::Range<usize>,
+    ) -> std::io::Result<Vec<SegmentCompactionTask>> {
+        self.inner.compaction_candidates(range)
     }
 
     /// Count sealed segments that are eligible for compaction.

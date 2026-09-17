@@ -1,0 +1,51 @@
+{
+  "status": "Focused controls pass; full gates, CI and merge pending",
+  "base": "d6e7172269c949d3cf201c6183509a60d5762dd4",
+  "findings": [
+    "B10-21",
+    "B10-22"
+  ],
+  "evidence_root": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-compaction-locks-8r46vib3",
+  "original_reproduction": {
+    "method": "Existing published-ingestion test on original source, asserting raw backlog matches the empty raw plan",
+    "passed": 0,
+    "failed": 1,
+    "exit_code": 101
+  },
+  "focused_tests": {
+    "storage_compaction": 7,
+    "background": 22,
+    "failed": 0,
+    "ignored": 0
+  },
+  "evidence": {
+    "original-storage.rs": {
+      "sha256": "cac6c6e94274b2525b91923d884f8419c18eeac5e5364f25ffcbc678d0cda7c9",
+      "bytes": 347559
+    },
+    "original-backlog-control.rs": {
+      "sha256": "310f1cef085d2f1a173beff2c3b0c4351dc1a19abcc9cce78eeaeb12451a99b4",
+      "bytes": 2394
+    },
+    "original-backlog.log": {
+      "sha256": "dd075a65bbc4a6b47d1efe3a172d5cf0d60649e569f1577ea354098ca1e3a347",
+      "bytes": 1364
+    },
+    "original-backlog-result.json": {
+      "sha256": "a44fa40057b601b2cd0cca97b31b5522c0e4b2c937b5e346ee6d4b9f8fa8d819",
+      "bytes": 73
+    },
+    "fixed-backlog.log": {
+      "sha256": "279589b825a521c1fce8af8762a20d5d71f80f2fc96da3b278782f00255ce1e8",
+      "bytes": 1258
+    },
+    "focused-storage.log": {
+      "sha256": "d16da2c327156cf19ac76d73c4dce2ba463f40466538355e50aaae607d088c3f",
+      "bytes": 1815
+    },
+    "focused-background.log": {
+      "sha256": "fa0d17b90789321f2115ff97030f711da9ed24e9a680f506bdd1e68a0de11bf0",
+      "bytes": 2935
+    }
+  }
+}
