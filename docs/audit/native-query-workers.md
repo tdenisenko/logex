@@ -5,7 +5,7 @@ This milestone covers native JSON-RPC and gRPC log scans. Shared query memory,
 request admission and retained response budgets remain a separate policy and
 implementation item. Source `f2293fd4` passes all ten local gates (1,902 workspace tests / 24
 existing ignores), including documentation tests and release linking.
-Exact-head CI and merge remain pending.
+All six CI jobs passed on `12b52a17`, including ten Linux volume/template cases with verified cleanup. [PR #218](https://github.com/tdenisenko/logex/pull/218) merged as `e76fd8cc`. The merge tree is identical to the tested head.
 
 ## B8-05: native API scans block runtime workers and ingestion (P1)
 

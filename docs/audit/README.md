@@ -52,9 +52,14 @@ The [native API worker review](native-query-workers.md) addresses synchronous
 filesystem scans and retained ingestion read locks in JSON-RPC/gRPC log methods
 (B8-05). Source `f2293fd4` passes 111 server/protocol controls, alongside 115 query
 controls with two existing ignores. All ten local gates pass (1,902 workspace
-tests / 24 ignored). Native API CI and merge remain pending.
+tests / 24 ignored). Six CI jobs passed before PR #218 merged as `e76fd8cc`.
 This is a native execution/lifetime correction; shared query memory and request
 admission remain open.
+
+The [remaining runtime review](runtime-config-review.md) corrects `info` ownership
+and signal-listener failure handling (B10-24/B10-25). Source `aaa8786d` passes
+233 node/CLI/example controls and all ten workspace gates. Publication remains
+pending before the remaining batch-10 code review is closed.
 
 ## Offline completion boundary
 

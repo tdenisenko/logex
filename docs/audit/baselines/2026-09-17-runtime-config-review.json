@@ -1,0 +1,328 @@
+{
+  "date": "2026-09-17",
+  "base": "e76fd8cce440041fc84038660d9e5959855aae61",
+  "source_commit": "aaa8786deb886d93533e185b4e98254bafa5f19c",
+  "branch": "audit/runtime-config-review",
+  "findings": [
+    {
+      "id": "B10-24",
+      "severity": "low",
+      "issue": "Consensus info read preceded exclusive storage ownership",
+      "proof": "Unchanged original CLI reads unavailable consensus before reporting an existing owner. Mixed-observation schedule is source review, not a forced race."
+    },
+    {
+      "id": "B10-25",
+      "severity": "moderate",
+      "issue": "Signal listener registration errors unwound outside bounded supervision",
+      "proof": "Actual original listener with an owned closed Tokio handle unwinds on registration error before any OS handler is installed."
+    }
+  ],
+  "before": {
+    "info": {
+      "exit_code": 101,
+      "summaries": [
+        {
+          "passed": 2,
+          "failed": 1,
+          "ignored": 0
+        }
+      ]
+    },
+    "signal": {
+      "exit_code": 101,
+      "summaries": [
+        {
+          "passed": 0,
+          "failed": 1,
+          "ignored": 0
+        }
+      ]
+    }
+  },
+  "focused": {
+    "command": [
+      "cargo",
+      "test",
+      "-p",
+      "logex-node",
+      "--all-targets",
+      "--locked",
+      "--offline",
+      "-j",
+      "2"
+    ],
+    "exit_code": 0,
+    "summaries": [
+      {
+        "passed": 217,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "passed": 3,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "passed": 13,
+        "failed": 0,
+        "ignored": 0
+      }
+    ]
+  },
+  "source_inventory": {
+    "base": "e76fd8cce440041fc84038660d9e5959855aae61",
+    "source_commit": "aaa8786deb886d93533e185b4e98254bafa5f19c",
+    "files": [
+      {
+        "path": "crates/logex-node/src/commands.rs",
+        "bytes": 16721,
+        "sha256": "220cd40f35b826ecb12edcef807ba48a52497385bc6a4c4ccf7bb0e713d2da60"
+      },
+      {
+        "path": "crates/logex-node/src/runtime.rs",
+        "bytes": 95915,
+        "sha256": "0e46567bce92525728fdb4486ff414ebe5a5c0281c779ab9b5268ed7bd0d2be7"
+      },
+      {
+        "path": "crates/logex-node/src/runtime/supervision.rs",
+        "bytes": 6857,
+        "sha256": "e26840fd3dd5fbf0928a6f6e8419852b8703ffd7602f99305f0b2c3b211318d8"
+      },
+      {
+        "path": "crates/logex-node/src/runtime/supervision/tests.rs",
+        "bytes": 24263,
+        "sha256": "b47305d58e713fa7c3de4797373b303ba291bae95083fbdffca80346cd7d834c"
+      },
+      {
+        "path": "crates/logex-node/tests/info_ownership.rs",
+        "bytes": 3892,
+        "sha256": "ae864d9dde7c1b86d0968e909473b7098cd888c23e3a4bd0cada8582b81fef6c"
+      }
+    ],
+    "review": {
+      "info": "Storage owner is acquired before any consensus inspection and remains in run_info through output. Consensus helper requires borrowed owner. Existing-snapshot open with no checkpoint does not save.",
+      "signal": "The I/O Result is retained by select and StopTrigger. Whole-shutdown hook runs before failure reporting; first error persists through engine grace. Normal success receives identical notification and cleanup.",
+      "cost": "No successful ingestion path, storage encoding, allocation policy, recurring timer or network work changed.",
+      "original_controls": "Actual info child proves pre-lock inspection, not the mixed-state schedule. Closed Tokio handle proves the actual registration expect unwinds, not a normal-running driver loss."
+    }
+  },
+  "gates": {
+    "commit": "aaa8786deb886d93533e185b4e98254bafa5f19c",
+    "rustc": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+    "gates": [
+      {
+        "name": "vendor",
+        "command": [
+          "python3",
+          "tools/verify_datafusion_vendor.py"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T07:32:04.359898+00:00",
+        "finished": "2026-09-17T07:32:04.497449+00:00",
+        "sha256": "95ada9e22c512e8346f3d8d057e7fba429b52506f4e037dcf35657f57d7ec451",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-runtime-config-review-o_8vumvf/gates/vendor.log"
+      },
+      {
+        "name": "format",
+        "command": [
+          "cargo",
+          "fmt",
+          "--all",
+          "--",
+          "--check"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T07:32:04.497941+00:00",
+        "finished": "2026-09-17T07:32:05.498131+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-runtime-config-review-o_8vumvf/gates/format.log"
+      },
+      {
+        "name": "vendor-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2024",
+          "--config-path",
+          "vendor/reth-network/rustfmt.toml",
+          "--config",
+          "skip_children=true",
+          "vendor/reth-network/src/eth_requests.rs",
+          "vendor/reth-network/src/session/active.rs",
+          "vendor/reth-network/src/session/mod.rs",
+          "vendor/reth-network/src/session/types.rs",
+          "vendor/reth-network/src/session/range_update.rs",
+          "vendor/reth-discv5/src/lib.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T07:32:05.498519+00:00",
+        "finished": "2026-09-17T07:32:05.565699+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-runtime-config-review-o_8vumvf/gates/vendor-format.log"
+      },
+      {
+        "name": "enr-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2021",
+          "--config",
+          "skip_children=true",
+          "vendor/enr/src/lib.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T07:32:05.566050+00:00",
+        "finished": "2026-09-17T07:32:05.617685+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-runtime-config-review-o_8vumvf/gates/enr-format.log"
+      },
+      {
+        "name": "aggregate-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2021",
+          "--config",
+          "max_width=90,skip_children=true",
+          "vendor/datafusion-functions-aggregate/src/sum.rs",
+          "vendor/datafusion-functions-aggregate/src/average.rs",
+          "vendor/datafusion-functions-aggregate-common/src/aggregate/sum_distinct/numeric.rs",
+          "vendor/datafusion-functions-aggregate-common/src/aggregate/avg_distinct/decimal.rs",
+          "vendor/datafusion-functions-aggregate-common/src/utils.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T07:32:05.618081+00:00",
+        "finished": "2026-09-17T07:32:05.680489+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-runtime-config-review-o_8vumvf/gates/aggregate-format.log"
+      },
+      {
+        "name": "check",
+        "command": [
+          "cargo",
+          "check",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T07:32:05.680837+00:00",
+        "finished": "2026-09-17T07:32:09.095258+00:00",
+        "sha256": "f0861f9b0f574f43fc766a0bed09f4be8c3f0cc463018546604e1f14c1158ee2",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-runtime-config-review-o_8vumvf/gates/check.log"
+      },
+      {
+        "name": "clippy",
+        "command": [
+          "cargo",
+          "clippy",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T07:32:09.095795+00:00",
+        "finished": "2026-09-17T07:32:11.550691+00:00",
+        "sha256": "539286a243ce4786ada87b05fde8df40c3ec6138bb1fb2615ec6d77a7eadb7ab",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-runtime-config-review-o_8vumvf/gates/clippy.log"
+      },
+      {
+        "name": "test",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T07:32:11.551299+00:00",
+        "finished": "2026-09-17T07:35:36.234709+00:00",
+        "sha256": "9f271972dad25df36a79116566bad2cd5e58611e8625f057016834ff5b0dc005",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-runtime-config-review-o_8vumvf/gates/test.log"
+      },
+      {
+        "name": "doc",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--doc",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T07:35:36.236701+00:00",
+        "finished": "2026-09-17T07:35:39.874661+00:00",
+        "sha256": "d8fe6f1700073829a50c7131a391cdd77b2aaa4e28cdb1660128caadb32ce930",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-runtime-config-review-o_8vumvf/gates/doc.log"
+      },
+      {
+        "name": "release-build",
+        "command": [
+          "cargo",
+          "build",
+          "-p",
+          "logex-node",
+          "--release",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T07:35:39.875167+00:00",
+        "finished": "2026-09-17T07:36:22.206975+00:00",
+        "sha256": "c16bbb3f15d23ef1b0162f94ae5df5eaab1ada1c42a6ba10f641bda3d27d7814",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-runtime-config-review-o_8vumvf/gates/release-build.log"
+      }
+    ]
+  },
+  "workspace_tests": {
+    "passed": 1908,
+    "failed": 0,
+    "ignored": 24,
+    "targets": 34
+  },
+  "evidence": {
+    "path": "docs/audit/baselines/2026-09-17-runtime-config-review-evidence.json.gz",
+    "files": 11,
+    "bytes_uncompressed": 193617,
+    "bytes": 36662,
+    "sha256": "25bd969dd5f2239e4a6e131843591cdca63612039ea27d5f2795f77ed70c41b4"
+  },
+  "validation": {
+    "path": "docs/audit/baselines/2026-09-17-runtime-config-review-validation.json.gz",
+    "files": 12,
+    "bytes_uncompressed": 220796,
+    "bytes": 40899,
+    "sha256": "96be5711d2b94a22b4c0ff31afb801f3545039038cadc359253bafa31b87510a"
+  },
+  "publication": {
+    "state": "pending"
+  },
+  "boundaries": [
+    "No benchmark, ingestion-path changes, live sync, deployment or remote-host work.",
+    "No OS signal sent by new tests; only owned runtimes, child inspection processes and temporary data.",
+    "Unix error handling is locally exercised; supported Linux and macOS CI follow publication. Non-Unix branch is not claimed tested.",
+    "Batch 10 offline code review closes only after merge. Batch 5 startup-state disposition, query budgets, offline repair and integrated acceptance remain separate."
+  ]
+}
