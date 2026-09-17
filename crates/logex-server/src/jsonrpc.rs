@@ -182,8 +182,8 @@ impl<'de> Deserialize<'de> for WireParams {
             }
             fn visit_map<M: MapAccess<'de>>(self, mut map: M) -> Result<Self::Value, M::Error> {
                 let mut values = Map::new();
-                while let Some((key, value)) = map.next_entry::<String, Value>()? {
-                    values.insert(key, value);
+                while let Some((key, value)) = map.next_entry::<String, LiteralValue>()? {
+                    values.insert(key, value.0);
                 }
                 Ok(WireParams(Some(Value::Object(values))))
             }
@@ -192,8 +192,8 @@ impl<'de> Deserialize<'de> for WireParams {
                 mut sequence: S,
             ) -> Result<Self::Value, S::Error> {
                 let mut values = Vec::new();
-                while let Some(value) = sequence.next_element::<Value>()? {
-                    values.push(value);
+                while let Some(value) = sequence.next_element::<LiteralValue>()? {
+                    values.push(value.0);
                 }
                 Ok(WireParams(Some(Value::Array(values))))
             }
@@ -217,6 +217,62 @@ impl<'de> Deserialize<'de> for WireParams {
             }
         }
         deserializer.deserialize_any(ParamsVisitor)
+    }
+}
+
+/// Decode JSON containers literally, without serde_json::Value's private-tag reinterpretation.
+struct LiteralValue(Value);
+
+impl<'de> Deserialize<'de> for LiteralValue {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct LiteralVisitor;
+        impl<'de> Visitor<'de> for LiteralVisitor {
+            type Value = LiteralValue;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a JSON value")
+            }
+            fn visit_map<M: MapAccess<'de>>(self, mut map: M) -> Result<Self::Value, M::Error> {
+                let mut values = Map::new();
+                while let Some((key, value)) = map.next_entry::<String, LiteralValue>()? {
+                    values.insert(key, value.0);
+                }
+                Ok(LiteralValue(Value::Object(values)))
+            }
+            fn visit_seq<S: SeqAccess<'de>>(
+                self,
+                mut sequence: S,
+            ) -> Result<Self::Value, S::Error> {
+                let mut values = Vec::new();
+                while let Some(value) = sequence.next_element::<LiteralValue>()? {
+                    values.push(value.0);
+                }
+                Ok(LiteralValue(Value::Array(values)))
+            }
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                Ok(LiteralValue(Value::String(value.to_owned())))
+            }
+            fn visit_string<E: serde::de::Error>(self, value: String) -> Result<Self::Value, E> {
+                Ok(LiteralValue(Value::String(value)))
+            }
+            fn visit_bool<E: serde::de::Error>(self, value: bool) -> Result<Self::Value, E> {
+                Ok(LiteralValue(Value::Bool(value)))
+            }
+            fn visit_i64<E: serde::de::Error>(self, value: i64) -> Result<Self::Value, E> {
+                Ok(LiteralValue(Value::Number(value.into())))
+            }
+            fn visit_u64<E: serde::de::Error>(self, value: u64) -> Result<Self::Value, E> {
+                Ok(LiteralValue(Value::Number(value.into())))
+            }
+            fn visit_f64<E: serde::de::Error>(self, value: f64) -> Result<Self::Value, E> {
+                serde_json::Number::from_f64(value)
+                    .map(|number| LiteralValue(Value::Number(number)))
+                    .ok_or_else(|| E::custom("invalid JSON number"))
+            }
+            fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+                Ok(LiteralValue(Value::Null))
+            }
+        }
+        deserializer.deserialize_any(LiteralVisitor)
     }
 }
 

@@ -26,8 +26,14 @@ controls passed; this is not completion of batch 8.
 
 The [single-request JSON-RPC admission review](jsonrpc-admission.md) fixes
 request envelopes/notifications, argument errors before storage and exact numeric
-ID correlation (B8-09–11). Source and local checks are complete; exact-head CI and merge remain.
-Batch execution, detailed filters and shared resource policy remain separate.
+ID correlation (B8-09–11). PR #229 merged as `61f2506b` after all six CI jobs and ten Linux controls.
+Batch execution and shared resource policy remain separate.
+
+The [Ethereum filter consistency review](ethereum-filter-semantics.md) addresses
+literal decoding, required wildcard topic positions and cross-protocol bounds
+(B8-12–14). Six expanded original-code groups reproduce the failures. Source `76667e69` passes an independent oracle across hot/sealed and indexed/
+unindexed storage, focused checks and all eleven local gates (2,000 workspace
+tests / 24 existing ignores). Exact-head CI and merge remain.
 
 ## Batch ledger
 

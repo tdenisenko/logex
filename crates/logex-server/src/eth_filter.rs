@@ -1,34 +1,106 @@
 use alloy_primitives::{Address, B256};
+use serde::de::{IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 
 use logex_storage::native::{NativeLogFilter, TopicConstraint};
 use logex_types::LogRow;
 
 /// `eth_getLogs` filter parameter — compatible with the Ethereum JSON-RPC spec.
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Default)]
 pub struct EthFilter {
     /// Starting block (inclusive). Can be a hex number or "latest"/"earliest".
     pub from_block: Option<BlockId>,
     /// Ending block (inclusive). Can be a hex number or "latest"/"earliest".
     pub to_block: Option<BlockId>,
     /// Contract address or list of addresses to filter.
-    #[serde(default)]
     pub address: AddressFilter,
     /// Topic filters — up to 4 positions, each can be null, a single hash, or
     /// an array of hashes (OR within position, AND across positions).
-    #[serde(default)]
     pub topics: Vec<Option<TopicFilter>>,
     /// Block hash — mutually exclusive with fromBlock/toBlock.
     pub block_hash: Option<B256>,
     /// Non-standard LogEx pagination limit. Defaults to the server page size.
     pub limit: Option<usize>,
     /// Non-standard LogEx pagination offset.
-    #[serde(default)]
     pub offset: usize,
 }
 
+impl<'de> Deserialize<'de> for EthFilter {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct FilterVisitor;
+        impl<'de> Visitor<'de> for FilterVisitor {
+            type Value = EthFilter;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("an Ethereum filter object")
+            }
+            fn visit_map<M: MapAccess<'de>>(self, mut map: M) -> Result<Self::Value, M::Error> {
+                let mut filter = EthFilter::default();
+                let mut seen = 0_u8;
+                while let Some(key) = map.next_key::<String>()? {
+                    let bit = match key.as_str() {
+                        "fromBlock" => 1,
+                        "toBlock" => 2,
+                        "address" => 4,
+                        "topics" => 8,
+                        "blockHash" => 16,
+                        "limit" => 32,
+                        "offset" => 64,
+                        _ => {
+                            map.next_value::<IgnoredAny>()?;
+                            continue;
+                        }
+                    };
+                    if seen & bit != 0 {
+                        return Err(serde::de::Error::custom(format!(
+                            "duplicate filter field {key}"
+                        )));
+                    }
+                    seen |= bit;
+                    match key.as_str() {
+                        "fromBlock" => filter.from_block = map.next_value()?,
+                        "toBlock" => filter.to_block = map.next_value()?,
+                        "address" => filter.address = map.next_value()?,
+                        "topics" => {
+                            filter.topics = map
+                                .next_value::<Option<Vec<Option<TopicFilter>>>>()?
+                                .unwrap_or_default()
+                        }
+                        "blockHash" => filter.block_hash = map.next_value()?,
+                        "limit" => filter.limit = map.next_value()?,
+                        "offset" => filter.offset = map.next_value()?,
+                        _ => unreachable!("unknown fields were consumed"),
+                    }
+                }
+                Ok(filter)
+            }
+        }
+        deserializer.deserialize_map(FilterVisitor)
+    }
+}
+
 impl EthFilter {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.block_hash.is_some() && (self.from_block.is_some() || self.to_block.is_some()) {
+            return Err("blockHash is mutually exclusive with fromBlock/toBlock".into());
+        }
+        if self.topics.len() > 4 {
+            return Err("at most four topic positions are supported".into());
+        }
+        Ok(())
+    }
+
+    /// Resolve only unambiguous live subscription bounds. Pagination is not a stream predicate.
+    pub(crate) fn to_stream_filter(&self) -> Result<NativeLogFilter, String> {
+        self.validate()?;
+        if [&self.from_block, &self.to_block]
+            .into_iter()
+            .any(|bound| matches!(bound, Some(BlockId::Latest)))
+        {
+            return Err("named latest bounds are not supported for live subscriptions; use numeric bounds or earliest".into());
+        }
+        Ok(self.to_native_filter(0))
+    }
+
     /// Convert this RPC filter into the native storage filter shape that the
     /// rewritten storage/query layer should execute directly.
     pub fn to_native_filter(&self, head_block: u64) -> NativeLogFilter {
@@ -52,9 +124,12 @@ impl EthFilter {
             AddressFilter::Multiple(addrs) => addrs.clone(),
         };
 
-        for (idx, topic_filter) in self.topics.iter().enumerate().take(4) {
+        filter.min_topic_count = self.topics.len();
+        for (constraint, topic_filter) in filter.topics.iter_mut().zip(&self.topics) {
             if let Some(topic_filter) = topic_filter {
-                filter.topics[idx] = match topic_filter {
+                *constraint = match topic_filter {
+                    TopicFilter::Any => TopicConstraint::Any,
+                    TopicFilter::Multiple(hashes) if hashes.is_empty() => TopicConstraint::Any,
                     TopicFilter::Single(hash) => TopicConstraint::One(*hash),
                     TopicFilter::Multiple(hashes) => TopicConstraint::AnyOf(hashes.clone()),
                 };
@@ -88,7 +163,10 @@ impl<'de> Deserialize<'de> for BlockId {
     {
         let s = String::deserialize(deserializer)?;
         match s.as_str() {
-            "latest" | "pending" | "safe" | "finalized" => Ok(BlockId::Latest),
+            "latest" => Ok(BlockId::Latest),
+            "pending" | "safe" | "finalized" => Err(serde::de::Error::custom(format!(
+                "unsupported block tag {s}"
+            ))),
             "earliest" => Ok(BlockId::Earliest),
             hex => {
                 let hex = hex.strip_prefix("0x").unwrap_or(hex);
@@ -110,80 +188,107 @@ pub enum AddressFilter {
 }
 
 impl<'de> Deserialize<'de> for AddressFilter {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let value = serde_json::Value::deserialize(deserializer)?;
-        match value {
-            serde_json::Value::Null => Ok(AddressFilter::Any),
-            serde_json::Value::String(s) => {
-                let addr = parse_address(&s).map_err(serde::de::Error::custom)?;
-                Ok(AddressFilter::Single(addr))
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct AddressVisitor;
+        impl<'de> Visitor<'de> for AddressVisitor {
+            type Value = AddressFilter;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("an address string, address array or null")
             }
-            serde_json::Value::Array(arr) => {
-                let addrs: Result<Vec<Address>, _> = arr
-                    .iter()
-                    .map(|v| {
-                        v.as_str()
-                            .ok_or_else(|| serde::de::Error::custom("expected hex string"))
-                            .and_then(|s| parse_address(s).map_err(serde::de::Error::custom))
-                    })
-                    .collect();
-                Ok(AddressFilter::Multiple(addrs?))
+            fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+                Ok(AddressFilter::Any)
             }
-            _ => Err(serde::de::Error::custom("invalid address filter")),
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                parse_address(value)
+                    .map(AddressFilter::Single)
+                    .map_err(E::custom)
+            }
+            fn visit_seq<S: SeqAccess<'de>>(
+                self,
+                mut sequence: S,
+            ) -> Result<Self::Value, S::Error> {
+                let mut addresses = Vec::new();
+                while let Some(address) = sequence.next_element::<String>()? {
+                    addresses.push(parse_address(&address).map_err(serde::de::Error::custom)?);
+                }
+                Ok(AddressFilter::Multiple(addresses))
+            }
         }
+        deserializer.deserialize_any(AddressVisitor)
     }
 }
 
 /// Topic filter for a single position.
 #[derive(Debug, Clone)]
 pub enum TopicFilter {
+    Any,
     Single(B256),
     Multiple(Vec<B256>),
 }
 
 impl<'de> Deserialize<'de> for TopicFilter {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let value = serde_json::Value::deserialize(deserializer)?;
-        match value {
-            serde_json::Value::String(s) => {
-                let hash = parse_b256(&s).map_err(serde::de::Error::custom)?;
-                Ok(TopicFilter::Single(hash))
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct TopicVisitor;
+        impl<'de> Visitor<'de> for TopicVisitor {
+            type Value = TopicFilter;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a topic hash or OR array of hashes/null")
             }
-            serde_json::Value::Array(arr) => {
-                let hashes: Result<Vec<B256>, _> = arr
-                    .iter()
-                    .filter_map(|v| v.as_str().map(parse_b256))
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(serde::de::Error::custom);
-                Ok(TopicFilter::Multiple(hashes?))
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                parse_b256(value)
+                    .map(TopicFilter::Single)
+                    .map_err(E::custom)
             }
-            _ => Err(serde::de::Error::custom("invalid topic filter")),
+            fn visit_seq<S: SeqAccess<'de>>(
+                self,
+                mut sequence: S,
+            ) -> Result<Self::Value, S::Error> {
+                let mut hashes = Vec::new();
+                let mut wildcard = false;
+                while let Some(value) = sequence.next_element::<Option<String>>()? {
+                    match value {
+                        Some(hash) => {
+                            hashes.push(parse_b256(&hash).map_err(serde::de::Error::custom)?)
+                        }
+                        None => wildcard = true,
+                    }
+                }
+                Ok(if wildcard || hashes.is_empty() {
+                    TopicFilter::Any
+                } else {
+                    TopicFilter::Multiple(hashes)
+                })
+            }
         }
+        deserializer.deserialize_any(TopicVisitor)
     }
 }
 
 pub(crate) fn parse_address(s: &str) -> Result<Address, String> {
     let hex = s.strip_prefix("0x").unwrap_or(s);
-    let bytes = hex::decode(hex).map_err(|e| format!("invalid address hex: {e}"))?;
-    if bytes.len() != 20 {
-        return Err(format!("address must be 20 bytes, got {}", bytes.len()));
+    if hex.len() != 40 {
+        return Err(format!(
+            "address must be 20 bytes (40 hex digits), got {} hex digits",
+            hex.len()
+        ));
     }
-    Ok(Address::from_slice(&bytes))
+    let mut bytes = [0_u8; 20];
+    hex::decode_to_slice(hex, &mut bytes)
+        .map_err(|error| format!("invalid address hex: {error}"))?;
+    Ok(Address::from(bytes))
 }
 
 fn parse_b256(s: &str) -> Result<B256, String> {
     let hex = s.strip_prefix("0x").unwrap_or(s);
-    let bytes = hex::decode(hex).map_err(|e| format!("invalid hash hex: {e}"))?;
-    if bytes.len() != 32 {
-        return Err(format!("hash must be 32 bytes, got {}", bytes.len()));
+    if hex.len() != 64 {
+        return Err(format!(
+            "hash must be 32 bytes (64 hex digits), got {} hex digits",
+            hex.len()
+        ));
     }
-    Ok(B256::from_slice(&bytes))
+    let mut bytes = [0_u8; 32];
+    hex::decode_to_slice(hex, &mut bytes).map_err(|error| format!("invalid hash hex: {error}"))?;
+    Ok(B256::from(bytes))
 }
 
 /// JSON-RPC log object returned by `eth_getLogs`.
@@ -231,64 +336,15 @@ impl From<&LogRow> for RpcLog {
     }
 }
 
-/// Check if a LogRow matches an `eth_getLogs` filter.
-pub fn matches_filter(row: &LogRow, filter: &EthFilter) -> bool {
-    if let Some(block_hash) = filter.block_hash
-        && row.block_hash != block_hash
-    {
-        return false;
-    }
-
-    // Address filter
-    match &filter.address {
-        AddressFilter::Any => {}
-        AddressFilter::Single(addr) => {
-            if row.address != *addr {
-                return false;
-            }
-        }
-        AddressFilter::Multiple(addrs) => {
-            if !addrs.contains(&row.address) {
-                return false;
-            }
-        }
-    }
-
-    // Topic filters
-    let row_topics: [Option<&B256>; 4] = [
-        row.topic0.as_ref(),
-        row.topic1.as_ref(),
-        row.topic2.as_ref(),
-        row.topic3.as_ref(),
-    ];
-
-    for (i, topic_filter) in filter.topics.iter().enumerate() {
-        if i >= 4 {
-            break;
-        }
-        if let Some(tf) = topic_filter {
-            match tf {
-                TopicFilter::Single(expected) => {
-                    if row_topics[i] != Some(expected) {
-                        return false;
-                    }
-                }
-                TopicFilter::Multiple(expected) => match row_topics[i] {
-                    Some(actual) if expected.contains(actual) => {}
-                    _ => return false,
-                },
-            }
-        }
-    }
-
-    true
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use alloy_primitives::bytes;
     use logex_types::Source;
+
+    fn matches_filter(row: &LogRow, filter: &EthFilter) -> bool {
+        logex_query::matches_native_filter(row, &filter.to_stream_filter().unwrap())
+    }
 
     fn test_row() -> LogRow {
         LogRow {

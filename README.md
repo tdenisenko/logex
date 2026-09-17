@@ -494,6 +494,21 @@ unsupported (nonempty arrays return HTTP 422; an empty array is an invalid
 request). Invalid method arguments return error code `-32602`; storage and
 execution failures return `-32603`.
 
+Filters must be objects. Omitted, null and empty address filters match every
+address. Topic positions are combined with AND; hashes within a position are
+combined with OR. A null position, an empty OR array, or an OR array containing
+null is a wildcard, but that topic position must exist in the log. For example,
+`topics: [null, null]` requires at least two topics. Every supplied hash must be
+valid, including hashes beside a null wildcard; at most four positions are allowed.
+`blockHash` cannot be combined with `fromBlock` or `toBlock`.
+
+Numeric block bounds are inclusive. `earliest` means block zero; HTTP `latest`
+uses the head captured for that query. `safe`, `finalized` and `pending` return
+unsupported-tag errors. Omitted bounds cover the indexed range. Raw WebSocket
+log filters accept numeric bounds and `earliest`; explicit `latest` bounds are
+unsupported. The query-only `limit` and `offset` fields do not paginate live
+WebSocket notifications.
+
 WebSocket ERC20 transfer hook:
 
 ```json

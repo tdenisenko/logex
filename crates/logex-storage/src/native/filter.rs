@@ -24,6 +24,8 @@ pub struct NativeLogFilter {
     pub block_hash: Option<B256>,
     pub addresses: Vec<Address>,
     pub topics: [TopicConstraint; 4],
+    /// Required leading topic positions. Zero adds no presence requirement; values above four match nothing.
+    pub min_topic_count: usize,
     pub data_len: Option<u32>,
     pub data_min: Option<Vec<u8>>,
     pub data_max: Option<Vec<u8>>,
@@ -84,6 +86,7 @@ mod tests {
     fn defaults_match_canonical_eth_get_logs_style_queries() {
         let filter = NativeLogFilter::new();
         assert!(filter.canonical_only);
+        assert_eq!(filter.min_topic_count, 0);
         assert!(filter.from_timestamp.is_none());
         assert!(filter.to_timestamp.is_none());
         assert!(filter.data_len.is_none());
