@@ -25,7 +25,14 @@ data and running deployments are not modified by the benchmark suite.
 
 The [query scan execution correction](query-scan-execution.md) addresses B7-30,
 missing recursive-query iterations. All nine local gates pass on `86c7e6f8`
-(1,861 tests / 24 ignored); exact-head CI and merge remain.
+(1,861 tests / 24 ignored); six CI jobs passed before PR #214
+merged as `657c99f4`.
+
+The [aggregate result-contract review](query-aggregate-contracts.md) checks the
+mixed exact/numeric output contract and fixes typed aggregate name collisions
+(B7-31). All nine local gates pass on `c95ed325` (1,870 tests / 24 ignored), plus
+500 isolated planner tests. Exact-head CI and merge remain. Ordinary integer
+SUM overflow (B7-32) is confirmed and recorded for the next correction.
 
 ## Offline completion boundary
 
@@ -181,6 +188,11 @@ Merged in PR #198 (`a47ecbd8`) after 124 focused node tests, eight local gates a
   correctness fix required to finish the baseline, not a claimed speedup.
 
 ## Decisions
+
+- Historical finding ID `B7-26` occurs in two reports: PR #151's storage-resource
+  report names aggregate payload batching, while PR #213's scalar report names
+  math NULL simplification. Cite the report/PR alongside that ID; retained
+  original evidence is not renumbered. New findings continue after B7-30.
 
 - Correctness before speed. No silent row caps, reduced verification, wholesale
   rewrites, or new benchmark dependencies.

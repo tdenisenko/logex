@@ -74,9 +74,9 @@ PACKAGES = (
         name="datafusion-sql",
         inventory_checksum="0cde1d552a958a7a7dca76c473334db21d0317313821fb8ba49bc8156ad34ec8",
         modified={
-            PurePosixPath("src/select.rs"): "366fb326d853dd359622ba8ada0485515e2c5643f2a05cf02752eb5b1d14ab5a",
+            PurePosixPath("src/select.rs"): "cfdb952619677d91827713cc67f233493f89a2dfc37c1fe8eabf50ed45140e77",
         },
-        patch_checksum="a7b520cf492ed95209a8335d88c60eec308f01cdd3e29c0734a597ca98f5bb21",
+        patch_checksum="4f8e501352ed8791fc0ba15f669768dedceb9ec763e9a4dd3efb2a4457ab3e42",
     ),
     Package(
         name="datafusion-optimizer",
