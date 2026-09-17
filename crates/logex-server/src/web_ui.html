@@ -2843,12 +2843,16 @@ function connectLiveTransfers(options) {
       setLiveTransferStatus('WebSocket connection failed.', true);
     }
   };
-  socket.onclose = function() {
+  socket.onclose = function(event) {
     if (liveTransferSocket !== socket) return;
     liveTransferSocket = null;
     stopLiveTransferStateRefresh();
     setLiveTransferConnected(false);
-    setLiveTransferStatus(liveTransferManualDisconnect ? 'Disconnected.' : 'Disconnected from live transfers.', !liveTransferManualDisconnect);
+    var message = liveTransferManualDisconnect ? 'Disconnected.' : 'Disconnected from live transfers.';
+    if (!liveTransferManualDisconnect && event && event.code === 1013) {
+      message = event.reason || 'Live stream interrupted; reconnect and reconcile stored logs.';
+    }
+    setLiveTransferStatus(message, !liveTransferManualDisconnect);
     liveTransferManualDisconnect = false;
   };
 }
