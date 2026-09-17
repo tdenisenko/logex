@@ -3,7 +3,7 @@
 Base: PR #226 merge `595e99745631c515d1c13f8909426af539947095`.
 Branch: `audit/execution-response-lifecycle`.
 This pass reviews remaining inbound/outgoing response ownership and fixes a
-numeric startup boundary. All eleven final-source local gates pass; exact-head CI and merge remain.
+numeric startup boundary. All eleven final-source gates and six CI jobs pass; PR #227 merged as `50c1194f`.
 
 ## B4-49: unchecked configured peer counts
 
@@ -113,7 +113,7 @@ offline audit remain open; live sync and staging follow offline completion.
 
 ## Batch disposition
 
-After the numeric correction passes final CI and merges, this pass completes the
+With the numeric correction validated and merged, this pass completes the
 batch-4 offline protocol, ownership, retention and implementation-cost review. It
 supersedes earlier open transient/provider-lifetime notes in the batch ledger.
 No additional persistent remote-derived owner requiring a fix was established.
@@ -129,4 +129,6 @@ retains full gate logs, source/review hashes and original arithmetic evidence.
 Existing dependency/linker/future-compatibility warnings remain recorded. Vendor
 sources are unchanged from PR #226; its separate local dependency suite is not
 repeated for this unrelated source change. Linux/macOS CI still runs those expiry
-regressions in addition to workspace checks. Exact-head CI and merge remain.
+regressions in addition to workspace checks. Exact-head CI and merge passed; verified closure follows.
+
+All six CI jobs passed on `25f88b99` and ten Linux volume/template controls passed with verified cleanup. [PR #227](https://github.com/tdenisenko/logex/pull/227) merged as `50c1194f`. The merge tree is identical to the tested head. B4-49 and the batch-4 offline protocol, ownership, retention and implementation-cost review are complete. This supersedes older open transient/provider-lifetime notes; no global RSS guarantee is claimed. Integrated mixed workloads remain in batch 12.

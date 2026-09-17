@@ -1,0 +1,283 @@
+{
+  "date": "2026-09-17",
+  "branch": "audit/api-subscription-lifecycle",
+  "base": "50c1194ff5f9c56581587a84eb46a408cd62b1e7",
+  "source_commit": "dbd5b48a9767bbd35ca26f7c68f340312323188e",
+  "source_inventory": {
+    "base": "50c1194ff5f9c56581587a84eb46a408cd62b1e7",
+    "source_commit": "dbd5b48a9767bbd35ca26f7c68f340312323188e",
+    "original": {
+      "path": "crates/logex-server/src/ws.rs",
+      "bytes": 46258,
+      "sha256": "be2bcc2a1dca688346a96d8fc53709e3fc6328bb63a61e57fe0a30b07c2cd8d8"
+    },
+    "final": {
+      "path": "crates/logex-server/src/ws.rs",
+      "bytes": 55591,
+      "sha256": "a0dcd4613deb82911611181fbbeb61cab8858499b97962e71a0086afa781022f"
+    }
+  },
+  "findings": [
+    "B8-06",
+    "B8-07",
+    "B8-08"
+  ],
+  "gates": {
+    "commit": "dbd5b48a9767bbd35ca26f7c68f340312323188e",
+    "rustc": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+    "gates": [
+      {
+        "name": "vendor",
+        "command": [
+          "python3",
+          "tools/verify_datafusion_vendor.py"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T13:57:36.975378+00:00",
+        "finished": "2026-09-17T13:57:37.105186+00:00",
+        "sha256": "66c8356dd4a2753b376fc6b222ceda74bb495616f72e05bb062c7fb877a81bd1",
+        "log": "/private/tmp/logex-audit-api-subscription-20260917/gates/vendor.log"
+      },
+      {
+        "name": "format",
+        "command": [
+          "cargo",
+          "fmt",
+          "--all",
+          "--",
+          "--check"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T13:57:37.105543+00:00",
+        "finished": "2026-09-17T13:57:38.136602+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-audit-api-subscription-20260917/gates/format.log"
+      },
+      {
+        "name": "vendor-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2024",
+          "--config-path",
+          "vendor/reth-network/rustfmt.toml",
+          "--config",
+          "skip_children=true",
+          "vendor/reth-network/src/eth_requests.rs",
+          "vendor/reth-network/src/session/active.rs",
+          "vendor/reth-network/src/session/mod.rs",
+          "vendor/reth-network/src/session/types.rs",
+          "vendor/reth-network/src/session/range_update.rs",
+          "vendor/reth-discv5/src/lib.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T13:57:38.136967+00:00",
+        "finished": "2026-09-17T13:57:38.205282+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-audit-api-subscription-20260917/gates/vendor-format.log"
+      },
+      {
+        "name": "enr-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2021",
+          "--config",
+          "skip_children=true",
+          "vendor/enr/src/lib.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T13:57:38.205787+00:00",
+        "finished": "2026-09-17T13:57:38.257989+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-audit-api-subscription-20260917/gates/enr-format.log"
+      },
+      {
+        "name": "gossipsub-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2021",
+          "--config",
+          "skip_children=true",
+          "vendor/libp2p-gossipsub/src/time_cache.rs",
+          "vendor/libp2p-gossipsub/src/behaviour.rs",
+          "vendor/libp2p-gossipsub/src/behaviour/tests.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T13:57:38.258316+00:00",
+        "finished": "2026-09-17T13:57:38.357171+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-audit-api-subscription-20260917/gates/gossipsub-format.log"
+      },
+      {
+        "name": "aggregate-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2021",
+          "--config",
+          "max_width=90,skip_children=true",
+          "vendor/datafusion-functions-aggregate/src/sum.rs",
+          "vendor/datafusion-functions-aggregate/src/average.rs",
+          "vendor/datafusion-functions-aggregate-common/src/aggregate/sum_distinct/numeric.rs",
+          "vendor/datafusion-functions-aggregate-common/src/aggregate/avg_distinct/decimal.rs",
+          "vendor/datafusion-functions-aggregate-common/src/utils.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T13:57:38.357674+00:00",
+        "finished": "2026-09-17T13:57:38.422949+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-audit-api-subscription-20260917/gates/aggregate-format.log"
+      },
+      {
+        "name": "check",
+        "command": [
+          "cargo",
+          "check",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T13:57:38.423333+00:00",
+        "finished": "2026-09-17T13:57:44.170180+00:00",
+        "sha256": "944e0336fac47f43b521c856af1f045d49403ec080cc12ae946da205932949d7",
+        "log": "/private/tmp/logex-audit-api-subscription-20260917/gates/check.log"
+      },
+      {
+        "name": "clippy",
+        "command": [
+          "cargo",
+          "clippy",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T13:57:44.171005+00:00",
+        "finished": "2026-09-17T13:57:49.937665+00:00",
+        "sha256": "e8223284d97702dbf1e2216948b2ea385cd7933825a4fd5ba9b4b3c2bb8d22f9",
+        "log": "/private/tmp/logex-audit-api-subscription-20260917/gates/clippy.log"
+      },
+      {
+        "name": "test",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T13:57:49.938292+00:00",
+        "finished": "2026-09-17T14:01:52.382496+00:00",
+        "sha256": "4a6a08edfbcad5c38ae9451f13773c9ad5a8f60a4011f38e7f25275ea28c4c95",
+        "log": "/private/tmp/logex-audit-api-subscription-20260917/gates/test.log"
+      },
+      {
+        "name": "doc",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--doc",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T14:01:52.386654+00:00",
+        "finished": "2026-09-17T14:02:02.643583+00:00",
+        "sha256": "ed76967ae58ebf4c82d52697bb07b306a5cadd6a2969f0a04d774b9eadbfde2e",
+        "log": "/private/tmp/logex-audit-api-subscription-20260917/gates/doc.log"
+      },
+      {
+        "name": "release-build",
+        "command": [
+          "cargo",
+          "build",
+          "-p",
+          "logex-node",
+          "--release",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T14:02:02.644386+00:00",
+        "finished": "2026-09-17T14:03:21.205816+00:00",
+        "sha256": "7dab0770e008044a9830a2aa0ec538abe3a3f6e7c36f938364173ac6a406c542",
+        "log": "/private/tmp/logex-audit-api-subscription-20260917/gates/release-build.log"
+      }
+    ]
+  },
+  "workspace_tests": {
+    "passed": 1973,
+    "failed": 0,
+    "ignored": 24,
+    "targets": 35
+  },
+  "documentation_tests": {
+    "passed": 0,
+    "failed": 0,
+    "ignored": 0,
+    "targets": 8
+  },
+  "original_controls": {
+    "passed": 15,
+    "failed": 4,
+    "ignored": 0,
+    "targets": 1
+  },
+  "final_server_library": {
+    "passed": 108,
+    "failed": 0,
+    "ignored": 0,
+    "targets": 1
+  },
+  "evidence": {
+    "path": "docs/audit/baselines/2026-09-17-api-subscription-lifecycle-evidence.json.gz",
+    "files": 14,
+    "bytes_uncompressed": 130116,
+    "bytes": 30545,
+    "sha256": "bc06f98e7377218b04bbe710642be183d8c63ada71a9aa8bfec7d1a171796ddf"
+  },
+  "validation": {
+    "path": "docs/audit/baselines/2026-09-17-api-subscription-lifecycle-validation.json.gz",
+    "files": 14,
+    "bytes_uncompressed": 236956,
+    "bytes": 45152,
+    "sha256": "9e54d0907284f581222ac1cce8635bc689309ca95cda94d683209f72c24e9c95"
+  },
+  "publication": {
+    "state": "pending"
+  },
+  "boundaries": [
+    "Four actual original-code failures using in-memory session manager/guards and finite history; fifteen existing WS controls pass on the same original source.",
+    "Original test patch uses the old guard signature; final controls carry the newly required private identity and expand positive coverage. Original source/diff/log retained.",
+    "One instance identity allocation per session; detached sockets cannot affect a recreated entry. Identity does not own the broadcast sender; deletion closes that channel after any already-buffered messages.",
+    "Ordinary shared-ID upsert retains identity and replaces shared filter/scope; this existing behavior is preserved, including service-to-ephemeral scope changes.",
+    "History is newest-first in publication order, not an arbitrary timestamp sort. Existing chronological live arrays remain unchanged. History limit and eviction count remain unchanged.",
+    "No new ingestion commit barriers, storage encoding, SQL, dependency, global budget or verified repair implementation. No benchmark or performance improvement claim.",
+    "JSON-RPC envelope/filter semantics, broadcast lag, reorg notifications, dashboard ordering and integrated acceptance remain open. The shared-query resource policy remains pending."
+  ]
+}
