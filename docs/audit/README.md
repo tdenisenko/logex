@@ -33,9 +33,16 @@ The [Ethereum filter consistency review](ethereum-filter-semantics.md) addresses
 literal decoding, required wildcard topic positions and cross-protocol bounds
 (B8-12–14). Six expanded original-code groups reproduce the failures. Source `76667e69` passes an independent oracle across hot/sealed and indexed/
 unindexed storage, focused checks and all eleven local gates (2,000 workspace
-tests / 24 existing ignores). Exact-head CI and merge remain.
+tests / 24 existing ignores). PR #230 merged as `a4eafd46` after all six CI jobs and ten Linux controls.
 
 ## Batch ledger
+
+The [WebSocket delivery review](websocket-delivery.md) makes detected broadcast
+gaps terminal and releases copied acknowledgement history before socket awaits
+(B8-15–16). Original raw/retained loopback controls reproduce silent continuation;
+source `71ef3cc0` passes 149 focused server tests, five browser callback controls,
+independent review and all eleven local gates (2,007 tests / 24 existing ignores).
+Source and local gates are complete; exact-head CI and merge remain.
 
 | Batch | Review area | Status / acceptance |
 | --- | --- | --- |
