@@ -1,5 +1,5 @@
 {
-  "status": "All eight final-source local gates pass; CI and merge pending",
+  "status": "Merged after eight local gates and six exact-head CI jobs",
   "base": "d6e7172269c949d3cf201c6183509a60d5762dd4",
   "findings": [
     "B10-21",
@@ -54,6 +54,26 @@
     "gates/test-summary.json": {
       "sha256": "39bad6ce3b091ccfd7f12d99e6de06c7234b940cbbf01f70ac5aaeb2947382ef",
       "bytes": 69
+    },
+    "premerge.json": {
+      "sha256": "6946f340c0ff71e8f3b0e4a97f32f14301c4bc713f28988457d8046aa3df6b3a",
+      "bytes": 1894
+    },
+    "merged.json": {
+      "sha256": "74eec07363540e8257213dfaa94e248fb6304a6101df40f893919d226478a87f",
+      "bytes": 240
+    },
+    "ci-watch.log": {
+      "sha256": "b0fb2bbe82b0bbf2270e6c395938ef34698b263f738bc8d962ceb3f53d075ad1",
+      "bytes": 12192
+    },
+    "ci-linux/volume-mount-results.json": {
+      "sha256": "07436443375f0b218b64f84945a84cc044cdc00283c7b6524df5228a43afaa0e",
+      "bytes": 1846
+    },
+    "publication-inventory.json": {
+      "sha256": "18ab78f06b1f947b6f6d5fd1e57820612db404a5b25d389f2b525226ce112386",
+      "bytes": 1895
     }
   },
   "source_commit": "948bece49214e8efda60ca51d18cab88955f6b25",
@@ -212,5 +232,112 @@
     "failed": 0,
     "ignored": 24,
     "groups": 27
+  },
+  "pull_request": {
+    "headRefOid": "d9b49aa3b5e91cca8ab9a48876600466a0ad1fc6",
+    "mergeCommit": {
+      "oid": "6d0c272e6d2171d7ce3839f706cb0ed55403dd1a"
+    },
+    "mergedAt": "2026-09-17T01:24:31Z",
+    "number": 210,
+    "state": "MERGED",
+    "url": "https://github.com/tdenisenko/logex/pull/210"
+  },
+  "linux_volume_controls": {
+    "results": [
+      {
+        "case": "systemd template validation",
+        "passed": true,
+        "diagnostic": ""
+      },
+      {
+        "case": "missing mount",
+        "passed": true,
+        "diagnostic": "Error: Os { code: 2, kind: NotFound, message: \"No such file or directory\" }\n"
+      },
+      {
+        "case": "low space",
+        "passed": true,
+        "diagnostic": "Error: Custom { kind: Other, error: \"expected volume has 473272320 free bytes; at least 10737418240 are required\" }\n"
+      },
+      {
+        "case": "wrong UUID",
+        "passed": true,
+        "diagnostic": "Error: Custom { kind: InvalidInput, error: \"expected volume UUID abcd-1234 is not available in /dev/disk/by-uuid\" }\n"
+      },
+      {
+        "case": "real filesystem preflight and anchored write",
+        "passed": true
+      },
+      {
+        "case": "lazy detach retains underlay contents",
+        "passed": true,
+        "inflight_write": "ok"
+      },
+      {
+        "case": "unmounted path cannot initialize storage",
+        "passed": true,
+        "diagnostic": "Error: Custom { kind: InvalidInput, error: \"expected path is not the opened filesystem's current mount location\" }\n"
+      },
+      {
+        "case": "different volume at same path",
+        "passed": true,
+        "diagnostic": "Error: Custom { kind: InvalidInput, error: \"mounted filesystem at \\\"/tmp/logex-volume-mounts-9sp_6v40/mount\\\" does not match expected UUID e40d9290-2122-43eb-9ccf-a3892fafbb3f\" }\n"
+      },
+      {
+        "case": "replacement volume receives no old-owner writes",
+        "passed": true
+      },
+      {
+        "case": "correct volume remount and restart",
+        "passed": true
+      }
+    ],
+    "errors": [],
+    "fixtures_detached": true,
+    "fixture_root_removed": true,
+    "fixture_root": "/tmp/logex-volume-mounts-9sp_6v40",
+    "binary_sha256": "83abfbc468d7a352ece4501284528669955b9c59ed990adfb9187e36cc008b3d"
+  },
+  "ci": {
+    "head": "d9b49aa3b5e91cca8ab9a48876600466a0ad1fc6",
+    "checks": [
+      {
+        "name": "Check",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS",
+        "detailsUrl": "https://github.com/tdenisenko/logex/actions/runs/35169808264/job/105038824208"
+      },
+      {
+        "name": "Format",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS",
+        "detailsUrl": "https://github.com/tdenisenko/logex/actions/runs/35169808264/job/105038824276"
+      },
+      {
+        "name": "Clippy",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS",
+        "detailsUrl": "https://github.com/tdenisenko/logex/actions/runs/35169808264/job/105038824272"
+      },
+      {
+        "name": "Test",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS",
+        "detailsUrl": "https://github.com/tdenisenko/logex/actions/runs/35169808264/job/105038824018"
+      },
+      {
+        "name": "macOS Test",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS",
+        "detailsUrl": "https://github.com/tdenisenko/logex/actions/runs/35169808264/job/105038824263"
+      },
+      {
+        "name": "Release Build",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS",
+        "detailsUrl": "https://github.com/tdenisenko/logex/actions/runs/35169808264/job/105038824256"
+      }
+    ]
   }
 }

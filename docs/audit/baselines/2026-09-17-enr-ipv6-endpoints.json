@@ -1,0 +1,97 @@
+{
+  "status": "Focused suites pass; source commit, nine gates, CI and merge pending",
+  "base": "6d0c272e6d2171d7ce3839f706cb0ed55403dd1a",
+  "findings": [
+    "B3-67",
+    "B4-47",
+    "B4-48"
+  ],
+  "evidence_root": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-ipv6-endpoints-0a5zyao7",
+  "reproductions": {
+    "original_cl": {
+      "passed": 0,
+      "failed": 3,
+      "exit_code": 101
+    },
+    "original_el": {
+      "passed": 3,
+      "failed": 2,
+      "exit_code": 101
+    },
+    "original_reth_method_with_enr_patch": {
+      "passed": 0,
+      "failed": 1,
+      "exit_code": 101,
+      "actual_tcp": 9002,
+      "expected_tcp": 9001,
+      "dependency_selections": "original locked selections"
+    }
+  },
+  "focused_endpoint_controls": {
+    "cl": 6,
+    "el": 18,
+    "failed": 0
+  },
+  "evidence": {
+    "base.json": {
+      "sha256": "de5c0a7e601689e6c5858358a53836ca5ea21f611ff7853518139b84a64f9d5a",
+      "bytes": 57
+    },
+    "original-network.rs": {
+      "sha256": "b1cb5175380af4463c51d2586ed0c5512f40feb4c66b04e3c43796b4c5f33a93",
+      "bytes": 529541
+    },
+    "original-peer-manager.rs": {
+      "sha256": "1631e3a31a7377674a26b98b87fa8b465a8d7e4c660aeb80e12cd9609eeb051c",
+      "bytes": 81860
+    },
+    "original-cl.log": {
+      "sha256": "ebcbd9da387a8dc3f606ff5f3e7fb3ceae4263865de75bcbd1da323b84b9459d",
+      "bytes": 2627
+    },
+    "original-el.log": {
+      "sha256": "8ecbc28174594b93f399c3483f3dc3bdfc5cdc056fcc196f39fcd86c955c1633",
+      "bytes": 2686
+    },
+    "original-reth-conversion.log": {
+      "sha256": "ac0167bb55c6c839ff4308264dfb1c9f4e47c1ec2bcab28e765bb863c948878a",
+      "bytes": 1515
+    },
+    "original-results.json": {
+      "sha256": "0b7a5634903f888f1338c1d6e90efd3d0a081505ff03c48a8e44de11ea0f387e",
+      "bytes": 197
+    },
+    "upstream-inventory.json": {
+      "sha256": "b6af3a764e70ba3c77322ec4fc60bf5f907dd6d24a60b14d2f7b893c7004b539",
+      "bytes": 1583
+    },
+    "fixed-cl.log": {
+      "sha256": "692d72e2d930618689b1d2ed3fa2a78523ada4bc489bc34d3894af69e8bc9227",
+      "bytes": 1151
+    },
+    "fixed-el.log": {
+      "sha256": "b1c9f5e45fbc70604c506059074af5c6c6ef2fe0a7fe1fc3045ea7e09084ed42",
+      "bytes": 2566
+    },
+    "focused-consensus.log": {
+      "bytes": 31635,
+      "sha256": "08910a2e1fd88dbe57d491bd31e2069cb25bf2a02959746bc7ee51dd8e18e577"
+    },
+    "focused-peer-manager.log": {
+      "bytes": 35118,
+      "sha256": "12f32a13b33ae94a8399dc8bddd7fa0a53d11be83f1dbe8135e74a9c3314b9ba"
+    }
+  },
+  "focused_suites": {
+    "consensus": {
+      "passed": 360,
+      "failed": 0,
+      "ignored": 1
+    },
+    "peer_manager": {
+      "passed": 318,
+      "failed": 0,
+      "ignored": 0
+    }
+  }
+}

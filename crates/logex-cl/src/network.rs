@@ -6853,7 +6853,7 @@ fn enr_multiaddrs_for_families(
 
 fn enr_has_discv5_endpoint_for_families(families: ConsensusDialAddressFamilies, enr: &Enr) -> bool {
     (families.ipv4 && enr.ip4().is_some() && enr.udp4().is_some())
-        || (families.ipv6 && enr.ip6().is_some() && enr.udp6().is_some())
+        || (families.ipv6 && enr.udp6_socket().is_some())
 }
 
 fn load_or_create_secret_key(secret_key_path: &Path) -> Result<CombinedKey, ConsensusNetworkError> {
@@ -7085,8 +7085,12 @@ fn enr_multiaddrs(enr: &Enr) -> Option<(PeerId, Vec<Multiaddr>)> {
     if let (Some(ip), Some(port)) = (enr.ip4(), enr.tcp4()) {
         addrs.push(multiaddr_from_ip(IpAddr::V4(ip), port, peer_id));
     }
-    if let (Some(ip), Some(port)) = (enr.ip6(), enr.tcp6()) {
-        addrs.push(multiaddr_from_ip(IpAddr::V6(ip), port, peer_id));
+    if let Some(socket) = enr.tcp6_socket() {
+        addrs.push(multiaddr_from_ip(
+            IpAddr::V6(*socket.ip()),
+            socket.port(),
+            peer_id,
+        ));
     }
     if addrs.is_empty() {
         return None;
@@ -11180,6 +11184,147 @@ mod tests {
             addrs
                 .iter()
                 .all(|addr| addr.to_string().contains(&peer_id.to_string()))
+        );
+    }
+
+    fn shared_ipv6_enr() -> Enr {
+        Enr::builder()
+            .ip6(Ipv6Addr::LOCALHOST)
+            .tcp4(9_001)
+            .udp4(9_002)
+            .build(&CombinedKey::generate_secp256k1())
+            .unwrap()
+    }
+
+    #[test]
+    fn shared_ipv6_ports_support_consensus_dialing() {
+        let enr = shared_ipv6_enr();
+        let (peer, addresses) =
+            enr_multiaddrs_for_families(ConsensusDialAddressFamilies::IPV6, &enr)
+                .expect("EIP-778 shared TCP port supplies an IPv6 endpoint");
+        assert_eq!(
+            addresses,
+            vec![multiaddr_from_ip(
+                IpAddr::V6(Ipv6Addr::LOCALHOST),
+                9_001,
+                peer
+            )]
+        );
+    }
+
+    #[test]
+    fn shared_ipv6_ports_support_consensus_discovery_admission() {
+        let enr = shared_ipv6_enr();
+        assert!(enr_has_discv5_endpoint_for_families(
+            ConsensusDialAddressFamilies::IPV6,
+            &enr
+        ));
+        assert!(!enr_has_discv5_endpoint_for_families(
+            ConsensusDialAddressFamilies::IPV4,
+            &enr
+        ));
+    }
+
+    #[test]
+    fn shared_ipv6_ports_support_discv5_contact() {
+        let enr = shared_ipv6_enr();
+        let original = enr.to_string();
+        let contact = discv5::handler::NodeContact::try_from_enr(enr.clone(), discv5::IpMode::Ip6)
+            .expect("discovery must interpret shared ports without rewriting the signed record");
+        assert_eq!(contact.socket_addr(), "[::1]:9002".parse().unwrap());
+        assert_eq!(contact.enr().unwrap().to_string(), original);
+        assert!(enr.udp6().is_none());
+        assert!(enr.tcp6().is_none());
+    }
+
+    #[test]
+    fn shared_ipv6_ports_preserve_specific_port_precedence() {
+        for (specific, tcp, udp) in [
+            (None, Some(9_001), Some(9_002)),
+            (Some(0u32), Some(0), Some(0)),
+            (Some(9_003), Some(9_003), Some(9_003)),
+            (Some(65_536), None, None),
+        ] {
+            let mut builder = Enr::builder();
+            builder.ip6(Ipv6Addr::LOCALHOST).tcp4(9_001).udp4(9_002);
+            if let Some(port) = specific {
+                builder.add_value(b"tcp6", &port).add_value(b"udp6", &port);
+            }
+            let enr = builder.build(&CombinedKey::generate_secp256k1()).unwrap();
+            let original = enr.to_string();
+            assert_eq!(enr.tcp6_socket().map(|socket| socket.port()), tcp);
+            assert_eq!(enr.udp6_socket().map(|socket| socket.port()), udp);
+            assert_eq!(enr.tcp4(), Some(9_001));
+            assert_eq!(enr.udp4(), Some(9_002));
+            assert_eq!(enr.to_string(), original);
+            if specific == Some(65_536) {
+                // Builders can hold this value, but the wire decoder rejects it.
+                assert!(original.parse::<Enr>().is_err());
+            } else {
+                assert_eq!(original.parse::<Enr>().unwrap(), enr);
+            }
+        }
+    }
+
+    #[test]
+    fn shared_ipv6_ports_keep_protocols_and_address_families_separate() {
+        let key = CombinedKey::generate_secp256k1();
+        let tcp = Enr::builder()
+            .ip6(Ipv6Addr::LOCALHOST)
+            .tcp4(9_001)
+            .build(&key)
+            .unwrap();
+        assert_eq!(tcp.tcp6_socket().unwrap().port(), 9_001);
+        assert!(tcp.udp6_socket().is_none());
+        assert!(!enr_has_discv5_endpoint_for_families(
+            ConsensusDialAddressFamilies::IPV6,
+            &tcp
+        ));
+        let udp = Enr::builder()
+            .ip6(Ipv6Addr::LOCALHOST)
+            .udp4(9_002)
+            .build(&key)
+            .unwrap();
+        assert_eq!(udp.udp6_socket().unwrap().port(), 9_002);
+        assert!(udp.tcp6_socket().is_none());
+        assert!(enr_multiaddrs(&udp).is_none());
+        let ipv4 = Enr::builder()
+            .ip4(Ipv4Addr::LOCALHOST)
+            .tcp4(9_001)
+            .udp4(9_002)
+            .build(&key)
+            .unwrap();
+        assert!(ipv4.tcp6_socket().is_none());
+        assert!(ipv4.udp6_socket().is_none());
+    }
+
+    #[test]
+    fn shared_ipv6_ports_keep_discovery_family_policy() {
+        let key = CombinedKey::generate_secp256k1();
+        let enr = Enr::builder()
+            .ip4(Ipv4Addr::LOCALHOST)
+            .ip6(Ipv6Addr::LOCALHOST)
+            .udp4(9_002)
+            .build(&key)
+            .unwrap();
+        assert_eq!(
+            discv5::IpMode::DualStack.get_contactable_addr(&enr),
+            Some("[::1]:9002".parse().unwrap())
+        );
+        assert_eq!(
+            discv5::IpMode::Ip4.get_contactable_addr(&enr),
+            Some("127.0.0.1:9002".parse().unwrap())
+        );
+        let mapped = Enr::builder()
+            .ip4(Ipv4Addr::LOCALHOST)
+            .ip6(Ipv4Addr::LOCALHOST.to_ipv6_mapped())
+            .udp4(9_002)
+            .build(&key)
+            .unwrap();
+        assert!(discv5::IpMode::Ip6.get_contactable_addr(&mapped).is_none());
+        assert_eq!(
+            discv5::IpMode::DualStack.get_contactable_addr(&mapped),
+            Some("127.0.0.1:9002".parse().unwrap())
         );
     }
 

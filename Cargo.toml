@@ -1,6 +1,6 @@
 [workspace]
 members = ["crates/logex-types", "crates/logex-fs", "crates/logex-cl", "crates/logex-storage", "crates/logex-index", "crates/logex-query", "crates/logex-server", "crates/logex-node", "crates/logex-sync"]
-exclude = ["vendor/datafusion-optimizer", "vendor/datafusion-sql", "vendor/reth-network"]
+exclude = ["vendor/enr", "vendor/reth-discv5", "vendor/datafusion-optimizer", "vendor/datafusion-sql", "vendor/reth-network"]
 resolver = "2"
 
 [workspace.package]
@@ -79,8 +79,10 @@ logex-sync = { path = "crates/logex-sync" }
 logex-node = { path = "crates/logex-node" }
 
 [patch.crates-io]
+enr = { path = "vendor/enr" }
 datafusion-optimizer = { path = "vendor/datafusion-optimizer" }
 datafusion-sql = { path = "vendor/datafusion-sql" }
 
 [patch."https://github.com/paradigmxyz/reth.git"]
+reth-discv5 = { path = "vendor/reth-discv5" }
 reth-network = { path = "vendor/reth-network" }

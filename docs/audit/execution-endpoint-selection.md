@@ -38,10 +38,11 @@ ENR conversions explicitly represent absent UDP as zero in `NodeRecord`, avoidin
 the constructor's bare-enode default. Pinned serialization preserves zero UDP
 explicitly as `discport=0`; no peer-cache migration is required. TCP dial submission passes no optional UDP
 address when that field is zero. Bare enode parsing keeps its existing default;
-signed records are not rewritten or re-signed. Pinned discv5's signed-record path
-still requires explicit IPv6 UDP metadata; the existing unsigned-address path can
-use the correctly resolved generic IPv6 UDP endpoint. The separate consensus-side
-IPv6 fallback review remains open.
+signed records are not rewritten or re-signed. At this milestone, pinned discv5's
+signed-record path still required explicit IPv6 UDP metadata; the unsigned path
+could use shared IPv6 UDP ports. The subsequent [ENR endpoint review](enr-ipv6-endpoints.md)
+patches the pinned helpers and execution adapter to remove that limitation; its
+validation and merge disposition are tracked separately.
 
 The old vector of selected TCP candidates became redundant once discovery seeds
 were separate: only its length was read. It is replaced by a count. The final
