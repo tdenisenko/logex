@@ -190,6 +190,85 @@ impl<'a> PreparedVarBytes<'a> {
     }
 }
 
+struct PreparedLogColumns {
+    addresses: Vec<Address>,
+    block_numbers: Vec<u64>,
+    block_hashes: Vec<B256>,
+    timestamps: Vec<u64>,
+    tx_hashes: Vec<B256>,
+    tx_indices: Vec<u32>,
+    log_indices: Vec<u32>,
+    topic0s: Vec<Option<B256>>,
+    topic1s: Vec<Option<B256>>,
+    topic2s: Vec<Option<B256>>,
+    topic3s: Vec<Option<B256>>,
+    sources: Vec<Source>,
+}
+
+impl PreparedLogColumns {
+    fn new(reader: &SegmentReader, row_ids: &[u32]) -> io::Result<Self> {
+        let addresses = reader.read_address(Some(row_ids))?;
+        let block_numbers = reader.read_u64("block_number", Some(row_ids))?;
+        let block_hashes = reader.read_b256("block_hash", Some(row_ids))?;
+        let timestamps = reader.read_u64("timestamp", Some(row_ids))?;
+        let tx_hashes = reader.read_b256("tx_hash", Some(row_ids))?;
+        let tx_indices = reader.read_u32("tx_index", Some(row_ids))?;
+        let log_indices = reader.read_u32("log_index", Some(row_ids))?;
+        let topic0s = reader.read_nullable_b256("topic0", Some(row_ids))?;
+        let topic1s = reader.read_nullable_b256("topic1", Some(row_ids))?;
+        let topic2s = reader.read_nullable_b256("topic2", Some(row_ids))?;
+        let topic3s = reader.read_nullable_b256("topic3", Some(row_ids))?;
+        let sources = reader
+            .read_u8("source", Some(row_ids))?
+            .into_iter()
+            .map(|source| {
+                Source::from_u8(source).ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("invalid source byte: {source}"),
+                    )
+                })
+            })
+            .collect::<io::Result<Vec<_>>>()?;
+        if [
+            addresses.len(),
+            block_numbers.len(),
+            block_hashes.len(),
+            timestamps.len(),
+            tx_hashes.len(),
+            tx_indices.len(),
+            log_indices.len(),
+            topic0s.len(),
+            topic1s.len(),
+            topic2s.len(),
+            topic3s.len(),
+            sources.len(),
+        ]
+        .into_iter()
+        .any(|len| len != row_ids.len())
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "selected log columns have inconsistent row counts",
+            ));
+        }
+        Ok(Self {
+            addresses,
+            block_numbers,
+            block_hashes,
+            timestamps,
+            tx_hashes,
+            tx_indices,
+            log_indices,
+            topic0s,
+            topic1s,
+            topic2s,
+            topic3s,
+            sources,
+        })
+    }
+}
+
 impl SegmentReader {
     pub(crate) fn generation(&self) -> u64 {
         self.manifest
@@ -665,6 +744,92 @@ impl SegmentReader {
 
     pub fn read_log_rows(&self, row_ids: Option<&[u32]>) -> io::Result<Vec<LogRow>> {
         self.materialize_log_rows(row_ids, None)
+    }
+
+    /// Prepare selected fixed metadata once and materialize one payload page or
+    /// raw row group at a time. This bounds logical batches, not bytes or RSS:
+    /// selected metadata and the payload iterator's raw buffers/page indexes are
+    /// retained for the lifetime of this iterator. Payload I/O remains lazy.
+    pub(crate) fn log_row_batches<'a>(
+        &'a self,
+        row_ids: &'a [u32],
+    ) -> io::Result<impl Iterator<Item = io::Result<Vec<LogRow>>> + 'a> {
+        let mut payloads = self.var_bytes_batches("data", row_ids)?;
+        let columns = if row_ids.is_empty() {
+            None
+        } else {
+            Some(PreparedLogColumns::new(self, row_ids)?)
+        };
+        let mut position = 0usize;
+        let mut finished = false;
+        Ok(std::iter::from_fn(move || {
+            if finished {
+                return None;
+            }
+            let payload = match payloads.next() {
+                Some(payload) => payload,
+                None => {
+                    finished = true;
+                    return (position != row_ids.len()).then(|| {
+                        Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "selected log payload rows are missing",
+                        ))
+                    });
+                }
+            };
+            let result = (|| {
+                let data = payload?;
+                let end = position
+                    .checked_add(data.len())
+                    .filter(|&end| !data.is_empty() && end <= row_ids.len())
+                    .ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "selected log payload rows differ",
+                        )
+                    })?;
+                let columns = columns.as_ref().ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "selected log metadata is missing",
+                    )
+                })?;
+                let mut rows = Vec::new();
+                rows.try_reserve_exact(data.len())
+                    .map_err(io::Error::other)?;
+                for (index, data) in (position..end).zip(data) {
+                    let data_len = u32::try_from(data.len()).map_err(|_| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "selected log data length exceeds u32",
+                        )
+                    })?;
+                    rows.push(LogRow {
+                        address: columns.addresses[index],
+                        block_number: columns.block_numbers[index],
+                        block_hash: columns.block_hashes[index],
+                        timestamp: columns.timestamps[index],
+                        tx_hash: columns.tx_hashes[index],
+                        tx_index: columns.tx_indices[index],
+                        log_index: columns.log_indices[index],
+                        topic0: columns.topic0s[index],
+                        topic1: columns.topic1s[index],
+                        topic2: columns.topic2s[index],
+                        topic3: columns.topic3s[index],
+                        source: columns.sources[index],
+                        data,
+                        data_len,
+                    });
+                }
+                position = end;
+                Ok(rows)
+            })();
+            if result.is_err() {
+                finished = true;
+            }
+            Some(result)
+        }))
     }
 
     /// Materialize a small maintenance candidate without trusting compressed
@@ -1429,6 +1594,166 @@ mod tests {
 
     fn after_artifact_capture(action: impl FnOnce() + 'static) {
         AFTER_ARTIFACT_CAPTURE.with_borrow_mut(|hook| *hook = Some(Box::new(action)));
+    }
+
+    #[test]
+    fn log_row_batches_match_raw_selected_rows_and_reject_invalid_ids() {
+        let tmp = TempDir::new().unwrap();
+        let mut rows = make_rows();
+        for (index, row) in rows.iter_mut().enumerate() {
+            row.data = Bytes::from(vec![index as u8; index % 7]);
+            row.data_len = row.data.len() as u32;
+            row.source = if index % 2 == 0 {
+                Source::Trace
+            } else {
+                Source::Receipt
+            };
+            row.topic2 = (index % 3 == 0).then_some(B256::repeat_byte(index as u8));
+            row.topic3 = (index % 4 == 0).then_some(B256::repeat_byte(index as u8 + 1));
+        }
+        ColumnFile::write_batch(tmp.path(), &rows).unwrap();
+        let reader = SegmentReader::open(tmp.path()).unwrap();
+        let ids = [0, 2, 7, 11, 19];
+        assert_eq!(
+            reader
+                .log_row_batches(&ids)
+                .unwrap()
+                .collect::<io::Result<Vec<_>>>()
+                .unwrap()
+                .concat(),
+            ids.map(|id| rows[id as usize].clone())
+        );
+        assert!(reader.log_row_batches(&[]).unwrap().next().is_none());
+        for ids in [&[1, 0][..], &[0, 0], &[20]] {
+            assert_eq!(
+                reader.log_row_batches(ids).err().unwrap().kind(),
+                io::ErrorKind::InvalidInput
+            );
+        }
+        let batches = reader.log_row_batches(&ids).unwrap();
+        let mut replacement = rows.clone();
+        replacement[0].data = bytes!("aabbcc");
+        replacement[0].data_len = 3;
+        replacement[0].block_number += 1000;
+        ColumnFile::write_batch(tmp.path(), &replacement).unwrap();
+        assert_eq!(
+            batches.collect::<io::Result<Vec<_>>>().unwrap().concat(),
+            ids.map(|id| rows[id as usize].clone())
+        );
+    }
+
+    #[test]
+    fn log_row_batches_match_paged_rows_across_selected_gaps() {
+        let (_tmp, dir) = compacted_fixture();
+        let rows = make_rows();
+        let manifest = load_manifest(&dir).unwrap().unwrap();
+        let descriptor = manifest
+            .columns
+            .iter()
+            .find(|column| column.name == "data")
+            .unwrap();
+        let mut encoded = Vec::new();
+        let mut index = Vec::new();
+        for range in [0..7, 7..13, 13..20] {
+            let values: Vec<_> = rows[range.clone()]
+                .iter()
+                .map(|row| row.data.clone())
+                .collect();
+            let page = crate::page::encode_var_bytes_page(&values, descriptor.codec).unwrap();
+            index.push(PageIndexEntry {
+                first_row: range.start as u64,
+                row_count: range.len() as u32,
+                offset: encoded.len() as u64,
+                encoded_len: page.len() as u32,
+            });
+            encoded.extend(page);
+        }
+        fs::write(dir.join(&descriptor.data_path), encoded).unwrap();
+        fs::write(
+            dir.join(descriptor.page_index_path.as_ref().unwrap()),
+            crate::page::write_page_index(&index),
+        )
+        .unwrap();
+        let reader = SegmentReader::open(&dir).unwrap();
+        let ids = [0, 6, 7, 12, 13, 19];
+        let batches = reader
+            .log_row_batches(&ids)
+            .unwrap()
+            .collect::<io::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(batches.iter().map(Vec::len).collect::<Vec<_>>(), [2, 2, 2]);
+        assert_eq!(batches.concat(), ids.map(|id| rows[id as usize].clone()));
+
+        let mut batches = reader.log_row_batches(&ids).unwrap();
+        assert_eq!(
+            batches.next().unwrap().unwrap(),
+            [rows[0].clone(), rows[6].clone()]
+        );
+        fs::OpenOptions::new()
+            .write(true)
+            .open(dir.join(&descriptor.data_path))
+            .unwrap()
+            .set_len(index[1].offset)
+            .unwrap();
+        assert!(batches.next().unwrap().is_err());
+        assert!(batches.next().is_none());
+        assert!(batches.next().is_none());
+    }
+
+    #[test]
+    fn log_row_batches_match_bundled_rows() {
+        let tmp = TempDir::new().unwrap();
+        let rows = make_rows();
+        let mut storage = crate::native::NativeStorage::open(crate::native::NativeStorageConfig {
+            data_dir: tmp.path().to_path_buf(),
+            hot_target_rows: rows.len() as u64,
+            compaction_safety_margin_blocks: 0,
+        })
+        .unwrap();
+        let appended = storage.write_historical_batch(&rows).unwrap();
+        assert_eq!(appended.len(), 1);
+        let reader = SegmentReader::open(&appended[0].path).unwrap();
+        assert!(reader.bundle_reference().is_some());
+        let ids = [0, 7, 19];
+        assert_eq!(
+            reader
+                .log_row_batches(&ids)
+                .unwrap()
+                .collect::<io::Result<Vec<_>>>()
+                .unwrap()
+                .concat(),
+            ids.map(|id| rows[id as usize].clone())
+        );
+    }
+
+    #[test]
+    fn log_row_batches_reject_corrupt_source_metadata_and_payload() {
+        for column in ["source.col", "block_hash.col", "data_len.col", "data.col"] {
+            let tmp = TempDir::new().unwrap();
+            ColumnFile::write_batch(tmp.path(), &make_rows()).unwrap();
+            let path = tmp.path().join(column);
+            let mut bytes = fs::read(&path).unwrap();
+            match column {
+                "source.col" => bytes[ColumnFileHeader::SIZE] = 255,
+                "data_len.col" => bytes[ColumnFileHeader::SIZE..ColumnFileHeader::SIZE + 4]
+                    .copy_from_slice(&3u32.to_le_bytes()),
+                _ => bytes.truncate(ColumnFileHeader::SIZE),
+            }
+            fs::write(path, bytes).unwrap();
+            let reader = SegmentReader::open(tmp.path()).unwrap();
+            let prepared = reader.log_row_batches(&[0, 19]);
+            if column == "source.col" || column == "block_hash.col" {
+                assert_eq!(prepared.err().unwrap().kind(), io::ErrorKind::InvalidData);
+            } else {
+                let mut batches = prepared.unwrap();
+                assert_eq!(
+                    batches.next().unwrap().unwrap_err().kind(),
+                    io::ErrorKind::InvalidData
+                );
+                assert!(batches.next().is_none());
+                assert!(batches.next().is_none());
+            }
+        }
     }
 
     #[test]

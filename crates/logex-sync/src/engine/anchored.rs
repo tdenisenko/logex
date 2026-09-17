@@ -6734,46 +6734,68 @@ impl SyncEngine {
             let tip = self.head_tracker.tip();
             let consensus = Arc::clone(&self.consensus);
             let storage = Arc::clone(&self.storage);
-            let mut storage = storage.write().await;
-            // Flush pending row work before taking the consensus publication
-            // lock. Begin's repeated checkpoint is then clean under this guard.
-            storage.checkpoint_durable()?;
-            let storage_ref = &mut *storage;
-            let (fresh, pending) = consensus
-                .with_reorg_anchor_snapshot(
-                    first,
-                    tip,
-                    headers.len(),
-                    move |snapshot| -> Result<_> {
-                        let fresh = locate_consensus_reorg_in_snapshot(snapshot, &headers)?;
-                        let pending = if let ConsensusReorgDecision::Rewind(reorg) = &fresh {
-                            Some(
-                                storage_ref
-                                    .begin_canonical_reorg(
-                                        &reorg.reverted_hashes,
-                                        &reorg.retained_headers,
-                                        reorg.indexed_head,
+            let subscriptions = self.subscriptions.clone();
+            // Keep checkpoint, fresh selection, commit and removal publication
+            // in one owned worker. A started worker completes even if its
+            // awaiting engine future is dropped during supervised shutdown.
+            let (fresh, count) = AbortOnDropHandle::new(tokio::task::spawn_blocking(
+                move || -> Result<(ConsensusReorgDecision, u64)> {
+                    let mut reverted_rows = 0;
+                    let mut storage = storage.blocking_write();
+                    // Flush pending row work before taking the consensus publication
+                    // lock. Begin's repeated checkpoint is then clean under this guard.
+                    storage.checkpoint_durable()?;
+                    let storage_ref = &mut *storage;
+                    let (fresh, pending) = consensus
+                        .with_reorg_anchor_snapshot(
+                            first,
+                            tip,
+                            headers.len(),
+                            move |snapshot| -> Result<_> {
+                                let fresh = locate_consensus_reorg_in_snapshot(snapshot, &headers)?;
+                                let pending = if let ConsensusReorgDecision::Rewind(reorg) = &fresh
+                                {
+                                    Some(
+                                        storage_ref
+                                            .begin_canonical_reorg(
+                                                &reorg.reverted_hashes,
+                                                &reorg.retained_headers,
+                                                reorg.indexed_head,
+                                            )
+                                            .map_err(|error| {
+                                                eyre::eyre!(
+                                                    "consensus reorg admission error: {error}"
+                                                )
+                                            })?,
                                     )
-                                    .map_err(|error| {
-                                        eyre::eyre!("consensus reorg admission error: {error}")
-                                    })?,
-                            )
-                        } else {
-                            None
-                        };
-                        Ok((fresh, pending))
-                    },
-                )
-                .ok_or_else(|| {
-                    eyre::eyre!("invalid or oversized consensus reorg anchor window")
-                })??;
-            // The durable intent owns this operation now. A later selection
-            // change is reconciled normally; the full row scan holds no CL lock.
-            if let Some(pending) = pending {
-                reverted_rows = pending
-                    .finish()
-                    .map_err(|error| eyre::eyre!("consensus reorg transaction error: {error}"))?;
-            }
+                                } else {
+                                    None
+                                };
+                                Ok((fresh, pending))
+                            },
+                        )
+                        .ok_or_else(|| {
+                            eyre::eyre!("invalid or oversized consensus reorg anchor window")
+                        })??;
+                    // The durable intent owns this operation now. A later selection
+                    // change is reconciled normally; the full row scan holds no CL lock.
+                    if let Some(pending) = pending {
+                        reverted_rows = match &subscriptions {
+                            Some(subscriptions) => pending.finish_with_notifications(|rows| {
+                                subscriptions.notify_removed(rows);
+                            }),
+                            None => pending.finish(),
+                        }
+                        .map_err(|error| {
+                            eyre::eyre!("consensus reorg transaction error: {error}")
+                        })?;
+                    }
+                    Ok((fresh, reverted_rows))
+                },
+            ))
+            .await
+            .map_err(|error| eyre::eyre!("consensus reorg worker failed: {error}"))??;
+            reverted_rows = count;
             if let ConsensusReorgDecision::Rewind(reorg) = &fresh {
                 self.head_tracker.restore(reorg.retained_headers.clone());
             }

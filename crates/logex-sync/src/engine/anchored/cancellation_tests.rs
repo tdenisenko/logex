@@ -596,6 +596,9 @@ async fn pending_selected_lineage_waits_without_progress_and_cancels() {
 #[tokio::test]
 async fn selected_chain_return_during_queued_reorg_must_preserve_published_suffix() {
     let (mut engine, _shutdown, _resources) = fixture().await;
+    let manager = SubscriptionManager::new();
+    let mut notifications = manager.subscribe();
+    engine.subscriptions = Some(manager);
     let first = Header {
         number: 100,
         timestamp: 1,
@@ -763,4 +766,275 @@ async fn selected_chain_return_during_queued_reorg_must_preserve_published_suffi
         tip_cached,
         "obsolete rewind must not evict current selected block"
     );
+    assert!(
+        notifications.try_recv().is_err(),
+        "obsolete queued decision must not publish a removal"
+    );
+}
+
+#[tokio::test]
+async fn committed_reorg_publishes_exact_removal_after_storage_success() {
+    for persisted_suffix in [false, true] {
+        let (mut engine, _shutdown, _resources) = fixture().await;
+        let manager = SubscriptionManager::new();
+        let mut receiver = manager.subscribe();
+        engine.subscriptions = Some(manager.clone());
+        let ancestor = Header {
+            number: 100,
+            ..Default::default()
+        };
+        let old_tip = Header {
+            number: 101,
+            parent_hash: ancestor.hash_slow(),
+            ..Default::default()
+        };
+        let replacement = Header {
+            timestamp: 1,
+            ..old_tip.clone()
+        };
+        let record = |header: &Header, slot| logex_cl::AnchorRecord {
+            anchor: ExecutionAnchor {
+                beacon_root: B256::repeat_byte(slot as u8),
+                beacon_slot: slot,
+                block_number: header.number,
+                block_hash: header.hash_slow(),
+                receipts_root: header.receipts_root,
+            },
+            finalized: false,
+            parent_beacon_root: None,
+        };
+        let ancestor_record = record(&ancestor, 1);
+        engine
+            .consensus
+            .append_anchors(vec![ancestor_record, record(&replacement, 2)])
+            .unwrap();
+        let row = logex_types::LogRow {
+            block_number: 101,
+            block_hash: old_tip.hash_slow(),
+            timestamp: 0,
+            tx_hash: B256::repeat_byte(9),
+            tx_index: 0,
+            log_index: 0,
+            address: alloy_primitives::Address::repeat_byte(1),
+            topic0: None,
+            topic1: None,
+            topic2: None,
+            topic3: None,
+            data: Default::default(),
+            data_len: 0,
+            source: logex_types::Source::Receipt,
+        };
+        {
+            let mut storage = engine.storage.write().await;
+            storage
+                .ingest_canonical_batch(
+                    &[],
+                    &ancestor,
+                    std::slice::from_ref(&ancestor),
+                    Some(&ancestor_record.anchor),
+                )
+                .unwrap();
+            if persisted_suffix {
+                storage
+                    .ingest_canonical_batch(
+                        std::slice::from_ref(&row),
+                        &old_tip,
+                        &[ancestor.clone(), old_tip.clone()],
+                        None,
+                    )
+                    .unwrap();
+            }
+        }
+        engine
+            .head_tracker
+            .restore([ancestor.clone(), old_tip.clone()]);
+        engine.progress.record_block(101, 1);
+        manager.notify(std::slice::from_ref(&row));
+        assert!(!receiver.try_recv().unwrap().removed);
+        let result = engine.reconcile_consensus_reorg().await;
+        if persisted_suffix {
+            assert!(result.unwrap());
+            let removal = receiver
+                .try_recv()
+                .expect("committed canonical retirement must publish removal");
+            assert!(removal.removed);
+            assert_eq!(removal.rows.len(), 1);
+            assert_eq!(removal.rows[0].block_hash, row.block_hash);
+            assert_eq!(engine.head_tracker.tip_header(), Some(&ancestor));
+            assert_eq!(
+                engine.storage.read().await.sync_head().unwrap().block_hash,
+                ancestor.hash_slow()
+            );
+            let mut replacement_row = row.clone();
+            replacement_row.block_hash = replacement.hash_slow();
+            replacement_row.timestamp = replacement.timestamp;
+            let replacement_anchor = record(&replacement, 2).anchor;
+            assert!(
+                engine
+                    .publish_selected_forward_rows(
+                        std::slice::from_ref(&replacement_row),
+                        std::slice::from_ref(&replacement),
+                        std::slice::from_ref(&replacement_row.block_hash),
+                        &replacement_anchor,
+                    )
+                    .await
+                    .unwrap()
+            );
+            // Both existing forward callers notify synchronously after this
+            // selected-storage helper. Peer fetching is outside this fixture.
+            manager.notify(std::slice::from_ref(&replacement_row));
+            let addition = receiver.try_recv().unwrap();
+            assert!(!addition.removed);
+            assert_eq!(addition.rows[0].tx_hash, removal.rows[0].tx_hash);
+            assert_eq!(addition.rows[0].log_index, removal.rows[0].log_index);
+            assert_ne!(addition.rows[0].block_hash, removal.rows[0].block_hash);
+        } else {
+            assert!(result.is_err());
+            assert!(receiver.try_recv().is_err());
+            assert_eq!(engine.head_tracker.tip_header(), Some(&old_tip));
+        }
+    }
+}
+
+// One blocking slot makes the pre-start cancellation boundary deterministic.
+#[test]
+fn reorg_worker_queued_abort_and_started_completion() {
+    for started in [false, true] {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let (mut engine, _shutdown, _resources) = fixture().await;
+            let manager = SubscriptionManager::new();
+            let mut receiver = manager.subscribe();
+            engine.subscriptions = Some(manager.clone());
+            let ancestor = Header {
+                number: 100,
+                ..Default::default()
+            };
+            let old_tip = Header {
+                number: 101,
+                parent_hash: ancestor.hash_slow(),
+                ..Default::default()
+            };
+            let replacement = Header {
+                timestamp: 1,
+                ..old_tip.clone()
+            };
+            let record = |header: &Header, slot| logex_cl::AnchorRecord {
+                anchor: ExecutionAnchor {
+                    beacon_root: B256::repeat_byte(slot as u8),
+                    beacon_slot: slot,
+                    block_number: header.number,
+                    block_hash: header.hash_slow(),
+                    receipts_root: header.receipts_root,
+                },
+                finalized: false,
+                parent_beacon_root: None,
+            };
+            let ancestor_record = record(&ancestor, 1);
+            engine
+                .consensus
+                .append_anchors(vec![ancestor_record, record(&replacement, 2)])
+                .unwrap();
+            let row = logex_types::LogRow {
+                block_number: 101,
+                block_hash: old_tip.hash_slow(),
+                timestamp: 0,
+                tx_hash: B256::repeat_byte(9),
+                tx_index: 0,
+                log_index: 0,
+                address: alloy_primitives::Address::repeat_byte(1),
+                topic0: None,
+                topic1: None,
+                topic2: None,
+                topic3: None,
+                data: Default::default(),
+                data_len: 0,
+                source: logex_types::Source::Receipt,
+            };
+            {
+                let mut storage = engine.storage.write().await;
+                storage
+                    .ingest_canonical_batch(
+                        &[],
+                        &ancestor,
+                        std::slice::from_ref(&ancestor),
+                        Some(&ancestor_record.anchor),
+                    )
+                    .unwrap();
+                storage
+                    .ingest_canonical_batch(
+                        std::slice::from_ref(&row),
+                        &old_tip,
+                        &[ancestor.clone(), old_tip.clone()],
+                        None,
+                    )
+                    .unwrap();
+            }
+            engine
+                .head_tracker
+                .restore([ancestor.clone(), old_tip.clone()]);
+            engine.progress.record_block(101, 1);
+            manager.notify(std::slice::from_ref(&row));
+            assert!(!receiver.try_recv().unwrap().removed);
+            let storage = Arc::clone(&engine.storage);
+            let held_read = storage.read().await;
+            let (release, wait) = std::sync::mpsc::channel();
+            let blocker = if started {
+                None
+            } else {
+                let (entered, entry) = tokio::sync::oneshot::channel();
+                let task = tokio::task::spawn_blocking(move || {
+                    entered.send(()).unwrap();
+                    wait.recv().unwrap();
+                });
+                entry.await.unwrap();
+                Some(task)
+            };
+            let mut action = Box::pin(engine.reconcile_consensus_reorg());
+            assert!(futures::poll!(&mut action).is_pending());
+            if started {
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    while storage.try_read().is_ok() {
+                        assert!(futures::poll!(&mut action).is_pending());
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .unwrap();
+                // The blocking worker is waiting on storage, while this single
+                // runtime thread continues polling timers and cancellation.
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+            drop(action);
+            drop(held_read);
+            if let Some(blocker) = blocker {
+                release.send(()).unwrap();
+                blocker.await.unwrap();
+                // FIFO single-slot barrier confirms the aborted queued job has
+                // been passed without starting the transaction.
+                tokio::task::spawn_blocking(|| ()).await.unwrap();
+                assert!(receiver.try_recv().is_err());
+                assert_eq!(
+                    storage.read().await.sync_head().unwrap().block_hash,
+                    old_tip.hash_slow()
+                );
+            } else {
+                let removal = tokio::time::timeout(Duration::from_secs(5), receiver.recv())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert!(removal.removed);
+                assert_eq!(removal.rows.len(), 1);
+                assert_eq!(removal.rows[0].block_hash, old_tip.hash_slow());
+                assert_eq!(
+                    storage.read().await.sync_head().unwrap().block_hash,
+                    ancestor.hash_slow()
+                );
+            }
+        });
+    }
 }
