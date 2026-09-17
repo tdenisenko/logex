@@ -23,7 +23,19 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use crate::{types::Subscription, TopicHash};
 
 pub trait TopicSubscriptionFilter {
-    /// Returns true iff the topic is of interest and we can subscribe to it.
+    /// Returns true iff the topic is eligible for local subscription and incoming traffic.
+    ///
+    /// In this vendored implementation, this predicate is also called once per incoming
+    /// publication (including codec-invalid publications), GRAFT topic and PRUNE topic,
+    /// before that item creates retained topic state or validation work. Ineligible traffic
+    /// is ignored without an invalid-message penalty. Publication eligibility uses its wire
+    /// topic, before any data transform.
+    ///
+    /// Implement this as a topic eligibility predicate, not a consumable subscription quota:
+    /// stateful callbacks now receive traffic-driven calls as well as local subscribe calls.
+    /// A static whitelist avoids eligibility changes leaving existing subscriptions behind.
+    /// The incoming SUBSCRIBE/UNSUBSCRIBE batch hooks still apply separately; their overrides
+    /// and cardinality limits are not consulted for publication, GRAFT or PRUNE admission.
     fn can_subscribe(&mut self, topic_hash: &TopicHash) -> bool;
 
     /// Filters a list of incoming subscriptions and returns a filtered set

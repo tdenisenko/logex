@@ -6845,3 +6845,261 @@ fn logex_expiry_heartbeat_releases_idle_duplicate_owners() {
     assert!(gs.duplicate_cache.contains(&live));
     assert!(gs.published_message_ids.contains(&live));
 }
+
+// Exercise topic admission through the handlers that own caches and peer state.
+#[derive(Clone, Default)]
+struct LogexTopicTransform {
+    calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl DataTransform for LogexTopicTransform {
+    fn inbound_transform(&self, raw: RawMessage) -> Result<Message, std::io::Error> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if raw.data == [0xff] {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "test transform",
+            ));
+        }
+        IdentityTransform.inbound_transform(raw)
+    }
+
+    fn outbound_transform(
+        &self,
+        topic: &TopicHash,
+        data: Vec<u8>,
+    ) -> Result<Vec<u8>, std::io::Error> {
+        IdentityTransform.outbound_transform(topic, data)
+    }
+}
+
+fn logex_topic_fixture(
+    explicit: bool,
+) -> InjectNodes<LogexTopicTransform, WhitelistSubscriptionFilter> {
+    let mut params = PeerScoreParams::default();
+    for name in ["allowed", "denied"] {
+        params.topics.insert(
+            Topic::new(name).hash(),
+            TopicScoreParams {
+                time_in_mesh_weight: 0.0,
+                first_message_deliveries_weight: 0.0,
+                mesh_message_deliveries_weight: 0.0,
+                mesh_failure_penalty_weight: 0.0,
+                invalid_message_deliveries_weight: -2.0,
+                invalid_message_deliveries_decay: 0.9,
+                ..Default::default()
+            },
+        );
+    }
+    inject_nodes()
+        .peer_no(1)
+        .topics(vec!["allowed".into()])
+        .explicit(usize::from(explicit))
+        .subscription_filter(WhitelistSubscriptionFilter(HashSet::from([Topic::new(
+            "allowed",
+        )
+        .hash()])))
+        .gs_config(
+            ConfigBuilder::default()
+                .validate_messages()
+                .build()
+                .unwrap(),
+        )
+        .scoring(Some((params, PeerScoreThresholds::default())))
+}
+
+fn logex_topic_message(source: PeerId, topic: &str, data: u8) -> RawMessage {
+    RawMessage {
+        source: Some(source),
+        data: vec![data],
+        sequence_number: Some(u64::from(data)),
+        topic: Topic::new(topic).hash(),
+        signature: None,
+        key: None,
+        validated: false,
+    }
+}
+
+#[test]
+fn logex_topic_receive_denied_before_transform_and_retention() {
+    let (mut gs, peers, receivers, _) = logex_topic_fixture(false).create_network();
+    let receivers = flush_events(&mut gs, receivers);
+    let cache_before = format!("{:?}", gs.mcache);
+    let score_before = gs.peer_score(&peers[0]);
+    // Both a transform-successful and a transform-failing body are neutral.
+    for data in [1, 0xff] {
+        gs.handle_received_message(logex_topic_message(peers[0], "denied", data), &peers[0]);
+    }
+    assert_eq!(
+        gs.data_transform
+            .calls
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+    assert_eq!(gs.duplicate_cache.retained_len(), 0);
+    assert_eq!(format!("{:?}", gs.mcache), cache_before);
+    assert!(gs.events.is_empty());
+    assert_eq!(gs.peer_score(&peers[0]), score_before);
+    assert_eq!(count_control_msgs(receivers, |_, _| true).0, 0);
+}
+
+#[test]
+fn logex_topic_receive_allowed_validation_lifecycle() {
+    let (mut gs, peers, receivers, _) = logex_topic_fixture(false).create_network();
+    let _receivers = flush_events(&mut gs, receivers);
+    for (data, acceptance) in [
+        (1, MessageAcceptance::Accept),
+        (2, MessageAcceptance::Reject),
+    ] {
+        let raw = logex_topic_message(peers[0], "allowed", data);
+        let id = gs
+            .config
+            .message_id(&IdentityTransform.inbound_transform(raw.clone()).unwrap());
+        gs.handle_received_message(raw, &peers[0]);
+        assert!(gs.duplicate_cache.contains(&id));
+        assert!(gs.mcache.get(&id).is_some());
+        assert!(
+            matches!(gs.events.pop_front(), Some(ToSwarm::GenerateEvent(Event::Message { message_id, .. })) if message_id == id)
+        );
+        let accepted = matches!(acceptance, MessageAcceptance::Accept);
+        assert!(gs.report_message_validation_result(&id, &peers[0], acceptance));
+        if accepted {
+            assert!(gs.mcache.get(&id).unwrap().validated);
+        } else {
+            assert!(gs.mcache.get(&id).is_none());
+        }
+    }
+    assert_eq!(
+        gs.data_transform
+            .calls
+            .load(std::sync::atomic::Ordering::SeqCst),
+        2
+    );
+}
+
+#[test]
+fn logex_topic_graft_denied_normal_and_explicit_peers() {
+    for explicit in [false, true] {
+        let (mut gs, peers, receivers, _) = logex_topic_fixture(explicit).create_network();
+        let receivers = flush_events(&mut gs, receivers);
+        let denied = Topic::new("denied").hash();
+        gs.handle_graft(&peers[0], vec![denied.clone()]);
+        assert!(!gs.connected_peers[&peers[0]].topics.contains(&denied));
+        assert!(gs.backoffs.get_backoff_time(&denied, &peers[0]).is_none());
+        assert!(gs.events.is_empty());
+        assert_eq!(count_control_msgs(receivers, |_, _| true).0, 0);
+    }
+}
+
+#[test]
+fn logex_topic_graft_mixed_preserves_allowed_mesh_membership() {
+    let (mut gs, peers, receivers, topics) = logex_topic_fixture(false).create_network();
+    let _receivers = flush_events(&mut gs, receivers);
+    let denied = Topic::new("denied").hash();
+    gs.handle_graft(&peers[0], vec![denied.clone(), topics[0].clone()]);
+    assert_eq!(
+        gs.connected_peers[&peers[0]].topics,
+        BTreeSet::from([topics[0].clone()])
+    );
+    assert!(gs.mesh[&topics[0]].contains(&peers[0]));
+    assert!(gs.backoffs.get_backoff_time(&denied, &peers[0]).is_none());
+}
+
+#[test]
+fn logex_topic_prune_denied_no_backoff_allowed_removes_mesh() {
+    let (mut gs, peers, receivers, topics) = logex_topic_fixture(false).create_network();
+    gs.handle_graft(&peers[0], vec![topics[0].clone()]);
+    let _receivers = flush_events(&mut gs, receivers);
+    let denied = Topic::new("denied").hash();
+    gs.handle_prune(&peers[0], vec![(denied.clone(), vec![], Some(30))]);
+    assert!(gs.backoffs.get_backoff_time(&denied, &peers[0]).is_none());
+    assert!(gs.events.is_empty());
+    assert!(gs.mesh[&topics[0]].contains(&peers[0]));
+    gs.handle_prune(&peers[0], vec![(topics[0].clone(), vec![], Some(30))]);
+    assert!(!gs.mesh[&topics[0]].contains(&peers[0]));
+    assert!(gs
+        .backoffs
+        .get_backoff_time(&topics[0], &peers[0])
+        .is_some());
+}
+
+#[test]
+fn logex_topic_subscription_whitelist_preserves_allowed_changes() {
+    let (mut gs, peers, receivers, topics) = logex_topic_fixture(false).create_network();
+    let _receivers = flush_events(&mut gs, receivers);
+    let denied = Topic::new("denied").hash();
+    gs.handle_received_subscriptions(
+        &[
+            Subscription {
+                action: SubscriptionAction::Subscribe,
+                topic_hash: denied.clone(),
+            },
+            Subscription {
+                action: SubscriptionAction::Subscribe,
+                topic_hash: topics[0].clone(),
+            },
+        ],
+        &peers[0],
+    );
+    assert_eq!(
+        gs.connected_peers[&peers[0]].topics,
+        BTreeSet::from([topics[0].clone()])
+    );
+    assert!(!gs.events.iter().any(|event| matches!(event, ToSwarm::GenerateEvent(Event::Subscribed { topic, .. }) if topic == &denied)));
+    gs.handle_received_subscriptions(
+        &[Subscription {
+            action: SubscriptionAction::Unsubscribe,
+            topic_hash: topics[0].clone(),
+        }],
+        &peers[0],
+    );
+    assert!(gs.connected_peers[&peers[0]].topics.is_empty());
+}
+
+#[test]
+fn logex_topic_codec_invalid_denied_neutral_allowed_penalized() {
+    let (mut gs, peers, receivers, _) = logex_topic_fixture(false).create_network();
+    let _receivers = flush_events(&mut gs, receivers);
+    let initial_score = gs.peer_score(&peers[0]).unwrap();
+    let mut deliver = |topic: &str| {
+        gs.on_connection_handler_event(
+            peers[0],
+            ConnectionId::new_unchecked(0),
+            HandlerEvent::Message {
+                rpc: Rpc {
+                    messages: vec![],
+                    subscriptions: vec![],
+                    control_msgs: vec![],
+                },
+                invalid_messages: vec![(
+                    logex_topic_message(peers[0], topic, 1),
+                    ValidationError::InvalidSignature,
+                )],
+            },
+        );
+        gs.peer_score(&peers[0]).unwrap()
+    };
+    assert_eq!(deliver("denied"), initial_score);
+    assert!(deliver("allowed") < initial_score);
+    assert_eq!(gs.duplicate_cache.retained_len(), 0);
+    assert!(gs.events.is_empty());
+}
+
+#[test]
+fn logex_topic_allow_all_retains_unsubscribed_message_behavior() {
+    let (mut gs, peers, receivers, _) = inject_nodes1().peer_no(1).create_network();
+    let _receivers = flush_events(&mut gs, receivers);
+    let raw = logex_topic_message(peers[0], "arbitrary", 1);
+    let id = gs
+        .config
+        .message_id(&IdentityTransform.inbound_transform(raw.clone()).unwrap());
+    gs.handle_received_message(raw, &peers[0]);
+    assert!(gs.duplicate_cache.contains(&id));
+    assert!(gs.mcache.get(&id).is_some());
+    assert!(gs.events.is_empty());
+    let topic = Topic::new("arbitrary").hash();
+    gs.handle_graft(&peers[0], vec![topic.clone()]);
+    assert!(gs.connected_peers[&peers[0]].topics.contains(&topic));
+    gs.handle_prune(&peers[0], vec![(topic.clone(), vec![], Some(30))]);
+    assert!(gs.backoffs.get_backoff_time(&topic, &peers[0]).is_some());
+}
