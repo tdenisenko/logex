@@ -15,6 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::ops::ControlFlow;
 use std::sync::Arc;
@@ -28,10 +29,10 @@ use crate::utils::{
 };
 
 use datafusion_common::error::DataFusionErrorBuilder;
-use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
+use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
 use datafusion_common::{not_impl_err, plan_err, Result};
 use datafusion_common::{RecursionUnnestOption, UnnestOptions};
-use datafusion_expr::expr::{PlannedReplaceSelectItem, WildcardOptions};
+use datafusion_expr::expr::{PlannedReplaceSelectItem, Sort, WildcardOptions};
 use datafusion_expr::expr_rewriter::{
     normalize_col, normalize_col_with_schemas_and_ambiguity_check, normalize_sorts,
 };
@@ -115,7 +116,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             true,
             Some(base_plan.schema().as_ref()),
         )?;
-        let order_by_rex = normalize_sorts(order_by_rex, &projected_plan)?;
+        let mut order_by_rex = normalize_sorts(order_by_rex, &projected_plan)?;
 
         // This alias map is resolved and looked up in both having exprs and group by exprs
         let alias_map = extract_aliases(&select_exprs);
@@ -217,13 +218,22 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             .transpose()?;
 
         // The outer expressions we will search through for aggregates.
-        // Aggregates may be sourced from the SELECT list or from the HAVING expression.
+        // Aggregates may be sourced from SELECT, HAVING or QUALIFY.
         let aggr_expr_haystack = select_exprs
             .iter()
             .chain(having_expr_opt.iter())
             .chain(qualify_expr_opt.iter());
         // All of the aggregate expressions (deduplicated).
-        let aggr_exprs = find_aggregate_exprs(aggr_expr_haystack);
+        let mut aggr_exprs = find_aggregate_exprs(aggr_expr_haystack);
+        // LogEx modification: collect hidden sort aggregates when this query
+        // already has an aggregation. Preserve the nonaggregate planning path.
+        if !group_by_exprs.is_empty() || !aggr_exprs.is_empty() {
+            for expr in find_aggregate_exprs(order_by_rex.iter().map(|sort| &sort.expr)) {
+                if !aggr_exprs.contains(&expr) {
+                    aggr_exprs.push(expr);
+                }
+            }
+        }
 
         // Process group by, aggregation or having
         let (
@@ -239,6 +249,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 qualify_expr_opt.as_ref(),
                 &group_by_exprs,
                 &aggr_exprs,
+                &mut order_by_rex,
             )?
         } else {
             match having_expr_opt {
@@ -858,6 +869,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
     /// * `group_by_exprs`  - Grouping expressions from the GROUP BY clause. These can be column
     ///   references or more complex expressions.
     /// * `aggr_exprs`      - Aggregate expressions, such as `SUM(a)` or `COUNT(1)`.
+    /// * `order_by`        - Sort expressions rebound to the aggregate outputs.
     ///
     /// # Return
     ///
@@ -870,7 +882,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
     ///   the aggregate
     /// * `qualify_expr_post_aggr`  - The "qualify" expression rewritten to reference a column from
     ///   the aggregate
-    #[allow(clippy::type_complexity)]
+    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
     fn aggregate(
         &self,
         input: &LogicalPlan,
@@ -879,7 +891,87 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
         qualify_expr_opt: Option<&Expr>,
         group_by_exprs: &[Expr],
         aggr_exprs: &[Expr],
+        order_by: &mut [Sort],
     ) -> Result<(LogicalPlan, Vec<Expr>, Option<Expr>, Option<Expr>)> {
+        // LogEx modification: distinguish structurally different aggregates whose
+        // schema names collide (CAST/TRY_CAST intentionally omit their types).
+        // Keep this mapping local to aggregation; preserve public projection names.
+        let mut used = input
+            .schema()
+            .fields()
+            .iter()
+            .map(|field| field.name().clone())
+            .collect::<HashSet<_>>();
+        for expr in group_by_exprs {
+            match expr {
+                Expr::GroupingSet(set) => used.extend(
+                    set.distinct_expr()
+                        .iter()
+                        .map(|expr| expr.schema_name().to_string()),
+                ),
+                _ => {
+                    used.insert(expr.schema_name().to_string());
+                }
+            }
+        }
+        let mut reserved = used.clone();
+        reserved.extend(aggr_exprs.iter().map(|expr| expr.schema_name().to_string()));
+        let mut replacements = Vec::new();
+        let mut next_alias = 0;
+        let mut aggregate_outputs = Cow::Borrowed(aggr_exprs);
+        for (index, expr) in aggr_exprs.iter().enumerate() {
+            if used.insert(expr.schema_name().to_string()) {
+                continue;
+            }
+            let name = loop {
+                let name = format!("__logex_aggregate_{next_alias}");
+                next_alias += 1;
+                if reserved.insert(name.clone()) {
+                    break name;
+                }
+            };
+            let aliased = expr.clone().alias(name);
+            replacements.push((expr.clone(), aliased.clone()));
+            aggregate_outputs.to_mut()[index] = aliased;
+        }
+        let aggr_exprs = aggregate_outputs;
+        let replace_aggregates = |expr: &Expr| -> Result<Expr> {
+            Ok(expr
+                .clone()
+                .transform_up(|nested| {
+                    if let Some((_, replacement)) = replacements
+                        .iter()
+                        .find(|(original, _)| original == &nested)
+                    {
+                        Ok(Transformed::yes(replacement.clone()))
+                    } else {
+                        Ok(Transformed::no(nested))
+                    }
+                })?
+                .data)
+        };
+        let rewrite = |expr: &Expr| -> Result<Expr> {
+            replace_aggregates(expr)?.alias_if_changed(expr.name_for_alias()?)
+        };
+        let rewritten = if replacements.is_empty() {
+            None
+        } else {
+            Some((
+                select_exprs
+                    .iter()
+                    .map(rewrite)
+                    .collect::<Result<Vec<_>>>()?,
+                having_expr_opt.map(replace_aggregates).transpose()?,
+                qualify_expr_opt.map(replace_aggregates).transpose()?,
+            ))
+        };
+        let (select_exprs, having_expr_opt, qualify_expr_opt) = match &rewritten {
+            Some((select, having, qualify)) => {
+                (select.as_slice(), having.as_ref(), qualify.as_ref())
+            }
+            None => (select_exprs, having_expr_opt, qualify_expr_opt),
+        };
+
         // create the aggregate plan
         let options =
             LogicalPlanBuilderOptions::new().with_add_implicit_group_by_exprs(true);
@@ -917,7 +1009,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                 _ => aggr_projection_exprs.push(expr.clone()),
             }
         }
-        aggr_projection_exprs.extend_from_slice(aggr_exprs);
+        aggr_projection_exprs.extend_from_slice(&aggr_exprs);
 
         // now attempt to resolve columns and replace with fully-qualified columns
         let aggr_projection_exprs = aggr_projection_exprs
@@ -931,6 +1023,16 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
             .iter()
             .map(|expr| expr_as_column_expr(expr, input))
             .collect::<Result<Vec<Expr>>>()?;
+
+        // ORDER BY is parsed before aggregation and may contain hidden aggregates.
+        // Rebind by expression identity before the generic sort builder sees the
+        // deliberately non-unique display names of cast arguments.
+        if !replacements.is_empty() {
+            for sort in order_by {
+                let expr = replace_aggregates(&sort.expr)?;
+                sort.expr = rebase_expr(&expr, &aggr_projection_exprs, input)?;
+            }
+        }
 
         // next we re-write the projection
         let select_exprs_post_aggr = select_exprs

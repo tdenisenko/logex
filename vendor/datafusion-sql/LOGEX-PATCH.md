@@ -30,15 +30,29 @@ recursively detect aggregate functions and removes the now-unused `Alias`
 import. A nearby modification notice records the local change as required by
 the Apache License.
 
+The SQL planner also contains a local correction for distinct aggregate
+expressions with identical schema names (notably CAST/TRY_CAST arguments).
+The upstream issue is https://github.com/apache/datafusion/issues/3353; this
+change is a LogEx correction, not a claimed upstream backport. Only colliding
+aggregate outputs receive unique internal aliases, reserved against input and
+group output names. Structural expression matching rebinds SELECT, HAVING,
+QUALIFY and ORDER BY through the existing planner; public projection names remain
+intact. Hidden ORDER BY aggregates are collected when the query already has
+aggregation; the nonaggregate planning path remains unchanged.
+Noncolliding expressions retain their original names and borrowed rewrite path.
+Public regressions live in `crates/logex-query/tests/sql_aggregate_contracts.rs`,
+including ordering, rollups, windows, nulls and preserved duplicate-name errors.
+
 The only other additions under this directory are this document, the exact
 local diff, and the original-file hash inventory. Run
 `python3 tools/verify_datafusion_vendor.py` from the repository root to verify
-both complete packages and their reviewed patches offline.
+all complete packages and their reviewed patches offline.
 
 ## Removal condition
 
 Remove this patch and vendor directory when LogEx adopts a maintained
 DataFusion release containing #20943 and that release passes the full SQL
 compatibility suite, including mixed numeric/text coercion and guarded
-`NOT IN (..., NULL)` cases. Until then, keep the backport limited to the
-upstream production hunk and its required attribution.
+`NOT IN (..., NULL)` cases. The local aggregate binding correction must likewise
+remain until a maintained release fixes #3353 and passes the aggregate contract
+regressions.
