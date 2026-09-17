@@ -3,7 +3,7 @@
 Source `52ce3bfd` on `audit/query-sum-overflow`, based on PR #215 merge
 `8fd2e55f`, corrects the findings below. Focused validation passes 33 application
 controls (two existing benchmark ignores) and 99 isolated package tests. All ten final-source workspace gates pass (1,875 tests / 24 existing ignores).
-Exact-head CI and merge remain pending.
+All six CI jobs passed on `703c4f8c`, including ten Linux volume/template cases with verified cleanup. [PR #216](https://github.com/tdenisenko/logex/pull/216) merged as `929a3639`. The merge tree is identical to the tested head.
 
 ## B7-32: silent fixed-width overflow (P1)
 
@@ -143,7 +143,7 @@ All ten workspace gates passed on the initial correction `d2d13a65`; those logs
 remain classified separately from final-revision validation. Final-source focused
 Clippy, formatting and complete-vendor verification pass. All ten final-source workspace gates pass, including 1,875 tests with 24 existing
 ignores across 31 targets, documentation tests, strict Clippy, formatting, vendor
-checks, compilation and release linking. Exact-head CI and merge remain pending.
+checks, compilation and release linking. All six CI jobs passed on `703c4f8c`, including ten Linux volume/template cases with verified cleanup. [PR #216](https://github.com/tdenisenko/logex/pull/216) merged as `929a3639`. The merge tree is identical to the tested head.
 
 [Validation record](baselines/2026-09-17-query-sum-overflow.json),
 [raw gate logs](baselines/2026-09-17-query-sum-overflow-validation.json.gz) and
