@@ -1,7 +1,7 @@
 # Sync selection and historical integration
 
 This follow-up starts at PR #222 merge `bdee0df8` on
-`audit/sync-selection-integration`. Source `b61e6363` passes all ten local gates; CI and merge remain. The checkpoint-gap retention item
+`audit/sync-selection-integration`. Source `b61e6363` passes all ten local gates; all six CI jobs passed before PR #223 merged as `1a34273c`. The checkpoint-gap retention item
 is closed by [PR #222](checkpoint-gap-memory.md).
 
 ## Forward publication under changing selection
@@ -161,4 +161,6 @@ passing logs, exact known command provenance, final reviews, source inventories
 and complete final gate logs. Two early invocation/exit details were not preserved
 and remain explicitly unknown; their compiler/behavior outputs are retained.
 Known vendored dependency and debug-linker warnings remain recorded; all final
-gates pass. Exact-head CI and merge are still required for closure.
+gates pass. Exact-head CI and merge passed; the verified closure follows.
+
+All six CI jobs passed on `2c71c747`, including ten Linux volume/template cases with verified cleanup. [PR #223](https://github.com/tdenisenko/logex/pull/223) merged as `1a34273c`. The merge tree is identical to the tested head. B5-15/B5-16 are closed within their documented scope. The batch-5 offline review is complete; integrated acceptance and broader offline audit work remain open.

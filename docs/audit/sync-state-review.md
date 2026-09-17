@@ -225,3 +225,5 @@ It corrects reproduced obsolete forward publication and queued-rewind behavior
 without holding CL across the complete reorg scan. Source `b61e6363` passes
 focused checks, final review and all ten local gates (1,960 tests /
 24 ignores); CI and merge remain.
+
+The subsequent selection integration merged in [PR #223](https://github.com/tdenisenko/logex/pull/223) as `1a34273c` after all local and CI gates. Together with the historical disposition and prior fixes, this closes batch 5 offline review; integrated acceptance remains open.
