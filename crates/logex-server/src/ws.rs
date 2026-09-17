@@ -430,7 +430,10 @@ impl Erc20TransferSubscription {
     }
 
     fn notification_for(&self, row: &LogRow) -> Option<Erc20TransferNotification> {
-        if row.topic0.as_ref() != Some(&*ERC20_TRANSFER_TOPIC) || row.data_len != 32 {
+        if row.topic0.as_ref() != Some(&*ERC20_TRANSFER_TOPIC)
+            || row.topic3.is_some()
+            || row.data_len != 32
+        {
             return None;
         }
         if !self.token_addresses.is_empty() && !self.token_addresses.contains(&row.address) {
@@ -849,26 +852,36 @@ fn address_vec<'de, D>(deserializer: D) -> Result<Vec<Address>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    let value = serde_json::Value::deserialize(deserializer)?;
-    match value {
-        serde_json::Value::Null => Ok(Vec::new()),
-        serde_json::Value::String(text) => parse_address_list(&text)
-            .map_err(serde::de::Error::custom)
-            .map(|addresses| addresses.into_iter().collect()),
-        serde_json::Value::Array(values) => values
-            .iter()
-            .map(|value| {
-                value
-                    .as_str()
-                    .ok_or_else(|| "expected address hex string".to_string())
-                    .and_then(parse_address)
-            })
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(serde::de::Error::custom),
-        _ => Err(serde::de::Error::custom(
-            "expected address string or address array",
-        )),
+    struct AddressListVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for AddressListVisitor {
+        type Value = Vec<Address>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("null, an address list string, or an array of address strings")
+        }
+
+        fn visit_unit<E>(self) -> Result<Self::Value, E> {
+            Ok(Vec::new())
+        }
+
+        fn visit_str<E: serde::de::Error>(self, text: &str) -> Result<Self::Value, E> {
+            parse_address_list(text).map_err(E::custom)
+        }
+
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut sequence: A,
+        ) -> Result<Self::Value, A::Error> {
+            let mut addresses = Vec::new();
+            while let Some(text) = sequence.next_element::<String>()? {
+                addresses.push(parse_address(&text).map_err(serde::de::Error::custom)?);
+            }
+            Ok(addresses)
+        }
     }
+
+    deserializer.deserialize_any(AddressListVisitor)
 }
 
 fn parse_address_list(text: &str) -> Result<Vec<Address>, String> {
@@ -882,20 +895,42 @@ fn amount_bound<'de, D>(deserializer: D) -> Result<Option<[u8; 32]>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    let value = serde_json::Value::deserialize(deserializer)?;
-    match value {
-        serde_json::Value::Null => Ok(None),
-        serde_json::Value::String(text) if text.trim().is_empty() => Ok(None),
-        serde_json::Value::String(text) => parse_u256_bound(&text)
-            .map(Some)
-            .map_err(serde::de::Error::custom),
-        serde_json::Value::Number(number) => parse_u256_bound(&number.to_string())
-            .map(Some)
-            .map_err(serde::de::Error::custom),
-        _ => Err(serde::de::Error::custom(
-            "amount bounds must be raw uint256 strings",
-        )),
+    struct AmountBoundVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for AmountBoundVisitor {
+        type Value = Option<[u8; 32]>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("null, a raw uint256 string, or an unsigned 64-bit integer")
+        }
+
+        fn visit_unit<E>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_str<E: serde::de::Error>(self, text: &str) -> Result<Self::Value, E> {
+            if text.trim().is_empty() {
+                return Ok(None);
+            }
+            parse_u256_bound(text).map(Some).map_err(E::custom)
+        }
+
+        fn visit_u64<E>(self, number: u64) -> Result<Self::Value, E> {
+            let mut amount = [0; 32];
+            amount[24..].copy_from_slice(&number.to_be_bytes());
+            Ok(Some(amount))
+        }
+
+        fn visit_i64<E: serde::de::Error>(self, number: i64) -> Result<Self::Value, E> {
+            let number = u64::try_from(number)
+                .map_err(|_| E::custom("amount bound must not be negative"))?;
+            self.visit_u64(number)
+        }
     }
+
+    // Floating-point tokens are deliberately unsupported: uint256 bounds must
+    // remain exact. Larger integer amounts are supplied as decimal/hex strings.
+    deserializer.deserialize_any(AmountBoundVisitor)
 }
 
 fn parse_u256_bound(value: &str) -> Result<[u8; 32], String> {
@@ -904,21 +939,32 @@ fn parse_u256_bound(value: &str) -> Result<[u8; 32], String> {
         return Err("amount bound cannot be empty".into());
     }
     if let Some(hex) = text.strip_prefix("0x") {
+        if hex.is_empty() {
+            return Err("hex amount bound must contain at least one digit".into());
+        }
         if hex.len() > 64 {
             return Err("hex amount bound must fit in uint256".into());
         }
-        let padded = format!("{hex:0>64}");
-        let bytes = hex::decode(padded).map_err(|e| format!("invalid hex amount bound: {e}"))?;
-        return bytes
-            .try_into()
-            .map_err(|_| "hex amount bound must be 32 bytes".to_string());
+        let mut padded = [b'0'; 64];
+        padded[64 - hex.len()..].copy_from_slice(hex.as_bytes());
+        let mut amount = [0; 32];
+        hex::decode_to_slice(padded, &mut amount)
+            .map_err(|e| format!("invalid hex amount bound: {e}"))?;
+        return Ok(amount);
     }
     if !text.chars().all(|ch| ch.is_ascii_digit()) {
         return Err("amount bound must be a decimal integer or 0x-prefixed uint256".into());
     }
 
+    // Scan syntax above, but only significant digits need uint256 arithmetic.
+    // A uint256 has at most 78 decimal digits; the arithmetic still checks the
+    // exact upper bound for 78-digit values. Leading zeroes remain accepted.
+    let significant = text.trim_start_matches('0');
+    if significant.len() > 78 {
+        return Err("decimal amount bound must fit in uint256".into());
+    }
     let mut out = [0_u8; 32];
-    for digit in text.bytes().map(|byte| byte - b'0') {
+    for digit in significant.bytes().map(|byte| byte - b'0') {
         mul_small(&mut out, 10)?;
         add_small(&mut out, digit)?;
     }
@@ -980,6 +1026,407 @@ mod tests {
     use super::*;
     use alloy_primitives::{Address, B256, Bytes, bytes};
     use logex_types::Source;
+
+    #[tokio::test]
+    async fn erc20_inputs_invalid_update_cannot_mutate_existing_session() {
+        use tower::ServiceExt;
+        let manager = SubscriptionManager::new();
+        let tracked = Address::repeat_byte(1);
+        let replacement = Address::repeat_byte(2);
+        let token = Address::repeat_byte(0xBB);
+        let subscription =
+            Erc20TransferSubscription::new(vec![tracked], vec![token], None, None).unwrap();
+        let attachment = manager.upsert_live_transfer_session(
+            Some("atomic-input".into()),
+            LiveSubscriptionScope::Dashboard,
+            subscription,
+            true,
+        );
+        manager.notify(&[make_transfer_log(token, tracked, Address::ZERO, 5, 10)]);
+        let directory = tempfile::tempdir().unwrap();
+        let storage =
+            logex_storage::PartitionManager::open(logex_storage::PartitionManagerConfig {
+                data_dir: directory.path().to_path_buf(),
+                partition_target_rows: 100,
+                compaction_safety_margin_blocks: 2048,
+            })
+            .unwrap();
+        let state = Arc::new(AppState::new(
+            storage,
+            Some(manager.clone()),
+            Default::default(),
+        ));
+        let router = axum::Router::new()
+            .route(
+                "/subscriptions",
+                axum::routing::post(handle_live_transfer_subscribe),
+            )
+            .with_state(state);
+        let private = |text: String| serde_json::json!({"$serde_json::private::RawValue":text});
+        for (index, (fields, expected)) in [
+            (
+                serde_json::json!({"addresses":private(serde_json::to_string(&format!("{replacement:#x}")).unwrap())}),
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+            (
+                serde_json::json!({"addresses":[format!("{replacement:#x}")],"minAmount":private("1".into())}),
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+            (
+                serde_json::json!({"addresses":[format!("{replacement:#x}")],"minAmount":"10","maxAmount":"1"}),
+                StatusCode::BAD_REQUEST,
+            ),
+        ].into_iter().enumerate() {
+            let prior_history = serde_json::to_value(&manager.live_transfer_session("atomic-input").unwrap().notifications).unwrap();
+            let mut request = fields;
+            request["subscriptionId"] = serde_json::json!("atomic-input");
+            let response = router
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("POST")
+                        .uri("/subscriptions")
+                        .header("content-type", "application/json")
+                        .body(axum::body::Body::from(request.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected);
+            let sessions = manager.live_transfers();
+            let session = sessions.sessions.get("atomic-input").unwrap();
+            assert!(Arc::ptr_eq(&session.identity, &attachment.identity));
+            assert_eq!(session.active_connections, 1);
+            assert_eq!(session.scope, LiveSubscriptionScope::Dashboard);
+            assert_eq!(
+                session.subscription.wallet_topics,
+                HashSet::from([address_topic(tracked)])
+            );
+            assert_eq!(session.subscription.token_addresses, HashSet::from([token]));
+            assert_eq!(session.subscription.min_amount, None);
+            assert_eq!(session.subscription.max_amount, None);
+            assert_eq!(serde_json::to_value(&session.notifications).unwrap(), prior_history);
+            assert_eq!(session.dropped_notifications, 0);
+            drop(sessions);
+            let next_block = 11 + index as u64;
+            manager.notify(&[make_transfer_log(token, tracked, Address::ZERO, 5, next_block)]);
+            let snapshot = manager.live_transfer_session("atomic-input").unwrap();
+            assert_eq!(snapshot.notifications.iter().map(|row| row.block_number).collect::<Vec<_>>(), (10..=next_block).rev().collect::<Vec<_>>());
+        }
+        let invalid_new = serde_json::json!({"subscriptionId":"must-not-exist","addresses":private(serde_json::to_string(&format!("{replacement:#x}")).unwrap())});
+        let response = router
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/subscriptions")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(invalid_new.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(manager.live_transfer_session("must-not-exist").is_none());
+        let request = serde_json::json!({"subscriptionId":"atomic-input","walletAddresses":format!("{replacement:#x}, {tracked:#x}"),"minAmountRaw":1,"maxAmountRaw":"10"});
+        let response = router
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/subscriptions")
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(request.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        {
+            let sessions = manager.live_transfers();
+            let session = sessions.sessions.get("atomic-input").unwrap();
+            assert!(Arc::ptr_eq(&session.identity, &attachment.identity));
+            assert_eq!(session.active_connections, 1);
+            assert_eq!(session.scope, LiveSubscriptionScope::Service);
+            assert_eq!(session.subscription.wallet_topics.len(), 2);
+            assert_eq!(
+                session.subscription.min_amount,
+                Some(parse_u256_bound("1").unwrap())
+            );
+            assert_eq!(
+                session
+                    .notifications
+                    .iter()
+                    .map(|row| row.block_number)
+                    .collect::<Vec<_>>(),
+                vec![13, 12, 11, 10]
+            );
+        }
+        manager.detach_live_transfer_session(&attachment.id, &attachment.identity);
+    }
+
+    #[test]
+    fn erc20_inputs_preserve_address_forms_and_aliases() {
+        let first = Address::repeat_byte(1);
+        let second = Address::repeat_byte(2);
+        for field in ["addresses", "walletAddresses", "tokenAddresses"] {
+            for (value, expected) in [
+                (serde_json::Value::Null, vec![]),
+                (serde_json::json!(""), vec![]),
+                (serde_json::json!([]), vec![]),
+                (serde_json::json!(format!("{first:#x}")), vec![first]),
+                (
+                    serde_json::json!(format!(" {first:#x},\n{second:#x}\r\t ")),
+                    vec![first, second],
+                ),
+                (
+                    serde_json::json!([format!("{first:#x}"), format!("{second:#x}")]),
+                    vec![first, second],
+                ),
+            ] {
+                let wire = serde_json::json!({field:value}).to_string();
+                let request: SubscribeRequest = serde_json::from_str(&wire).unwrap();
+                let actual = if field == "tokenAddresses" {
+                    request.token_addresses
+                } else {
+                    request.addresses
+                };
+                assert_eq!(actual, expected, "{field}");
+            }
+            for value in [
+                serde_json::json!(true),
+                serde_json::json!(42),
+                serde_json::json!({}),
+                serde_json::json!([null]),
+                serde_json::json!([[]]),
+                serde_json::json!([42]),
+                serde_json::json!("0x01"),
+            ] {
+                let wire = serde_json::json!({field:value}).to_string();
+                assert!(
+                    serde_json::from_str::<SubscribeRequest>(&wire).is_err(),
+                    "{wire}"
+                );
+            }
+        }
+        let wire = format!(
+            r#"{{"type":"erc20Transfers","walletAddresses":["{first:#x}"],"minAmountRaw":"1","maxAmountRaw":2,"subscriptionScope":"dashboard","clientId":"kept-id","unknownExtension":{{"anything":true}}}}"#
+        );
+        let request: SubscribeRequest = serde_json::from_str(&wire).unwrap();
+        assert_eq!(request.subscription_id.as_deref(), Some("kept-id"));
+        assert_eq!(
+            request.live_session_scope(),
+            LiveSubscriptionScope::Dashboard
+        );
+        assert!(request.into_subscription().is_ok());
+    }
+
+    #[test]
+    fn erc20_inputs_amount_wire_types_are_exact_and_optional() {
+        for field in ["minAmount", "maxAmount", "minAmountRaw", "maxAmountRaw"] {
+            for token in ["null", r#""""#, r#""  ""#] {
+                let wire = format!("{{\"{field}\":{token}}}");
+                let request: SubscribeRequest = serde_json::from_str(&wire).unwrap();
+                assert!(request.min_amount.is_none() && request.max_amount.is_none());
+            }
+            for token in ["0", "100", "18446744073709551615", r#""0xF""#, r#""00015""#] {
+                let wire = format!("{{\"{field}\":{token}}}");
+                let request: SubscribeRequest = serde_json::from_str(&wire).unwrap();
+                let expected = parse_u256_bound(token.trim_matches('"')).unwrap();
+                let actual = if field.starts_with("min") {
+                    request.min_amount
+                } else {
+                    request.max_amount
+                };
+                assert_eq!(actual, Some(expected), "{wire}");
+            }
+            for token in [
+                "-1",
+                "-0",
+                "1.0",
+                "1e2",
+                "18446744073709551616",
+                "true",
+                "[]",
+                "{}",
+                r#""0x""#,
+            ] {
+                let wire = format!("{{\"{field}\":{token}}}");
+                assert!(
+                    serde_json::from_str::<SubscribeRequest>(&wire).is_err(),
+                    "{wire}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn erc20_inputs_uint256_boundaries_and_leading_zeroes() {
+        const MAX: &str =
+            "115792089237316195423570985008687907853269984665640564039457584007913129639935";
+        const OVER: &str =
+            "115792089237316195423570985008687907853269984665640564039457584007913129639936";
+        assert_eq!(parse_u256_bound(MAX).unwrap(), [255; 32]);
+        assert_eq!(
+            parse_u256_bound(&format!("0x{}", "f".repeat(64))).unwrap(),
+            [255; 32]
+        );
+        assert!(parse_u256_bound(OVER).is_err());
+        assert!(parse_u256_bound(&"9".repeat(79)).is_err());
+        assert_eq!(parse_u256_bound(&"0".repeat(128)).unwrap(), [0; 32]);
+        assert_eq!(
+            parse_u256_bound(&format!("{}15", "0".repeat(128))).unwrap(),
+            parse_u256_bound("0xf").unwrap()
+        );
+        assert_eq!(parse_u256_bound(&format!("000{MAX}")).unwrap(), [255; 32]);
+        assert!(parse_u256_bound(&format!("000{OVER}")).is_err());
+        for invalid in ["", "-1", "+1", "1.1", "1e2", "0X1", "0xG", "00x", "١"] {
+            assert!(parse_u256_bound(invalid).is_err(), "{invalid}");
+        }
+        let mut expected = [0; 32];
+        expected[31] = 15;
+        assert_eq!(parse_u256_bound("  0xF  ").unwrap(), expected);
+        assert_eq!(parse_u256_bound("  00015  ").unwrap(), expected);
+    }
+
+    #[test]
+    fn erc20_inputs_event_shape_and_zero_transfer_controls() {
+        let token = Address::repeat_byte(0xBB);
+        let subscription = Erc20TransferSubscription::new(vec![], vec![token], None, None).unwrap();
+        let original = make_transfer_log(token, Address::ZERO, Address::ZERO, 0, 100);
+        for mask in 0..16 {
+            let mut row = original.clone();
+            row.topic0 = (mask & 1 != 0).then_some(*ERC20_TRANSFER_TOPIC);
+            row.topic1 = (mask & 2 != 0).then_some(B256::ZERO);
+            row.topic2 = (mask & 4 != 0).then_some(B256::ZERO);
+            row.topic3 = (mask & 8 != 0).then_some(B256::ZERO);
+            assert_eq!(
+                subscription.notification_for(&row).is_some(),
+                mask == 7,
+                "mask={mask}"
+            );
+        }
+        for actual in [0, 31, 32, 33] {
+            for declared in [0, 31, 32, 33] {
+                let mut row = original.clone();
+                row.data = Bytes::from(vec![0; actual]);
+                row.data_len = declared;
+                assert_eq!(
+                    subscription.notification_for(&row).is_some(),
+                    actual == 32 && declared == 32
+                );
+            }
+        }
+        for position in [1, 2] {
+            let mut row = original.clone();
+            let mut topic = [0; 32];
+            topic[0] = 1;
+            if position == 1 {
+                row.topic1 = Some(B256::from(topic));
+            } else {
+                row.topic2 = Some(B256::from(topic));
+            }
+            assert!(subscription.notification_for(&row).is_none());
+        }
+        let notification = subscription.notification_for(&original).unwrap();
+        assert_eq!(notification.from, format!("{:#x}", Address::ZERO));
+        assert_eq!(notification.to, format!("{:#x}", Address::ZERO));
+        assert_eq!(notification.raw_amount, format!("0x{}", "00".repeat(32)));
+    }
+
+    #[test]
+    fn erc20_inputs_invalid_event_is_excluded_from_raw_hook_and_retained_history() {
+        let token = Address::repeat_byte(0xBB);
+        let subscription = Erc20TransferSubscription::new(vec![], vec![token], None, None).unwrap();
+        let valid = make_transfer_log(token, Address::ZERO, Address::repeat_byte(1), 10, 100);
+        let mut invalid = valid.clone();
+        invalid.topic3 = Some(B256::ZERO);
+        invalid.block_number = 101;
+        let rows = [valid, invalid];
+        let payload = Subscription::Erc20Transfers(subscription.clone())
+            .payload_for(&rows)
+            .unwrap();
+        let payload: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(payload.as_array().unwrap().len(), 1);
+        assert_eq!(payload[0]["blockNumber"], 100);
+        let logs = Subscription::Logs(Box::default())
+            .payload_for(&rows)
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&logs)
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        let manager = SubscriptionManager::new();
+        let mut attachment = manager.upsert_live_transfer_session(
+            Some("shape".into()),
+            LiveSubscriptionScope::Service,
+            subscription,
+            false,
+        );
+        manager.notify(&rows);
+        assert_eq!(attachment.receiver.try_recv().unwrap().len(), 1);
+        let snapshot = manager.live_transfer_session("shape").unwrap();
+        assert_eq!(snapshot.notifications.len(), 1);
+        assert_eq!(snapshot.notifications[0].block_number, 100);
+    }
+
+    #[test]
+    fn erc20_inputs_reject_literal_objects_disguised_as_values() {
+        let address = format!("{:#x}", Address::repeat_byte(1));
+        let raw = |encoded: String| serde_json::json!({"$serde_json::private::RawValue": encoded});
+        let mut accepted = Vec::new();
+        for (field, value) in [
+            ("addresses", raw(serde_json::to_string(&address).unwrap())),
+            (
+                "walletAddresses",
+                raw(serde_json::to_string(&vec![&address]).unwrap()),
+            ),
+            (
+                "tokenAddresses",
+                serde_json::json!([raw(serde_json::to_string(&address).unwrap())]),
+            ),
+            ("minAmount", raw("\"100\"".into())),
+            ("maxAmountRaw", raw("100".into())),
+            ("minAmountRaw", raw("null".into())),
+        ] {
+            let mut request = serde_json::json!({"type":"erc20Transfers"});
+            request[field] = value;
+            let wire = request.to_string();
+            if serde_json::from_str::<SubscribeRequest>(&wire).is_ok() {
+                accepted.push(field);
+            }
+        }
+        assert!(
+            accepted.is_empty(),
+            "literal object accepted in: {accepted:?}"
+        );
+    }
+
+    #[test]
+    fn erc20_inputs_reject_empty_hex_amount_digits() {
+        assert!(
+            parse_u256_bound("0x").is_err(),
+            "hex prefix without digits is not an amount"
+        );
+    }
+
+    #[test]
+    fn erc20_inputs_require_exact_transfer_topic_count() {
+        let token = Address::repeat_byte(0xBB);
+        let tracked = Address::repeat_byte(1);
+        let subscription =
+            Erc20TransferSubscription::new(vec![tracked], vec![token], None, None).unwrap();
+        let mut row = make_transfer_log(token, tracked, Address::repeat_byte(2), 10, 100);
+        assert!(subscription.notification_for(&row).is_some());
+        row.topic3 = Some(B256::ZERO);
+        assert!(
+            subscription.notification_for(&row).is_none(),
+            "four-topic row is not the ERC20 Transfer ABI"
+        );
+    }
 
     struct CloseDropProbe(Arc<std::sync::atomic::AtomicBool>);
 
