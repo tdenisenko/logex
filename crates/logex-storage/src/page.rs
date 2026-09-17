@@ -358,7 +358,7 @@ pub fn decode_u32_page(
     codec: CompressionCodec,
 ) -> io::Result<Vec<u32>> {
     let raw = match codec {
-        CompressionCodec::None => encoded.to_vec(),
+        CompressionCodec::None => return decode_plain_u32_page(encoded, row_count),
         CompressionCodec::Zstd => {
             zstd_decompress_bounded(encoded, decoded_fixed_len(row_count, 4)?)?
         }
@@ -392,7 +392,7 @@ pub fn decode_u8_page(
     codec: CompressionCodec,
 ) -> io::Result<Vec<u8>> {
     let raw = match codec {
-        CompressionCodec::None => encoded.to_vec(),
+        CompressionCodec::None => decode_plain_fixed_width_page(encoded, row_count)?,
         CompressionCodec::Dictionary => dict_decode(encoded, row_count, 1)?,
         CompressionCodec::Zstd => {
             zstd_decompress_bounded(encoded, decoded_fixed_len(row_count, 1)?)?
@@ -744,6 +744,52 @@ fn decode_plain_u32_page(raw: &[u8], row_count: usize) -> io::Result<Vec<u32>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scalar_pages_require_exact_row_shapes_across_codecs() {
+        for codec in [
+            CompressionCodec::None,
+            CompressionCodec::Zstd,
+            CompressionCodec::Lz4,
+        ] {
+            for rows in [0, 1, MAX_PAGE_ROWS as usize] {
+                let values: Vec<u32> = (0..rows).map(|row| u32::MAX - row as u32).collect();
+                let encoded = encode_u32_page(&values, codec).unwrap();
+                assert_eq!(decode_u32_page(&encoded, rows, codec).unwrap(), values);
+                assert!(decode_u32_page(&encoded, rows + 1, codec).is_err());
+                assert!(decode_u32_page(&encoded, usize::MAX, codec).is_err());
+                if rows > 0 {
+                    assert!(decode_u32_page(&encoded, rows - 1, codec).is_err());
+                }
+
+                let values: Vec<u8> = (0..rows).map(|row| row as u8).collect();
+                let encoded = encode_u8_page(&values, codec).unwrap();
+                assert_eq!(decode_u8_page(&encoded, rows, codec).unwrap(), values);
+                assert!(decode_u8_page(&encoded, rows + 1, codec).is_err());
+                if rows > 0 {
+                    assert!(decode_u8_page(&encoded, rows - 1, codec).is_err());
+                }
+            }
+        }
+        // A physically present page can still be inconsistent with its row
+        // count. Reject the shape even when the input is larger than any valid
+        // one-row scalar output.
+        for length in [0, 2, 3, 5, 65_536] {
+            let encoded = vec![0; length];
+            assert_eq!(
+                decode_u32_page(&encoded, 1, CompressionCodec::None)
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::InvalidData
+            );
+            assert_eq!(
+                decode_u8_page(&encoded, 1, CompressionCodec::None)
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::InvalidData
+            );
+        }
+    }
 
     #[test]
     fn bounded_page_decoding_rejects_expansion_and_preserves_valid_rows() {

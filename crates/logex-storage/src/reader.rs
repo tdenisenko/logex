@@ -336,34 +336,6 @@ impl RawBytesColumn {
     }
 }
 
-/// Typed column data returned from reads.
-#[derive(Debug, Clone)]
-pub enum ColumnData {
-    Address(Vec<Address>),
-    B256(Vec<Option<B256>>),
-    U64(Vec<u64>),
-    U32(Vec<u32>),
-    U8(Vec<u8>),
-    Bytes(Vec<Bytes>),
-}
-
-impl ColumnData {
-    pub fn len(&self) -> usize {
-        match self {
-            Self::Address(v) => v.len(),
-            Self::B256(v) => v.len(),
-            Self::U64(v) => v.len(),
-            Self::U32(v) => v.len(),
-            Self::U8(v) => v.len(),
-            Self::Bytes(v) => v.len(),
-        }
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-}
-
 /// Reads column files from a partition directory.
 pub struct ColumnReader;
 

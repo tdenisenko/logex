@@ -20,7 +20,7 @@ pub use commitment::PrefixState;
 pub use index_checkpoint::{IndexBuildCheckpoint, IndexReadCheckpoint};
 pub use page::PageIndexEntry;
 pub use partition::{Partition, PartitionManager, PartitionManagerConfig};
-pub use reader::{ColumnData, ColumnReader};
+pub use reader::ColumnReader;
 pub use segment_reader::SegmentReader;
 pub use state::SyncHead;
 pub use wal::WriteAheadLog;
