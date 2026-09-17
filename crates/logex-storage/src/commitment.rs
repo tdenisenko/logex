@@ -1,6 +1,7 @@
 //! Grouping-independent identity of a segment's logical row prefix.
 mod stream;
 
+use crate::row_bounds::RowBounds;
 use alloy_primitives::FixedBytes;
 use logex_types::LogRow;
 use serde::{Deserialize, Serialize};
@@ -101,12 +102,13 @@ impl PrefixState {
 
     /// Validate every fallible encoding boundary before a new bundle mutates
     /// files. Only the historical empty-prefix overlap path needs this pass.
+    /// Collect exact count and extrema here without a second metadata scan.
     pub(crate) fn validate_new_append(
         &self,
         namespace: [u8; 16],
         root: Commitment,
         rows: &[LogRow],
-    ) -> io::Result<()> {
+    ) -> io::Result<Option<RowBounds>> {
         self.validate(namespace, 0, root)?;
         self.rows
             .checked_add(u64::try_from(rows.len()).map_err(io::Error::other)?)
@@ -114,7 +116,13 @@ impl PrefixState {
                 io::Error::new(io::ErrorKind::InvalidInput, "logical row count overflow")
             })?;
         let mut bytes = self.stream.byte_len();
+        let mut bounds: Option<RowBounds> = None;
         for row in rows {
+            if let Some(bounds) = &mut bounds {
+                bounds.include(row);
+            } else {
+                bounds = Some(RowBounds::from_row(row));
+            }
             let topics = [&row.topic0, &row.topic1, &row.topic2, &row.topic3]
                 .into_iter()
                 .filter(|topic| topic.is_some())
@@ -125,7 +133,7 @@ impl PrefixState {
                 u64::try_from(row.data.len()).map_err(io::Error::other)?,
             )?;
         }
-        Ok(())
+        Ok(bounds)
     }
 
     pub(crate) fn validate(
@@ -431,9 +439,12 @@ mod tests {
         let empty = PrefixState::empty([1; 16]);
         let mut value = row();
         value.data_len += 1;
-        empty
-            .validate_new_append([1; 16], empty.commitment(), &[value])
-            .unwrap();
+        assert!(
+            empty
+                .validate_new_append([1; 16], empty.commitment(), &[value])
+                .unwrap()
+                .is_some()
+        );
         let nonempty = empty.extend(&[row()]).unwrap();
         assert!(
             nonempty
