@@ -3924,6 +3924,69 @@ mod tests {
     }
 
     #[test]
+    fn signed_newer_beacon_update_can_select_lower_execution_height() {
+        let slot = 10_000_000;
+        let (checkpoint, bootstrap_bytes, sk) = bootstrap_payload(slot);
+        let (_, mut store) = verify_bootstrap_payload(&bootstrap_bytes, checkpoint).unwrap();
+        let mut previous = None;
+        // Constructed committee/Merkle fixtures prove the actual acceptance
+        // path, not that these payloads describe canonical mainnet blocks.
+        for (attested_slot, number, marker) in
+            [(slot + 1, 19_000_010, 0x44), (slot + 3, 19_000_009, 0x45)]
+        {
+            let execution = deneb_execution(number, marker);
+            let siblings = [
+                B256::repeat_byte(0xc1),
+                B256::repeat_byte(0xc2),
+                B256::repeat_byte(0xc3),
+                B256::repeat_byte(0xc4),
+            ];
+            let header = LightClientHeaderDeneb {
+                beacon: beacon_header(
+                    attested_slot,
+                    B256::repeat_byte(0xdd),
+                    branch_root(
+                        execution_payload_header_deneb_root(&execution),
+                        &siblings,
+                        subtree_index(EXECUTION_PAYLOAD_GINDEX),
+                    ),
+                    marker,
+                ),
+                execution,
+                execution_branch: FixedBytes::from_slice(
+                    &siblings
+                        .iter()
+                        .flat_map(|root| root.as_slice().iter().copied())
+                        .collect::<Vec<_>>(),
+                ),
+            };
+            let signature_slot = attested_slot + 1;
+            let payload = LightClientOptimisticUpdateDeneb {
+                attested_header: header.clone(),
+                sync_aggregate: signed_sync_aggregate(&sk, &header.beacon, signature_slot),
+                signature_slot,
+            };
+            let (_, next, _) = apply_optimistic_update_payload_at_slot(
+                &payload.as_ssz_bytes(),
+                &store,
+                signature_slot + 1,
+            )
+            .unwrap();
+            let anchor = next.optimistic_anchor().unwrap();
+            assert_eq!(anchor.block_number, number);
+            assert_eq!(anchor.beacon_slot, attested_slot);
+            if let Some(prior) = previous {
+                let prior: ExecutionAnchor = prior;
+                assert!(anchor.beacon_slot > prior.beacon_slot);
+                assert!(anchor.block_number < prior.block_number);
+                assert_ne!(anchor.block_hash, prior.block_hash);
+            }
+            previous = Some(anchor);
+            store = next;
+        }
+    }
+
+    #[test]
     fn malformed_committee_cannot_inflate_signed_update_participation() {
         let slot = 10_000_000;
         let (checkpoint, bootstrap_bytes, _) = bootstrap_payload(slot);

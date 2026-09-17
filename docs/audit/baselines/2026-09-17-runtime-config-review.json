@@ -317,12 +317,172 @@
     "sha256": "96be5711d2b94a22b4c0ff31afb801f3545039038cadc359253bafa31b87510a"
   },
   "publication": {
-    "state": "pending"
+    "state": "merged",
+    "pull_request": {
+      "headRefOid": "3336965aa2bab51ae8a444ecce5be377b53777ff",
+      "mergeCommit": {
+        "oid": "43bb6bc07ad3510304afe28ff7ff503405d2f5cb"
+      },
+      "mergedAt": "2026-09-17T07:50:32Z",
+      "number": 219,
+      "state": "MERGED",
+      "url": "https://github.com/tdenisenko/logex/pull/219"
+    },
+    "ci": [
+      {
+        "__typename": "CheckRun",
+        "completedAt": "2026-09-17T07:38:30Z",
+        "conclusion": "SUCCESS",
+        "detailsUrl": "https://github.com/tdenisenko/logex/actions/runs/35195447391/job/105117473347",
+        "name": "Check",
+        "startedAt": "2026-09-17T07:37:22Z",
+        "status": "COMPLETED",
+        "workflowName": "CI"
+      },
+      {
+        "__typename": "CheckRun",
+        "completedAt": "2026-09-17T07:37:41Z",
+        "conclusion": "SUCCESS",
+        "detailsUrl": "https://github.com/tdenisenko/logex/actions/runs/35195447391/job/105117473343",
+        "name": "Format",
+        "startedAt": "2026-09-17T07:37:22Z",
+        "status": "COMPLETED",
+        "workflowName": "CI"
+      },
+      {
+        "__typename": "CheckRun",
+        "completedAt": "2026-09-17T07:38:22Z",
+        "conclusion": "SUCCESS",
+        "detailsUrl": "https://github.com/tdenisenko/logex/actions/runs/35195447391/job/105117473304",
+        "name": "Clippy",
+        "startedAt": "2026-09-17T07:37:21Z",
+        "status": "COMPLETED",
+        "workflowName": "CI"
+      },
+      {
+        "__typename": "CheckRun",
+        "completedAt": "2026-09-17T07:49:18Z",
+        "conclusion": "SUCCESS",
+        "detailsUrl": "https://github.com/tdenisenko/logex/actions/runs/35195447391/job/105117473263",
+        "name": "Test",
+        "startedAt": "2026-09-17T07:37:21Z",
+        "status": "COMPLETED",
+        "workflowName": "CI"
+      },
+      {
+        "__typename": "CheckRun",
+        "completedAt": "2026-09-17T07:47:28Z",
+        "conclusion": "SUCCESS",
+        "detailsUrl": "https://github.com/tdenisenko/logex/actions/runs/35195447391/job/105117473286",
+        "name": "macOS Test",
+        "startedAt": "2026-09-17T07:37:27Z",
+        "status": "COMPLETED",
+        "workflowName": "CI"
+      },
+      {
+        "__typename": "CheckRun",
+        "completedAt": "2026-09-17T07:44:28Z",
+        "conclusion": "SUCCESS",
+        "detailsUrl": "https://github.com/tdenisenko/logex/actions/runs/35195447391/job/105117473345",
+        "name": "Release Build",
+        "startedAt": "2026-09-17T07:37:21Z",
+        "status": "COMPLETED",
+        "workflowName": "CI"
+      }
+    ],
+    "linux_volume_controls": {
+      "results": [
+        {
+          "case": "systemd template validation",
+          "passed": true,
+          "diagnostic": ""
+        },
+        {
+          "case": "missing mount",
+          "passed": true,
+          "diagnostic": "Error: Os { code: 2, kind: NotFound, message: \"No such file or directory\" }\n"
+        },
+        {
+          "case": "low space",
+          "passed": true,
+          "diagnostic": "Error: Custom { kind: Other, error: \"expected volume has 473272320 free bytes; at least 10737418240 are required\" }\n"
+        },
+        {
+          "case": "wrong UUID",
+          "passed": true,
+          "diagnostic": "Error: Custom { kind: InvalidInput, error: \"expected volume UUID abcd-1234 is not available in /dev/disk/by-uuid\" }\n"
+        },
+        {
+          "case": "real filesystem preflight and anchored write",
+          "passed": true
+        },
+        {
+          "case": "lazy detach retains underlay contents",
+          "passed": true,
+          "inflight_write": "ok"
+        },
+        {
+          "case": "unmounted path cannot initialize storage",
+          "passed": true,
+          "diagnostic": "Error: Custom { kind: InvalidInput, error: \"expected path is not the opened filesystem's current mount location\" }\n"
+        },
+        {
+          "case": "different volume at same path",
+          "passed": true,
+          "diagnostic": "Error: Custom { kind: InvalidInput, error: \"mounted filesystem at \\\"/tmp/logex-volume-mounts-b2yfm8u7/mount\\\" does not match expected UUID 093109dd-d054-4eeb-9919-c919239fd4b4\" }\n"
+        },
+        {
+          "case": "replacement volume receives no old-owner writes",
+          "passed": true
+        },
+        {
+          "case": "correct volume remount and restart",
+          "passed": true
+        }
+      ],
+      "errors": [],
+      "fixtures_detached": true,
+      "fixture_root_removed": true,
+      "fixture_root": "/tmp/logex-volume-mounts-b2yfm8u7",
+      "binary_sha256": "6995849b49b2209cf46c95a4da302c9e723c6586fb1657e1a2a2bb95f7b9d685"
+    },
+    "merge_tree_review": {
+      "head": "3336965aa2bab51ae8a444ecce5be377b53777ff",
+      "merge": "43bb6bc07ad3510304afe28ff7ff503405d2f5cb",
+      "tree": "81bae5b9b5f008b07a94f31235cfb6c60cc76dfb",
+      "identical": true
+    }
   },
   "boundaries": [
     "No benchmark, ingestion-path changes, live sync, deployment or remote-host work.",
     "No OS signal sent by new tests; only owned runtimes, child inspection processes and temporary data.",
     "Unix error handling is locally exercised; supported Linux and macOS CI follow publication. Non-Unix branch is not claimed tested.",
     "Batch 10 offline code review closes only after merge. Batch 5 startup-state disposition, query budgets, offline repair and integrated acceptance remain separate."
-  ]
+  ],
+  "publication_evidence": {
+    "premerge.json": {
+      "sha256": "5e63a3879bdf09103128683a30c15963504d69cae2f1b0d1b005e752c135d788",
+      "bytes": 1894
+    },
+    "merged.json": {
+      "sha256": "1043bc8f42d0a23b9c3ffc5516257537258437014d58eadbe28bb9372cc3001e",
+      "bytes": 240
+    },
+    "ci-watch.log": {
+      "sha256": "d4579e0113d1b92ffaed93356648b67e8445ad2eede9d6aee8cbbbaa012ae116",
+      "bytes": 16103
+    },
+    "ci-linux/volume-mount-results.json": {
+      "sha256": "cd21dead2772a4897e25314ca6df9cc5181f9ce6f6ff7b61521c2600120c30a4",
+      "bytes": 1846
+    },
+    "publication-inventory.json": {
+      "sha256": "bf32ca8a75f075a052f55c69219465ef70163c91ab6a68d90f237a99969077b3",
+      "bytes": 2554
+    },
+    "merge-tree-review.json": {
+      "sha256": "c484d700bb789a960498b7aa2e45afbfef4224a97251a2d7bb773ac6c7e4ce7d",
+      "bytes": 187
+    }
+  }
 }

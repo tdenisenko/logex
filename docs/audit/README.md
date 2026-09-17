@@ -58,8 +58,15 @@ admission remain open.
 
 The [remaining runtime review](runtime-config-review.md) corrects `info` ownership
 and signal-listener failure handling (B10-24/B10-25). Source `aaa8786d` passes
-233 node/CLI/example controls and all ten workspace gates. Publication remains
-pending before the remaining batch-10 code review is closed.
+233 node/CLI/example controls and all ten workspace gates. Six CI jobs and ten Linux controls passed before PR #219 merged as `43bb6bc0`; the remaining batch-10 offline code review is closed.
+
+The [sync-state review](sync-state-review.md) corrects consensus admission,
+partial progress, whole-reorg recovery, sparse/selected-head decisions and bundled
+maintenance ownership (B5-07–10/B5-12–14). Source `9869104d` passes all ten local
+gates (1,930 tests / 24 ignores), with six effective original regression
+patches, repeated recovery checks and selected-lineage controls. The head check
+reuses the existing verified cache to avoid repeated beacon-root hashing.
+Publication is pending; the remaining batch-5 work stays open.
 
 ## Offline completion boundary
 

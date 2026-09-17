@@ -60,7 +60,7 @@ failed listener and no new watchdog, timer or shutdown timeout.
 | Unsafe initialization and FFI | Rechecked the node call sites: `rlimit`, `statvfs`, Unix descriptor operations and macOS volume attributes document pointer/lifetime/initialization contracts. Result structures are assumed initialized only after successful system calls; newly owned descriptors transfer once. Existing platform fixtures exercise decoding and lifecycle. No unsafe block changes. |
 | Best-effort state | Final peer hints remain a derived cache: persistence failure is reported without converting a clean primary-storage shutdown into failure. Trusted storage and consensus failures use their separate terminal paths. |
 
-This disposes the remaining batch-10 code review when this milestone is merged.
+This closes the remaining batch-10 offline code review.
 It does not close shared query budgets, sync-state review, verified offline repair
 or integrated acceptance. Ordinary storage startup before `PartitionManager::open`
 finishes remains outside its health-monitor lifetime; expected-volume preflight
@@ -87,3 +87,5 @@ or configuration default changes. No benchmark is warranted for these inspection
 and terminal-error changes. All ten local gates pass on `aaa8786d`, including 1,908 workspace tests / 24 existing ignores. Publication is recorded in
 the [validation ledger](baselines/2026-09-17-runtime-config-review.json). No live
 sync, deployment, mac-mini work or production-data access occurred.
+
+All six CI jobs passed on `3336965a`, including ten Linux volume/template cases with verified cleanup. [PR #219](https://github.com/tdenisenko/logex/pull/219) merged as `43bb6bc0`. The merge tree is identical to the tested head.

@@ -995,6 +995,8 @@ pub(crate) fn append_compacted_rows_with_revision(
 /// Append a new canonical view without changing the catalog-pinned bitmap.
 /// The caller must publish the returned reference and flush this tree before
 /// acknowledging the catalog commit; an interrupted update remains a tail.
+/// Sealed segments require the caller to retain their maintenance owner through
+/// manifest publication so a previously captured task cannot republish old bits.
 pub(crate) fn append_bundled_canonical(
     dir: &Path,
     reference: &BundleReference,
@@ -1238,12 +1240,12 @@ pub(crate) fn apply_ordered_rows_to_descriptor(
     descriptor.row_count += rows.len() as u64;
 }
 
-/// Compaction and standalone manifest refresh share one segment owner. Query
-/// readers retain their own files and never wait on this maintenance lock.
-struct SegmentMaintenanceGuard(File);
+/// Compaction, bundled canonical updates, and standalone manifest refresh share
+/// one segment owner. Query readers retain their files and never wait on it.
+pub(super) struct SegmentMaintenanceGuard(File);
 
 impl SegmentMaintenanceGuard {
-    fn acquire(
+    pub(super) fn acquire(
         paths: &StorageCatalogPaths,
         descriptor: &SegmentDescriptor,
     ) -> std::io::Result<Option<Self>> {
@@ -1308,6 +1310,7 @@ fn verify_maintenance_source(
 #[cfg(test)]
 thread_local! {
     static AFTER_REFRESH_CAPTURE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    pub(super) static AFTER_COMPACTION_SOURCE_VERIFIED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]
@@ -1412,6 +1415,10 @@ pub(crate) fn compact_ingest_segment(
     }
     let _owner = SegmentMaintenanceGuard::acquire(paths, descriptor)?;
     verify_maintenance_source(paths, descriptor)?;
+    #[cfg(test)]
+    if let Some(hook) = AFTER_COMPACTION_SOURCE_VERIFIED.with_borrow_mut(Option::take) {
+        hook();
+    }
 
     if segment_uses_current_compaction_profile(paths, descriptor.id)? {
         return persist_ingest_manifest(paths, descriptor, publication);

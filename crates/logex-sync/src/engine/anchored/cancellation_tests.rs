@@ -18,7 +18,13 @@ async fn fixture() -> (SyncEngine, watch::Sender<bool>, impl Sized) {
         Arc::new(RwLock::new(storage)),
         None,
         Arc::new(std::sync::Mutex::new(SyncStatus::default())),
-        None,
+        Arc::new(
+            ConsensusStore::open(
+                directory.path(),
+                Some("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            )
+            .unwrap(),
+        ),
         receiver,
     );
     (engine, shutdown, (resources, directory))
@@ -308,4 +314,281 @@ async fn cancellation_controls_closed_owner_stops_prepare_wait() {
             .expect("closed shutdown owner must stop the prepare wait")
             .unwrap()
     );
+}
+
+#[tokio::test]
+async fn required_consensus_without_execution_anchor_waits_without_ingesting() {
+    let (mut engine, shutdown, _resources) = fixture().await;
+    let status = Arc::clone(&engine.sync_status);
+    let storage = Arc::clone(&engine.storage);
+    assert!(engine.consensus.chain_anchors().optimistic_head.is_none());
+    assert!(engine.consensus.chain_anchors().finalized_head.is_none());
+
+    // Poll the real entry point until its first consensus wait. The peer fixture
+    // holds a dormant localhost listener and local channels; it never polls the
+    // network manager or starts discovery, peer connections, or external sync.
+    let mut run = Box::pin(engine.run());
+    tokio::select! {
+        biased;
+        result = &mut run => panic!("sync exited before waiting for consensus: {result:?}"),
+        _ = tokio::task::yield_now() => {}
+    }
+    assert_eq!(
+        status.lock().unwrap().node_state,
+        NodeState::WaitingForConsensus
+    );
+    assert!(storage.read().await.sync_head().is_none());
+    assert_eq!(storage.read().await.total_rows(), 0);
+    shutdown.send(true).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), &mut run)
+        .await
+        .expect("consensus wait must remain cancellable")
+        .unwrap();
+}
+
+#[tokio::test]
+async fn parent_validation_tracks_partial_anchored_progress() {
+    let (mut engine, _shutdown, _resources) = fixture().await;
+    let accepted = Header {
+        number: 100,
+        ..Default::default()
+    };
+    // Reproduce the helper-visible state after the first anchored block succeeds
+    // and a later payload fails: the tracker advanced, but the old batch-final
+    // parent cache assignment was skipped. This is not a peer request-loop test.
+    engine.head_tracker.track(accepted.clone());
+    assert_eq!(engine.expected_parent_for_validation(101), Some(&accepted));
+}
+
+#[tokio::test]
+async fn parent_validation_follows_restore_rewind_and_number_boundaries() {
+    let (mut engine, _shutdown, _resources) = fixture().await;
+    let first = Header {
+        number: 100,
+        ..Default::default()
+    };
+    let second = Header {
+        number: 101,
+        parent_hash: first.hash_slow(),
+        ..Default::default()
+    };
+    engine.head_tracker.restore([first.clone(), second.clone()]);
+    assert_eq!(engine.expected_parent_for_validation(102), Some(&second));
+    assert!(engine.expected_parent_for_validation(101).is_none());
+    engine.head_tracker.restore([first.clone()]);
+    assert_eq!(engine.expected_parent_for_validation(101), Some(&first));
+    assert!(engine.expected_parent_for_validation(102).is_none());
+    engine.head_tracker.restore([Header {
+        number: u64::MAX,
+        ..Default::default()
+    }]);
+    assert!(engine.expected_parent_for_validation(0).is_none());
+    engine.head_tracker.restore([]);
+    assert!(engine.expected_parent_for_validation(1).is_none());
+}
+
+#[tokio::test]
+async fn forward_tracking_rejects_discontinuity_before_mutation() {
+    let (mut engine, _shutdown, _resources) = fixture().await;
+    let genesis = Header::default();
+    engine.track_forward_header(genesis.clone()).unwrap();
+    let before = engine.head_tracker.snapshot();
+    for incoming in [
+        Header {
+            number: 100,
+            ..Default::default()
+        },
+        Header {
+            number: 1,
+            parent_hash: B256::repeat_byte(0x99),
+            ..Default::default()
+        },
+    ] {
+        assert!(engine.track_forward_header(incoming).is_err());
+        assert_eq!(engine.head_tracker.snapshot(), before);
+        assert!(engine.storage.read().await.sync_head().is_none());
+    }
+    let child = Header {
+        number: 1,
+        parent_hash: genesis.hash_slow(),
+        ..Default::default()
+    };
+    engine.track_forward_header(child.clone()).unwrap();
+    assert_eq!(engine.head_tracker.tip_header(), Some(&child));
+    engine.head_tracker.restore([Header {
+        number: u64::MAX,
+        ..Default::default()
+    }]);
+    let before = engine.head_tracker.snapshot();
+    assert!(engine.track_forward_header(Header::default()).is_err());
+    assert_eq!(engine.head_tracker.snapshot(), before);
+}
+
+#[tokio::test]
+async fn forward_tracking_allows_checkpoint_bootstrap_only_without_tip() {
+    let (mut engine, _shutdown, _resources) = fixture().await;
+    let checkpoint = Header {
+        number: 100,
+        ..Default::default()
+    };
+    engine.track_forward_header(checkpoint.clone()).unwrap();
+    assert_eq!(engine.head_tracker.tip_header(), Some(&checkpoint));
+    assert!(
+        engine
+            .track_forward_header(Header {
+                number: 110,
+                parent_hash: checkpoint.hash_slow(),
+                ..Default::default()
+            })
+            .is_err()
+    );
+    assert_eq!(engine.head_tracker.tip_header(), Some(&checkpoint));
+}
+
+#[tokio::test]
+async fn consensus_reorg_publishes_tracker_only_after_storage_accepts_suffix() {
+    for persisted_suffix in [false, true] {
+        let (mut engine, _shutdown, _resources) = fixture().await;
+        let ancestor = Header {
+            number: 100,
+            ..Default::default()
+        };
+        let old_tip = Header {
+            number: 101,
+            parent_hash: ancestor.hash_slow(),
+            ..Default::default()
+        };
+        let replacement = Header {
+            timestamp: 1,
+            ..old_tip.clone()
+        };
+        let anchor = |header: &Header, slot| logex_cl::AnchorRecord {
+            anchor: ExecutionAnchor {
+                beacon_root: B256::repeat_byte(slot as u8),
+                beacon_slot: slot,
+                block_number: header.number,
+                block_hash: header.hash_slow(),
+                receipts_root: header.receipts_root,
+            },
+            finalized: false,
+            parent_beacon_root: None,
+        };
+        let ancestor_anchor = anchor(&ancestor, 1);
+        engine
+            .consensus
+            .append_anchors(vec![ancestor_anchor, anchor(&replacement, 2)])
+            .unwrap();
+        {
+            let mut storage = engine.storage.write().await;
+            storage
+                .ingest_canonical_batch(
+                    &[],
+                    &ancestor,
+                    std::slice::from_ref(&ancestor),
+                    Some(&ancestor_anchor.anchor),
+                )
+                .unwrap();
+            if persisted_suffix {
+                storage
+                    .ingest_canonical_batch(
+                        &[],
+                        &old_tip,
+                        &[ancestor.clone(), old_tip.clone()],
+                        None,
+                    )
+                    .unwrap();
+            }
+        }
+        engine
+            .head_tracker
+            .restore([ancestor.clone(), old_tip.clone()]);
+        engine.progress.record_block(101, 0);
+        let result = engine.reconcile_consensus_reorg().await;
+        if persisted_suffix {
+            assert!(result.unwrap());
+            assert_eq!(engine.head_tracker.tip_header(), Some(&ancestor));
+            assert_eq!(engine.current_block(), 100);
+        } else {
+            assert!(result.is_err());
+            assert_eq!(engine.head_tracker.tip_header(), Some(&old_tip));
+            assert_eq!(engine.current_block(), 101);
+        }
+        let storage = engine.storage.read().await;
+        assert_eq!(
+            storage.sync_head().unwrap().block_hash,
+            ancestor.hash_slow()
+        );
+        assert_eq!(storage.historical_anchor_header(), Some(&ancestor));
+        assert_eq!(storage.historical_floor_header(), Some(&ancestor));
+    }
+}
+
+#[tokio::test]
+async fn zero_batch_sizes_fail_before_sync_startup() {
+    for header_batch in [false, true] {
+        let (mut engine, _shutdown, _resources) = fixture().await;
+        if header_batch {
+            engine.config.header_batch_size = 0;
+        } else {
+            engine.config.fetch_batch_size = 0;
+        }
+        let error = tokio::time::timeout(Duration::from_secs(5), engine.run())
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert!(error.to_string().contains(if header_batch {
+            "header_batch_size"
+        } else {
+            "fetch_batch_size"
+        }));
+        assert!(engine.head_tracker.is_empty());
+        assert!(engine.storage.read().await.sync_head().is_none());
+    }
+}
+
+#[tokio::test]
+async fn pending_selected_lineage_waits_without_progress_and_cancels() {
+    let (mut engine, shutdown, _resources) = fixture().await;
+    let header = Header {
+        number: 100,
+        ..Default::default()
+    };
+    engine.head_tracker.restore([header.clone()]);
+    engine
+        .storage
+        .write()
+        .await
+        .record_sync_head(100, header.hash_slow(), 0)
+        .unwrap();
+    engine.progress.record_block(100, 0);
+    let status = Arc::clone(&engine.sync_status);
+    let storage = Arc::clone(&engine.storage);
+    let original_head = storage.read().await.sync_head();
+    // Exercise the real pending action branch with a finite local decision;
+    // CL snapshot controls separately verify when this decision is produced.
+    let mut pending = Box::pin(
+        engine.apply_consensus_reorg_decision(ConsensusReorgDecision::PendingMaterialization),
+    );
+    tokio::select! {
+        biased;
+        result = &mut pending => panic!("pending lineage did not wait: {result:?}"),
+        _ = tokio::task::yield_now() => {}
+    }
+    assert_eq!(
+        status.lock().unwrap().node_state,
+        NodeState::WaitingForConsensus
+    );
+    assert_eq!(status.lock().unwrap().current_block, 100);
+    assert_eq!(storage.read().await.sync_head(), original_head);
+    assert_eq!(storage.read().await.total_rows(), 0);
+    shutdown.send(true).unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(5), &mut pending)
+            .await
+            .unwrap()
+            .unwrap()
+    );
+    drop(pending);
+    assert_eq!(engine.head_tracker.tip_header(), Some(&header));
+    assert_eq!(storage.read().await.sync_head(), original_head);
 }

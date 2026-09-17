@@ -234,20 +234,6 @@ pub async fn run_sync(options: RunSyncOptions<'_>) -> cleanup::RuntimeShutdown {
     let data_dir = pm_config.data_dir.clone();
     let discovery_secret_file = discovery_secret_path(&data_dir);
     let known_peers_file = known_peers_path(&data_dir);
-    let consensus_state_exists = match consensus_state_exists(&data_dir) {
-        Ok(exists) => exists,
-        Err(error) => {
-            tracing::error!(%error, "failed to inspect consensus state");
-            std::process::exit(1);
-        }
-    };
-    let checkpoint_request = checkpoint;
-    let mut checkpoint = if consensus_state_exists && checkpoint_request.is_none() {
-        None
-    } else {
-        resolve_checkpoint_or_exit(checkpoint_request, checkpoint_sync_url.as_deref()).await
-    };
-
     let mut storage = match PartitionManager::open(pm_config) {
         Ok(s) => s,
         Err(e) => {
@@ -264,6 +250,21 @@ pub async fn run_sync(options: RunSyncOptions<'_>) -> cleanup::RuntimeShutdown {
             tracing::error!(%error, "failed to start storage health monitor");
             std::process::exit(1);
         });
+
+    // Resolve checkpoint admission only while owning the storage directory lock.
+    let consensus_state_exists = match consensus_state_exists(&data_dir) {
+        Ok(exists) => exists,
+        Err(error) => {
+            tracing::error!(%error, "failed to inspect consensus state");
+            std::process::exit(1);
+        }
+    };
+    let checkpoint_request = checkpoint;
+    let mut checkpoint = if consensus_state_exists && checkpoint_request.is_none() {
+        None
+    } else {
+        resolve_checkpoint_or_exit(checkpoint_request, checkpoint_sync_url.as_deref()).await
+    };
 
     let sync_head = storage.sync_head();
     let historical_sync_mode = match resolve_historical_sync_mode(
@@ -294,13 +295,12 @@ pub async fn run_sync(options: RunSyncOptions<'_>) -> cleanup::RuntimeShutdown {
     );
 
     let mut consensus_refreshed = false;
-    let mut consensus = match maybe_open_consensus_store(&data_dir, &storage, checkpoint.as_deref())
-    {
-        Ok(store) => store.map(Arc::new),
+    let mut consensus = match open_required_consensus_store(&storage, checkpoint.as_deref()) {
+        Ok(store) => Arc::new(store),
         Err(ConsensusStateError::MissingCheckpoint) => {
             tracing::error!(
                 data_dir = %data_dir.display(),
-                "fresh data directories now require --checkpoint <root-or-descriptor> to start canonical sync"
+                "canonical sync requires persisted consensus state or a resolved --checkpoint <root-or-descriptor>"
             );
             std::process::exit(1);
         }
@@ -319,7 +319,7 @@ pub async fn run_sync(options: RunSyncOptions<'_>) -> cleanup::RuntimeShutdown {
             {
                 Ok(store) => {
                     consensus_refreshed = true;
-                    Some(Arc::new(store))
+                    Arc::new(store)
                 }
                 Err(error) => {
                     tracing::error!(%error, "failed to refresh stale consensus state");
@@ -333,9 +333,7 @@ pub async fn run_sync(options: RunSyncOptions<'_>) -> cleanup::RuntimeShutdown {
         }
     };
 
-    if let Some(store) = consensus.as_ref()
-        && let Some(staleness) = recent_consensus_state_staleness(store)
-    {
+    if let Some(staleness) = recent_consensus_state_staleness(&consensus) {
         tracing::warn!(
             trusted_slot = staleness.trusted_slot,
             trusted_epoch = staleness.trusted_epoch,
@@ -352,7 +350,7 @@ pub async fn run_sync(options: RunSyncOptions<'_>) -> cleanup::RuntimeShutdown {
         .await
         {
             Ok(store) => {
-                consensus = Some(Arc::new(store));
+                consensus = Arc::new(store);
                 consensus_refreshed = true;
             }
             Err(error) => {
@@ -362,8 +360,7 @@ pub async fn run_sync(options: RunSyncOptions<'_>) -> cleanup::RuntimeShutdown {
         }
     }
 
-    if let Some(store) = consensus.as_ref()
-        && let Some(staleness) = local_execution_progress_staleness(sync_head, store)
+    if let Some(staleness) = local_execution_progress_staleness(sync_head, &consensus)
         && !consensus_refreshed
     {
         tracing::warn!(
@@ -382,7 +379,7 @@ pub async fn run_sync(options: RunSyncOptions<'_>) -> cleanup::RuntimeShutdown {
         .await
         {
             Ok(store) => {
-                consensus = Some(Arc::new(store));
+                consensus = Arc::new(store);
                 consensus_refreshed = true;
             }
             Err(error) => {
@@ -395,8 +392,8 @@ pub async fn run_sync(options: RunSyncOptions<'_>) -> cleanup::RuntimeShutdown {
         }
     }
 
-    if let Some(consensus) = consensus.as_ref() {
-        if let Some(staleness) = local_execution_progress_staleness(sync_head, consensus) {
+    {
+        if let Some(staleness) = local_execution_progress_staleness(sync_head, &consensus) {
             tracing::warn!(
                 block_number = staleness.block_number,
                 timestamp = staleness.timestamp,
@@ -419,13 +416,6 @@ pub async fn run_sync(options: RunSyncOptions<'_>) -> cleanup::RuntimeShutdown {
             optimistic_head = anchors.optimistic_head.map(|anchor| anchor.block_number),
             finalized_head = anchors.finalized_head.map(|anchor| anchor.block_number),
             "consensus state ready"
-        );
-    } else {
-        tracing::warn!(
-            cl_discovery_port,
-            cl_p2p_port,
-            cl_max_peers,
-            "starting without persisted consensus state; EL-only sync mode remains active until checkpointed CL state is configured"
         );
     }
 
@@ -470,7 +460,7 @@ pub async fn run_sync(options: RunSyncOptions<'_>) -> cleanup::RuntimeShutdown {
         historical_floor,
         historical_anchor,
         historical_sync_disabled,
-        consensus.as_deref(),
+        Some(consensus.as_ref()),
     );
     apply_p2p_address_status(&mut sync_status, &p2p_address);
     let state = Arc::new(AppState::new(
@@ -511,9 +501,7 @@ pub async fn run_sync(options: RunSyncOptions<'_>) -> cleanup::RuntimeShutdown {
     );
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-    let mut consensus_storage_failure = consensus
-        .as_ref()
-        .map(|store| store.subscribe_storage_failure());
+    let mut consensus_storage_failure = Some(consensus.subscribe_storage_failure());
     let _consensus_storage_watchdog = consensus_storage_failure.as_ref().map(|receiver| {
         start_runtime_failure_watchdog(receiver.clone(), RUNTIME_FAILURE_CLEANUP_GRACE, || {
             std::process::exit(1)
@@ -537,32 +525,27 @@ pub async fn run_sync(options: RunSyncOptions<'_>) -> cleanup::RuntimeShutdown {
         std::process::exit(1);
     });
 
-    let consensus_network_handle = consensus.as_ref().map(|consensus| {
-        prepare_consensus_network(
-            ConsensusNetworkConfig {
-                data_dir: data_dir.clone(),
-                checkpoint: consensus.checkpoint(),
-                bind_ip: consensus_p2p_address.bind_ip,
-                dial_families: consensus_p2p_address.dial_families,
-                external_ip: consensus_p2p_address.external_ip,
-                discovery_port: cl_discovery_port,
-                p2p_port: cl_p2p_port,
-                max_peers: cl_max_peers,
-            },
-            Arc::clone(consensus),
-            Arc::clone(&state.sync_status),
-            shutdown_rx.clone(),
-        )
-    });
+    let consensus_network_handle = prepare_consensus_network(
+        ConsensusNetworkConfig {
+            data_dir: data_dir.clone(),
+            checkpoint: consensus.checkpoint(),
+            bind_ip: consensus_p2p_address.bind_ip,
+            dial_families: consensus_p2p_address.dial_families,
+            external_ip: consensus_p2p_address.external_ip,
+            discovery_port: cl_discovery_port,
+            p2p_port: cl_p2p_port,
+            max_peers: cl_max_peers,
+        },
+        Arc::clone(&consensus),
+        Arc::clone(&state.sync_status),
+        shutdown_rx.clone(),
+    );
     let consensus_network_handle = match consensus_network_handle {
-        Some(Ok(network)) => {
-            Some(node_workers.spawn_result("consensus network supervisor", network))
-        }
-        Some(Err(error)) => {
+        Ok(network) => node_workers.spawn_result("consensus network supervisor", network),
+        Err(error) => {
             tracing::error!(%error, "failed to start consensus network");
             std::process::exit(1);
         }
-        None => None,
     };
 
     let http_addr = SocketAddr::new(http_host, http_port);
@@ -597,7 +580,7 @@ pub async fn run_sync(options: RunSyncOptions<'_>) -> cleanup::RuntimeShutdown {
         "query endpoints starting"
     );
 
-    let our_head = startup_network_head(sync_head, consensus.as_deref());
+    let our_head = startup_network_head(sync_head, Some(consensus.as_ref()));
     let peers = match PeerManager::new(PeerManagerConfig {
         secret_key,
         listener_port: p2p_port,
@@ -709,9 +692,7 @@ pub async fn run_sync(options: RunSyncOptions<'_>) -> cleanup::RuntimeShutdown {
         ("gRPC server", grpc_handle),
         ("background indexer", index_handle),
     ];
-    if let Some(handle) = consensus_network_handle {
-        tasks.push(("consensus network", handle));
-    }
+    tasks.push(("consensus network", consensus_network_handle));
     // These workers are already stopping independently. Await them together so
     // their cleanup windows do not multiply with the number of services.
     for result in futures_util::future::join_all(
@@ -1479,20 +1460,13 @@ fn network_head(number: u64, hash: alloy_primitives::B256, timestamp: u64) -> He
     }
 }
 
-fn maybe_open_consensus_store(
-    data_dir: &std::path::Path,
+fn open_required_consensus_store(
     storage: &PartitionManager,
     checkpoint: Option<&str>,
-) -> Result<Option<ConsensusStore>, ConsensusStateError> {
-    if consensus_state_exists(data_dir)? || checkpoint.is_some() {
-        return ConsensusStore::open(data_dir, checkpoint).map(Some);
-    }
-
-    if storage.sync_head().is_none() && storage.total_rows() == 0 {
-        return Err(ConsensusStateError::MissingCheckpoint);
-    }
-
-    Ok(None)
+) -> Result<ConsensusStore, ConsensusStateError> {
+    // Execution rows and a persisted sync head cannot establish consensus trust.
+    // The storage reference keeps admission tied to directory ownership.
+    ConsensusStore::open(storage.data_dir(), checkpoint)
 }
 
 async fn resolve_checkpoint_or_exit(
@@ -2342,9 +2316,7 @@ mod tests {
         let checkpoint = checkpoint_at_slot(recent_checkpoint_slot(1));
         let original = ConsensusStore::open(temp.path(), Some(&checkpoint)).unwrap();
         assert!(consensus_state_exists(temp.path()).unwrap());
-        let reopened = maybe_open_consensus_store(temp.path(), &storage, None)
-            .unwrap()
-            .unwrap();
+        let reopened = open_required_consensus_store(&storage, None).unwrap();
         assert_eq!(original.checkpoint(), reopened.checkpoint());
     }
 
@@ -2359,7 +2331,7 @@ mod tests {
         let checkpoint = checkpoint_at_slot(recent_checkpoint_slot(1));
         for requested in [None, Some(checkpoint.as_str())] {
             assert!(matches!(
-                maybe_open_consensus_store(temp.path(), &storage, requested),
+                open_required_consensus_store(&storage, requested),
                 Err(ConsensusStateError::ParseState { .. })
             ));
         }
@@ -2373,7 +2345,7 @@ mod tests {
         let storage = open_storage_at(temp.path());
         fs::write(temp.path().join("cl"), b"preserve parent").unwrap();
         assert!(matches!(
-            maybe_open_consensus_store(temp.path(), &storage, None),
+            open_required_consensus_store(&storage, None),
             Err(ConsensusStateError::ReadState { .. })
         ));
         assert_eq!(
@@ -2397,7 +2369,7 @@ mod tests {
             };
             std::os::unix::fs::symlink("missing-target", &path).unwrap();
             assert!(consensus_state_exists(temp.path()).unwrap());
-            assert!(maybe_open_consensus_store(temp.path(), &storage, None).is_err());
+            assert!(open_required_consensus_store(&storage, None).is_err());
             assert_eq!(
                 fs::read_link(&path).unwrap(),
                 PathBuf::from("missing-target")
@@ -2409,11 +2381,51 @@ mod tests {
     }
 
     #[test]
+    fn populated_storage_requires_consensus_before_sync() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut storage = open_storage_at(temp.path());
+        storage
+            .record_sync_head(100, B256::repeat_byte(0x11), 1_700_000_000)
+            .unwrap();
+        let head = storage.sync_head();
+        assert!(matches!(
+            open_required_consensus_store(&storage, None),
+            Err(ConsensusStateError::MissingCheckpoint)
+        ));
+        assert_eq!(storage.sync_head(), head);
+        assert!(!consensus_state_exists(temp.path()).unwrap());
+    }
+
+    #[test]
+    fn archived_consensus_cannot_enable_el_only_restart() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut storage = open_storage_at(temp.path());
+        storage
+            .record_sync_head(100, B256::repeat_byte(0x11), 1_700_000_000)
+            .unwrap();
+        let checkpoint = checkpoint_at_slot(recent_checkpoint_slot(1));
+        let consensus = ConsensusStore::open(temp.path(), Some(&checkpoint)).unwrap();
+        assert!(consensus_state_exists(temp.path()).unwrap());
+        drop(consensus);
+        let original = fs::read(consensus_state_path(temp.path())).unwrap();
+        // Sequentially reproduce disappearance after the old startup probe.
+        // This is not an interprocess race or a live checkpoint fetch.
+        let archive = archive_consensus_state(temp.path(), "offline-audit")
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            open_required_consensus_store(&storage, None),
+            Err(ConsensusStateError::MissingCheckpoint)
+        ));
+        assert_eq!(fs::read(archive).unwrap(), original);
+    }
+
+    #[test]
     fn fresh_data_directory_requires_checkpoint_before_sync() {
         let temp = tempfile::tempdir().unwrap();
         let storage = open_storage_at(temp.path());
 
-        let error = maybe_open_consensus_store(temp.path(), &storage, None).unwrap_err();
+        let error = open_required_consensus_store(&storage, None).unwrap_err();
 
         assert!(matches!(error, ConsensusStateError::MissingCheckpoint));
     }
@@ -2424,9 +2436,7 @@ mod tests {
         let storage = open_storage_at(temp.path());
         let checkpoint = checkpoint_at_slot(recent_checkpoint_slot(1));
 
-        let consensus = maybe_open_consensus_store(temp.path(), &storage, Some(&checkpoint))
-            .unwrap()
-            .unwrap();
+        let consensus = open_required_consensus_store(&storage, Some(&checkpoint)).unwrap();
 
         assert!(recent_consensus_state_staleness(&consensus).is_none());
     }

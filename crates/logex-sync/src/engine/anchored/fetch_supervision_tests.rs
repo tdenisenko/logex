@@ -21,7 +21,13 @@ async fn fixture() -> (SyncEngine, impl Sized) {
         Arc::new(RwLock::new(storage)),
         None,
         Arc::new(std::sync::Mutex::new(SyncStatus::default())),
-        None,
+        Arc::new(
+            ConsensusStore::open(
+                directory.path(),
+                Some("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            )
+            .unwrap(),
+        ),
         receiver,
     );
     engine.historical_fetch_expected_child = Some(child());

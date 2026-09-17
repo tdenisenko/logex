@@ -47,6 +47,9 @@ fn legacy_prefix_recovery_hook(before_manifest: bool) {
     }
 }
 
+#[path = "reorg.rs"]
+mod reorg;
+
 const HISTORICAL_STAGING_MAX_BLOCK_SPAN: u64 = 65_536;
 
 /// Filesystem state to select after capturing eligible segment metadata.
@@ -319,6 +322,7 @@ impl NativeStorage {
         storage.repair_recoverable_hot_segment_artifacts()?;
         storage.repair_recoverable_historical_segment_artifacts()?;
         storage.verify_integrity()?;
+        storage.finish_canonical_reorg()?;
         Ok(storage)
     }
 
@@ -467,7 +471,9 @@ impl NativeStorage {
         self.persist_catalog()
     }
 
-    pub fn rewind_canonical_state(
+    // Retained only for isolated metadata/cache invariant controls.
+    #[cfg(test)]
+    fn rewind_canonical_state(
         &mut self,
         recent_headers: &[Header],
         indexed_head: Option<ExecutionAnchor>,
@@ -1629,10 +1635,19 @@ impl NativeStorage {
         Ok(count)
     }
 
+    /// Change one block's row flags without rewinding canonical progress.
+    /// Use `apply_canonical_reorg` for a recoverable chain-level reorg.
     pub fn mark_non_canonical(&mut self, block_hash: B256) -> std::io::Result<u64> {
         self.ensure_writable()?;
         self.checkpoint_durable()?;
         self.recovery_required = true;
+        let marked = self.apply_non_canonical_hashes(&BTreeSet::from([block_hash]))?;
+        self.recovery_required = false;
+        self.read_view.0.store(true, Ordering::SeqCst);
+        Ok(marked)
+    }
+
+    fn apply_non_canonical_hashes(&mut self, block_hashes: &BTreeSet<B256>) -> io::Result<u64> {
         let mut total_marked = 0u64;
         let mut changed_bundles = Vec::new();
         let mut view_invalidated = false;
@@ -1643,6 +1658,14 @@ impl NativeStorage {
             }
 
             let dir = self.paths.segment_dir(descriptor.id);
+            // Raw sources already acquire this same inode via SourceWriteGuard;
+            // only bundled sources need the maintenance owner here. Retain it
+            // through manifest publication, excluding already-verified tasks.
+            let _bundle_owner = if descriptor.column_bundle.is_some() {
+                super::segment::SegmentMaintenanceGuard::acquire(&self.paths, descriptor)?
+            } else {
+                None
+            };
             let raw_owner = if descriptor.column_bundle.is_none() {
                 Some(match descriptor.source_namespace {
                     Some(namespace) => crate::column::SourceWriteGuard::acquire_bound(
@@ -1681,7 +1704,7 @@ impl NativeStorage {
             let mut modified = false;
 
             for (row_id, hash) in hashes.iter().enumerate() {
-                if *hash == block_hash && canonical.is_present(row_id as u64) {
+                if block_hashes.contains(hash) && canonical.is_present(row_id as u64) {
                     canonical.set(row_id as u64, false);
                     modified = true;
                     total_marked += 1;
@@ -1718,11 +1741,6 @@ impl NativeStorage {
                 &self.paths.catalog_path(),
                 &self.catalog.encode()?,
             )?;
-        }
-        self.recovery_required = false;
-        if view_invalidated {
-            // Failed publication leaves the new view invalid until reopen.
-            self.read_view.0.store(true, Ordering::SeqCst);
         }
         Ok(total_marked)
     }
@@ -8661,5 +8679,406 @@ mod tests {
         assert_eq!(storage.compaction_backlog_count().unwrap(), 0);
         assert_eq!(storage.segment_compaction_plan(10).unwrap().len(), 0);
         assert_eq!(storage.compact_eligible_segments().unwrap(), 0);
+    }
+
+    fn reorg_fixture(path: &Path) -> (NativeStorage, Vec<Header>, Vec<LogRow>) {
+        let mut storage = NativeStorage::open(NativeStorageConfig {
+            data_dir: path.to_owned(),
+            hot_target_rows: 100,
+            ..Default::default()
+        })
+        .unwrap();
+        let ancestor = ingestion_header(100, B256::ZERO);
+        let first = ingestion_header(101, ancestor.hash_slow());
+        let second = ingestion_header(102, first.hash_slow());
+        let empty_tip = ingestion_header(103, second.hash_slow());
+        let obsolete = ingestion_header(99, B256::repeat_byte(0xee));
+        let mut rows = ingestion_rows(1, &ancestor);
+        rows.extend(ingestion_rows(1, &first));
+        storage.write_batch(&rows).unwrap();
+        storage.checkpoint_durable().unwrap();
+        let mut historical = ingestion_rows(1, &obsolete);
+        historical.extend(ingestion_rows(1, &second));
+        storage.write_historical_batch(&historical).unwrap();
+        storage.checkpoint_durable().unwrap();
+        rows.extend(historical);
+        rows.sort_by_key(|row| (row.block_number, row.tx_index, row.log_index));
+        assert!(
+            storage
+                .catalog
+                .segments
+                .iter()
+                .any(|s| s.row_count > 0 && s.column_bundle.is_none())
+        );
+        assert!(
+            storage
+                .catalog
+                .segments
+                .iter()
+                .any(|s| s.row_count > 0 && s.column_bundle.is_some())
+        );
+        storage.mark_non_canonical(obsolete.hash_slow()).unwrap();
+        storage.record_historical_floor(&ancestor).unwrap();
+        let headers = vec![ancestor, first, second, empty_tip];
+        storage
+            .record_verified_canonical_state(
+                &reorg_anchor(headers.last().unwrap()),
+                headers.last().unwrap(),
+                &headers,
+            )
+            .unwrap();
+        storage.checkpoint_durable().unwrap();
+        (storage, headers, rows)
+    }
+
+    fn reorg_anchor(header: &Header) -> ExecutionAnchor {
+        ExecutionAnchor {
+            beacon_root: B256::repeat_byte(0xaa),
+            beacon_slot: header.number,
+            block_number: header.number,
+            block_hash: header.hash_slow(),
+            receipts_root: header.receipts_root,
+        }
+    }
+
+    fn reorg_canonical_blocks(storage: &NativeStorage) -> Vec<u64> {
+        let mut blocks = Vec::new();
+        for segment in &storage.catalog.segments {
+            if segment.row_count == 0 {
+                continue;
+            }
+            let reader = SegmentReader::open(&storage.paths.segment_dir(segment.id)).unwrap();
+            let canonical = reader.read_canonical().unwrap();
+            for (row_id, row) in reader.read_log_rows(None).unwrap().iter().enumerate() {
+                if canonical.is_present(row_id as u64) {
+                    blocks.push(row.block_number);
+                }
+            }
+        }
+        blocks.sort_unstable();
+        blocks
+    }
+
+    fn assert_reorg_state(
+        storage: &NativeStorage,
+        headers: &[Header],
+        rows: &[LogRow],
+        committed: bool,
+    ) {
+        assert_eq!(read_ingestion_rows(storage), rows);
+        let expected = if committed { &headers[..1] } else { headers };
+        assert_eq!(storage.recent_headers(), expected);
+        assert_eq!(
+            storage.sync_head().unwrap().block_number,
+            expected.last().unwrap().number
+        );
+        assert_eq!(storage.head_block(), Some(expected.last().unwrap().number));
+        assert_eq!(
+            storage.chain_anchors().indexed_head,
+            Some(reorg_anchor(expected.last().unwrap()))
+        );
+        assert_eq!(storage.historical_floor_header(), Some(&headers[0]));
+        assert_eq!(storage.historical_anchor_header(), Some(&headers[0]));
+        assert_eq!(
+            reorg_canonical_blocks(storage),
+            if committed {
+                vec![100]
+            } else {
+                vec![100, 101, 102]
+            }
+        );
+        assert!(storage.catalog.state.canonical_reorg.is_none());
+        assert!(storage.read_view_token().is_valid());
+    }
+
+    #[test]
+    fn canonical_reorg_before_separate_publications_leave_false_coverage() {
+        let tmp = TempDir::new().unwrap();
+        let (mut storage, headers, rows) = reorg_fixture(tmp.path());
+        let config = storage.config.clone();
+        // Exact old caller interruption: first successful mark, before remaining
+        // hash retirement and before rewind_canonical_state.
+        storage.mark_non_canonical(headers[1].hash_slow()).unwrap();
+        drop(storage);
+        let mut storage = NativeStorage::open(config.clone()).unwrap();
+        assert_eq!(storage.head_block(), Some(103));
+        assert_eq!(
+            storage.chain_anchors().indexed_head.unwrap().block_number,
+            103
+        );
+        assert_eq!(reorg_canonical_blocks(&storage), vec![100, 102]);
+        eprintln!(
+            "BEFORE: verified range 100..103; canonical blocks [100, 102]; mixed raw/bundled rows, empty tip 103"
+        );
+        assert_eq!(
+            storage
+                .apply_canonical_reorg(
+                    &headers[1..]
+                        .iter()
+                        .map(Header::hash_slow)
+                        .collect::<Vec<_>>(),
+                    &headers[..1],
+                    Some(reorg_anchor(&headers[0])),
+                )
+                .unwrap(),
+            1
+        );
+        drop(storage);
+        for _ in 0..2 {
+            let recovered = NativeStorage::open(config.clone()).unwrap();
+            assert_reorg_state(&recovered, &headers, &rows, true);
+        }
+        eprintln!(
+            "FIXED: verified range 100..100; canonical blocks [100]; all physical rows and historical markers preserved"
+        );
+    }
+
+    #[test]
+    fn canonical_reorg_recovers_every_publication_failure() {
+        let mut steps = 0;
+        for failure in std::iter::once(usize::MAX).chain(0..) {
+            if failure != usize::MAX && failure >= steps {
+                break;
+            }
+            let tmp = TempDir::new().unwrap();
+            let (mut storage, headers, rows) = reorg_fixture(tmp.path());
+            let config = storage.config.clone();
+            let before = fs::read(storage.paths.catalog_path()).unwrap();
+            let old_view = storage.read_view_token();
+            let hashes = headers[1..]
+                .iter()
+                .map(Header::hash_slow)
+                .collect::<Vec<_>>();
+            durability::inject_failure(failure);
+            let result = storage.apply_canonical_reorg(
+                &hashes,
+                &headers[..1],
+                Some(reorg_anchor(&headers[0])),
+            );
+            let events = durability::take_events();
+            if failure == usize::MAX {
+                assert_eq!(result.unwrap(), 2);
+                steps = events.len();
+                assert!(steps > 0 && steps < 512);
+                assert_reorg_state(&storage, &headers, &rows, true);
+            } else {
+                assert!(result.is_err(), "failure {failure}: {events:?}");
+                assert!(storage.ensure_writable().is_err());
+                assert!(!storage.read_view_token().is_valid());
+            }
+            assert!(!old_view.is_valid());
+            let committed = fs::read(storage.paths.catalog_path()).unwrap() != before;
+            drop(storage);
+            for restart in 0..2 {
+                let recovered = NativeStorage::open(config.clone()).unwrap_or_else(|error| {
+                    panic!("failure {failure}, restart {restart}: {events:?}: {error}")
+                });
+                assert_reorg_state(&recovered, &headers, &rows, committed);
+            }
+        }
+        eprintln!(
+            "whole reorg: {steps} finite interruption points, each reopened twice, mixed raw/bundled segments"
+        );
+    }
+
+    #[test]
+    fn canonical_reorg_noop_invalid_suffix_and_empty_log_suffix() {
+        let tmp = TempDir::new().unwrap();
+        let (mut storage, headers, rows) = reorg_fixture(tmp.path());
+        let before = fs::read(storage.paths.catalog_path()).unwrap();
+        let view = storage.read_view_token();
+        durability::inject_failure(usize::MAX);
+        assert_eq!(
+            storage
+                .apply_canonical_reorg(&[], &headers, Some(reorg_anchor(&headers[3])))
+                .unwrap(),
+            0
+        );
+        assert!(durability::take_events().is_empty());
+        assert!(view.is_valid());
+        assert!(
+            storage
+                .apply_canonical_reorg(
+                    &[headers[2].hash_slow()],
+                    &headers[..1],
+                    Some(reorg_anchor(&headers[0]))
+                )
+                .is_err()
+        );
+        assert!(
+            storage
+                .apply_canonical_reorg(
+                    &[headers[3].hash_slow()],
+                    &headers[..3],
+                    Some(reorg_anchor(&headers[0]))
+                )
+                .is_err()
+        );
+        assert_eq!(fs::read(storage.paths.catalog_path()).unwrap(), before);
+        assert!(storage.ensure_writable().is_ok());
+        assert!(view.is_valid());
+        assert_eq!(
+            storage
+                .apply_canonical_reorg(
+                    &[headers[3].hash_slow()],
+                    &headers[..3],
+                    Some(reorg_anchor(&headers[2]))
+                )
+                .unwrap(),
+            0
+        );
+        let config = storage.config.clone();
+        drop(storage);
+        let reopened = NativeStorage::open(config).unwrap();
+        assert_eq!(reopened.head_block(), Some(102));
+        assert_eq!(
+            reopened.chain_anchors().indexed_head,
+            Some(reorg_anchor(&headers[2]))
+        );
+        assert_eq!(reopened.recent_headers(), &headers[..3]);
+        assert_eq!(read_ingestion_rows(&reopened), rows);
+        assert_eq!(reorg_canonical_blocks(&reopened), vec![100, 101, 102]);
+    }
+
+    #[test]
+    fn canonical_reorg_recovery_can_itself_be_interrupted() {
+        let tmp = TempDir::new().unwrap();
+        let (mut storage, headers, rows) = reorg_fixture(tmp.path());
+        storage.catalog.state.canonical_reorg = Some(super::super::catalog::CanonicalReorgIntent {
+            retained_header_count: 1,
+            indexed_head: Some(reorg_anchor(&headers[0])),
+        });
+        storage.persist_catalog().unwrap();
+        let config = storage.config.clone();
+        drop(storage);
+        let original = TempDir::new().unwrap();
+        copy_fixture_tree(tmp.path(), original.path());
+        durability::inject_failure(usize::MAX);
+        let recovered = NativeStorage::open(config.clone()).unwrap();
+        let events = durability::take_events();
+        assert_reorg_state(&recovered, &headers, &rows, true);
+        drop(recovered);
+        let phases = events
+            .iter()
+            .enumerate()
+            .filter_map(|(index, (name, _))| {
+                matches!(*name, "reorg_rows_applied" | "reorg_completed").then_some(index)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(phases.len(), 2);
+        for failure in phases {
+            let interrupted = TempDir::new().unwrap();
+            copy_fixture_tree(original.path(), interrupted.path());
+            let mut config = config.clone();
+            config.data_dir = interrupted.path().to_owned();
+            durability::inject_failure(failure);
+            let result = NativeStorage::open(config.clone());
+            let events = durability::take_events();
+            assert!(result.is_err(), "recovery failure {failure}: {events:?}");
+            for _ in 0..2 {
+                let recovered = NativeStorage::open(config.clone()).unwrap();
+                assert_reorg_state(&recovered, &headers, &rows, true);
+            }
+        }
+    }
+    fn reorg_compaction_fixture(
+        path: &Path,
+    ) -> (
+        NativeStorage,
+        Vec<Header>,
+        Vec<LogRow>,
+        SegmentCompactionTask,
+    ) {
+        let (mut storage, headers, rows) = reorg_fixture(path);
+        storage.finalize_active_historical_segment().unwrap();
+        storage.config.compaction_safety_margin_blocks = 0;
+        let task = storage
+            .compaction_candidates(0..storage.compaction_candidate_count())
+            .unwrap()
+            .into_iter()
+            .find(|task| task.descriptor.column_bundle.is_some())
+            .unwrap();
+        // The public task API permits this call; the normal background scheduler
+        // skips this current-profile candidate. Do not model it as a scheduler failure.
+        assert!(
+            !task
+                .needs_compaction(CompactionMode::CurrentProfile)
+                .unwrap()
+        );
+        (storage, headers, rows, task)
+    }
+
+    fn paused_reorg_compaction(
+        task: SegmentCompactionTask,
+    ) -> (
+        std::sync::mpsc::SyncSender<()>,
+        std::thread::JoinHandle<io::Result<()>>,
+    ) {
+        let (verified_tx, verified_rx) = std::sync::mpsc::sync_channel(0);
+        let (resume_tx, resume_rx) = std::sync::mpsc::sync_channel(0);
+        let worker = std::thread::spawn(move || {
+            super::super::segment::AFTER_COMPACTION_SOURCE_VERIFIED.with_borrow_mut(|hook| {
+                *hook = Some(Box::new(move || {
+                    verified_tx.send(()).unwrap();
+                    resume_rx
+                        .recv_timeout(std::time::Duration::from_secs(10))
+                        .unwrap();
+                }));
+            });
+            task.compact()
+        });
+        verified_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap();
+        (resume_tx, worker)
+    }
+
+    #[test]
+    fn canonical_reorg_excludes_verified_bundle_compaction() {
+        let tmp = TempDir::new().unwrap();
+        let (mut storage, headers, rows, task) = reorg_compaction_fixture(tmp.path());
+        let config = storage.config.clone();
+        let (resume, worker) = paused_reorg_compaction(task);
+        let hashes = headers[1..]
+            .iter()
+            .map(Header::hash_slow)
+            .collect::<Vec<_>>();
+        let mutation =
+            storage.apply_canonical_reorg(&hashes, &headers[..1], Some(reorg_anchor(&headers[0])));
+        // Always release the worker before assertions, even if exclusion failed.
+        resume.send(()).unwrap();
+        worker.join().unwrap().unwrap();
+        assert_eq!(mutation.unwrap_err().kind(), io::ErrorKind::WouldBlock);
+        assert!(storage.ensure_writable().is_err());
+        assert!(!storage.read_view_token().is_valid());
+        drop(storage);
+        for _ in 0..2 {
+            let reopened = NativeStorage::open(config.clone()).unwrap();
+            assert_reorg_state(&reopened, &headers, &rows, true);
+        }
+    }
+
+    #[test]
+    fn canonical_reorg_rejects_compaction_task_captured_before_retirement() {
+        let tmp = TempDir::new().unwrap();
+        let (mut storage, headers, rows, task) = reorg_compaction_fixture(tmp.path());
+        let hashes = headers[1..]
+            .iter()
+            .map(Header::hash_slow)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            storage
+                .apply_canonical_reorg(&hashes, &headers[..1], Some(reorg_anchor(&headers[0])))
+                .unwrap(),
+            2
+        );
+        let manifest_path = storage.paths.segment_manifest_path(task.segment_id());
+        let manifest = fs::read(&manifest_path).unwrap();
+        assert_eq!(
+            task.compact().unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        assert_eq!(fs::read(&manifest_path).unwrap(), manifest);
+        assert_reorg_state(&storage, &headers, &rows, true);
     }
 }
