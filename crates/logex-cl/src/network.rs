@@ -180,6 +180,8 @@ pub enum ConsensusNetworkError {
     PersistKnownPeers { path: PathBuf, source: io::Error },
     #[error("invalid built-in mainnet bootnode ENR: {0}")]
     InvalidBootnode(String),
+    #[error("consensus peer count {0} exceeds representable connection limits")]
+    InvalidPeerLimit(usize),
     #[error("failed to construct consensus discovery service: {0}")]
     ConstructDiscovery(String),
     #[error("failed to start consensus discovery service: {0}")]
@@ -2143,6 +2145,9 @@ impl ConsensusNetwork {
         consensus: Arc<ConsensusStore>,
         sync_status: Arc<Mutex<SyncStatus>>,
     ) -> Result<Self, ConsensusNetworkError> {
+        // Validate configuration before opening identity files or constructing
+        // transports. Never silently substitute different connection limits.
+        let connection_limits = build_connection_limits(config.max_peers)?;
         let bootnodes = mainnet_bootnodes()?;
         let local_epoch = config
             .checkpoint
@@ -2250,7 +2255,7 @@ impl ConsensusNetwork {
         }
 
         let response_budgets = RpcResponseBudgets::default();
-        let swarm = build_rpc_swarm(local_keypair, config.max_peers, response_budgets.clone())?;
+        let swarm = build_rpc_swarm(local_keypair, connection_limits, response_budgets.clone())?;
         let mut verified_beacon_blocks =
             verified_beacon_blocks_from_anchor_records(&consensus.ordered_anchors());
         if let Some(store) = consensus.light_client_store() {
@@ -6472,7 +6477,7 @@ fn build_libp2p_keypair(enr_key: &CombinedKey) -> Result<identity::Keypair, Cons
 
 fn build_rpc_swarm(
     keypair: identity::Keypair,
-    max_peers: usize,
+    connection_limits: libp2p::connection_limits::Behaviour,
     response_budgets: RpcResponseBudgets,
 ) -> Result<Swarm<ConsensusBehaviour>, ConsensusNetworkError> {
     let public_key = keypair.public();
@@ -6489,7 +6494,7 @@ fn build_rpc_swarm(
                     .with_cache_size(0),
             );
             Ok(ConsensusBehaviour {
-                connection_limits: build_connection_limits(max_peers),
+                connection_limits,
                 identify,
                 gossip,
                 status_rpc: StatusRpcBehaviour {
@@ -6538,19 +6543,29 @@ fn build_rpc_swarm(
         })
 }
 
-fn build_connection_limits(max_peers: usize) -> libp2p::connection_limits::Behaviour {
+fn build_connection_limits(
+    max_peers: usize,
+) -> Result<libp2p::connection_limits::Behaviour, ConsensusNetworkError> {
     let mut limits = libp2p::connection_limits::ConnectionLimits::default()
         .with_max_pending_incoming(Some(5))
         .with_max_pending_outgoing(Some(16))
         .with_max_established_per_peer(Some(1));
     if max_peers > 0 {
-        let max_peers = u32::try_from(max_peers).unwrap_or(u32::MAX);
+        let invalid = || ConsensusNetworkError::InvalidPeerLimit(max_peers);
+        let count = u64::try_from(max_peers).map_err(|_| invalid())?;
+        let scaled = |factor| {
+            count
+                .checked_mul(factor)
+                .map(|value| value.div_ceil(10))
+                .and_then(|value| u32::try_from(value).ok())
+                .ok_or_else(invalid)
+        };
         limits = limits
-            .with_max_established_incoming(Some(max_peers.saturating_mul(9).div_ceil(10)))
-            .with_max_established_outgoing(Some(max_peers.saturating_mul(11).div_ceil(10)))
-            .with_max_established(Some(max_peers.saturating_mul(13).div_ceil(10)));
+            .with_max_established_incoming(Some(scaled(9)?))
+            .with_max_established_outgoing(Some(scaled(11)?))
+            .with_max_established(Some(scaled(13)?));
     }
-    libp2p::connection_limits::Behaviour::new(limits)
+    Ok(libp2p::connection_limits::Behaviour::new(limits))
 }
 
 fn build_rpc_transport(
@@ -7309,6 +7324,76 @@ mod tests {
     use alloy_primitives::b256;
     use libp2p::StreamProtocol;
     use tempfile::TempDir;
+
+    #[test]
+    fn connection_limits_preserve_representable_scaled_counts() {
+        // Inspect configuration only. Large numeric inputs create no connections
+        // or peer-sized buffers; the dependency stores six optional integers.
+        for count in [0, 1, 32, 500_000_000] {
+            let mut behaviour = build_connection_limits(count).unwrap();
+            let actual = format!("{:?}", behaviour.limits_mut());
+            for (field, factor) in [
+                ("max_established_incoming", 9_u128),
+                ("max_established_outgoing", 11),
+                ("max_established_total", 13),
+            ] {
+                let expected = (count != 0)
+                    .then(|| u32::try_from((count as u128 * factor).div_ceil(10)).unwrap());
+                assert!(
+                    actual.contains(&format!("{field}: {expected:?}")),
+                    "count {count}: {field} should be {expected:?}; got {actual}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn connection_limits_reject_unrepresentable_counts() {
+        let maximum = usize::try_from(u64::from(u32::MAX) * 10 / 13).unwrap();
+        let mut limits = build_connection_limits(maximum).unwrap();
+        assert!(
+            format!("{:?}", limits.limits_mut())
+                .contains(&format!("max_established_total: Some({})", u32::MAX))
+        );
+        for count in [maximum + 1, usize::MAX] {
+            assert!(matches!(
+                build_connection_limits(count),
+                Err(ConsensusNetworkError::InvalidPeerLimit(value)) if value == count
+            ));
+        }
+    }
+
+    #[test]
+    fn invalid_peer_count_fails_before_network_initialization() {
+        let temp = TempDir::new().unwrap();
+        let root = B256::repeat_byte(1);
+        let consensus = Arc::new(
+            ConsensusStore::open(temp.path().join("consensus"), Some(&format!("{root:#x}")))
+                .unwrap(),
+        );
+        let network_dir = temp.path().join("network");
+        // No runtime is needed: invalid configuration must fail before identity
+        // files, discovery or transports are initialized.
+        let result = ConsensusNetwork::new(
+            ConsensusNetworkConfig {
+                data_dir: network_dir.clone(),
+                checkpoint: consensus.checkpoint(),
+                bind_ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
+                dial_families: ConsensusDialAddressFamilies::IPV4,
+                external_ip: None,
+                discovery_port: 0,
+                p2p_port: 0,
+                max_peers: usize::MAX,
+            },
+            consensus,
+            Arc::new(Mutex::new(SyncStatus::default())),
+        );
+        assert!(matches!(
+            result,
+            Err(ConsensusNetworkError::InvalidPeerLimit(_))
+        ));
+        assert!(!network_dir.exists());
+    }
 
     fn retention_peer(index: u16) -> PeerId {
         let mut seed = [1; 32];
