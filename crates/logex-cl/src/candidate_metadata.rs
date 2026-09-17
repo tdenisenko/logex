@@ -1,9 +1,9 @@
-//! FIFO bookkeeping for optional, unconnected Beacon metadata.
+//! FIFO bookkeeping for optional Beacon metadata, including released forks.
 //!
 //! The caller owns block/child maps and must remove every root returned by
-//! `trim`. Insert a bounded response batch, promote authenticated roots with
-//! `protect`, then trim before accepting another batch. Membership can exceed
-//! capacity by that batch size until trim; this tracker does not limit batches.
+//! `trim`. Complete an admission or owner-release batch, promote required roots
+//! with `protect`, then trim before accepting another batch. Membership can
+//! temporarily exceed capacity until trim; this tracker does not bound batch size.
 
 use std::collections::{HashSet, VecDeque};
 
@@ -30,6 +30,7 @@ impl CandidateMetadata {
         self.candidates.contains(root)
     }
 
+    /// Admit a new candidate or demote metadata whose required owners have ended.
     pub(crate) fn insert(&mut self, root: B256) {
         if !self.candidates.insert(root) {
             return;

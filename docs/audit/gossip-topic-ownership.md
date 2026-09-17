@@ -3,7 +3,7 @@
 Base: PR #235 merge `66512764923f3598b5eb5c107b93bfc5a2474eb8`.
 Branch: `audit/gossip-topic-ownership`.
 Source: `9778b322a703c61c0b2d0c89ccb82df6c9014db4`.
-All eleven local gates passed on the frozen source; exact-head CI and merge remain.
+All eleven local gates passed on the frozen source. PR #236 merged as `59f5722c` after all six CI jobs.
 
 ## B3-71: unsupported topics acquired retained state
 
@@ -115,3 +115,5 @@ compressed), SHA-256
 `6cf075db63063a778e55235eb617d31181b724e464ecfddd9b8b562b47470bab`.
 Original-source failures are expected regression evidence; corrected-source
 validation has no failures.
+
+All six CI jobs passed on `b976cd76` and ten Linux volume/template controls passed with verified cleanup. [PR #236](https://github.com/tdenisenko/logex/pull/236) merged as `59f5722c`. The merge tree is identical to the tested head. B3-71 and B3-72 are closed in their documented scope. Protected metadata, gossip admission, shared query resources, dashboard review, verified repair and integrated acceptance remain open.
