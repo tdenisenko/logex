@@ -1,0 +1,374 @@
+{
+  "date": "2026-09-18",
+  "branch": "audit/gossip-topic-ownership",
+  "base": "66512764923f3598b5eb5c107b93bfc5a2474eb8",
+  "source_commit": "9778b322a703c61c0b2d0c89ccb82df6c9014db4",
+  "source_inventory": {
+    "base": "66512764923f3598b5eb5c107b93bfc5a2474eb8",
+    "source_commit": "9778b322a703c61c0b2d0c89ccb82df6c9014db4",
+    "files": {
+      ".github/workflows/ci.yml": {
+        "original": {
+          "bytes": 5285,
+          "sha256": "a191c52ddb68f662672a43e0dc847ad23096dbd4e176511fd2279f476dac4a48"
+        },
+        "final": {
+          "bytes": 5320,
+          "sha256": "e8295af7655c7491683716a85e7452f81c5d23388710c617d6e446f8f346fa6e"
+        }
+      },
+      "crates/logex-cl/src/network.rs": {
+        "original": {
+          "bytes": 538144,
+          "sha256": "6a618819065fdd85f98ff0b02069227565f8efa222bc7c51bc9f78934fad7ca4"
+        },
+        "final": {
+          "bytes": 541954,
+          "sha256": "035175252cad53a0f74a90c8d5219b8f42835174a56ab5723cce662ddb3ba494"
+        }
+      },
+      "tools/verify_datafusion_vendor.py": {
+        "original": {
+          "bytes": 12469,
+          "sha256": "570e7d868efe5c494588d15b222d61bf9a01fd0ad8fa085acd3b1c00fc9326f3"
+        },
+        "final": {
+          "bytes": 12594,
+          "sha256": "f2802670056ecc273436186a20fd4de44e986a5551a875db91edafd6c1dc9b50"
+        }
+      },
+      "vendor/libp2p-gossipsub/LOGEX-PATCH.diff": {
+        "original": {
+          "bytes": 6654,
+          "sha256": "e25f34ffe5f3ea42cc480a78322b72ea805a6156797623e1e3de2fbb9ada2f29"
+        },
+        "final": {
+          "bytes": 21223,
+          "sha256": "6f796df45e0abf217256afc95a0158fba1d3051071808e0862ac398cce4ea9e7"
+        }
+      },
+      "vendor/libp2p-gossipsub/LOGEX-PATCH.md": {
+        "original": {
+          "bytes": 3418,
+          "sha256": "c5b316207a464db776871c21728f79363019b1216246f14c5365fafb415aa43f"
+        },
+        "final": {
+          "bytes": 5567,
+          "sha256": "7315e92171e62a1bb5e19589c0f088dafe22fad0b096547367a8b8f8a7210623"
+        }
+      },
+      "vendor/libp2p-gossipsub/src/behaviour.rs": {
+        "original": {
+          "bytes": 145419,
+          "sha256": "8310bb396e324a837bd7f073fd8ffb5c34a199087f8ee0e15e19b827ba826c6f"
+        },
+        "final": {
+          "bytes": 146180,
+          "sha256": "a357647c2b9dcc6b059c74268dae4838707bd2a4155600d0b7c531c12c6092df"
+        }
+      },
+      "vendor/libp2p-gossipsub/src/behaviour/tests.rs": {
+        "original": {
+          "bytes": 213773,
+          "sha256": "91bcca73037e152f868ae79ea4b16b1924db7173dcb9261997124dc38f083ff8"
+        },
+        "final": {
+          "bytes": 223393,
+          "sha256": "d7f2f4aaaf0ffef97160b1b43f8fe2667c5384ead9844554ce4ccc5a23121399"
+        }
+      },
+      "vendor/libp2p-gossipsub/src/subscription_filter.rs": {
+        "original": {
+          "bytes": 14293,
+          "sha256": "a7fa8e4da268914ce76c6839b9a0a32a28adb8dc8539fe1e97216d80a71ac8aa"
+        },
+        "final": {
+          "bytes": 15197,
+          "sha256": "3e0a08d79be552532b60a9fef0141dbb361a68f4525e14aedd227d27d06fc6e5"
+        }
+      }
+    }
+  },
+  "findings": [
+    "B3-71",
+    "B3-72"
+  ],
+  "gates": {
+    "commit": "9778b322a703c61c0b2d0c89ccb82df6c9014db4",
+    "rustc": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+    "gates": [
+      {
+        "name": "vendor",
+        "command": [
+          "python3",
+          "tools/verify_datafusion_vendor.py"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T19:07:15.545415+00:00",
+        "finished": "2026-09-17T19:07:15.684840+00:00",
+        "sha256": "6755a02cf45534df3ee2ceb1312a5de76c07ade7dd1320e318bb2bbe38d0a97c",
+        "log": "/private/tmp/logex-audit-gossip-topics-20260918/gates/vendor.log"
+      },
+      {
+        "name": "format",
+        "command": [
+          "cargo",
+          "fmt",
+          "--all",
+          "--",
+          "--check"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T19:07:15.685239+00:00",
+        "finished": "2026-09-17T19:07:17.326814+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-audit-gossip-topics-20260918/gates/format.log"
+      },
+      {
+        "name": "vendor-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2024",
+          "--config-path",
+          "vendor/reth-network/rustfmt.toml",
+          "--config",
+          "skip_children=true",
+          "vendor/reth-network/src/eth_requests.rs",
+          "vendor/reth-network/src/session/active.rs",
+          "vendor/reth-network/src/session/mod.rs",
+          "vendor/reth-network/src/session/types.rs",
+          "vendor/reth-network/src/session/range_update.rs",
+          "vendor/reth-discv5/src/lib.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T19:07:17.327211+00:00",
+        "finished": "2026-09-17T19:07:17.393504+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-audit-gossip-topics-20260918/gates/vendor-format.log"
+      },
+      {
+        "name": "enr-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2021",
+          "--config",
+          "skip_children=true",
+          "vendor/enr/src/lib.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T19:07:17.393856+00:00",
+        "finished": "2026-09-17T19:07:17.444887+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-audit-gossip-topics-20260918/gates/enr-format.log"
+      },
+      {
+        "name": "gossipsub-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2021",
+          "--config",
+          "skip_children=true",
+          "vendor/libp2p-gossipsub/src/time_cache.rs",
+          "vendor/libp2p-gossipsub/src/behaviour.rs",
+          "vendor/libp2p-gossipsub/src/behaviour/tests.rs",
+          "vendor/libp2p-gossipsub/src/subscription_filter.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T19:07:17.447892+00:00",
+        "finished": "2026-09-17T19:07:17.550364+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-audit-gossip-topics-20260918/gates/gossipsub-format.log"
+      },
+      {
+        "name": "aggregate-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2021",
+          "--config",
+          "max_width=90,skip_children=true",
+          "vendor/datafusion-functions-aggregate/src/sum.rs",
+          "vendor/datafusion-functions-aggregate/src/average.rs",
+          "vendor/datafusion-functions-aggregate-common/src/aggregate/sum_distinct/numeric.rs",
+          "vendor/datafusion-functions-aggregate-common/src/aggregate/avg_distinct/decimal.rs",
+          "vendor/datafusion-functions-aggregate-common/src/utils.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T19:07:17.551625+00:00",
+        "finished": "2026-09-17T19:07:17.614706+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-audit-gossip-topics-20260918/gates/aggregate-format.log"
+      },
+      {
+        "name": "check",
+        "command": [
+          "cargo",
+          "check",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T19:07:17.615088+00:00",
+        "finished": "2026-09-17T19:07:25.069594+00:00",
+        "sha256": "d8568db7ea740a197b64162dead5e54158cd4509212f77541b4a980dd7e9b618",
+        "log": "/private/tmp/logex-audit-gossip-topics-20260918/gates/check.log"
+      },
+      {
+        "name": "clippy",
+        "command": [
+          "cargo",
+          "clippy",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T19:07:25.070435+00:00",
+        "finished": "2026-09-17T19:07:30.891600+00:00",
+        "sha256": "26f6b82dd97953ddd859bcc2d7ba90cce3245d10e2453324912bdaab8f55b55f",
+        "log": "/private/tmp/logex-audit-gossip-topics-20260918/gates/clippy.log"
+      },
+      {
+        "name": "test",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T19:07:30.892205+00:00",
+        "finished": "2026-09-17T19:11:29.652987+00:00",
+        "sha256": "0be5ab90303e5aa8e84bbd892eb6a638677d8f85f1a956d3308e291ae8129aa1",
+        "log": "/private/tmp/logex-audit-gossip-topics-20260918/gates/test.log"
+      },
+      {
+        "name": "doc",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--doc",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T19:11:29.660163+00:00",
+        "finished": "2026-09-17T19:11:41.592044+00:00",
+        "sha256": "be59e4208a2f013972719af431439be03eb6290a6d40b41247ed830af9ddfb83",
+        "log": "/private/tmp/logex-audit-gossip-topics-20260918/gates/doc.log"
+      },
+      {
+        "name": "release-build",
+        "command": [
+          "cargo",
+          "build",
+          "-p",
+          "logex-node",
+          "--release",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T19:11:41.592957+00:00",
+        "finished": "2026-09-17T19:12:54.936432+00:00",
+        "sha256": "66abac541c3756ce7e9bcc35c49b278c526510c8930d7b31216c6e62fb01fe8d",
+        "log": "/private/tmp/logex-audit-gossip-topics-20260918/gates/release-build.log"
+      }
+    ]
+  },
+  "workspace_tests": {
+    "passed": 2060,
+    "failed": 0,
+    "ignored": 24,
+    "targets": 37
+  },
+  "documentation_tests": {
+    "passed": 0,
+    "failed": 0,
+    "ignored": 0,
+    "targets": 8
+  },
+  "focused_consensus_tests": {
+    "passed": 393,
+    "failed": 0,
+    "ignored": 1,
+    "targets": 1
+  },
+  "focused_gossip_tests": {
+    "passed": 25,
+    "failed": 0,
+    "ignored": 0,
+    "targets": 1
+  },
+  "standalone_vendor_tests": {
+    "passed": 162,
+    "failed": 0,
+    "ignored": 0,
+    "targets": 1
+  },
+  "original_application_controls": {
+    "passed": 11,
+    "failed": 2,
+    "ignored": 0,
+    "targets": 1
+  },
+  "original_vendor_controls": {
+    "passed": 3,
+    "failed": 5,
+    "ignored": 0,
+    "targets": 1
+  },
+  "evidence": {
+    "path": "docs/audit/baselines/2026-09-18-gossip-topic-ownership-evidence.json.gz",
+    "files": 33,
+    "bytes_uncompressed": 1876422,
+    "bytes": 317605,
+    "sha256": "5f48ae8af74f0f8c02bcc69a62ac268862a0ad70260926c29fd522b84befe2ba"
+  },
+  "validation": {
+    "path": "docs/audit/baselines/2026-09-18-gossip-topic-ownership-validation.json.gz",
+    "files": 14,
+    "bytes_uncompressed": 245423,
+    "bytes": 47067,
+    "sha256": "6cf075db63063a778e55235eb617d31181b724e464ecfddd9b8b562b47470bab"
+  },
+  "publication": {
+    "state": "pending"
+  },
+  "boundaries": [
+    "Original application and vendor production source plus additive controls reproduce late type-size and ineligible-topic admission. The tiny fixtures create no network connections.",
+    "Static twelve-topic whitelist covers all six supported repository fork/BPO digest states. Existing active/pre/retiring policy and all cryptographic verification remain unchanged.",
+    "Receive, GRAFT, PRUNE and codec-invalid gates use the documented expanded can_subscribe eligibility hook. AllowAll behavior is preserved; mutable/custom cardinality filters are explicitly not treated as equivalent policies.",
+    "Existing per-type compressed/decoded limits run before message IDs/cache insertion. The message-ID algorithm, including bounded malformed Snappy, is unchanged.",
+    "All 34 upstream package files and exact reconstruction of the six modified files were checked. CI retains expiry coverage and adds topic controls; no dependency version or lockfile changed.",
+    "Initial RPC decoding and generic transform cloning precede the type guard. No total RSS/cache/queue cap or measured throughput improvement is claimed.",
+    "Protected metadata, eligible cache admission/overload policy, priority control queues, shared query resources, dashboard, verified repair and integrated acceptance remain open.",
+    "No benchmark, live sync, production data, remote-host work or release-readiness claim."
+  ]
+}

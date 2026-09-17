@@ -40,11 +40,12 @@ PACKAGES = (
         modified={
             PurePosixPath("Cargo.lock"): "9c251863c193ed1c83b1e63ccc6765b553fc3cf4687464377e1b4bbc8d3cf1eb",
             PurePosixPath("Cargo.toml"): "0e8db4bae3efe861d432bb895baefb868a7fba6f0d4f7dc5ee65bde05bbe4d61",
-            PurePosixPath("src/behaviour/tests.rs"): "91bcca73037e152f868ae79ea4b16b1924db7173dcb9261997124dc38f083ff8",
-            PurePosixPath("src/behaviour.rs"): "8310bb396e324a837bd7f073fd8ffb5c34a199087f8ee0e15e19b827ba826c6f",
+            PurePosixPath("src/behaviour.rs"): "a357647c2b9dcc6b059c74268dae4838707bd2a4155600d0b7c531c12c6092df",
+            PurePosixPath("src/behaviour/tests.rs"): "d7f2f4aaaf0ffef97160b1b43f8fe2667c5384ead9844554ce4ccc5a23121399",
+            PurePosixPath("src/subscription_filter.rs"): "3e0a08d79be552532b60a9fef0141dbb361a68f4525e14aedd227d27d06fc6e5",
             PurePosixPath("src/time_cache.rs"): "454fa2013bb25585a31170e0f7a36ac91caccf57ee6531fc1f489ea13a0719a2",
         },
-        patch_checksum="e25f34ffe5f3ea42cc480a78322b72ea805a6156797623e1e3de2fbb9ada2f29",
+        patch_checksum="6f796df45e0abf217256afc95a0158fba1d3051071808e0862ac398cce4ea9e7",
     ),
     Package(
         name="datafusion-functions-aggregate",

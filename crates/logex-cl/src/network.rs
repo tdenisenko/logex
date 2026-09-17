@@ -220,7 +220,7 @@ struct PersistedPeer {
 struct ConsensusBehaviour {
     connection_limits: libp2p::connection_limits::Behaviour,
     identify: identify::Behaviour,
-    gossip: gossipsub::Behaviour<GossipSizeGuard>,
+    gossip: gossipsub::Behaviour<GossipSizeGuard, gossipsub::WhitelistSubscriptionFilter>,
     status_rpc: StatusRpcBehaviour,
     goodbye_rpc: GoodbyeRpcBehaviour,
     metadata_rpc: MetadataRpcBehaviour,
@@ -6600,7 +6600,7 @@ fn build_rpc_transport(
         .map_err(|error| ConsensusNetworkError::ConstructRpcTransport(error.to_string()))
 }
 
-// This transform preserves wire bytes. Global size failures are rejected by
+// This transform preserves wire bytes. Type size failures are rejected by
 // gossipsub before ID generation and do not reach application-event counters.
 // Malformed Snappy within those bounds still receives the required INVALID ID.
 #[derive(Default)]
@@ -6610,13 +6610,13 @@ fn validate_gossip_wire_size(payload: &[u8], max_decoded: usize) -> io::Result<(
     if payload.len() > snap::raw::max_compress_len(max_decoded) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "gossip compressed payload exceeds global limit",
+            "gossip compressed payload exceeds size limit",
         ));
     }
     if snap::raw::decompress_len(payload).is_ok_and(|length| length > max_decoded) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "gossip declared payload exceeds global limit",
+            "gossip declared payload exceeds size limit",
         ));
     }
     Ok(())
@@ -6624,7 +6624,7 @@ fn validate_gossip_wire_size(payload: &[u8], max_decoded: usize) -> io::Result<(
 
 impl gossipsub::DataTransform for GossipSizeGuard {
     fn inbound_transform(&self, message: gossipsub::RawMessage) -> io::Result<gossipsub::Message> {
-        validate_gossip_wire_size(&message.data, GOSSIP_MAX_PAYLOAD_SIZE)?;
+        validate_gossip_wire_size(&message.data, gossip_payload_limit(&message.topic))?;
         Ok(gossipsub::Message {
             source: message.source,
             data: message.data,
@@ -6633,8 +6633,12 @@ impl gossipsub::DataTransform for GossipSizeGuard {
         })
     }
 
-    fn outbound_transform(&self, _: &gossipsub::TopicHash, data: Vec<u8>) -> io::Result<Vec<u8>> {
-        validate_gossip_wire_size(&data, GOSSIP_MAX_PAYLOAD_SIZE)?;
+    fn outbound_transform(
+        &self,
+        topic: &gossipsub::TopicHash,
+        data: Vec<u8>,
+    ) -> io::Result<Vec<u8>> {
+        validate_gossip_wire_size(&data, gossip_payload_limit(topic))?;
         Ok(data)
     }
 }
@@ -6659,14 +6663,38 @@ fn build_gossip_config() -> Result<gossipsub::Config, ConsensusNetworkError> {
         .map_err(|error| ConsensusNetworkError::ConstructGossip(error.to_string()))
 }
 
-fn build_gossip_behaviour() -> Result<gossipsub::Behaviour<GossipSizeGuard>, ConsensusNetworkError>
-{
-    gossipsub::Behaviour::new_with_transform(
+fn build_gossip_behaviour() -> Result<
+    gossipsub::Behaviour<GossipSizeGuard, gossipsub::WhitelistSubscriptionFilter>,
+    ConsensusNetworkError,
+> {
+    // Keep all supported fork topics eligible here. Active/pre-subscribed/
+    // retiring eligibility remains owned by the consensus validation lifecycle.
+    let topics = supported_gossip_fork_digests()
+        .flat_map(|digest| {
+            let topics = build_gossip_topics(digest);
+            [
+                topics.finality_update.hash(),
+                topics.optimistic_update.hash(),
+            ]
+        })
+        .collect();
+    gossipsub::Behaviour::new_with_subscription_filter_and_transform(
         gossipsub::MessageAuthenticity::Anonymous,
         build_gossip_config()?,
+        gossipsub::WhitelistSubscriptionFilter(topics),
         GossipSizeGuard,
     )
     .map_err(|error| ConsensusNetworkError::ConstructGossip(error.to_string()))
+}
+
+fn supported_gossip_fork_digests() -> impl Iterator<Item = [u8; 4]> {
+    let spec = MAINNET_CONSENSUS_CHAIN_SPEC;
+    spec.fork_schedule
+        .iter()
+        .filter(|fork| fork.version[0] >= 3)
+        .map(|fork| fork.epoch)
+        .chain(spec.blob_schedule.iter().map(|fork| fork.epoch))
+        .map(move |epoch| spec.fork_digest_for_epoch(epoch))
 }
 
 fn build_gossip_topics(fork_digest: [u8; 4]) -> ConsensusGossipTopics {
@@ -6724,16 +6752,9 @@ fn parse_light_client_topic(topic: &gossipsub::TopicHash) -> Option<(bool, [u8; 
     {
         return None;
     }
-    let spec = MAINNET_CONSENSUS_CHAIN_SPEC;
-    let known = spec
-        .fork_schedule
-        .iter()
-        .any(|fork| fork.version[0] >= 3 && spec.fork_digest_for_epoch(fork.epoch) == digest)
-        || spec
-            .blob_schedule
-            .iter()
-            .any(|fork| spec.fork_digest_for_epoch(fork.epoch) == digest);
-    known.then_some((finality, digest))
+    supported_gossip_fork_digests()
+        .any(|known| known == digest)
+        .then_some((finality, digest))
 }
 
 fn gossip_slot_at(now_ms: u128) -> u64 {
@@ -10011,7 +10032,7 @@ mod tests {
     }
 
     #[test]
-    fn gossip_size_guard_preserves_wire_and_rejects_global_oversize() {
+    fn gossip_size_guard_preserves_wire_and_rejects_oversize() {
         use gossipsub::DataTransform as _;
         for payload in [HELLO_SNAPPY, HELLO_SPLIT_SNAPPY, &[5, 16, b'h'], &[], &[0]] {
             let message = GossipSizeGuard
@@ -10048,6 +10069,74 @@ mod tests {
         assert!(validate_gossip_wire_size(&vec![0x80; max_wire + 1], 8).is_err());
         assert!(validate_gossip_wire_size(HELLO_SNAPPY, 5).is_ok());
         assert!(validate_gossip_wire_size(HELLO_SNAPPY, 4).is_err());
+    }
+
+    #[test]
+    fn gossip_admission_subscribes_only_to_supported_topics() {
+        let mut gossip = build_gossip_behaviour().unwrap();
+        // Exercise the configured behaviour across every supported mainnet
+        // transition, including the two blob-schedule digest changes.
+        for epoch in [194_048, 269_568, 364_032, 411_392, 412_672, 419_072] {
+            let topics =
+                build_gossip_topics(MAINNET_CONSENSUS_CHAIN_SPEC.fork_digest_for_epoch(epoch));
+            assert!(gossip.subscribe(&topics.finality_update).unwrap());
+            assert!(gossip.subscribe(&topics.optimistic_update).unwrap());
+        }
+        for topic in [
+            "/example/unrelated-topic",
+            "/eth2/00000000/light_client_optimistic_update/ssz_snappy",
+            "/eth2/8C9F62FE/light_client_finality_update/ssz_snappy",
+            "/eth2/8c9f62fe/light_client_finality_update/ssz_snappy/extra",
+            "/eth2/8c9f62fe/beacon_block/ssz_snappy",
+        ] {
+            assert!(
+                gossip
+                    .subscribe(&gossipsub::IdentTopic::new(topic))
+                    .is_err(),
+                "unsupported topic was admitted: {topic}"
+            );
+        }
+    }
+
+    #[test]
+    fn gossip_admission_enforces_type_sizes_before_message_ids() {
+        use gossipsub::DataTransform as _;
+        for (name, decoded_limit) in [
+            (LIGHT_CLIENT_OPTIMISTIC_UPDATE_TOPIC_NAME, 1_032usize),
+            (LIGHT_CLIENT_FINALITY_UPDATE_TOPIC_NAME, 2_120usize),
+        ] {
+            let topic = gossipsub::TopicHash::from_raw(format!("/eth2/8c9f62fe/{name}/ssz_snappy"));
+            let mut buffer = unsigned_varint::encode::u64_buffer();
+            let header = unsigned_varint::encode::u64(
+                u64::try_from(decoded_limit + 1).unwrap(),
+                &mut buffer,
+            );
+            let mut raw = gossip_raw_message(header);
+            raw.topic = topic.clone();
+            assert!(GossipSizeGuard.inbound_transform(raw).is_err(), "{name}");
+            assert!(
+                GossipSizeGuard
+                    .outbound_transform(&topic, header.to_vec())
+                    .is_err(),
+                "{name}"
+            );
+
+            // Small raw buffers exercise the compressed-size boundary without
+            // decoding or allocating an announced payload. Bounded malformed
+            // Snappy still reaches the existing INVALID-domain ID function.
+            let wire_limit = snap::raw::max_compress_len(decoded_limit);
+            for (length, accepted) in [(wire_limit, true), (wire_limit + 1, false)] {
+                let mut raw = gossip_raw_message(&vec![0x80; length]);
+                raw.topic = topic.clone();
+                assert_eq!(GossipSizeGuard.inbound_transform(raw).is_ok(), accepted);
+                assert_eq!(
+                    GossipSizeGuard
+                        .outbound_transform(&topic, vec![0x80; length])
+                        .is_ok(),
+                    accepted
+                );
+            }
+        }
     }
 
     #[test]

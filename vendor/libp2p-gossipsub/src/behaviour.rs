@@ -1372,7 +1372,12 @@ where
 
     /// Handles GRAFT control messages. If subscribed to the topic, adds the peer to mesh, if not,
     /// responds with PRUNE messages.
-    fn handle_graft(&mut self, peer_id: &PeerId, topics: Vec<TopicHash>) {
+    fn handle_graft(&mut self, peer_id: &PeerId, mut topics: Vec<TopicHash>) {
+        // Filter once before recording peer subscriptions or responding to explicit peers.
+        topics.retain(|topic| self.subscription_filter.can_subscribe(topic));
+        if topics.is_empty() {
+            return;
+        }
         tracing::debug!(peer=%peer_id, "Handling GRAFT message for peer");
 
         let mut to_prune_topics = HashSet::new();
@@ -1608,6 +1613,10 @@ where
             .peer_score
             .below_threshold(peer_id, |ts| ts.accept_px_threshold);
         for (topic_hash, px, backoff) in prune_data {
+            // Even an unknown mesh topic would otherwise acquire a retained backoff entry.
+            if !self.subscription_filter.can_subscribe(&topic_hash) {
+                continue;
+            }
             if self.remove_peer_from_mesh(peer_id, &topic_hash, backoff, true) {
                 #[cfg(feature = "metrics")]
                 if let Some(m) = self.metrics.as_mut() {
@@ -1766,6 +1775,10 @@ where
         mut raw_message: RawMessage,
         propagation_source: &PeerId,
     ) {
+        // Topic eligibility is neutral: do not transform, score, cache or emit a rejected topic.
+        if !self.subscription_filter.can_subscribe(&raw_message.topic) {
+            return;
+        }
         // Record the received metric
         #[cfg(feature = "metrics")]
         if let Some(metrics) = self.metrics.as_mut() {
@@ -3298,22 +3311,23 @@ where
                     return;
                 }
 
-                // Handle any invalid messages from this peer
-                if let PeerScoreState::Active(_) = self.peer_score {
-                    for (raw_message, validation_error) in invalid_messages {
+                // Codec-invalid messages bypass handle_received_message, so apply the same
+                // neutral topic eligibility before invalid metrics or peer penalties.
+                for (raw_message, validation_error) in invalid_messages {
+                    if !self.subscription_filter.can_subscribe(&raw_message.topic) {
+                        continue;
+                    }
+                    if let PeerScoreState::Active(_) = self.peer_score {
                         self.handle_invalid_message(
                             &propagation_source,
                             &raw_message.topic,
                             None,
                             RejectReason::ValidationError(validation_error),
-                        )
-                    }
-                } else {
-                    // log the invalid messages
-                    for (message, validation_error) in invalid_messages {
+                        );
+                    } else {
                         tracing::warn!(
                             peer=%propagation_source,
-                            source=?message.source,
+                            source=?raw_message.source,
                             "Invalid message from peer. Reason: {:?}",
                             validation_error,
                         );
