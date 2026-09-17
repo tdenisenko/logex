@@ -17,7 +17,7 @@ use datafusion::catalog::Session;
 use datafusion::common::{DFSchema, ScalarValue};
 use datafusion::datasource::TableProvider;
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
-use datafusion::execution::context::{SQLOptions, SessionState};
+use datafusion::execution::context::{SQLOptions, SessionState, TaskContext};
 use datafusion::logical_expr::expr::InList;
 use datafusion::logical_expr::simplify::SimplifyContext;
 use datafusion::logical_expr::{
@@ -25,8 +25,9 @@ use datafusion::logical_expr::{
 };
 use datafusion::optimizer::simplify_expressions::ExprSimplifier;
 use datafusion::physical_expr::PhysicalExpr;
-use datafusion::physical_plan::ExecutionPlan;
-use datafusion::physical_plan::memory::{LazyBatchGenerator, LazyMemoryExec};
+use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
+use datafusion::physical_plan::streaming::{PartitionStream, StreamingTableExec};
+use datafusion::physical_plan::{ExecutionPlan, SendableRecordBatchStream};
 use datafusion::prelude::SessionContext;
 use datafusion::sql::parser::{DFParser, DFParserBuilder, Statement as DFStatement};
 use datafusion::sql::sqlparser::ast::{
@@ -37,6 +38,7 @@ use datafusion::sql::sqlparser::ast::{
 };
 use datafusion::sql::sqlparser::keywords::Keyword;
 use datafusion::sql::sqlparser::tokenizer::Token as SqlToken;
+use futures_util::stream;
 use num_bigint::{BigInt, BigUint};
 use roaring::RoaringBitmap;
 use serde_json::{Map, Value};
@@ -170,7 +172,7 @@ impl TableProvider for LogexTableProvider {
         let projected_columns = projected_column_names(self.schema(), projection);
         let mut scanned_rows = 0u64;
         let mut remaining_limit = limit;
-        let mut generators: Vec<Arc<parking_lot::RwLock<dyn LazyBatchGenerator>>> = Vec::new();
+        let mut partitions: Vec<Arc<dyn PartitionStream>> = Vec::new();
 
         for partition in self.snapshot.partitions_in_order(filter.order) {
             check_query_canceled(self.cancel_check.as_ref())?;
@@ -206,14 +208,12 @@ impl TableProvider for LogexTableProvider {
                 remaining_limit = Some(limit.saturating_sub(row_ids.len()));
             }
 
-            generators.push(Arc::new(parking_lot::RwLock::new(
-                LogSegmentBatchGenerator::new(
-                    partition.path.clone(),
-                    projected_schema.clone(),
-                    projected_columns.clone(),
-                    row_ids,
-                    self.cancel_check.clone(),
-                ),
+            partitions.push(Arc::new(LogSegmentPartition::new(
+                partition.path.clone(),
+                projected_schema.clone(),
+                projected_columns.clone(),
+                row_ids,
+                self.cancel_check.clone(),
             )));
 
             if remaining_limit == Some(0) {
@@ -222,15 +222,22 @@ impl TableProvider for LogexTableProvider {
         }
 
         self.total_scanned.store(scanned_rows, Ordering::Relaxed);
-        if generators.is_empty() {
-            generators.push(Arc::new(parking_lot::RwLock::new(
-                EmptyLogBatchGenerator::new(projected_schema.clone()),
-            )));
+        if partitions.is_empty() {
+            partitions.push(Arc::new(EmptyLogPartition {
+                schema: projected_schema.clone(),
+            }));
         }
 
-        Ok(Arc::new(LazyMemoryExec::try_new(
+        // Selection, projection and the pushed limit are already captured above.
+        // The adapter supplies cooperative polling; each partition execution
+        // constructs its own cursor over the same immutable selected row IDs.
+        Ok(Arc::new(StreamingTableExec::try_new(
             projected_schema,
-            generators,
+            partitions,
+            None,
+            [],
+            false,
+            None,
         )?))
     }
 }
@@ -287,61 +294,46 @@ fn exact_candidate_row_ids(
 }
 
 #[derive(Debug)]
-struct EmptyLogBatchGenerator {
+struct EmptyLogPartition {
     schema: SchemaRef,
-    yielded: bool,
 }
 
-impl EmptyLogBatchGenerator {
-    fn new(schema: SchemaRef) -> Self {
-        Self {
-            schema,
-            yielded: false,
-        }
+impl PartitionStream for EmptyLogPartition {
+    fn schema(&self) -> &SchemaRef {
+        &self.schema
+    }
+
+    fn execute(&self, _context: Arc<TaskContext>) -> SendableRecordBatchStream {
+        let schema = self.schema.clone();
+        Box::pin(RecordBatchStreamAdapter::new(
+            schema.clone(),
+            stream::once(async move { empty_projected_batch(schema) }),
+        ))
     }
 }
 
-impl std::fmt::Display for EmptyLogBatchGenerator {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "empty log batch generator")
-    }
-}
-
-impl LazyBatchGenerator for EmptyLogBatchGenerator {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
-    fn generate_next_batch(&mut self) -> DataFusionResult<Option<RecordBatch>> {
-        if self.yielded {
-            return Ok(None);
-        }
-        self.yielded = true;
-        Ok(Some(empty_projected_batch(self.schema.clone())?))
-    }
-}
-
-struct LogSegmentBatchGenerator {
+#[derive(Clone)]
+struct LogSegmentPartition {
     dir: std::path::PathBuf,
     schema: SchemaRef,
-    projected_columns: Vec<String>,
-    row_ids: Vec<u32>,
-    offset: usize,
+    projected_columns: Arc<Vec<String>>,
+    // Keep the original Vec allocation. Executions clone only this Arc, never
+    // the complete selection and never recalculate it against newer storage.
+    row_ids: Arc<Vec<u32>>,
     cancel_check: Option<QueryCancelCheck>,
 }
 
-impl std::fmt::Debug for LogSegmentBatchGenerator {
+impl std::fmt::Debug for LogSegmentPartition {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("LogSegmentBatchGenerator")
+        f.debug_struct("LogSegmentPartition")
             .field("dir", &self.dir)
             .field("projected_columns", &self.projected_columns)
             .field("row_ids", &self.row_ids.len())
-            .field("offset", &self.offset)
             .finish_non_exhaustive()
     }
 }
 
-impl LogSegmentBatchGenerator {
+impl LogSegmentPartition {
     fn new(
         dir: std::path::PathBuf,
         schema: SchemaRef,
@@ -352,43 +344,38 @@ impl LogSegmentBatchGenerator {
         Self {
             dir,
             schema,
-            projected_columns,
-            row_ids,
-            offset: 0,
+            projected_columns: Arc::new(projected_columns),
+            row_ids: Arc::new(row_ids),
             cancel_check,
         }
     }
 }
 
-impl std::fmt::Display for LogSegmentBatchGenerator {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "log segment batch generator")
-    }
-}
-
-impl LazyBatchGenerator for LogSegmentBatchGenerator {
-    fn as_any(&self) -> &dyn Any {
-        self
+impl PartitionStream for LogSegmentPartition {
+    fn schema(&self) -> &SchemaRef {
+        &self.schema
     }
 
-    fn generate_next_batch(&mut self) -> DataFusionResult<Option<RecordBatch>> {
-        check_query_canceled(self.cancel_check.as_ref())?;
-        if self.offset >= self.row_ids.len() {
-            return Ok(None);
-        }
-
-        let end = (self.offset + DATAFUSION_BATCH_SIZE).min(self.row_ids.len());
-        let row_ids = &self.row_ids[self.offset..end];
-        self.offset = end;
-
-        let batch = build_projected_batch(
+    fn execute(&self, _context: Arc<TaskContext>) -> SendableRecordBatchStream {
+        let partition = self.clone();
+        Box::pin(RecordBatchStreamAdapter::new(
             self.schema.clone(),
-            &self.dir,
-            row_ids,
-            &self.projected_columns,
-        )
-        .map_err(DataFusionError::from)?;
-        Ok(Some(batch))
+            stream::try_unfold((partition, 0), |(partition, offset)| async move {
+                check_query_canceled(partition.cancel_check.as_ref())?;
+                if offset >= partition.row_ids.len() {
+                    return Ok(None);
+                }
+                let end = (offset + DATAFUSION_BATCH_SIZE).min(partition.row_ids.len());
+                let batch = build_projected_batch(
+                    partition.schema.clone(),
+                    &partition.dir,
+                    &partition.row_ids[offset..end],
+                    &partition.projected_columns,
+                )
+                .map_err(DataFusionError::from)?;
+                Ok(Some((batch, (partition, end))))
+            }),
+        ))
     }
 }
 
@@ -5395,8 +5382,10 @@ mod tests {
         assert!(!result.rows[0].as_object().unwrap().contains_key("data"));
     }
 
-    #[test]
-    fn lazy_batches_preserve_captured_rows_across_append_and_compaction() {
+    #[tokio::test]
+    async fn scan_executions_preserve_captured_rows_across_append_and_compaction() {
+        use futures_util::TryStreamExt;
+        use std::sync::atomic::AtomicBool;
         let tmp = TempDir::new().unwrap();
         let count = DATAFUSION_BATCH_SIZE * 2 + 1;
         let mut storage = PartitionManager::open(PartitionManagerConfig {
@@ -5420,14 +5409,25 @@ mod tests {
             DataType::UInt64,
             false,
         )]));
-        let mut generator = LogSegmentBatchGenerator::new(
+        let canceled = Arc::new(AtomicBool::new(false));
+        let cancellation = canceled.clone();
+        let partition = LogSegmentPartition::new(
             path,
-            schema,
+            schema.clone(),
             vec!["log_index".to_owned()],
             (0..count as u32).collect(),
-            None,
+            Some(Arc::new(move || cancellation.load(Ordering::Relaxed))),
         );
-        let first = generator.generate_next_batch().unwrap().unwrap();
+        let plan: Arc<dyn ExecutionPlan> = Arc::new(
+            StreamingTableExec::try_new(schema, vec![Arc::new(partition)], None, [], false, None)
+                .unwrap(),
+        );
+        let context = Arc::new(TaskContext::default());
+        let mut first_stream = plan.execute(0, context.clone()).unwrap();
+        let mut concurrent_stream = plan.execute(0, context.clone()).unwrap();
+        let first = first_stream.try_next().await.unwrap().unwrap();
+        let concurrent_first = concurrent_stream.try_next().await.unwrap().unwrap();
+        assert_eq!(first, concurrent_first);
         assert_eq!(first.num_rows(), DATAFUSION_BATCH_SIZE);
         storage
             .write_batch(&[LogRow {
@@ -5438,8 +5438,33 @@ mod tests {
         storage.checkpoint().unwrap();
         assert_eq!(storage.compact_eligible_segments().unwrap(), 1);
         let mut batches = vec![first];
-        while let Some(batch) = generator.generate_next_batch().unwrap() {
-            batches.push(batch);
+        batches.extend(first_stream.try_collect::<Vec<_>>().await.unwrap());
+        let mut concurrent_batches = vec![concurrent_first];
+        concurrent_batches.extend(concurrent_stream.try_collect::<Vec<_>>().await.unwrap());
+        assert_eq!(batches, concurrent_batches);
+        let repeated = plan
+            .execute(0, context.clone())
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+        assert_eq!(batches, repeated);
+        let reset = plan.reset_state().unwrap();
+        let repeated_batches = reset
+            .execute(0, context.clone())
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+        assert_eq!(batches, repeated_batches);
+        let mut active = reset.execute(0, context.clone()).unwrap();
+        assert!(active.try_next().await.unwrap().is_some());
+        let mut fresh = reset.execute(0, context).unwrap();
+        canceled.store(true, Ordering::Relaxed);
+        for result in [active.try_next().await, fresh.try_next().await] {
+            assert!(
+                matches!(result, Err(DataFusionError::Execution(message)) if message == "query canceled")
+            );
         }
         assert_eq!(batches.len(), 3);
         assert_eq!(

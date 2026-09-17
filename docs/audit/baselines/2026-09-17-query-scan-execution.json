@@ -1,0 +1,331 @@
+{
+  "base_commit": "8c881b94e98a14c1b74eb332957662c52dd76ba7",
+  "source_commit": "86c7e6f814f722cf49b2294c6b43a95880582664",
+  "findings": [
+    "B7-30"
+  ],
+  "validation": {
+    "commit": "86c7e6f814f722cf49b2294c6b43a95880582664",
+    "rustc": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+    "gates": [
+      {
+        "name": "vendor",
+        "command": [
+          "python3",
+          "tools/verify_datafusion_vendor.py"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T03:27:06.601179+00:00",
+        "finished": "2026-09-17T03:27:06.712546+00:00",
+        "sha256": "5ab30796f73ebe487516c1f0a99e16016635326667eae76c440d81ff3f41ad1b",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-query-scans-dau6ja3k/gates/vendor.log"
+      },
+      {
+        "name": "format",
+        "command": [
+          "cargo",
+          "fmt",
+          "--all",
+          "--",
+          "--check"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T03:27:06.712957+00:00",
+        "finished": "2026-09-17T03:27:07.717709+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-query-scans-dau6ja3k/gates/format.log"
+      },
+      {
+        "name": "vendor-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2024",
+          "--config-path",
+          "vendor/reth-network/rustfmt.toml",
+          "--config",
+          "skip_children=true",
+          "vendor/reth-network/src/eth_requests.rs",
+          "vendor/reth-network/src/session/active.rs",
+          "vendor/reth-network/src/session/mod.rs",
+          "vendor/reth-network/src/session/types.rs",
+          "vendor/reth-network/src/session/range_update.rs",
+          "vendor/reth-discv5/src/lib.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T03:27:07.718158+00:00",
+        "finished": "2026-09-17T03:27:07.788818+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-query-scans-dau6ja3k/gates/vendor-format.log"
+      },
+      {
+        "name": "enr-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2021",
+          "--config",
+          "skip_children=true",
+          "vendor/enr/src/lib.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T03:27:07.789223+00:00",
+        "finished": "2026-09-17T03:27:07.844027+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-query-scans-dau6ja3k/gates/enr-format.log"
+      },
+      {
+        "name": "check",
+        "command": [
+          "cargo",
+          "check",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T03:27:07.844427+00:00",
+        "finished": "2026-09-17T03:27:09.825490+00:00",
+        "sha256": "d5923f260ff975b7e13d420ad4e037fb74db8611f0763b281695f1d9a4d56df8",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-query-scans-dau6ja3k/gates/check.log"
+      },
+      {
+        "name": "clippy",
+        "command": [
+          "cargo",
+          "clippy",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T03:27:09.825972+00:00",
+        "finished": "2026-09-17T03:27:20.967451+00:00",
+        "sha256": "6cf5637d6b2dc42cbf2b106ccaaaf8e8cff7e20229b5fe83d0f1d8526939dccf",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-query-scans-dau6ja3k/gates/clippy.log"
+      },
+      {
+        "name": "test",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T03:27:20.968284+00:00",
+        "finished": "2026-09-17T03:32:44.326786+00:00",
+        "sha256": "5e61fb0ebc85fe924b4777ccc6c7b03475b5ed719a872c20820909a2cdec1112",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-query-scans-dau6ja3k/gates/test.log"
+      },
+      {
+        "name": "doc",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--doc",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T03:32:44.330904+00:00",
+        "finished": "2026-09-17T03:32:59.310909+00:00",
+        "sha256": "749131354233d9770f0155ced1fec045b114988312d840b31123bf4476cc5908",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-query-scans-dau6ja3k/gates/doc.log"
+      },
+      {
+        "name": "release-build",
+        "command": [
+          "cargo",
+          "build",
+          "-p",
+          "logex-node",
+          "--release",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T03:32:59.311751+00:00",
+        "finished": "2026-09-17T03:34:37.678761+00:00",
+        "sha256": "df368659019067410ab8ba0e76dd2fb38f8e86ecf9a986dbf98f1af8dc4b113d",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-query-scans-dau6ja3k/gates/release-build.log"
+      }
+    ]
+  },
+  "workspace_tests": {
+    "passed": 1861,
+    "failed": 0,
+    "ignored": 24,
+    "groups": 29
+  },
+  "focused_application": {
+    "passed": 97,
+    "ignored": 2,
+    "new_public_controls": 6
+  },
+  "retained_investigation": {
+    "path": "docs/audit/baselines/2026-09-17-query-scan-execution-evidence.json.gz",
+    "sha256": "ae50ad2953eec17476688bc609117b5affa0fd155151171d099d6af5ed1e3caf",
+    "files": 28,
+    "compressed_bytes": 275908,
+    "decoded_bytes": 1477473,
+    "source_hashes_match": true,
+    "lockfile_only_changes_query_direct_edges": true,
+    "handoff": {
+      "branch": "audit/query-scan-execution",
+      "baseline": "8c881b94e98a14c1b74eb332957662c52dd76ba7",
+      "implementation_commit": "9960fd6ba4775c193923216052bfe699d35722ed",
+      "final_readability_commit": "86c7e6f814f722cf49b2294c6b43a95880582664",
+      "owned_files": [
+        "Cargo.lock",
+        "crates/logex-query/Cargo.toml",
+        "crates/logex-query/src/sql.rs",
+        "crates/logex-query/tests/sql_scan_execution.rs"
+      ],
+      "finding": "Public bounded recursive query returned [1,2] instead of independently expected [1,2,3,4] on one and three stored partitions; reused LazyMemoryExec generator cursor exhausted on first recursive iteration.",
+      "remedy": "Builtin StreamingTableExec invokes immutable PartitionStream descriptor to construct fresh per-execution try_unfold cursor. Captured Vec allocation moves into private Arc<Vec<u32>>, with no row-ID cloning or reselection. Cooperative polling retained; cancellation closure preserved. No provider metrics equivalence/performance claim.",
+      "checks": {
+        "05-lifecycle-candidate.log": {
+          "passed": 1,
+          "filtered": 79,
+          "detail": "same-plan overlapping/interleaved streams, sequential execution, reset execution, 8193 captured rows across append/compaction, cancellation of active and fresh streams"
+        },
+        "06-focused.log": {
+          "passed": 97,
+          "ignored": 2,
+          "groups": {
+            "query_library": 79,
+            "snapshots": 11,
+            "sql_limits": 1,
+            "sql_scan_execution": 6
+          }
+        },
+        "07-clippy.log": "strict focused Clippy passed for query library and new integration target",
+        "08-format.log": "workspace formatting passed before readability-only change",
+        "09-format.log": "workspace formatting passed after final readability-only change"
+      },
+      "attempts": [
+        {
+          "log": "01-public-before.log",
+          "test_source": "01-public-before.rs",
+          "provider_source": "01-provider-before.rs",
+          "outcome": "4 failed at fixture partition-count assertion; single-partition target100 left active partition unsealed. No SQL reproduction claim."
+        },
+        {
+          "log": "02-public-before.log",
+          "test_source": "02-public-before.rs",
+          "provider_source": "01-provider-before.rs",
+          "outcome": "3 controls passed; recursive query failed planning because recursive CTE alias list did not name the seed column. Not the cursor defect."
+        },
+        {
+          "log": "03-public-before.log",
+          "test_source": "03-public-before.rs",
+          "provider_source": "01-provider-before.rs",
+          "outcome": "3 ordinary groups passed; recursive assertion failed with [1,2] on both physical layouts, expected[1,2,3,4]. First valid public cursor reproduction."
+        },
+        {
+          "log": "04-public-candidate.log",
+          "test_source": "04-public-candidate.rs",
+          "provider_source": "04-provider-candidate.rs",
+          "outcome": "4 public groups passed on adapter candidate; raw asserted values printed, including recursive correction."
+        },
+        {
+          "log": "05-lifecycle-candidate.log",
+          "test_source": "05-public-candidate.rs",
+          "provider_source": "05-provider-candidate.rs",
+          "outcome": "mechanism assertion test passed; exact manifests05 retained before this run."
+        },
+        {
+          "log": "06-focused.log",
+          "test_source": "05-public-candidate.rs",
+          "provider_source": "05-provider-candidate.rs",
+          "outcome": "97 passed and2 existing ignores; same exact05 sources/manifests, verified before handoff."
+        },
+        {
+          "log": "07-clippy.log",
+          "test_source": "05-public-candidate.rs",
+          "provider_source": "05-provider-candidate.rs",
+          "outcome": "passed with unchanged05 sources"
+        }
+      ],
+      "assertion_provenance": "All test runs use actual equality assertions. Early public probes also print actual/expected values, but no diagnostic-only success is represented as validation.",
+      "source_provenance_limits": [
+        "Provider/public test source saved before every meaningful failing attempt; provider unchanged between attempts01\u201303 and retained as01-provider-before.rs.",
+        "Baseline manifests00 were recovered from immutable baseline Git revision after tests.04 dependency manifests were not separately snapshotted: that successful candidate only added existing futures-util;05 then removed unused parking_lot.05 exact manifests retained before all final behavior checks.",
+        "Final readability commit wraps two existing test calls and adds optional trailing commas only; final integration source retained as09-public-readability.rs. Behavioral tests/Clippy precede this formatting-only change. Parent full-head validation remains separate."
+      ],
+      "scoped_limits": [
+        "Finite offline fixtures only; no production data, peer/network tests, live sync, mac-mini or benchmarks.",
+        "Ordinary repeated CTE, self/cross joins and repeated scalar subqueries passed before and after; do not claim all reuse forms were broken.",
+        "Overlapping same-plan streams are interleaved deterministically; no claim of simultaneous OS-thread execution.",
+        "StreamingTableExec uses UnknownPartitioning instead of LazyMemoryExec RoundRobinBatch; built-in cooperative adapter preserved, but no identical internal baseline poll metrics claim.",
+        "total_scanned behavior remains unchanged and its multi-scan telemetry contract is outside this patch.",
+        "Snapshot invalidation/cancellation checks and captured selection retained; no new file lease introduced.",
+        "No new isolated Cargo target created; existing workspace build artifacts retained. Temporary directory contains evidence/source only."
+      ],
+      "dependency_check": "Only logex-query dependency edges change: add existing futures-util, remove unused direct parking_lot. All package names,versions,sources and other dependency edges remain identical to baseline.",
+      "final_source_sha256": {
+        "Cargo.lock": "8b99e98fe2a742d81cea02923a2429fe6261df42b968b47d9579c93ceb97139b",
+        "crates/logex-query/Cargo.toml": "852b283b2ab3448cc513f73342ee410312fcfe72d1bdaa684975dfd8afb2f531",
+        "crates/logex-query/src/sql.rs": "569d022e72c9cbdd583fc026a125736f49e14ba0b34c1d9d5379b52e65af0aba",
+        "crates/logex-query/tests/sql_scan_execution.rs": "291e80463d1937a4d1a3c189873598c78163fc78230facffaf24c798b257da0a"
+      },
+      "evidence_sha256": {
+        "00-Cargo.lock": "4b39ae6c50823440dd5c9a8d81762b691a5e9a0ebe8e87076394e84766f60d06",
+        "00-query-Cargo.toml": "0e565733dcd026b23dbd44acf41243622a2e541fd7c8634817f357d99b8d0684",
+        "01-provider-before.rs": "98fe1b87638e215b52c6f2af5c31fbeeffde4309a91a7c127cf2d93a998c424a",
+        "01-public-before.log": "ca0defc66c46f0391261e417d0b8492b414c2b3af2253d343a5bafc215e75de3",
+        "01-public-before.rs": "05ac256d229368fb4244f50c8b1dfeb798e3eae677a24f6dd9223e43163c4d67",
+        "02-public-before.log": "0e65bad67108bd1fab68a9e38b5fa3fea232331e77d7e10f608e0ecea08221f3",
+        "02-public-before.rs": "5bea8980789fb173f7c4159d1db5d249e7612ddb48c9c4c359784aca2cc65d31",
+        "03-public-before.log": "dadc333f653284726930ff66bb0782cfe3058a6157c1e3ab6fdbbcad28acafe3",
+        "03-public-before.rs": "7982cc14d2769f52b65ae1977b02c7dffb94f5cf2ede55b2a90245e9ab149760",
+        "04-provider-candidate.rs": "c91e4463d1ca4c40495a55f2a47040dd4b0eb2694f98aa75a7d7c4a105253ae9",
+        "04-public-candidate.log": "f56d1695b47372ff6588551b138a3a6923ea82d4456f9de9984168c8b963beb1",
+        "04-public-candidate.rs": "76e28cf66876ba8220f14c7587b7fcc76cfe31fdb7e27a1be2ae0710ef6ee051",
+        "05-Cargo.lock": "8b99e98fe2a742d81cea02923a2429fe6261df42b968b47d9579c93ceb97139b",
+        "05-lifecycle-candidate.log": "7243e37a4404bb2d2992d13b803eda1eb8857434301a577c5d5eec32d7732990",
+        "05-provider-candidate.rs": "569d022e72c9cbdd583fc026a125736f49e14ba0b34c1d9d5379b52e65af0aba",
+        "05-public-candidate.rs": "8c05ca35339372818d1678a454423951b53ac25ae1760a134aee0f152348a5b9",
+        "05-query-Cargo.toml": "852b283b2ab3448cc513f73342ee410312fcfe72d1bdaa684975dfd8afb2f531",
+        "06-focused.log": "fc4b357739cd29075ae2bc8640773c1f38ee4a256cdd3f21c72bd4a938203925",
+        "07-clippy.log": "55810605352a83a3573cba2edee10e2fabb53ee2811bc4cd852d3411a88c9040",
+        "08-format.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "09-format.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "09-public-readability.rs": "291e80463d1937a4d1a3c189873598c78163fc78230facffaf24c798b257da0a",
+        "pinned-api/execution_plan.rs": "abcd38288e6a104819c21407093b32c8308a219019e3494434131a6293fb8e1f",
+        "pinned-api/memory.rs": "adbe1818cc3b46d6f1b93d0fac1c436c076fe9d39a6202f3dc89c01a15cae194",
+        "pinned-api/recursive_query.rs": "1f21f946e2d0693b55a9d55dd53157eefd99d051740d28e907f994638ca9846a",
+        "pinned-api/streaming.rs": "7f4d801fb6a6174112f8488f021a3aff4ad8c68119d7a5293c53f2f8522dd9ee"
+      }
+    }
+  },
+  "review": "Public recursive reproduction; parent reviewed caller, snapshot, partitioning and cancellation contracts. Ordinary reuse controls passed on the original implementation.",
+  "performance": "Captured row IDs share their original vector allocation; no selection copy or reselection per execution. No benchmark campaign or timing guarantee. No ingestion/storage changes.",
+  "publication": "pending exact-head CI and merge",
+  "gate_logs": {
+    "path": "docs/audit/baselines/2026-09-17-query-scan-execution-validation.json.gz",
+    "sha256": "b39a02ad0006e180442adb89d46de940fdf8d8826af6516dd7fa862aee47edaa",
+    "bytes": 38598
+  }
+}

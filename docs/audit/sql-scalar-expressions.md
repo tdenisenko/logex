@@ -2,7 +2,7 @@
 
 Base: `4b0b1437` (merged PR #212). The remaining DataFusion #24246 leads
 reproduce through LogEx's public query path. The scoped correction passes focused application and optimizer/math package
-checks; all final-source local gates pass; exact-head CI and merge remain. This report does not close the
+checks; all final-source local gates and exact-head CI pass; PR #213 is merged. This report does not close the
 broader query audit.
 
 ## Findings
@@ -103,7 +103,7 @@ independently compared package inventories to the published archive hashes and
 verified that the lockfile changes only the two new package sources.
 
 Source commit: `6d766f98`. Final-source workspace gates and fixture identities are recorded below;
-publication status will follow exact-head CI. The nested-function
+PR #213 is merged as `8c881b94`. The nested-function
 package initially lacked a schema in an existing simplifier test; supplying its
 actual nullable column schema fixed the fixture without weakening the guard.
 The isolated temporary build directory was removed after checks, reclaiming
@@ -114,7 +114,7 @@ All nine local gates pass on `6d766f98`, including 1,855 workspace tests with
 node build. [Validation record](baselines/2026-09-17-sql-scalar-expressions.json)
 retains commands, identities and counts; [raw gate logs](baselines/2026-09-17-sql-scalar-expressions-validation.json.gz)
 and [investigation evidence](baselines/2026-09-17-sql-scalar-expressions-evidence.json.gz)
-retain original output and source-snapshot limitations. Publication/CI/merge remain.
+retain original output and source-snapshot limitations. All six CI jobs passed on `7d836fef`, including ten Linux volume/template cases with verified cleanup. [PR #213](https://github.com/tdenisenko/logex/pull/213) merged as `8c881b94`.
 
 Not every intermediate diagnostic fixture or failed package-source state was
 snapshotted. The evidence manifest names those gaps, distinguishes printed

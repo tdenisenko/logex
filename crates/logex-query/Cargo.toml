@@ -11,13 +11,13 @@ logex-index = { workspace = true }
 alloy-primitives = { workspace = true }
 async-trait = { workspace = true }
 datafusion = { workspace = true }
+futures-util = { workspace = true }
 hex = "0.4"
 num-bigint = "0.4"
 roaring = "0.10"
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-parking_lot = "0.12"
 
 [dev-dependencies]
 alloy-consensus = { workspace = true }
