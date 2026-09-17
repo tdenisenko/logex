@@ -484,6 +484,16 @@ curl -u logex:YOUR_PASSWORD \
   }'
 ```
 
+Send one JSON-RPC 2.0 request object per HTTP request. `eth_getLogs` requires
+exactly one positional filter; `eth_blockNumber`, `web3_clientVersion`, and
+`net_version` take no arguments (omit `params` or use an empty array/object).
+Omitting `id` submits a notification: the server awaits its work and returns
+HTTP 204 without a response body. An explicit null ID still receives a response;
+string and numeric IDs are echoed without numeric rounding. Batch execution is
+unsupported (nonempty arrays return HTTP 422; an empty array is an invalid
+request). Invalid method arguments return error code `-32602`; storage and
+execution failures return `-32603`.
+
 WebSocket ERC20 transfer hook:
 
 ```json

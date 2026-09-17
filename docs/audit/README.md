@@ -16,12 +16,18 @@ inbound/outgoing ownership dispositions and fixes unrepresentable peer-count
 configuration before startup (B4-49). Source `eecd57d7` passes six focused controls,
 strict sync Clippy, independent review and all eleven local gates (1,968 tests / 24 ignores); PR #227 merged as `50c1194f` after all six CI jobs and ten Linux controls.
 
-The [live subscription ownership milestone](api-subscription-lifecycle.md) is in
-progress on `audit/api-subscription-lifecycle`: four original-code controls
+The [live subscription ownership milestone](api-subscription-lifecycle.md) merged in
+PR #228 as `910a74ae`: four original-code controls
 reproduce named ephemeral lifetime, replaced-session detach and retained history
 ordering/eviction (B8-06–08). Final source `dbd5b48a` passes 108 server tests,
 independent review and eleven local gates (1,973 tests / 24 ignores). Other API protocol/filter/notification findings are
-recorded for sequential fixes; this is not completion of batch 8.
+recorded for sequential fixes. All eleven local gates, six CI jobs and ten Linux
+controls passed; this is not completion of batch 8.
+
+The [single-request JSON-RPC admission review](jsonrpc-admission.md) fixes
+request envelopes/notifications, argument errors before storage and exact numeric
+ID correlation (B8-09–11). Source and local checks are complete; exact-head CI and merge remain.
+Batch execution, detailed filters and shared resource policy remain separate.
 
 ## Batch ledger
 
