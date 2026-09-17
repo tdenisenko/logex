@@ -832,14 +832,14 @@
   .history-table-wrap {
     max-height: 320px;
     overflow-y: auto;
-    overflow-x: hidden;
+    overflow-x: auto;
     border: 1px solid var(--line);
     border-radius: 8px;
     background: #070a0e;
   }
 
   .history-table-wrap table {
-    min-width: 0;
+    min-width: 920px;
     table-layout: fixed;
   }
 
@@ -892,7 +892,7 @@
     display: flex;
     gap: 8px;
     justify-content: flex-start;
-    flex-wrap: nowrap;
+    flex-wrap: wrap;
   }
 
   .history-actions button {
@@ -1090,6 +1090,10 @@
       grid-template-columns: 1fr;
     }
   }
+  @media (prefers-reduced-motion: reduce) {
+    .dot, .segmented-bar > span { animation: none !important; }
+    .segmented-bar > span, .copy-toast { transition: none; }
+  }
 </style>
 </head>
 <body>
@@ -1101,7 +1105,7 @@
     </div>
     <div class="status-strip">
       <span class="pill state-syncing" id="nodeBadge"><span class="dot"></span><strong id="nodeState">Starting</strong></span>
-      <span class="pill">Updated <strong id="lastUpdated">--</strong></span>
+      <span class="pill">Status received <strong id="lastUpdated">--</strong></span>
     </div>
   </header>
 
@@ -1140,12 +1144,12 @@
       <div class="section-head">
         <div>
           <h2>Sync Performance</h2>
-          <p>Execution log rate, serving peers, and process CPU utilization over the selected window.</p>
+          <p>Execution log rate, serving peers, and process CPU utilization over the selected window. CPU and disk metrics refresh about once a minute.</p>
         </div>
-        <div class="range-buttons" aria-label="Chart range">
-          <button type="button" class="active" data-hours="1" onclick="setChartWindow(1)">1 hour</button>
-          <button type="button" data-hours="6" onclick="setChartWindow(6)">6 hours</button>
-          <button type="button" data-hours="12" onclick="setChartWindow(12)">12 hours</button>
+        <div class="range-buttons" role="group" aria-label="Chart range">
+          <button type="button" class="active" data-hours="1" aria-pressed="true" onclick="setChartWindow(1)">1 hour</button>
+          <button type="button" data-hours="6" aria-pressed="false" onclick="setChartWindow(6)">6 hours</button>
+          <button type="button" data-hours="12" aria-pressed="false" onclick="setChartWindow(12)">12 hours</button>
         </div>
       </div>
       <div class="charts-grid">
@@ -1433,15 +1437,18 @@
 
 <div class="copy-toast" id="copyToast" role="status" aria-live="polite">Copied to clipboard</div>
 
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.5.0/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.5.0/dist/chart.umd.min.js" integrity="sha384-XcdcwHqIPULERb2yDEM4R0XaQKU3YnDsrTmjACBZyfdVVqjh6xQ4/DCMd7XLcA6Y" crossorigin="anonymous"></script>
 <script>
 var QUERY_PAGE_SIZE = 50;
 var DEFAULT_QUERY_LIMIT = 500;
 var queryOffset = 0;
 var queryRows = [];
+var queryResultCustomToken = null;
 var queryColumns = [];
 var queryScannedRows = null;
-var lastStatusTimestamp = null;
+var lastStatusReceivedAtMs = null;
+var statusRequest = null;
+var STATUS_TIMEOUT_MS = 10000;
 var chartHours = 1;
 var FOLDOUT_STORAGE_KEY = 'logex.dashboard.v1.foldouts';
 var PERF_SAMPLE_STORAGE_KEY = 'logex.performance.v3.samples';
@@ -1733,7 +1740,11 @@ function fmtDateTime(value) {
 function fmtAgo(timestamp) {
   var value = numberOrNull(timestamp);
   if (value === null || value <= 0) return null;
-  var delta = Math.max(0, Math.floor(Date.now() / 1000 - value));
+  return fmtAge(Date.now() / 1000 - value);
+}
+
+function fmtAge(seconds) {
+  var delta = Math.max(0, Math.floor(seconds));
   if (delta < 10) return 'Now';
   if (delta < 60) return delta + 's ago';
   if (delta < 3600) return Math.floor(delta / 60) + 'm ago';
@@ -1936,7 +1947,7 @@ function tokenForAddress(address) {
   var normalized = normalizeAddress(address);
   if (!normalized) return null;
   var custom = customBuilderToken(false);
-  if (custom && custom.address === normalized) return custom;
+  if (custom && normalizeAddress(custom.address) === normalized) return custom;
   return ERC20_TOKEN_BY_ADDRESS[normalized] || null;
 }
 
@@ -2020,8 +2031,12 @@ function displayTopicValue(column, value) {
 }
 
 function tokenForResultRow(row) {
-  if (row && row.address) return tokenForAddress(row.address);
-  return selectedBuilderToken(false);
+  var address = row && normalizeAddress(row.address);
+  if (!address) return null;
+  if (queryResultCustomToken && normalizeAddress(queryResultCustomToken.address) === address) {
+    return queryResultCustomToken;
+  }
+  return ERC20_TOKEN_BY_ADDRESS[address] || null;
 }
 
 function displayCellValue(column, value, row) {
@@ -2034,20 +2049,17 @@ function displayCellValue(column, value, row) {
       return displayTopicValue('topic' + index, topic);
     }).join(', ');
   }
-  if (column === 'data' && resultHasTransferContext(row ? [row] : null)) {
-    return formatTokenAmount(raw, tokenForResultRow(row)) || raw;
+  if (column === 'data' && row && row.address && resultHasTransferContext([row])) {
+    var token = tokenForResultRow(row);
+    return token ? formatTokenAmount(raw, token) || raw : raw;
   }
   return raw;
 }
 
 function resultHasTransferContext(rows) {
-  if (Array.isArray(rows) && rows.some(function(row) {
-    return normalizeTopicHash(row.topic0) === TRANSFER_TOPIC0;
-  })) {
-    return true;
-  }
-  var sql = byId('sql') ? byId('sql').value : '';
-  return sql.indexOf(TRANSFER_EVENT_SIGNATURE) !== -1 || sql.toLowerCase().indexOf(TRANSFER_TOPIC0) !== -1;
+  return Array.isArray(rows) && rows.length > 0 && rows.every(function(row) {
+    return row && normalizeTopicHash(row.topic0) === TRANSFER_TOPIC0;
+  });
 }
 
 function columnTitle(column, rows) {
@@ -2086,17 +2098,38 @@ function setBuilderStatus(message, isError) {
 }
 
 function parseBuilderBlock(id) {
-  var value = byId(id).value.trim();
+  var input = byId(id);
+  var errorMessage = 'Block range values must be non-negative whole numbers.';
+  if (input.validity && input.validity.badInput) throw new Error(errorMessage);
+  var value = input.value.trim();
   if (value === '') return null;
+
+  // Check integrality before Number can round fractions or underflow to zero.
+  // Decimal position comparison also preserves whole scientific notation without
+  // expanding exponent-sized strings or integers.
+  var decimal = value.match(/^[+-]?(\d*)(?:\.(\d*))?(?:[eE]([+-]?\d+))?$/);
+  var whole = false;
+  if (decimal) {
+    var fraction = decimal[2] || '';
+    var digits = decimal[1] + fraction;
+    var significant = digits.replace(/0+$/, '');
+    var exponent = Number(decimal[3] || 0);
+    whole = digits.length > 0 && (significant.length === 0 ||
+      exponent >= fraction.length - (digits.length - significant.length));
+  }
   var number = Number(value);
-  if (!Number.isSafeInteger(number) || number < 0) {
-    throw new Error('Block range values must be non-negative whole numbers.');
+  if (!whole || !Number.isSafeInteger(number) || number < 0) {
+    throw new Error(errorMessage);
   }
   return number;
 }
 
 function parseBuilderTimestamp(id, label) {
-  var value = byId(id).value.trim();
+  var input = byId(id);
+  if (input.validity && input.validity.badInput) {
+    throw new Error(label + ' must be a valid local time.');
+  }
+  var value = input.value.trim();
   if (value === '') return null;
   var match = value.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3}))?)?$/);
   if (!match) {
@@ -2126,19 +2159,61 @@ function parseBuilderTimestamp(id, label) {
 
 function normalizeEventSignature(value) {
   var text = String(value || '').trim().replace(/\s+/g, '');
-  var match = text.match(/^([A-Za-z_$][A-Za-z0-9_$]*)\((.*)\)$/);
-  if (!match) {
+  var name = text.match(/^([A-Za-z_$][A-Za-z0-9_$]*)\(/);
+  if (!name) {
     throw new Error('Event must use the format Transfer(address,address,uint256).');
   }
-  var args = match[2];
-  if (args === '') return match[1] + '()';
-  var types = args.split(',');
-  if (!types.every(function(type) {
-    return /^[A-Za-z][A-Za-z0-9_]*(\[[0-9]*\])*$/.test(type);
-  })) {
-    throw new Error('Event argument types must be canonical ABI types without names.');
+  function invalidType() {
+    throw new Error('Event argument types must be canonical ABI types without names or aliases.');
   }
-  return match[1] + '(' + types.join(',') + ')';
+  function isCanonicalType(type) {
+    if (/^(address|bool|string|bytes|function)$/.test(type)) return true;
+    var integer = type.match(/^(?:u?int)([1-9][0-9]*)$/);
+    if (integer) return Number(integer[1]) <= 256 && Number(integer[1]) % 8 === 0;
+    var bytes = type.match(/^bytes([1-9][0-9]*)$/);
+    if (bytes) return Number(bytes[1]) <= 32;
+    var fixed = type.match(/^u?fixed([1-9][0-9]*)x([1-9][0-9]*)$/);
+    return !!fixed && Number(fixed[1]) <= 256 && Number(fixed[1]) % 8 === 0 && Number(fixed[2]) <= 80;
+  }
+
+  // Canonical ABI tuples and array suffixes. An explicit stack avoids recursive
+  // parsing of user-provided tuple nesting; no values or array elements allocate.
+  var position = name[0].length;
+  var listSizes = [0];
+  var expectType = true;
+  while (listSizes.length) {
+    if (expectType && text[position] === ')') {
+      if (listSizes[listSizes.length - 1] !== 0) invalidType();
+    } else {
+      if (expectType) {
+        if (text[position] === '(') {
+          listSizes.push(0);
+          position++;
+          continue;
+        }
+        var type = text.slice(position).match(/^[A-Za-z][A-Za-z0-9_]*/);
+        if (!type || !isCanonicalType(type[0])) invalidType();
+        position += type[0].length;
+      }
+      while (text[position] === '[') {
+        var array = text.slice(position).match(/^\[(?:0|[1-9][0-9]*)?\]/);
+        if (!array) invalidType();
+        position += array[0].length;
+      }
+      listSizes[listSizes.length - 1]++;
+      if (text[position] === ',') {
+        position++;
+        expectType = true;
+        continue;
+      }
+    }
+    if (text[position] !== ')') invalidType();
+    position++;
+    listSizes.pop();
+    expectType = false;
+  }
+  if (position !== text.length) invalidType();
+  return text;
 }
 
 function selectedBuilderToken(strict) {
@@ -2996,7 +3071,9 @@ function markQueryBuilderTouched() {
 }
 
 function setBuilderRangeMode(mode) {
-  builderRangeMode = mode === 'time' ? 'time' : 'block';
+  var nextMode = mode === 'time' ? 'time' : 'block';
+  if (nextMode === builderRangeMode) return;
+  builderRangeMode = nextMode;
   Array.prototype.forEach.call(document.querySelectorAll('[data-builder-range-mode]'), function(button) {
     button.classList.toggle('active', button.getAttribute('data-builder-range-mode') === builderRangeMode);
   });
@@ -3102,7 +3179,7 @@ function setPill(id, label, className) {
 }
 
 function updateStatus(data) {
-  lastStatusTimestamp = Date.now() / 1000;
+  lastStatusReceivedAtMs = performance.now();
   var query = data.query_coverage || {};
   var consensusNetwork = data.consensus_network || {};
   var executionNetwork = data.execution_network || {};
@@ -3182,15 +3259,8 @@ function updateStatus(data) {
   var consensusHeadFresh = !consensusStatusStale && data.consensus_head_fresh === true;
   var consensusHeadLagSlots = numberOrNull(data.consensus_head_lag_slots);
 
-  var displayState = state;
-  var displayStateLabel = stateLabel;
-  if (historicalComplete && consensusHeadFresh && liveRemaining != null && liveRemaining < 3) {
-    displayState = 'synced';
-    displayStateLabel = 'Synced';
-  }
-
-  setPill('nodeBadge', displayStateLabel, stateClass(displayState));
-  setText('nodeState', displayStateLabel);
+  setPill('nodeBadge', stateLabel, stateClass(state));
+  setText('nodeState', stateLabel);
   refreshLastUpdated();
 
   setText('executionSyncTitle', historicalSyncDisabled ? 'Forward Sync' : 'Historical Sync');
@@ -3389,25 +3459,64 @@ function updateStatus(data) {
 }
 
 function refreshLastUpdated() {
-  if (!lastStatusTimestamp) {
+  if (lastStatusReceivedAtMs == null) {
     setText('lastUpdated', '--');
     return;
   }
-  setText('lastUpdated', fmtAgo(lastStatusTimestamp));
+  var ageMs = performance.now() - lastStatusReceivedAtMs;
+  setText('lastUpdated', fmtAge(ageMs / 1000));
+  if (ageMs >= STATUS_TIMEOUT_MS) markStatusOffline();
+}
+
+function markStatusOffline(label) {
+  setPill('nodeBadge', label || 'Status offline', 'state-disconnected');
+  setText('nodeState', label || 'Status offline');
+  setExecutionBarState(false, true);
 }
 
 function fetchStatus() {
-  fetch('/status', { credentials: 'same-origin' })
+  if (statusRequest) return;
+  var request = { controller: new AbortController(), startedAt: performance.now() };
+  statusRequest = request;
+  var timeout = setTimeout(function() {
+    if (statusRequest !== request) return;
+    statusRequest = null;
+    request.controller.abort();
+    markStatusOffline();
+    refreshLastUpdated();
+  }, STATUS_TIMEOUT_MS);
+  fetch('/status', { credentials: 'same-origin', signal: request.controller.signal })
     .then(function(response) {
-      if (!response.ok) throw new Error('status ' + response.status);
-      return response.json();
+      return response.json().then(function(data) {
+        return { ok: response.ok, status: response.status, data: data };
+      });
     })
-    .then(updateStatus)
+    .then(function(response) {
+      if (statusRequest !== request) return;
+      // Background tabs can delay timer callbacks beyond the deadline.
+      if (performance.now() - request.startedAt >= STATUS_TIMEOUT_MS) {
+        throw new Error('status timed out');
+      }
+      if (!response.ok) {
+        if (response.status === 503 && response.data && response.data.status === 'storage_unavailable') {
+          lastStatusReceivedAtMs = performance.now();
+          markStatusOffline('Storage unavailable');
+          setText('executionSummary', response.data.error || 'Storage is unavailable.');
+          refreshLastUpdated();
+          return;
+        }
+        throw new Error('status ' + response.status);
+      }
+      updateStatus(response.data);
+    })
     .catch(function() {
-      setPill('nodeBadge', 'Status offline', 'state-disconnected');
-      setText('nodeState', 'Status offline');
-      setExecutionBarState(false, true);
+      if (statusRequest !== request) return;
+      markStatusOffline();
       refreshLastUpdated();
+    })
+    .finally(function() {
+      clearTimeout(timeout);
+      if (statusRequest === request) statusRequest = null;
     });
 }
 
@@ -3415,9 +3524,11 @@ function loadPerfSamples() {
   try {
     var parsed = JSON.parse(localStorage.getItem(PERF_SAMPLE_STORAGE_KEY) || '[]');
     if (!Array.isArray(parsed)) return [];
+    var now = Date.now();
+    var cutoff = now - 12 * 3600 * 1000;
     return parsed.filter(function(sample) {
-      return sample && Number.isFinite(Number(sample.ts));
-    });
+      return sample && Number.isFinite(sample.ts) && sample.ts >= cutoff && sample.ts <= now;
+    }).sort(function(a, b) { return a.ts - b.ts; });
   } catch (_) {
     return [];
   }
@@ -3485,9 +3596,12 @@ function initFoldouts() {
 }
 
 function addPerfSample(sample) {
+  var now = Date.now();
+  var cutoff = now - 12 * 3600 * 1000;
+  perfSamples = perfSamples.filter(function(item) { return item.ts >= cutoff && item.ts <= now; });
+  if (!Number.isFinite(sample.ts) || sample.ts < cutoff || sample.ts > now) return;
   var newest = perfSamples.length ? perfSamples[perfSamples.length - 1] : null;
   if (newest && sample.ts - newest.ts < 1500) return;
-  var cutoff = Date.now() - 12 * 3600 * 1000;
   perfSamples.push({
     ts: sample.ts,
     peers: Math.max(0, Number(sample.peers) || 0),
@@ -3495,14 +3609,15 @@ function addPerfSample(sample) {
     blockRate: Math.max(0, Number(sample.blockRate) || 0),
     cpu: sample.cpu == null ? null : Math.max(0, Number(sample.cpu) || 0)
   });
-  perfSamples = perfSamples.filter(function(item) { return item.ts >= cutoff; });
   savePerfSamples();
 }
 
 function setChartWindow(hours) {
   chartHours = hours;
   Array.prototype.forEach.call(document.querySelectorAll('.range-buttons button'), function(button) {
-    button.classList.toggle('active', Number(button.getAttribute('data-hours')) === hours);
+    var selected = Number(button.getAttribute('data-hours')) === hours;
+    button.classList.toggle('active', selected);
+    button.setAttribute('aria-pressed', String(selected));
   });
   renderChart();
 }
@@ -3511,7 +3626,7 @@ function renderChart() {
   var now = Date.now();
   var windowMinutes = chartHours * 60;
   var start = now - windowMinutes * 60 * 1000;
-  var samples = downsampleSamples(perfSamples.filter(function(sample) { return sample.ts >= start; }), 720);
+  var samples = downsampleSamples(perfSamples.filter(function(sample) { return sample.ts >= start && sample.ts <= now; }), 720);
   setText('chartWindowLabel', 'Last ' + chartHours + (chartHours === 1 ? ' hour' : ' hours'));
 
   if (!window.Chart) {
@@ -3697,7 +3812,6 @@ function renderTable(rows, emptyMessage) {
 
 function formatCell(value) {
   if (value === null || value === undefined) return '';
-  if (Array.isArray(value)) return value.join(', ');
   if (typeof value === 'object') return JSON.stringify(value);
   return String(value);
 }
@@ -3900,6 +4014,7 @@ function renderQueryHistory() {
       '<td>' + escapeHtml(queryHistorySummary(entry)) + '</td>' +
       '<td class="history-sql"><code>' + escapeHtml(entry.sql) + '</code></td>' +
       '<td><div class="history-actions">' +
+      '<button type="button" class="secondary" data-history-action="details" data-history-id="' + escapeHtml(entry.id) + '" aria-controls="' + escapeHtml(detailId) + '" aria-expanded="false">Details</button>' +
       '<button type="button" class="secondary" data-history-action="use" data-history-id="' + escapeHtml(entry.id) + '">Use</button>' +
       '<button type="button" class="secondary" data-history-action="export" data-history-id="' + escapeHtml(entry.id) + '">.sql</button>' +
       '</div></td>' +
@@ -3937,7 +4052,13 @@ function toggleQueryHistoryDetail(id) {
   var row = Array.prototype.find.call(document.querySelectorAll('[data-history-detail-id]'), function(candidate) {
     return candidate.getAttribute('data-history-detail-id') === id;
   });
-  if (row) row.hidden = !row.hidden;
+  if (!row) return;
+  row.hidden = !row.hidden;
+  Array.prototype.forEach.call(document.querySelectorAll('[data-history-action="details"]'), function(button) {
+    if (button.getAttribute('data-history-id') === id) {
+      button.setAttribute('aria-expanded', String(!row.hidden));
+    }
+  });
 }
 
 function downloadSql(sql, filename) {
@@ -4008,6 +4129,22 @@ function cancelRunningQuery() {
   }
 }
 
+function parseQueryResponse(text) {
+  var data = JSON.parse(text, function(key, value, context) {
+    if (typeof value !== 'number' || !Number.isInteger(value) || Number.isSafeInteger(value)) return value;
+    // JSON numbers have already become Numbers here. Only source text can
+    // preserve ordinary i64/u64 digits; decimal/exponent tokens stay floats.
+    if (!context || typeof context.source !== 'string') {
+      throw new Error('This browser cannot preserve exact large query numbers. Use a browser with JSON source support.');
+    }
+    return /^-?\d+$/.test(context.source) ? context.source : value;
+  });
+  if (!data || !Array.isArray(data.rows)) {
+    throw new Error('Invalid query response: expected a rows array.');
+  }
+  return data;
+}
+
 function runQuery() {
   if (queryRunning) {
     showQueryError('A query is already running. Stop it before starting another one.');
@@ -4016,17 +4153,28 @@ function runQuery() {
   var sql = byId('sql').value.trim();
   queryOffset = 0;
   queryRows = [];
+  queryResultCustomToken = null;
   queryColumns = [];
   queryScannedRows = null;
   updateQueryButtons();
   showQueryError('');
   if (!sql) {
     showQueryError('Enter a SQL query.');
+    renderTable([], 'No query results yet.');
+    setText('resultCount', 'No query results yet.');
     stopQueryTimer();
     setText('queryTimer', '00:00:000');
     return;
   }
 
+  var customToken = customBuilderToken(false);
+  var resultCustomToken = customToken ? Object.freeze({
+    address: customToken.address,
+    symbol: customToken.symbol,
+    name: customToken.name,
+    decimals: customToken.decimals,
+    custom: true
+  }) : null;
   startQueryTimer();
   setQueryRunning(true);
   queryAbortController = new AbortController();
@@ -4041,6 +4189,10 @@ function runQuery() {
   })
     .then(function(response) {
       return response.text().then(function(text) {
+        if (response.ok) {
+          // Decoding failures must reach the query error path, never empty success.
+          return { ok: true, status: response.status, data: parseQueryResponse(text) };
+        }
         var data = {};
         if (text) {
           try {
@@ -4049,7 +4201,8 @@ function runQuery() {
             data = { error: text };
           }
         }
-        return { ok: response.ok, status: response.status, data: data };
+        if (!data || typeof data !== 'object') data = { error: text };
+        return { ok: false, status: response.status, data: data };
       });
     })
     .then(function(result) {
@@ -4057,6 +4210,7 @@ function runQuery() {
         throw new Error(result.data.error || result.data.message || 'Query failed with HTTP ' + result.status + '.');
       }
       queryRows = Array.isArray(result.data.rows) ? result.data.rows : [];
+      queryResultCustomToken = queryRows.length ? resultCustomToken : null;
       queryColumns = queryRows.length ? Object.keys(queryRows[0]) : [];
       queryScannedRows = result.data.total_scanned;
       var durationMs = stopQueryTimer();
@@ -4076,6 +4230,7 @@ function runQuery() {
       showQueryError(errorMessage);
       setText('resultCount', wasCanceled ? 'Query canceled.' : 'Query failed.');
       queryRows = [];
+      queryResultCustomToken = null;
       queryColumns = [];
       queryScannedRows = null;
       updateQueryButtons();
@@ -4273,6 +4428,7 @@ byId('queryHistoryTable').addEventListener('click', function(event) {
     event.stopPropagation();
     var action = actionButton.getAttribute('data-history-action');
     var id = actionButton.getAttribute('data-history-id');
+    if (action === 'details') toggleQueryHistoryDetail(id);
     if (action === 'use') useQueryHistoryEntry(id);
     if (action === 'export') exportQueryHistoryEntry(id);
     return;
