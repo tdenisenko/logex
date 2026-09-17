@@ -2447,7 +2447,7 @@ impl SyncEngine {
 
         let header_peer = header_peer.expect("checkpoint gap contains at least one header batch");
         let hashes: Vec<B256> = headers.iter().map(|header| header.hash_slow()).collect();
-        let (progressed, last_validated_header, last_head) = self
+        let (progressed, last_head) = self
             .ingest_checkpoint_gap_fetch_pipeline(
                 header_peer,
                 headers,
@@ -2457,7 +2457,6 @@ impl SyncEngine {
             )
             .await?;
 
-        self.last_validated_header = last_validated_header;
         self.refresh_consensus_status().await;
         self.refresh_historical_status().await;
 
@@ -2481,12 +2480,12 @@ impl SyncEngine {
         hashes: Vec<B256>,
         anchor: ExecutionAnchor,
         historical_backfill_active: bool,
-    ) -> Result<(bool, Option<Header>, Option<Head>)> {
+    ) -> Result<(bool, Option<Head>)> {
         if headers.is_empty() {
-            return Ok((false, None, None));
+            return Ok((false, None));
         }
         if headers.len() != hashes.len() {
-            return Ok((false, None, None));
+            return Ok((false, None));
         }
 
         let mut active_fetches = JoinSet::new();
@@ -2496,7 +2495,6 @@ impl SyncEngine {
         let mut next_offset = 0usize;
         let mut expected_offset = 0usize;
         let mut progressed = false;
-        let mut last_validated_header = None;
         let mut last_head = None;
 
         while expected_offset < headers.len() {
@@ -2532,12 +2530,12 @@ impl SyncEngine {
 
             if let Some(outcome) = completed_fetches.remove(&expected_sequence) {
                 let Some(chunk) = self.materialize_checkpoint_gap_fetch_outcome(outcome)? else {
-                    return Ok((progressed, last_validated_header, last_head));
+                    return Ok((progressed, last_head));
                 };
                 let (chunk_progressed, chunk_last_header, chunk_last_head) =
                     self.ingest_forward_gap_fetched_chunk(chunk, anchor).await?;
                 if !chunk_progressed {
-                    return Ok((progressed, last_validated_header, last_head));
+                    return Ok((progressed, last_head));
                 }
                 let chunk_block_count = chunk_last_header
                     .as_ref()
@@ -2551,13 +2549,12 @@ impl SyncEngine {
                 expected_offset = expected_offset.saturating_add(chunk_block_count);
                 expected_sequence = expected_sequence.saturating_add(1);
                 progressed = true;
-                last_validated_header = chunk_last_header;
                 last_head = chunk_last_head;
                 continue;
             }
 
             if active_fetches.is_empty() {
-                let (tail_progressed, tail_last_header, tail_last_head) = self
+                let (tail_progressed, tail_last_head) = self
                     .ingest_checkpoint_gap_sequential_tail(
                         header_peer,
                         &headers[expected_offset..],
@@ -2566,11 +2563,7 @@ impl SyncEngine {
                         historical_backfill_active,
                     )
                     .await?;
-                return Ok((
-                    progressed || tail_progressed,
-                    tail_last_header.or(last_validated_header),
-                    tail_last_head.or(last_head),
-                ));
+                return Ok((progressed || tail_progressed, tail_last_head.or(last_head)));
             }
 
             tokio::select! {
@@ -2582,7 +2575,7 @@ impl SyncEngine {
                         }
                         Some(Err(error)) => {
                             tracing::warn!(%error, "checkpoint gap body/receipt pipeline worker failed");
-                            return Ok((progressed, last_validated_header, last_head));
+                            return Ok((progressed, last_head));
                         }
                         None => {}
                     }
@@ -2590,13 +2583,13 @@ impl SyncEngine {
                 _ = wait_for_shutdown(&mut self.shutdown) => {
                     active_fetches.abort_all();
                     self.finish_shutdown()?;
-                    return Ok((progressed, last_validated_header, last_head));
+                    return Ok((progressed, last_head));
                 }
             }
         }
 
         active_fetches.abort_all();
-        Ok((progressed, last_validated_header, last_head))
+        Ok((progressed, last_head))
     }
 
     async fn spawn_checkpoint_gap_fetch_task(
@@ -2713,9 +2706,8 @@ impl SyncEngine {
         hashes: &[B256],
         anchor: ExecutionAnchor,
         historical_backfill_active: bool,
-    ) -> Result<(bool, Option<Header>, Option<Head>)> {
+    ) -> Result<(bool, Option<Head>)> {
         let mut progressed = false;
-        let mut last_validated_header = None;
         let mut last_head = None;
         let (request_timeout, request_attempts) =
             consensus_anchor_forward_payload_policy(historical_backfill_active);
@@ -2750,15 +2742,15 @@ impl SyncEngine {
                         bodies = bodies.len(),
                         "checkpoint gap tail body request returned an unexpected response"
                     );
-                    return Ok((progressed, last_validated_header, last_head));
+                    return Ok((progressed, last_head));
                 }
                 Some(Err(error)) => {
                     tracing::warn!(%error, "checkpoint gap tail body request failed");
-                    return Ok((progressed, last_validated_header, last_head));
+                    return Ok((progressed, last_head));
                 }
                 None => {
                     self.finish_shutdown()?;
-                    return Ok((progressed, last_validated_header, last_head));
+                    return Ok((progressed, last_head));
                 }
             };
 
@@ -2785,15 +2777,15 @@ impl SyncEngine {
                         returned_receipt_sets = receipts.len(),
                         "checkpoint gap tail receipt request returned an unexpected response"
                     );
-                    return Ok((progressed, last_validated_header, last_head));
+                    return Ok((progressed, last_head));
                 }
                 Some(Err(error)) => {
                     tracing::warn!(%error, "checkpoint gap tail receipt request failed");
-                    return Ok((progressed, last_validated_header, last_head));
+                    return Ok((progressed, last_head));
                 }
                 None => {
                     self.finish_shutdown()?;
-                    return Ok((progressed, last_validated_header, last_head));
+                    return Ok((progressed, last_head));
                 }
             };
 
@@ -2806,17 +2798,16 @@ impl SyncEngine {
                 body_receipt_elapsed: Duration::ZERO,
                 blocks,
             };
-            let (chunk_progressed, chunk_last_header, chunk_last_head) =
+            let (chunk_progressed, _, chunk_last_head) =
                 self.ingest_forward_gap_fetched_chunk(chunk, anchor).await?;
             if !chunk_progressed {
-                return Ok((progressed, last_validated_header, last_head));
+                return Ok((progressed, last_head));
             }
             progressed = true;
-            last_validated_header = chunk_last_header;
             last_head = chunk_last_head;
         }
 
-        Ok((progressed, last_validated_header, last_head))
+        Ok((progressed, last_head))
     }
 
     async fn ingest_forward_gap_fetched_chunk(
@@ -3102,7 +3093,6 @@ impl SyncEngine {
         let mut newly_serving_peers = HashSet::new();
         let hashes: Vec<B256> = headers.iter().map(|header| header.hash_slow()).collect();
         let mut progressed = false;
-        let mut last_validated_header = None;
         let mut last_head = None;
         let (payload_timeout, payload_attempts) =
             consensus_anchor_forward_payload_policy(historical_backfill_active);
@@ -3252,13 +3242,11 @@ impl SyncEngine {
                 self.note_serving_peer(header_peer, &mut newly_serving_peers);
                 self.note_serving_peer(*body_peer, &mut newly_serving_peers);
                 self.note_serving_peer(*receipt_peer, &mut newly_serving_peers);
-                last_validated_header = Some(header.clone());
                 last_head = Some(execution_head(block_number, block_hash, header.timestamp()));
                 progressed = true;
             }
         }
 
-        self.last_validated_header = last_validated_header;
         self.refresh_consensus_status().await;
         self.refresh_historical_status().await;
 
@@ -6723,7 +6711,6 @@ impl SyncEngine {
         };
 
         self.head_tracker.restore(reorg.retained_headers.clone());
-        self.last_validated_header = reorg.retained_headers.last().cloned();
         self.progress
             .rewind_to(reorg.indexed_head.map_or(0, |anchor| anchor.block_number));
         self.refresh_consensus_status().await;

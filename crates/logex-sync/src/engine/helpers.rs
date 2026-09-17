@@ -134,9 +134,9 @@ impl SyncEngine {
         &self,
         expected_start_block: u64,
     ) -> Option<&Header> {
-        self.last_validated_header
-            .as_ref()
-            .filter(|header| header.number() + 1 == expected_start_block)
+        self.head_tracker
+            .tip_header()
+            .filter(|header| header.number().checked_add(1) == Some(expected_start_block))
     }
 
     pub(super) fn try_mark_synced(&self, reason: &'static str) -> bool {

@@ -345,3 +345,44 @@ async fn required_consensus_without_execution_anchor_waits_without_ingesting() {
         .expect("consensus wait must remain cancellable")
         .unwrap();
 }
+
+#[tokio::test]
+async fn parent_validation_tracks_partial_anchored_progress() {
+    let (mut engine, _shutdown, _resources) = fixture().await;
+    let accepted = Header {
+        number: 100,
+        ..Default::default()
+    };
+    // Reproduce the helper-visible state after the first anchored block succeeds
+    // and a later payload fails: the tracker advanced, but the old batch-final
+    // parent cache assignment was skipped. This is not a peer request-loop test.
+    engine.head_tracker.track(accepted.clone());
+    assert_eq!(engine.expected_parent_for_validation(101), Some(&accepted));
+}
+
+#[tokio::test]
+async fn parent_validation_follows_restore_rewind_and_number_boundaries() {
+    let (mut engine, _shutdown, _resources) = fixture().await;
+    let first = Header {
+        number: 100,
+        ..Default::default()
+    };
+    let second = Header {
+        number: 101,
+        parent_hash: first.hash_slow(),
+        ..Default::default()
+    };
+    engine.head_tracker.restore([first.clone(), second.clone()]);
+    assert_eq!(engine.expected_parent_for_validation(102), Some(&second));
+    assert!(engine.expected_parent_for_validation(101).is_none());
+    engine.head_tracker.restore([first.clone()]);
+    assert_eq!(engine.expected_parent_for_validation(101), Some(&first));
+    assert!(engine.expected_parent_for_validation(102).is_none());
+    engine.head_tracker.restore([Header {
+        number: u64::MAX,
+        ..Default::default()
+    }]);
+    assert!(engine.expected_parent_for_validation(0).is_none());
+    engine.head_tracker.restore([]);
+    assert!(engine.expected_parent_for_validation(1).is_none());
+}

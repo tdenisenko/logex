@@ -234,7 +234,6 @@ pub struct SyncEngine {
     historical_rows_per_block_ewma: Option<f64>,
     last_historical_allocator_trim: Option<Instant>,
     connected_once: bool,
-    last_validated_header: Option<Header>,
     shutdown: watch::Receiver<bool>,
 }
 
@@ -289,7 +288,6 @@ impl SyncEngine {
             historical_rows_per_block_ewma: None,
             last_historical_allocator_trim: None,
             connected_once: false,
-            last_validated_header: None,
             shutdown,
         }
     }
