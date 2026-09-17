@@ -58,8 +58,7 @@ checkpoint failure and worker-cleanup tests remain.
 
 Implementer review traced the actual source/checkpoint/artifact opens, read-guard
 lifetimes, storage ownership across worker completion, publication checks and
-unchanged indexing policy. No independent review is claimed. Full workspace
-gates, exact-head Linux/macOS CI and merge remain pending.
+unchanged indexing policy. No independent review is claimed. All eight local gates pass on `c86d5e8a`: vendor verification, workspace/patched-vendor formatting, check, strict Clippy, 1,832 workspace tests (24 ignored), documentation tests and release build. Exact-head Linux/macOS CI and merge remain pending.
 
 The lock control establishes that index inspection no longer excludes an ingestion
 writer. Moving hot inspection off the async worker is verified by call-site review.

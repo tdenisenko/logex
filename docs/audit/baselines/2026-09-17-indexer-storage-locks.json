@@ -1,5 +1,5 @@
 {
-  "status": "Focused controls pass; final cleanup, workspace gates, CI and merge pending",
+  "status": "All eight final-source local gates pass; CI and merge pending",
   "base": "17b044f9959450b9d038f30c9a4273cb6acdf4de",
   "findings": [
     "B10-20"
@@ -42,6 +42,171 @@
     "focused-node.log": {
       "sha256": "ab4c2a3d6d911fff7d6ffb20c7cc1a42431a0106177a3d12653f381688fbf7b7",
       "bytes": 18454
+    },
+    "gates/results.json": {
+      "sha256": "99df0c96b0968327a6d6a20dd0fde629c47eb62c2ae41af22d292a1379297171",
+      "bytes": 4821
+    },
+    "gates/test-summary.json": {
+      "sha256": "39a224282e24b53a01d0de7560c607b04c1b0bdad5e0c9ba53834ae9678cdfd7",
+      "bytes": 69
     }
+  },
+  "source_commit": "c86d5e8ad2549ecd67e5c13261aec2c24c22cef2",
+  "validation": {
+    "commit": "c86d5e8ad2549ecd67e5c13261aec2c24c22cef2",
+    "rustc": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+    "gates": [
+      {
+        "name": "vendor",
+        "command": [
+          "python3",
+          "tools/verify_datafusion_vendor.py"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T00:37:24.192867+00:00",
+        "finished": "2026-09-17T00:37:24.259783+00:00",
+        "sha256": "5de30a03a2c21d0dd165f1d3f30b23ef080e06616866e0a02f37198cff7f3a16",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-indexer-locks-0ty2k44y/gates/vendor.log"
+      },
+      {
+        "name": "format",
+        "command": [
+          "cargo",
+          "fmt",
+          "--all",
+          "--",
+          "--check"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T00:37:24.260168+00:00",
+        "finished": "2026-09-17T00:37:25.234762+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-indexer-locks-0ty2k44y/gates/format.log"
+      },
+      {
+        "name": "vendor-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2024",
+          "--config-path",
+          "vendor/reth-network/rustfmt.toml",
+          "--config",
+          "skip_children=true",
+          "vendor/reth-network/src/eth_requests.rs",
+          "vendor/reth-network/src/session/active.rs",
+          "vendor/reth-network/src/session/mod.rs",
+          "vendor/reth-network/src/session/types.rs",
+          "vendor/reth-network/src/session/range_update.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T00:37:25.235181+00:00",
+        "finished": "2026-09-17T00:37:25.300594+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-indexer-locks-0ty2k44y/gates/vendor-format.log"
+      },
+      {
+        "name": "check",
+        "command": [
+          "cargo",
+          "check",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T00:37:25.300939+00:00",
+        "finished": "2026-09-17T00:37:28.319365+00:00",
+        "sha256": "94f61bc9de20edae43368b1ff34ebf45d4ec0255e3e265ebcdf39f16ab526dec",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-indexer-locks-0ty2k44y/gates/check.log"
+      },
+      {
+        "name": "clippy",
+        "command": [
+          "cargo",
+          "clippy",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T00:37:28.319793+00:00",
+        "finished": "2026-09-17T00:37:30.223265+00:00",
+        "sha256": "8b6caa899e1f695f0f036965510d3348a7d3e525f4e4d87275575e220af75b6b",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-indexer-locks-0ty2k44y/gates/clippy.log"
+      },
+      {
+        "name": "test",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T00:37:30.223681+00:00",
+        "finished": "2026-09-17T00:40:23.853326+00:00",
+        "sha256": "bb19aabb6644a1bfc149dbd3162d145bd49a7fc6570dee1e3ca349df8c45bd02",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-indexer-locks-0ty2k44y/gates/test.log"
+      },
+      {
+        "name": "doc",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--doc",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T00:40:23.857930+00:00",
+        "finished": "2026-09-17T00:40:27.995978+00:00",
+        "sha256": "b8be6a3cba0baebe308c11e02d7806e0ed0c908b75829526c544ab5fa30ead2e",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-indexer-locks-0ty2k44y/gates/doc.log"
+      },
+      {
+        "name": "release-build",
+        "command": [
+          "cargo",
+          "build",
+          "-p",
+          "logex-node",
+          "--release",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T00:40:27.996796+00:00",
+        "finished": "2026-09-17T00:41:12.049032+00:00",
+        "sha256": "352427edf18c1f162243beff7d67bcd077321c8fae19512f1a63c016c0a0dc3c",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-indexer-locks-0ty2k44y/gates/release-build.log"
+      }
+    ]
+  },
+  "workspace_tests": {
+    "passed": 1832,
+    "failed": 0,
+    "ignored": 24,
+    "groups": 27
   }
 }
