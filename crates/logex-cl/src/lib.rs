@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -423,6 +423,13 @@ impl ConsensusStore {
             .clone()
     }
 
+    /// Inspect and synchronously reconcile cached metadata with one published
+    /// snapshot, without cloning retained history or committee state. The
+    /// callback must not await, perform I/O, or re-enter consensus store APIs.
+    pub(crate) fn with_snapshot<R>(&self, inspect: impl FnOnce(&ConsensusSnapshot) -> R) -> R {
+        inspect(&self.inner.lock().unwrap())
+    }
+
     pub fn next_anchor_after(&self, block_number: u64) -> Option<ExecutionAnchor> {
         let snapshot = self.inner.lock().unwrap();
         let anchors = &snapshot.ordered_anchors;
@@ -455,8 +462,23 @@ impl ConsensusStore {
         end_block: u64,
         anchors: Vec<AnchorRecord>,
     ) -> Result<(), ConsensusStateError> {
+        self.replace_anchor_range_with_replaced_roots(start_block, end_block, anchors)
+            .map(|_| ())
+    }
+
+    /// Return prior roots removed or changed at their execution height only
+    /// after the range has been durably published. These are release candidates,
+    /// not proof of lost ownership: the same root may remain at another height
+    /// or be reintroduced by a later writer. Consumers must recheck ownership.
+    pub(crate) fn replace_anchor_range_with_replaced_roots(
+        &self,
+        start_block: u64,
+        end_block: u64,
+        anchors: Vec<AnchorRecord>,
+    ) -> Result<Vec<B256>, ConsensusStateError> {
         let anchors = normalize_anchor_records(anchors);
-        self.update_if(move |current| {
+        let mut replaced = Vec::new();
+        self.update_if(|current| {
             if start_block <= end_block
                 && anchors
                     .iter()
@@ -472,13 +494,15 @@ impl ConsensusStore {
                     return Ok(None);
                 }
             }
+            replaced =
+                replaced_anchor_roots(&current.ordered_anchors, start_block, end_block, &anchors);
             Ok(Some(StateDelta::ReplaceRange {
                 start: start_block,
                 end: end_block,
                 anchors,
             }))
-        })
-        .map(|_| ())
+        })?;
+        Ok(replaced)
     }
 
     pub(crate) fn record_verified_bootstrap(
@@ -1118,6 +1142,54 @@ fn weak_subjectivity_trusted_slot(snapshot: &ConsensusSnapshot) -> Option<u64> {
         // caller-supplied hint. Only the verified header establishes freshness.
         .map(|store| store.finalized_header.beacon.slot)
         .or(snapshot.checkpoint.beacon_slot)
+}
+
+/// Capture changed prior roots without inspecting unaffected retained history.
+/// Both inputs are sorted and unique by execution height. The range fallback
+/// also upserts incoming records outside the deletion interval.
+fn replaced_anchor_roots(
+    previous: &[AnchorRecord],
+    start: u64,
+    end: u64,
+    incoming: &[AnchorRecord],
+) -> Vec<B256> {
+    let mut roots = Vec::new();
+    let mut seen = HashSet::new();
+    let mut nominate = |root| {
+        if seen.insert(root) {
+            roots.push(root);
+        }
+    };
+    if start <= end {
+        let first = previous.partition_point(|record| record.anchor.block_number < start);
+        let last = previous.partition_point(|record| record.anchor.block_number <= end);
+        let mut next = 0;
+        for old in &previous[first..last] {
+            while next < incoming.len()
+                && incoming[next].anchor.block_number < old.anchor.block_number
+            {
+                next += 1;
+            }
+            if incoming.get(next).is_none_or(|new| {
+                new.anchor.block_number != old.anchor.block_number
+                    || new.anchor.beacon_root != old.anchor.beacon_root
+            }) {
+                nominate(old.anchor.beacon_root);
+            }
+        }
+    }
+    for new in incoming {
+        if start <= end && (start..=end).contains(&new.anchor.block_number) {
+            continue;
+        }
+        if let Ok(index) = previous.binary_search_by_key(&new.anchor.block_number, |record| {
+            record.anchor.block_number
+        }) && previous[index].anchor.beacon_root != new.anchor.beacon_root
+        {
+            nominate(previous[index].anchor.beacon_root);
+        }
+    }
+    roots
 }
 
 fn normalize_anchor_records(mut anchors: Vec<AnchorRecord>) -> Vec<AnchorRecord> {
@@ -2295,6 +2367,145 @@ mod tests {
                 .get("anchor_gap_count")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn replaced_roots_match_independent_range_reference_and_reopen() {
+        let record = |height, root| {
+            let mut record = test_anchor(height);
+            record.anchor.beacon_root = B256::repeat_byte(root);
+            record
+        };
+        let previous = vec![
+            record(0, 1),
+            record(2, 2),
+            record(4, 1),
+            record(7, 3),
+            record(u64::MAX, 4),
+        ];
+        let cases = [
+            (2, 4, vec![record(2, 5), record(3, 6)]),
+            (4, 4, Vec::new()), // Root 1 remains owned at height 0.
+            (2, 7, vec![record(3, 2), record(6, 1)]), // Roots move heights.
+            (0, u64::MAX, Vec::new()),
+            (5, 6, Vec::new()),
+            (7, 2, vec![record(7, 8), record(2, 9)]),
+            (2, 4, vec![record(7, 8), record(0, 9)]),
+            (0, 4, vec![record(4, 5), record(0, 7), record(4, 1)]),
+            (u64::MAX, u64::MAX, vec![record(u64::MAX, 9)]),
+        ];
+        for checkpoint in [false, true] {
+            for (start, end, incoming) in &cases {
+                let temp = TempDir::new().unwrap();
+                let store = ConsensusStore::open(
+                    temp.path(),
+                    Some(&format!("{:#x}", B256::repeat_byte(1))),
+                )
+                .unwrap();
+                store.replace_anchors(previous.clone()).unwrap();
+                if checkpoint {
+                    store.writer.lock().unwrap().force_checkpoint_due_for_test();
+                }
+                // Independent map reference: delete the inclusive interval,
+                // then upsert in input order so the last duplicate key wins.
+                let mut expected: BTreeMap<_, _> = previous
+                    .iter()
+                    .map(|record| (record.anchor.block_number, *record))
+                    .collect();
+                if start <= end {
+                    expected.retain(|height, _| height < start || height > end);
+                }
+                for record in incoming {
+                    expected.insert(record.anchor.block_number, *record);
+                }
+                let expected_roots: HashSet<_> = previous
+                    .iter()
+                    .filter(|old| {
+                        expected
+                            .get(&old.anchor.block_number)
+                            .is_none_or(|new| new.anchor.beacon_root != old.anchor.beacon_root)
+                    })
+                    .map(|record| record.anchor.beacon_root)
+                    .collect();
+                let roots = store
+                    .replace_anchor_range_with_replaced_roots(*start, *end, incoming.clone())
+                    .unwrap();
+                assert_eq!(roots.len(), expected_roots.len());
+                assert_eq!(roots.into_iter().collect::<HashSet<_>>(), expected_roots);
+                let expected: Vec<_> = expected.into_values().collect();
+                assert_eq!(store.ordered_anchors(), expected);
+                assert_eq!(
+                    ConsensusStore::open(temp.path(), None)
+                        .unwrap()
+                        .ordered_anchors(),
+                    expected
+                );
+                assert_coverage_matches_records(&store);
+            }
+        }
+    }
+
+    #[test]
+    fn replaced_roots_distinguish_noop_from_same_root_metadata_change() {
+        let temp = TempDir::new().unwrap();
+        let store =
+            ConsensusStore::open(temp.path(), Some(&format!("{:#x}", B256::repeat_byte(1))))
+                .unwrap();
+        let mut record = test_anchor(10);
+        store.replace_anchors(vec![record]).unwrap();
+        let before = fs::read(store.state_path()).unwrap();
+        assert!(
+            store
+                .replace_anchor_range_with_replaced_roots(10, 10, vec![record])
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(fs::read(store.state_path()).unwrap(), before);
+        record.finalized = !record.finalized;
+        record.parent_beacon_root = Some(B256::repeat_byte(8));
+        assert!(
+            store
+                .replace_anchor_range_with_replaced_roots(10, 10, vec![record])
+                .unwrap()
+                .is_empty()
+        );
+        assert_ne!(fs::read(store.state_path()).unwrap(), before);
+        let reopened = ConsensusStore::open(temp.path(), None).unwrap();
+        assert_eq!(reopened.ordered_anchors(), vec![record]);
+        let summary = reopened.with_snapshot(|snapshot| {
+            (
+                snapshot.ordered_anchors[0],
+                snapshot.verified_light_client_store.is_none(),
+            )
+        });
+        assert_eq!(summary, (record, true));
+    }
+
+    #[test]
+    fn replaced_roots_are_not_returned_after_failed_publication() {
+        let temp = TempDir::new().unwrap();
+        let store =
+            ConsensusStore::open(temp.path(), Some(&format!("{:#x}", B256::repeat_byte(1))))
+                .unwrap();
+        let original = test_anchor(10);
+        store.replace_anchors(vec![original]).unwrap();
+        let mut replacement = original;
+        replacement.anchor.beacon_root = B256::repeat_byte(9);
+        let directory = store.state_path().parent().unwrap();
+        let moved = temp.path().join("paused-test-store");
+        fs::rename(directory, &moved).unwrap();
+        assert!(
+            store
+                .replace_anchor_range_with_replaced_roots(10, 10, vec![replacement])
+                .is_err()
+        );
+        assert_eq!(store.ordered_anchors(), vec![original]);
+        assert!(!directory.exists());
+        // The failure latch also precedes the exact-no-op shortcut.
+        assert!(matches!(
+            store.replace_anchor_range_with_replaced_roots(10, 10, vec![original]),
+            Err(ConsensusStateError::StorageFailed(_))
+        ));
     }
 
     #[test]

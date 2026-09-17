@@ -1,6 +1,6 @@
 mod supervision;
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 use std::convert::Infallible;
 use std::fs;
 use std::io::{self, Read, Write};
@@ -614,6 +614,11 @@ struct ConsensusNetwork {
     history_range_recovery: Option<HistoryRangeRecovery>,
     candidate_metadata: CandidateMetadata,
     candidate_metadata_pressure: bool,
+    metadata_release_roots: HashSet<B256>,
+    metadata_volatile_owners: HashSet<B256>,
+    metadata_response_owners: HashSet<B256>,
+    #[cfg(test)]
+    metadata_membership_scans: usize,
     pending_peer_kinds: HashSet<(PeerId, RpcRequestKind)>,
     inbound_rate_limits: HashMap<(PeerId, RpcRequestKind), InboundRateLimitBucket>,
     last_light_client_request_at: HashMap<RpcRequestKind, Instant>,
@@ -2256,13 +2261,20 @@ impl ConsensusNetwork {
 
         let response_budgets = RpcResponseBudgets::default();
         let swarm = build_rpc_swarm(local_keypair, connection_limits, response_budgets.clone())?;
-        let mut verified_beacon_blocks =
-            verified_beacon_blocks_from_anchor_records(&consensus.ordered_anchors());
-        if let Some(store) = consensus.light_client_store() {
-            for block in verified_beacon_blocks_from_light_client_store(&store) {
-                verified_beacon_blocks.insert(block.beacon_root, block);
-            }
-        }
+        let (verified_beacon_blocks, metadata_volatile_owners) =
+            consensus.with_snapshot(|snapshot| {
+                let mut blocks =
+                    verified_beacon_blocks_from_anchor_records(&snapshot.ordered_anchors);
+                let mut owners = HashSet::from([snapshot.checkpoint.beacon_root]);
+                if let Some(store) = snapshot.verified_light_client_store.as_ref() {
+                    for block in verified_beacon_blocks_from_light_client_store(store) {
+                        owners.insert(block.beacon_root);
+                        blocks.insert(block.beacon_root, block);
+                    }
+                    owners.insert(store.checkpoint_root);
+                }
+                (blocks, owners)
+            });
         let verified_beacon_block_children =
             verified_beacon_block_children_from_blocks(&verified_beacon_blocks);
 
@@ -2310,6 +2322,11 @@ impl ConsensusNetwork {
             pending_history_range_requests: HashMap::new(),
             history_range_recovery: None,
             candidate_metadata: CandidateMetadata::new(MAX_CANDIDATE_BEACON_METADATA),
+            metadata_release_roots: HashSet::new(),
+            metadata_volatile_owners,
+            metadata_response_owners: HashSet::new(),
+            #[cfg(test)]
+            metadata_membership_scans: 0,
             candidate_metadata_pressure: false,
             pending_peer_kinds: HashSet::new(),
             inbound_rate_limits: HashMap::new(),
@@ -3279,6 +3296,7 @@ impl ConsensusNetwork {
                         .map(|pending| pending.request.count),
                     _ => None,
                 };
+                self.trim_candidate_beacon_metadata();
                 if self.handle_local_rpc_failure(kind, &error, failed_count, Instant::now()) {
                     return;
                 }
@@ -3579,6 +3597,38 @@ impl ConsensusNetwork {
     }
 
     fn handle_rpc_response(
+        &mut self,
+        kind: RpcRequestKind,
+        peer: PeerId,
+        request_id: Eth2OutboundRequestId,
+        response: Eth2RpcResponse,
+    ) {
+        let key = PendingRequestKey { kind, request_id };
+        if self.pending_requests.contains_key(&key) {
+            if let Some(roots) = self.pending_history_root_requests.get(&key) {
+                self.metadata_response_owners.extend(roots.iter().copied());
+            }
+            if let Some(identity) = self
+                .pending_history_range_requests
+                .get(&key)
+                .and_then(|pending| pending.recovery.as_ref())
+            {
+                self.metadata_response_owners.extend([
+                    identity.target.checkpoint_root,
+                    identity.target.finalized_root,
+                    identity.target.optimistic_root,
+                    identity.child.beacon_root,
+                    identity.child.parent_root,
+                ]);
+            }
+        }
+        self.handle_rpc_response_inner(kind, peer, request_id, response);
+        self.metadata_release_roots
+            .extend(self.metadata_response_owners.drain());
+        self.trim_candidate_beacon_metadata();
+    }
+
+    fn handle_rpc_response_inner(
         &mut self,
         kind: RpcRequestKind,
         peer: PeerId,
@@ -5012,7 +5062,11 @@ impl ConsensusNetwork {
     }
 
     fn latest_history_sync_target(&self) -> Option<HistorySyncTarget> {
-        let store = self.consensus.light_client_store()?;
+        self.consensus.with_snapshot(Self::snapshot_history_target)
+    }
+
+    fn snapshot_history_target(snapshot: &crate::ConsensusSnapshot) -> Option<HistorySyncTarget> {
+        let store = snapshot.verified_light_client_store.as_ref()?;
         Some(HistorySyncTarget {
             checkpoint_root: store.checkpoint_root,
             checkpoint_slot: store.bootstrap_slot(),
@@ -5048,6 +5102,7 @@ impl ConsensusNetwork {
             );
         }
         self.active_history_target = next;
+        self.trim_candidate_beacon_metadata();
     }
 
     fn next_history_root_request(&self) -> Option<Vec<B256>> {
@@ -5277,14 +5332,17 @@ impl ConsensusNetwork {
         if previous.is_none() {
             self.candidate_metadata.insert(block.beacon_root);
         }
-        if self
-            .verified_beacon_block_children
-            .get(&block.beacon_root)
-            .is_some_and(|children| {
-                children.iter().any(|child| {
-                    child.slot > block.slot && !self.candidate_metadata.contains(&child.beacon_root)
+        if (previous.is_some() && !self.candidate_metadata.contains(&block.beacon_root))
+            || self.metadata_volatile_owners.contains(&block.beacon_root)
+            || self
+                .verified_beacon_block_children
+                .get(&block.beacon_root)
+                .is_some_and(|children| {
+                    children.iter().any(|child| {
+                        child.slot > block.slot
+                            && !self.candidate_metadata.contains(&child.beacon_root)
+                    })
                 })
-            })
         {
             self.protect_beacon_ancestry(block.beacon_root);
         }
@@ -5293,6 +5351,14 @@ impl ConsensusNetwork {
         }
 
         if let Some(previous) = previous {
+            if !self.candidate_metadata.contains(&previous.beacon_root)
+                && self
+                    .verified_beacon_blocks
+                    .get(&previous.parent_root)
+                    .is_some_and(|parent| parent.slot < previous.slot)
+            {
+                self.metadata_release_roots.insert(previous.parent_root);
+            }
             let remove_parent = self
                 .verified_beacon_block_children
                 .get_mut(&previous.parent_root)
@@ -5332,6 +5398,7 @@ impl ConsensusNetwork {
     }
 
     fn protect_beacon_ancestry(&mut self, mut root: B256) {
+        self.metadata_release_roots.insert(root);
         while let Some(block) = self.verified_beacon_blocks.get(&root) {
             self.candidate_metadata.protect(&root);
             let Some(parent) = self.verified_beacon_blocks.get(&block.parent_root) else {
@@ -5347,7 +5414,158 @@ impl ConsensusNetwork {
         }
     }
 
+    // Release only roots implicated by authentication or an actual owner change.
+    // Membership is checked under one borrowed snapshot: a root can be persisted
+    // at several execution heights, so a negative point lookup is not proof of
+    // absence. No permanent reverse index or full-history clone is needed.
+    fn release_obsolete_beacon_metadata(&mut self, snapshot: &crate::ConsensusSnapshot) {
+        let latest = Self::snapshot_history_target(snapshot);
+        let mut owners = HashSet::from([snapshot.checkpoint.beacon_root]);
+        let add_target = |owners: &mut HashSet<B256>, target: HistorySyncTarget| {
+            owners.extend([
+                target.checkpoint_root,
+                target.finalized_root,
+                target.optimistic_root,
+            ]);
+        };
+        for target in [self.active_history_target, latest].into_iter().flatten() {
+            add_target(&mut owners, target);
+        }
+        owners.extend(
+            self.pending_history_root_requests
+                .values()
+                .flatten()
+                .copied(),
+        );
+        owners.extend(self.metadata_response_owners.iter().copied());
+        let current = self.active_history_target.or(latest);
+        let recovery = self
+            .history_range_recovery
+            .as_ref()
+            .filter(|recovery| Some(recovery.identity.target) == current)
+            .map(|recovery| &recovery.identity);
+        for identity in self
+            .pending_history_range_requests
+            .values()
+            .filter_map(|pending| pending.recovery.as_ref())
+            .chain(recovery)
+        {
+            add_target(&mut owners, identity.target);
+            owners.extend([identity.child.beacon_root, identity.child.parent_root]);
+        }
+        let newly_owned: Vec<_> = owners
+            .difference(&self.metadata_volatile_owners)
+            .copied()
+            .collect();
+        for root in newly_owned {
+            self.protect_beacon_ancestry(root);
+        }
+        self.metadata_release_roots
+            .extend(self.metadata_volatile_owners.difference(&owners).copied());
+        self.metadata_volatile_owners = owners;
+        if self.metadata_release_roots.is_empty() {
+            return;
+        }
+        let directly_owned = |root: &B256, block: &VerifiedBeaconBlock| {
+            self.metadata_volatile_owners.contains(root)
+                || snapshot
+                    .ordered_anchors
+                    .binary_search_by_key(&block.execution_anchor.block_number, |record| {
+                        record.anchor.block_number
+                    })
+                    .is_ok_and(|index| snapshot.ordered_anchors[index].anchor.beacon_root == *root)
+        };
+        let mut queued = std::mem::take(&mut self.metadata_release_roots);
+        let mut pending: BinaryHeap<_> = queued
+            .iter()
+            .filter_map(|root| {
+                self.verified_beacon_blocks
+                    .get(root)
+                    .map(|block| (block.slot, *root))
+            })
+            .collect();
+        let mut possible = HashSet::new();
+        while let Some((_, root)) = pending.pop() {
+            let block = &self.verified_beacon_blocks[&root];
+            if directly_owned(&root, block) || self.candidate_metadata.contains(&root) {
+                continue;
+            }
+            // Valid parent edges strictly decrease slots. The temporary heap
+            // therefore considers every potentially released child before its
+            // parent, including siblings at unequal depths. Each adjacency list
+            // is examined once in this collection pass, without retained counts.
+            if self
+                .verified_beacon_block_children
+                .get(&root)
+                .is_some_and(|children| {
+                    children.iter().any(|child| {
+                        child.slot > block.slot
+                            && !self.candidate_metadata.contains(&child.beacon_root)
+                            && !possible.contains(&child.beacon_root)
+                    })
+                })
+            {
+                continue;
+            }
+            possible.insert(root);
+            if let Some(parent) = self.verified_beacon_blocks.get(&block.parent_root)
+                && parent.beacon_root == block.parent_root
+                && parent.slot < block.slot
+                && queued.insert(parent.beacon_root)
+            {
+                pending.push((parent.slot, parent.beacon_root));
+            }
+        }
+        if possible.is_empty() {
+            return;
+        }
+        #[cfg(test)]
+        {
+            self.metadata_membership_scans += 1;
+        }
+        let mut unowned = possible.clone();
+        for record in &snapshot.ordered_anchors {
+            unowned.remove(&record.anchor.beacon_root);
+            if unowned.is_empty() {
+                break;
+            }
+        }
+        let mut ordered: Vec<_> = possible.into_iter().collect();
+        ordered.sort_unstable_by_key(|root| {
+            (
+                std::cmp::Reverse(self.verified_beacon_blocks[root].slot),
+                *root,
+            )
+        });
+        for root in ordered {
+            if !unowned.contains(&root) || self.candidate_metadata.contains(&root) {
+                continue;
+            }
+            let block = self.verified_beacon_blocks[&root];
+            let required_child =
+                self.verified_beacon_block_children
+                    .get(&root)
+                    .is_some_and(|children| {
+                        children.iter().any(|child| {
+                            child.slot > block.slot
+                                && !self.candidate_metadata.contains(&child.beacon_root)
+                        })
+                    });
+            if !required_child {
+                self.candidate_metadata.insert(root);
+            }
+        }
+    }
+
     fn trim_candidate_beacon_metadata(&mut self) {
+        let consensus = Arc::clone(&self.consensus);
+        consensus.with_snapshot(|snapshot| {
+            self.release_obsolete_beacon_metadata(snapshot);
+            self.evict_candidate_beacon_metadata();
+        });
+    }
+
+    fn evict_candidate_beacon_metadata(&mut self) {
         // Complete bounded response batches and promote their authenticated
         // ancestry before evicting any optional metadata.
         let evicted = self.candidate_metadata.trim();
@@ -5373,10 +5591,13 @@ impl ConsensusNetwork {
     }
 
     fn seed_verified_light_client_headers(&mut self) -> bool {
-        let Some(store) = self.consensus.light_client_store() else {
-            return false;
-        };
-        let blocks = verified_beacon_blocks_from_light_client_store(&store);
+        let blocks = self.consensus.with_snapshot(|snapshot| {
+            snapshot
+                .verified_light_client_store
+                .as_ref()
+                .map(verified_beacon_blocks_from_light_client_store)
+        });
+        let Some(blocks) = blocks else { return false };
         let mut inserted = false;
         for block in blocks {
             inserted |= self.record_authenticated_beacon_block(block, None);
@@ -5424,7 +5645,12 @@ impl ConsensusNetwork {
         let Some(target) = self.current_history_sync_target() else {
             return;
         };
-        let Some(store) = self.consensus.light_client_store() else {
+        let Some(finalized_slot) = self.consensus.with_snapshot(|snapshot| {
+            snapshot
+                .verified_light_client_store
+                .as_ref()
+                .map(|store| store.finalized_header.beacon.slot)
+        }) else {
             return;
         };
         let Some(materializable_chain) = self.materializable_history_chain(target) else {
@@ -5436,7 +5662,7 @@ impl ConsensusNetwork {
             .iter()
             .map(|block| crate::AnchorRecord {
                 anchor: block.execution_anchor,
-                finalized: block.slot <= store.finalized_header.beacon.slot,
+                finalized: block.slot <= finalized_slot,
                 parent_beacon_root: Some(block.parent_root),
             })
             .collect::<Vec<_>>();
@@ -5456,14 +5682,18 @@ impl ConsensusNetwork {
             last_anchor.block_number
         };
 
-        if let Err(error) = self.consensus.replace_anchor_range(
+        let replaced = match self.consensus.replace_anchor_range_with_replaced_roots(
             first_anchor.block_number,
             replace_end_block,
             anchor_records,
         ) {
-            tracing::warn!(%error, "failed to persist verified beacon-block execution anchors");
-            return;
-        }
+            Ok(replaced) => replaced,
+            Err(error) => {
+                tracing::warn!(%error, "failed to persist verified beacon-block execution anchors");
+                return;
+            }
+        };
+        self.metadata_release_roots.extend(replaced);
         self.refresh_history_sync_target();
     }
 
@@ -5912,6 +6142,7 @@ impl ConsensusNetwork {
             self.pending_history_root_requests.remove(&key);
             self.pending_history_range_requests.remove(&key);
         }
+        self.trim_candidate_beacon_metadata();
     }
 
     fn clear_peer_state(&mut self, peer: PeerId) {
@@ -12707,6 +12938,441 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn metadata_lifetime_releases_displaced_authenticated_fork_after_materialization() {
+        let temp = TempDir::new().unwrap();
+        let mut network = candidate_test_network(&temp);
+        let checkpoint = ancestry_test_block(100, 1, 0);
+        let old = ancestry_test_block(101, 2, 1);
+        let replacement = ancestry_test_block(101, 3, 1);
+        let target = |head: VerifiedBeaconBlock| HistorySyncTarget {
+            checkpoint_root: checkpoint.beacon_root,
+            checkpoint_slot: checkpoint.slot,
+            finalized_root: checkpoint.beacon_root,
+            optimistic_root: head.beacon_root,
+            optimistic_slot: head.slot,
+        };
+        // Existing decoded-metadata fixture: exercise the real durable range
+        // materializer, without claiming SSZ/signature or live peer coverage.
+        network.active_history_target = Some(target(old));
+        for block in [checkpoint, old] {
+            network.record_authenticated_beacon_block(block, None);
+        }
+        network.materialize_verified_anchor_segments();
+        assert_eq!(network.consensus.anchor_at(101), Some(old.execution_anchor));
+        network.trim_candidate_beacon_metadata();
+        assert!(!network.candidate_metadata.contains(&old.beacon_root));
+        assert!(
+            network
+                .verified_beacon_blocks
+                .contains_key(&checkpoint.beacon_root)
+        );
+
+        network.active_history_target = Some(target(replacement));
+        network.record_authenticated_beacon_block(replacement, None);
+        network.materialize_verified_anchor_segments();
+        assert_eq!(
+            network.consensus.anchor_at(101),
+            Some(replacement.execution_anchor)
+        );
+        network.trim_candidate_beacon_metadata();
+        // Required persisted ancestry survives before checking the obsolete fork.
+        for block in [checkpoint, replacement] {
+            assert_eq!(
+                network.verified_beacon_blocks.get(&block.beacon_root),
+                Some(&block)
+            );
+            assert!(!network.candidate_metadata.contains(&block.beacon_root));
+        }
+        candidate_index_oracle(&network);
+        assert!(
+            network.candidate_metadata.contains(&old.beacon_root)
+                || !network
+                    .verified_beacon_blocks
+                    .contains_key(&old.beacon_root),
+            "displaced authenticated fork retains permanent protection after durable replacement"
+        );
+    }
+
+    #[tokio::test]
+    async fn metadata_lifetime_releases_unmaterialized_target_after_refresh() {
+        let temp = TempDir::new().unwrap();
+        let mut network = candidate_test_network(&temp);
+        let checkpoint = ancestry_test_block(100, 10, 0);
+        let old = ancestry_test_block(101, 11, 10);
+        network
+            .consensus
+            .replace_anchors(vec![crate::AnchorRecord {
+                anchor: checkpoint.execution_anchor,
+                finalized: true,
+                parent_beacon_root: Some(checkpoint.parent_root),
+            }])
+            .unwrap();
+        network.active_history_target = Some(HistorySyncTarget {
+            checkpoint_root: checkpoint.beacon_root,
+            checkpoint_slot: checkpoint.slot,
+            finalized_root: checkpoint.beacon_root,
+            optimistic_root: old.beacon_root,
+            optimistic_slot: old.slot,
+        });
+        for block in [checkpoint, old] {
+            network.record_authenticated_beacon_block(block, None);
+        }
+        network.trim_candidate_beacon_metadata();
+        assert!(!network.candidate_metadata.contains(&old.beacon_root));
+        // The old target is complete, so the real selector advances to the
+        // fixture's different verified light-client target. No anchors are removed.
+        network.refresh_history_sync_target();
+        assert_eq!(
+            network.active_history_target,
+            network.latest_history_sync_target()
+        );
+        assert_ne!(
+            network.active_history_target.unwrap().optimistic_root,
+            old.beacon_root
+        );
+        network.trim_candidate_beacon_metadata();
+        assert_eq!(
+            network.consensus.anchor_at(100),
+            Some(checkpoint.execution_anchor)
+        );
+        assert_eq!(
+            network.verified_beacon_blocks.get(&checkpoint.beacon_root),
+            Some(&checkpoint)
+        );
+        assert!(!network.candidate_metadata.contains(&checkpoint.beacon_root));
+        candidate_index_oracle(&network);
+        assert!(
+            network.candidate_metadata.contains(&old.beacon_root)
+                || !network
+                    .verified_beacon_blocks
+                    .contains_key(&old.beacon_root),
+            "unmaterialized authenticated fork retains permanent protection after target release"
+        );
+    }
+
+    fn metadata_record(block: VerifiedBeaconBlock, height: u64) -> crate::AnchorRecord {
+        let mut anchor = block.execution_anchor;
+        anchor.block_number = height;
+        crate::AnchorRecord {
+            anchor,
+            finalized: false,
+            parent_beacon_root: Some(block.parent_root),
+        }
+    }
+
+    fn assert_metadata_optional(network: &ConsensusNetwork, root: B256) {
+        assert!(
+            network.candidate_metadata.contains(&root)
+                || !network.verified_beacon_blocks.contains_key(&root)
+        );
+    }
+
+    #[tokio::test]
+    async fn metadata_lifetime_alias_owner_and_reownership_are_checked_fresh() {
+        let temp = TempDir::new().unwrap();
+        let mut network = candidate_test_network(&temp);
+        network.candidate_metadata = CandidateMetadata::new(0);
+        let parent = ancestry_test_block(10, 10, 0);
+        let head = ancestry_test_block(11, 11, 10);
+        network
+            .consensus
+            .replace_anchors(vec![metadata_record(head, 900)])
+            .unwrap();
+        for block in [parent, head] {
+            network.record_authenticated_beacon_block(block, None);
+        }
+        network.trim_candidate_beacon_metadata();
+        assert!(network.consensus.anchor_at(11).is_none());
+        for block in [parent, head] {
+            assert!(
+                network
+                    .verified_beacon_blocks
+                    .contains_key(&block.beacon_root)
+            );
+            assert!(!network.candidate_metadata.contains(&block.beacon_root));
+        }
+        let scans = network.metadata_membership_scans;
+        for _ in 0..4 {
+            network.trim_candidate_beacon_metadata();
+        }
+        assert_eq!(
+            network.metadata_membership_scans, scans,
+            "unchanged ticks do not rescan history"
+        );
+        let removed = network
+            .consensus
+            .replace_anchor_range_with_replaced_roots(900, 900, Vec::new())
+            .unwrap();
+        network.metadata_release_roots.extend(removed);
+        // Another publication reacquires the same root at another height before
+        // network reconciliation. The returned roots are only candidates.
+        network
+            .consensus
+            .replace_anchors(vec![metadata_record(head, 950)])
+            .unwrap();
+        network.trim_candidate_beacon_metadata();
+        assert!(
+            network
+                .verified_beacon_blocks
+                .contains_key(&head.beacon_root)
+        );
+        let removed = network
+            .consensus
+            .replace_anchor_range_with_replaced_roots(950, 950, Vec::new())
+            .unwrap();
+        network.metadata_release_roots.extend(removed);
+        let scans = network.metadata_membership_scans;
+        network.trim_candidate_beacon_metadata();
+        assert_eq!(network.metadata_membership_scans, scans + 1);
+        assert!(network.verified_beacon_blocks.is_empty());
+        candidate_index_oracle(&network);
+    }
+
+    #[tokio::test]
+    async fn metadata_lifetime_whole_fork_batch_releases_shared_ancestors() {
+        let temp = TempDir::new().unwrap();
+        let mut network = candidate_test_network(&temp);
+        network.candidate_metadata = CandidateMetadata::new(0);
+        let parent = ancestry_test_block(10, 10, 0);
+        let left = ancestry_test_block(12, 12, 10);
+        let right = ancestry_test_block(11, 11, 10);
+        // Reversed sibling/parent order must not leave a parent permanently
+        // protected after its last child is demoted later in the same batch.
+        let deep = ancestry_test_block(15, 15, 12);
+        for block in [left, parent, deep, right] {
+            network.record_authenticated_beacon_block(block, None);
+        }
+        for marker in 20..28 {
+            network.record_authenticated_beacon_block(
+                ancestry_test_block(marker.into(), marker, 10),
+                None,
+            );
+        }
+        network.trim_candidate_beacon_metadata();
+        assert!(network.verified_beacon_blocks.is_empty());
+        assert_eq!(network.metadata_membership_scans, 1);
+        candidate_index_oracle(&network);
+    }
+
+    #[tokio::test]
+    async fn metadata_lifetime_active_and_latest_targets_keep_independent_ancestry() {
+        let temp = TempDir::new().unwrap();
+        let mut network = candidate_test_network(&temp);
+        let parent = ancestry_test_block(10, 10, 0);
+        let active = ancestry_test_block(11, 11, 10);
+        network
+            .active_history_target
+            .as_mut()
+            .unwrap()
+            .optimistic_root = active.beacon_root;
+        for block in [parent, active] {
+            network.record_authenticated_beacon_block(block, None);
+        }
+        network.seed_verified_light_client_headers();
+        let latest = network.latest_history_sync_target().unwrap();
+        for root in [
+            parent.beacon_root,
+            active.beacon_root,
+            latest.finalized_root,
+            latest.optimistic_root,
+        ] {
+            assert!(network.verified_beacon_blocks.contains_key(&root));
+            assert!(!network.candidate_metadata.contains(&root));
+        }
+        let scans = network.metadata_membership_scans;
+        for _ in 0..4 {
+            network.seed_verified_light_client_headers();
+        }
+        assert_eq!(network.metadata_membership_scans, scans);
+        let mut retained = vec![parent, active];
+        let mut previous = active;
+        for marker in 12..16 {
+            let next = ancestry_test_block(marker.into(), marker, previous.beacon_root[0]);
+            network.record_authenticated_beacon_block(next, None);
+            let target = network.active_history_target.as_mut().unwrap();
+            target.optimistic_root = next.beacon_root;
+            target.optimistic_slot = next.slot;
+            network.trim_candidate_beacon_metadata();
+            retained.push(next);
+            for block in &retained {
+                assert_eq!(
+                    network.verified_beacon_blocks.get(&block.beacon_root),
+                    Some(block)
+                );
+                assert!(!network.candidate_metadata.contains(&block.beacon_root));
+            }
+            assert_eq!(
+                network.metadata_membership_scans, scans,
+                "ordinary head progress keeps prior ancestry through its required child without scanning history"
+            );
+            previous = next;
+        }
+        network.active_history_target = None;
+        network.trim_candidate_beacon_metadata();
+        assert_metadata_optional(&network, active.beacon_root);
+        assert_metadata_optional(&network, parent.beacon_root);
+        assert!(!network.candidate_metadata.contains(&latest.optimistic_root));
+        candidate_index_oracle(&network);
+    }
+
+    #[tokio::test]
+    async fn metadata_lifetime_request_early_return_retry_and_stale_response() {
+        let temp = TempDir::new().unwrap();
+        let mut network = candidate_test_network(&temp);
+        network.candidate_metadata = CandidateMetadata::new(0);
+        let parent = ancestry_test_block(10, 10, 0);
+        let head = ancestry_test_block(11, 11, 10);
+        let peer = PeerId::random();
+        let first = memory_root_request(&mut network, peer, vec![head.beacon_root]);
+        for block in [parent, head] {
+            network.record_authenticated_beacon_block(block, None);
+        }
+        network.trim_candidate_beacon_metadata();
+        assert!(
+            network
+                .verified_beacon_blocks
+                .contains_key(&parent.beacon_root)
+        );
+        // Empty response returns from inside decoding; the outer lifetime must
+        // still release the completed request. No new metadata was inserted.
+        network.handle_rpc_response(
+            first.kind,
+            peer,
+            first.request_id,
+            Eth2RpcResponse::BeaconBlocksByRoot(Vec::new()),
+        );
+        assert!(network.verified_beacon_blocks.is_empty());
+        let retry = memory_root_request(&mut network, peer, vec![head.beacon_root]);
+        for block in [head, parent] {
+            network.record_authenticated_beacon_block(block, None);
+        }
+        network.trim_candidate_beacon_metadata();
+        network.handle_rpc_response(
+            first.kind,
+            peer,
+            first.request_id,
+            Eth2RpcResponse::BeaconBlocksByRoot(Vec::new()),
+        );
+        assert!(network.pending_requests.contains_key(&retry));
+        assert!(
+            network
+                .verified_beacon_blocks
+                .contains_key(&parent.beacon_root)
+        );
+        network.clear_pending_requests_for_peer(peer);
+        assert!(network.verified_beacon_blocks.is_empty());
+        candidate_index_oracle(&network);
+    }
+
+    #[tokio::test]
+    async fn metadata_lifetime_pending_recovery_outlives_active_target_only_until_completion() {
+        let temp = TempDir::new().unwrap();
+        let (mut network, chain) = backward_test_network(&temp);
+        network.candidate_metadata = CandidateMetadata::new(0);
+        network.candidate_metadata_pressure = true;
+        let peer = PeerId::random();
+        network.ensure_request(peer, RpcRequestKind::BeaconBlocksByRange);
+        let key = *network
+            .pending_history_range_requests
+            .keys()
+            .next()
+            .unwrap();
+        assert!(
+            network.pending_history_range_requests[&key]
+                .recovery
+                .is_some()
+        );
+        network.trim_candidate_beacon_metadata();
+        network.active_history_target = None;
+        network.trim_candidate_beacon_metadata();
+        assert!(
+            network
+                .verified_beacon_blocks
+                .contains_key(&chain[5].beacon_root)
+        );
+        // The pending old scan still owns its exact child/target, but the stale
+        // local recovery cursor does not retain them after request completion.
+        network.handle_rpc_response(
+            key.kind,
+            peer,
+            key.request_id,
+            Eth2RpcResponse::BeaconBlocksByRange(Vec::new()),
+        );
+        assert_metadata_optional(&network, chain[5].beacon_root);
+        assert!(
+            !network
+                .metadata_volatile_owners
+                .contains(&chain[5].beacon_root)
+        );
+        candidate_index_oracle(&network);
+    }
+
+    #[tokio::test]
+    async fn metadata_lifetime_already_owned_missing_root_is_protected_on_range_arrival() {
+        let temp = TempDir::new().unwrap();
+        let mut network = candidate_test_network(&temp);
+        network.candidate_metadata = CandidateMetadata::new(0);
+        let parent = ancestry_test_block(10, 10, 0);
+        let head = ancestry_test_block(11, 11, 10);
+        network
+            .active_history_target
+            .as_mut()
+            .unwrap()
+            .optimistic_root = head.beacon_root;
+        network.trim_candidate_beacon_metadata();
+        assert!(network.metadata_volatile_owners.contains(&head.beacon_root));
+        assert!(network.verified_beacon_blocks.is_empty());
+        // The owner predates arrival and there is no cached protected child.
+        network.record_verified_beacon_block(head, None);
+        network.record_verified_beacon_block(parent, None);
+        network.trim_candidate_beacon_metadata();
+        for block in [head, parent] {
+            assert!(
+                network
+                    .verified_beacon_blocks
+                    .contains_key(&block.beacon_root)
+            );
+            assert!(!network.candidate_metadata.contains(&block.beacon_root));
+        }
+        candidate_index_oracle(&network);
+    }
+
+    #[tokio::test]
+    async fn metadata_lifetime_detached_protected_parent_is_reconsidered() {
+        let temp = TempDir::new().unwrap();
+        let mut network = candidate_test_network(&temp);
+        network.candidate_metadata = CandidateMetadata::new(0);
+        let old_parent = ancestry_test_block(10, 10, 0);
+        let new_parent = ancestry_test_block(10, 12, 0);
+        let mut head = ancestry_test_block(11, 11, 10);
+        network
+            .active_history_target
+            .as_mut()
+            .unwrap()
+            .optimistic_root = head.beacon_root;
+        for block in [old_parent, head] {
+            network.record_authenticated_beacon_block(block, None);
+        }
+        network.trim_candidate_beacon_metadata();
+        network.record_verified_beacon_block(new_parent, None);
+        assert!(network.candidate_metadata.contains(&new_parent.beacon_root));
+        head.parent_root = new_parent.beacon_root;
+        network.record_verified_beacon_block(head, None);
+        network.trim_candidate_beacon_metadata();
+        assert!(
+            !network
+                .verified_beacon_blocks
+                .contains_key(&old_parent.beacon_root)
+        );
+        assert!(
+            network
+                .verified_beacon_blocks
+                .contains_key(&new_parent.beacon_root)
+        );
+        candidate_index_oracle(&network);
+    }
+
+    #[tokio::test]
     async fn candidate_metadata_pressure_keeps_exact_children_without_publication() {
         let temp = TempDir::new().unwrap();
         let mut network = candidate_test_network(&temp);
@@ -12747,6 +13413,11 @@ mod tests {
         let parent = ancestry_test_block(10, 1, 0);
         let middle = ancestry_test_block(11, 2, 1);
         let head = ancestry_test_block(12, 3, 2);
+        network
+            .active_history_target
+            .as_mut()
+            .unwrap()
+            .optimistic_root = head.beacon_root;
         // Arrival order is deliberately opposite ancestry traversal, with a batch
         // larger than quota. No mid-batch trim may destroy the authenticated path.
         for block in [parent, middle, head] {
@@ -12783,6 +13454,11 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let mut network = candidate_test_network(&temp);
         let checkpoint = ancestry_test_block(10, 1, 0);
+        network
+            .active_history_target
+            .as_mut()
+            .unwrap()
+            .checkpoint_root = checkpoint.beacon_root;
         network.record_authenticated_beacon_block(checkpoint, None);
         let child = ancestry_test_block(11, 2, 1);
         network.record_verified_beacon_block(child, None);
@@ -12827,6 +13503,11 @@ mod tests {
                 .verified_beacon_block_children
                 .contains_key(&parent.beacon_root)
         );
+        network
+            .active_history_target
+            .as_mut()
+            .unwrap()
+            .optimistic_root = head.beacon_root;
         assert!(!network.record_authenticated_beacon_block(head, None));
         // Existing authenticated child's committed parent authenticates the
         // refetched range entry without changing the child's edge.
@@ -13100,6 +13781,17 @@ mod tests {
             optimistic_root: head.beacon_root,
             optimistic_slot: head.slot,
         });
+        // The selector can release this synthetic active target because its
+        // checkpoint differs from the verified fixture's latest checkpoint.
+        // A disconnected persisted head still requires its exact parent after
+        // that transition; the missing parent itself remains unpublished.
+        network
+            .consensus
+            .replace_anchors(vec![metadata_record(
+                head,
+                head.execution_anchor.block_number,
+            )])
+            .unwrap();
         network.candidate_metadata = CandidateMetadata::new(0);
         network.candidate_metadata_pressure = true;
         network.history_range_batch_limit = 3;
