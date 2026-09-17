@@ -545,3 +545,50 @@ async fn zero_batch_sizes_fail_before_sync_startup() {
         assert!(engine.storage.read().await.sync_head().is_none());
     }
 }
+
+#[tokio::test]
+async fn pending_selected_lineage_waits_without_progress_and_cancels() {
+    let (mut engine, shutdown, _resources) = fixture().await;
+    let header = Header {
+        number: 100,
+        ..Default::default()
+    };
+    engine.head_tracker.restore([header.clone()]);
+    engine
+        .storage
+        .write()
+        .await
+        .record_sync_head(100, header.hash_slow(), 0)
+        .unwrap();
+    engine.progress.record_block(100, 0);
+    let status = Arc::clone(&engine.sync_status);
+    let storage = Arc::clone(&engine.storage);
+    let original_head = storage.read().await.sync_head();
+    // Exercise the real pending action branch with a finite local decision;
+    // CL snapshot controls separately verify when this decision is produced.
+    let mut pending = Box::pin(
+        engine.apply_consensus_reorg_decision(ConsensusReorgDecision::PendingMaterialization),
+    );
+    tokio::select! {
+        biased;
+        result = &mut pending => panic!("pending lineage did not wait: {result:?}"),
+        _ = tokio::task::yield_now() => {}
+    }
+    assert_eq!(
+        status.lock().unwrap().node_state,
+        NodeState::WaitingForConsensus
+    );
+    assert_eq!(status.lock().unwrap().current_block, 100);
+    assert_eq!(storage.read().await.sync_head(), original_head);
+    assert_eq!(storage.read().await.total_rows(), 0);
+    shutdown.send(true).unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(5), &mut pending)
+            .await
+            .unwrap()
+            .unwrap()
+    );
+    drop(pending);
+    assert_eq!(engine.head_tracker.tip_header(), Some(&header));
+    assert_eq!(storage.read().await.sync_head(), original_head);
+}

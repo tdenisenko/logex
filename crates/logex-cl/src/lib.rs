@@ -118,10 +118,15 @@ pub struct AnchorCoverage {
 pub enum ReorgAnchorSnapshot {
     /// The tracked tip matches consensus; no range allocation is needed.
     MatchingTip,
+    /// The selected head is at/below the tracked tip or materialized terminal,
+    /// and its complete lineage has not replaced the old materialization yet.
+    PendingMaterialization,
+    NoTrackedHeaders,
     Window {
         anchors: Vec<ExecutionAnchor>,
         first_anchor_block: Option<u64>,
         last_anchor_block: Option<u64>,
+        selected_head_is_lower: bool,
     },
 }
 
@@ -278,15 +283,33 @@ impl ConsensusStore {
     pub fn reorg_anchor_snapshot(
         &self,
         first_block: u64,
-        last_block: u64,
-        tip_hash: B256,
+        tracked_tip: Option<(u64, B256)>,
         max_records: usize,
     ) -> Option<ReorgAnchorSnapshot> {
-        if first_block > last_block {
+        if tracked_tip.is_some_and(|(last, _)| first_block > last) {
             return None;
         }
         let snapshot = self.inner.lock().unwrap();
         let anchors = &snapshot.ordered_anchors;
+        let materialized_tip = anchors.last().map(|record| record.anchor);
+        let selected = snapshot
+            .verified_light_client_store
+            .as_ref()
+            .and_then(|store| store.optimistic_anchor());
+        if let Some(selected) = selected {
+            let requires_complete_lineage = tracked_tip
+                .is_some_and(|(last, _)| selected.block_number <= last)
+                || materialized_tip.is_some_and(|tip| tip.block_number >= selected.block_number);
+            if requires_complete_lineage && materialized_tip != Some(selected) {
+                // Do not combine a selected head with an older fork's lower
+                // anchors. Network materialization publishes the complete
+                // selected lineage and terminal together, removing its old tail.
+                return Some(ReorgAnchorSnapshot::PendingMaterialization);
+            }
+        }
+        let Some((last_block, tip_hash)) = tracked_tip else {
+            return Some(ReorgAnchorSnapshot::NoTrackedHeaders);
+        };
         if let Ok(index) =
             anchors.binary_search_by_key(&last_block, |record| record.anchor.block_number)
             && anchors[index].anchor.block_hash == tip_hash
@@ -305,6 +328,7 @@ impl ConsensusStore {
                 .collect(),
             first_anchor_block: anchors.first().map(|record| record.anchor.block_number),
             last_anchor_block: anchors.last().map(|record| record.anchor.block_number),
+            selected_head_is_lower: selected.is_some_and(|head| head.block_number < last_block),
         })
     }
 
@@ -1556,6 +1580,148 @@ mod tests {
     }
 
     #[test]
+    fn selected_lower_head_must_not_accept_stale_materialized_tip() {
+        let slot = recent_cache_fixture_slot();
+        let fixture = light_client::test_cached_light_client_fixture(slot);
+        let temp = tempfile::tempdir().unwrap();
+        let consensus = ConsensusStore::open(
+            temp.path(),
+            Some("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        )
+        .unwrap();
+        let old = vec![test_anchor(100), test_anchor(101)];
+        consensus.replace_anchors(old.clone()).unwrap();
+        // A constructed verified-store state isolates snapshot admission. Signed
+        // lower-height update acceptance is covered separately in light_client.
+        let mut selected = fixture.store;
+        selected.optimistic_header.beacon.slot = slot + 100;
+        selected.optimistic_header.execution = Some(light_client::VerifiedExecutionPayloadHeader {
+            block_number: 100,
+            block_hash: B256::repeat_byte(0xef),
+            receipts_root: B256::ZERO,
+        });
+        consensus.inner.lock().unwrap().verified_light_client_store = Some(selected);
+        assert!(matches!(
+            consensus
+                .reorg_anchor_snapshot(100, Some((101, old[1].anchor.block_hash)), 2)
+                .unwrap(),
+            ReorgAnchorSnapshot::PendingMaterialization
+        ));
+    }
+
+    #[test]
+    fn selected_head_snapshot_waits_for_exact_lineage_without_blocking_ahead_progress() {
+        let slot = recent_cache_fixture_slot();
+        let fixture = light_client::test_cached_light_client_fixture(slot);
+        let temp = tempfile::tempdir().unwrap();
+        let consensus = ConsensusStore::open(
+            temp.path(),
+            Some("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        )
+        .unwrap();
+        let select = |number, hash| {
+            let mut store = fixture.store.clone();
+            store.optimistic_header.beacon.slot = slot + 100;
+            store.optimistic_header.execution =
+                Some(light_client::VerifiedExecutionPayloadHeader {
+                    block_number: number,
+                    block_hash: hash,
+                    receipts_root: B256::ZERO,
+                });
+            let head = store.optimistic_anchor().unwrap();
+            consensus.inner.lock().unwrap().verified_light_client_store = Some(store);
+            head
+        };
+        let selected = select(100, B256::repeat_byte(0xef));
+        let old = vec![test_anchor(99), test_anchor(100), test_anchor(101)];
+        consensus.replace_anchors(old.clone()).unwrap();
+        for tip in [
+            None,
+            Some((99, old[0].anchor.block_hash)),
+            Some((100, selected.block_hash)),
+            Some((101, old[2].anchor.block_hash)),
+        ] {
+            assert_eq!(
+                consensus.reorg_anchor_snapshot(99, tip, 3),
+                Some(ReorgAnchorSnapshot::PendingMaterialization)
+            );
+        }
+        // Matching execution number/hash alone cannot prove selected ancestry.
+        let record = AnchorRecord {
+            anchor: selected,
+            finalized: false,
+            parent_beacon_root: None,
+        };
+        let mut wrong_root = record;
+        wrong_root.anchor.beacon_root = B256::repeat_byte(0xee);
+        consensus.replace_anchors(vec![old[0], wrong_root]).unwrap();
+        for tip in [
+            None,
+            Some((100, selected.block_hash)),
+            Some((101, old[2].anchor.block_hash)),
+        ] {
+            assert_eq!(
+                consensus.reorg_anchor_snapshot(99, tip, 3),
+                Some(ReorgAnchorSnapshot::PendingMaterialization)
+            );
+        }
+        consensus.replace_anchors(vec![old[0], record]).unwrap();
+        assert!(matches!(
+            consensus.reorg_anchor_snapshot(99, Some((101, old[2].anchor.block_hash)), 3),
+            Some(ReorgAnchorSnapshot::Window {
+                selected_head_is_lower: true,
+                ..
+            })
+        ));
+        assert_eq!(
+            consensus.reorg_anchor_snapshot(99, Some((100, selected.block_hash)), 0),
+            Some(ReorgAnchorSnapshot::MatchingTip)
+        );
+        assert_eq!(
+            consensus.reorg_anchor_snapshot(0, None, 0),
+            Some(ReorgAnchorSnapshot::NoTrackedHeaders)
+        );
+        // A same-height conflict also waits until its complete selected terminal.
+        consensus.replace_anchors(old[..2].to_vec()).unwrap();
+        assert_eq!(
+            consensus.reorg_anchor_snapshot(99, Some((100, old[1].anchor.block_hash)), 2),
+            Some(ReorgAnchorSnapshot::PendingMaterialization)
+        );
+        consensus.replace_anchors(vec![old[0], record]).unwrap();
+        assert!(matches!(
+            consensus.reorg_anchor_snapshot(99, Some((100, old[1].anchor.block_hash)), 2),
+            Some(ReorgAnchorSnapshot::Window {
+                selected_head_is_lower: false,
+                ..
+            })
+        ));
+        // Ordinary newer selected heads may lag in materialization; a partial
+        // authenticated gap still uses the existing bounded sparse scan.
+        select(105, B256::repeat_byte(0xf5));
+        consensus.replace_anchors(old[..2].to_vec()).unwrap();
+        assert_eq!(
+            consensus.reorg_anchor_snapshot(99, Some((100, old[1].anchor.block_hash)), 0),
+            Some(ReorgAnchorSnapshot::MatchingTip)
+        );
+        assert!(matches!(
+            consensus.reorg_anchor_snapshot(99, Some((101, old[2].anchor.block_hash)), 3),
+            Some(ReorgAnchorSnapshot::Window {
+                selected_head_is_lower: false,
+                ..
+            })
+        ));
+        assert_eq!(
+            consensus.reorg_anchor_snapshot(0, None, 0),
+            Some(ReorgAnchorSnapshot::NoTrackedHeaders)
+        );
+        consensus.inner.lock().unwrap().verified_light_client_store = None;
+        assert_eq!(
+            consensus.reorg_anchor_snapshot(99, Some((100, old[1].anchor.block_hash)), 0),
+            Some(ReorgAnchorSnapshot::MatchingTip)
+        );
+    }
+
+    #[test]
     fn reorg_anchor_snapshot_bounds_windows_and_keeps_matching_tip_allocation_free() {
         let temp = tempfile::tempdir().unwrap();
         let store = ConsensusStore::open(
@@ -1564,17 +1730,22 @@ mod tests {
         )
         .unwrap();
         let mismatch = B256::repeat_byte(0xee);
-        assert!(store.reorg_anchor_snapshot(1, 0, mismatch, 10).is_none());
+        assert!(
+            store
+                .reorg_anchor_snapshot(1, Some((0, mismatch)), 10)
+                .is_none()
+        );
         let window = |first, last, limit| match store
-            .reorg_anchor_snapshot(first, last, mismatch, limit)
+            .reorg_anchor_snapshot(first, Some((last, mismatch)), limit)
             .unwrap()
         {
             ReorgAnchorSnapshot::Window {
                 anchors,
                 first_anchor_block,
                 last_anchor_block,
+                ..
             } => (anchors, first_anchor_block, last_anchor_block),
-            ReorgAnchorSnapshot::MatchingTip => panic!("unexpected matching tip"),
+            _ => panic!("unexpected snapshot result"),
         };
         assert!(window(0, u64::MAX, 0).0.is_empty());
         let anchors = vec![
@@ -1587,15 +1758,19 @@ mod tests {
         // Zero window capacity still returns the allocation-free variant when
         // the tip matches. No range data is copied or retained in that variant.
         assert_eq!(
-            store.reorg_anchor_snapshot(0, u64::MAX, anchors[3].anchor.block_hash, 0),
+            store.reorg_anchor_snapshot(0, Some((u64::MAX, anchors[3].anchor.block_hash)), 0),
             Some(ReorgAnchorSnapshot::MatchingTip)
         );
         assert!(
             store
-                .reorg_anchor_snapshot(0, u64::MAX, mismatch, 3)
+                .reorg_anchor_snapshot(0, Some((u64::MAX, mismatch)), 3)
                 .is_none()
         );
-        assert!(store.reorg_anchor_snapshot(3, 8, mismatch, 1).is_none());
+        assert!(
+            store
+                .reorg_anchor_snapshot(3, Some((8, mismatch)), 1)
+                .is_none()
+        );
         let (copied, first, last) = window(3, 8, 2);
         assert_eq!(copied, vec![anchors[1].anchor, anchors[2].anchor]);
         assert_eq!(first, Some(0));
