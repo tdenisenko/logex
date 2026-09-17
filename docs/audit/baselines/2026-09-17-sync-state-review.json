@@ -2,16 +2,22 @@
   "date": "2026-09-17",
   "branch": "audit/sync-state-review",
   "base": "43bb6bc07ad3510304afe28ff7ff503405d2f5cb",
-  "source_commit": "3baecd32f0a95eb84e8f1ea7b79b15f298658fa7",
+  "source_commit": "9869104d06ffd8bd42d7ecca2f1da77eedfc7806",
   "source_inventory": {
     "base": "43bb6bc07ad3510304afe28ff7ff503405d2f5cb",
-    "source_commit": "3baecd32f0a95eb84e8f1ea7b79b15f298658fa7",
+    "source_commit": "9869104d06ffd8bd42d7ecca2f1da77eedfc7806",
     "files": [
       {
         "change": "M",
         "path": "crates/logex-cl/src/lib.rs",
-        "bytes": 113369,
-        "sha256": "3a3d8bbd28f4d18ab152835eaf25cc1d5c4dfb893adb06c8a7597d725f5b9c58"
+        "bytes": 121520,
+        "sha256": "333846d50bee881ab5e90c501cf27e64706f5a422d753a66185ddb904689658d"
+      },
+      {
+        "change": "M",
+        "path": "crates/logex-cl/src/light_client.rs",
+        "bytes": 163269,
+        "sha256": "90fc6442250fff27f625f364d0b456e5cbdf320ca588c81c7f6eff54a86c6088"
       },
       {
         "change": "M",
@@ -52,14 +58,14 @@
       {
         "change": "M",
         "path": "crates/logex-sync/src/engine/anchored.rs",
-        "bytes": 344226,
-        "sha256": "ba87354bea482f2c87d15f69a9740c25eb4774635a57dec0f3866f8a68029388"
+        "bytes": 349300,
+        "sha256": "aad39995c219f000ff70de036eed80f9c48fba6b48f906b8bbf88f6ed7167566"
       },
       {
         "change": "M",
         "path": "crates/logex-sync/src/engine/anchored/cancellation_tests.rs",
-        "bytes": 19075,
-        "sha256": "578ea0bb485ce2074acf445a2dea54485f91bd26dc942075ab5d599e4e4529b7"
+        "bytes": 20768,
+        "sha256": "0d1a664c78010c082ea2a6aee63bac10909030b163c645bd6421736550570d65"
       },
       {
         "change": "M",
@@ -103,10 +109,11 @@
     "B5-09",
     "B5-10",
     "B5-12",
-    "B5-13"
+    "B5-13",
+    "B5-14"
   ],
   "gates": {
-    "commit": "3baecd32f0a95eb84e8f1ea7b79b15f298658fa7",
+    "commit": "9869104d06ffd8bd42d7ecca2f1da77eedfc7806",
     "rustc": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
     "gates": [
       {
@@ -116,10 +123,10 @@
           "tools/verify_datafusion_vendor.py"
         ],
         "exit_code": 0,
-        "started": "2026-09-17T08:28:31.471832+00:00",
-        "finished": "2026-09-17T08:28:31.615833+00:00",
+        "started": "2026-09-17T09:10:43.726989+00:00",
+        "finished": "2026-09-17T09:10:43.853006+00:00",
         "sha256": "95ada9e22c512e8346f3d8d057e7fba429b52506f4e037dcf35657f57d7ec451",
-        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-sync-state-review-sctywegb/gates/vendor.log"
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-sync-state-review-sctywegb/gates-cached-head/vendor.log"
       },
       {
         "name": "format",
@@ -131,10 +138,10 @@
           "--check"
         ],
         "exit_code": 0,
-        "started": "2026-09-17T08:28:31.616431+00:00",
-        "finished": "2026-09-17T08:28:32.652273+00:00",
+        "started": "2026-09-17T09:10:43.853434+00:00",
+        "finished": "2026-09-17T09:10:44.939373+00:00",
         "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-sync-state-review-sctywegb/gates/format.log"
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-sync-state-review-sctywegb/gates-cached-head/format.log"
       },
       {
         "name": "vendor-format",
@@ -155,10 +162,10 @@
           "vendor/reth-discv5/src/lib.rs"
         ],
         "exit_code": 0,
-        "started": "2026-09-17T08:28:32.652661+00:00",
-        "finished": "2026-09-17T08:28:32.720739+00:00",
+        "started": "2026-09-17T09:10:44.939834+00:00",
+        "finished": "2026-09-17T09:10:45.012841+00:00",
         "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-sync-state-review-sctywegb/gates/vendor-format.log"
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-sync-state-review-sctywegb/gates-cached-head/vendor-format.log"
       },
       {
         "name": "enr-format",
@@ -172,10 +179,10 @@
           "vendor/enr/src/lib.rs"
         ],
         "exit_code": 0,
-        "started": "2026-09-17T08:28:32.721070+00:00",
-        "finished": "2026-09-17T08:28:32.772795+00:00",
+        "started": "2026-09-17T09:10:45.013278+00:00",
+        "finished": "2026-09-17T09:10:45.072526+00:00",
         "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-sync-state-review-sctywegb/gates/enr-format.log"
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-sync-state-review-sctywegb/gates-cached-head/enr-format.log"
       },
       {
         "name": "aggregate-format",
@@ -193,10 +200,10 @@
           "vendor/datafusion-functions-aggregate-common/src/utils.rs"
         ],
         "exit_code": 0,
-        "started": "2026-09-17T08:28:32.773164+00:00",
-        "finished": "2026-09-17T08:28:32.835726+00:00",
+        "started": "2026-09-17T09:10:45.073023+00:00",
+        "finished": "2026-09-17T09:10:45.144070+00:00",
         "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-sync-state-review-sctywegb/gates/aggregate-format.log"
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-sync-state-review-sctywegb/gates-cached-head/aggregate-format.log"
       },
       {
         "name": "check",
@@ -211,10 +218,10 @@
           "2"
         ],
         "exit_code": 0,
-        "started": "2026-09-17T08:28:32.836108+00:00",
-        "finished": "2026-09-17T08:28:47.402781+00:00",
-        "sha256": "5c918682e3a34cc74a56e5ffe480a7dcaebef440b9b880e9a02e755ca296705a",
-        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-sync-state-review-sctywegb/gates/check.log"
+        "started": "2026-09-17T09:10:45.144530+00:00",
+        "finished": "2026-09-17T09:10:51.090262+00:00",
+        "sha256": "4e81b2219cf2786f5c8da231dca9f9cd653575fbdd29381a5b37cdc1a4db3956",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-sync-state-review-sctywegb/gates-cached-head/check.log"
       },
       {
         "name": "clippy",
@@ -232,10 +239,10 @@
           "warnings"
         ],
         "exit_code": 0,
-        "started": "2026-09-17T08:28:47.403739+00:00",
-        "finished": "2026-09-17T08:29:04.445838+00:00",
-        "sha256": "09c395290c4a9a046ea270fc09c953097440caf1ebe03c153af53d4bfdb3a2fc",
-        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-sync-state-review-sctywegb/gates/clippy.log"
+        "started": "2026-09-17T09:10:51.091111+00:00",
+        "finished": "2026-09-17T09:10:56.966683+00:00",
+        "sha256": "3a59996c6bb864305388e2120fcee8af753790fa8928dc17a192a689a2156dde",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-sync-state-review-sctywegb/gates-cached-head/clippy.log"
       },
       {
         "name": "test",
@@ -250,10 +257,10 @@
           "2"
         ],
         "exit_code": 0,
-        "started": "2026-09-17T08:29:04.446555+00:00",
-        "finished": "2026-09-17T08:35:34.509367+00:00",
-        "sha256": "e2a87d40b89cfc833c78dcf2b30699dffc4138ee6ee80d3c93e3cdab76e5ef32",
-        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-sync-state-review-sctywegb/gates/test.log"
+        "started": "2026-09-17T09:10:56.967887+00:00",
+        "finished": "2026-09-17T09:14:21.745288+00:00",
+        "sha256": "d9dbcb48921ae5d17c977e742b875b22a05506acfdb7cd56e08dc4b72b245719",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-sync-state-review-sctywegb/gates-cached-head/test.log"
       },
       {
         "name": "doc",
@@ -268,10 +275,10 @@
           "2"
         ],
         "exit_code": 0,
-        "started": "2026-09-17T08:35:34.511946+00:00",
-        "finished": "2026-09-17T08:35:51.636222+00:00",
-        "sha256": "7475a84848248b17472a66b0e7579622857ec4ce671fc4ef76c8753705fe4aa6",
-        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-sync-state-review-sctywegb/gates/doc.log"
+        "started": "2026-09-17T09:14:21.748428+00:00",
+        "finished": "2026-09-17T09:14:30.456841+00:00",
+        "sha256": "2fcd5442c514fc93009a235bbd2940fcb6839627cb44a709878267a9d44ff934",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-sync-state-review-sctywegb/gates-cached-head/doc.log"
       },
       {
         "name": "release-build",
@@ -287,42 +294,438 @@
           "2"
         ],
         "exit_code": 0,
-        "started": "2026-09-17T08:35:51.636963+00:00",
-        "finished": "2026-09-17T08:37:55.420505+00:00",
-        "sha256": "ccdabcb29914ce2dccde55f9fbfbc49f14fa1ac15a7eee4ee4f0e27a8a92a9a5",
-        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-sync-state-review-sctywegb/gates/release-build.log"
+        "started": "2026-09-17T09:14:30.457610+00:00",
+        "finished": "2026-09-17T09:15:37.186053+00:00",
+        "sha256": "b0ce24cde38d1e05b1d5e8c0322177b867e4ccd2e38839c8399f6f85267d71a7",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-sync-state-review-sctywegb/gates-cached-head/release-build.log"
       }
     ]
   },
+  "previous_validations": [
+    {
+      "source_commit": "3baecd32f0a95eb84e8f1ea7b79b15f298658fa7",
+      "gates": {
+        "commit": "3baecd32f0a95eb84e8f1ea7b79b15f298658fa7",
+        "rustc": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+        "gates": [
+          {
+            "name": "vendor",
+            "command": [
+              "python3",
+              "tools/verify_datafusion_vendor.py"
+            ],
+            "exit_code": 0,
+            "started": "2026-09-17T08:28:31.471832+00:00",
+            "finished": "2026-09-17T08:28:31.615833+00:00",
+            "sha256": "95ada9e22c512e8346f3d8d057e7fba429b52506f4e037dcf35657f57d7ec451",
+            "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-sync-state-review-sctywegb/gates/vendor.log"
+          },
+          {
+            "name": "format",
+            "command": [
+              "cargo",
+              "fmt",
+              "--all",
+              "--",
+              "--check"
+            ],
+            "exit_code": 0,
+            "started": "2026-09-17T08:28:31.616431+00:00",
+            "finished": "2026-09-17T08:28:32.652273+00:00",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-sync-state-review-sctywegb/gates/format.log"
+          },
+          {
+            "name": "vendor-format",
+            "command": [
+              "rustfmt",
+              "--check",
+              "--edition",
+              "2024",
+              "--config-path",
+              "vendor/reth-network/rustfmt.toml",
+              "--config",
+              "skip_children=true",
+              "vendor/reth-network/src/eth_requests.rs",
+              "vendor/reth-network/src/session/active.rs",
+              "vendor/reth-network/src/session/mod.rs",
+              "vendor/reth-network/src/session/types.rs",
+              "vendor/reth-network/src/session/range_update.rs",
+              "vendor/reth-discv5/src/lib.rs"
+            ],
+            "exit_code": 0,
+            "started": "2026-09-17T08:28:32.652661+00:00",
+            "finished": "2026-09-17T08:28:32.720739+00:00",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-sync-state-review-sctywegb/gates/vendor-format.log"
+          },
+          {
+            "name": "enr-format",
+            "command": [
+              "rustfmt",
+              "--check",
+              "--edition",
+              "2021",
+              "--config",
+              "skip_children=true",
+              "vendor/enr/src/lib.rs"
+            ],
+            "exit_code": 0,
+            "started": "2026-09-17T08:28:32.721070+00:00",
+            "finished": "2026-09-17T08:28:32.772795+00:00",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-sync-state-review-sctywegb/gates/enr-format.log"
+          },
+          {
+            "name": "aggregate-format",
+            "command": [
+              "rustfmt",
+              "--check",
+              "--edition",
+              "2021",
+              "--config",
+              "max_width=90,skip_children=true",
+              "vendor/datafusion-functions-aggregate/src/sum.rs",
+              "vendor/datafusion-functions-aggregate/src/average.rs",
+              "vendor/datafusion-functions-aggregate-common/src/aggregate/sum_distinct/numeric.rs",
+              "vendor/datafusion-functions-aggregate-common/src/aggregate/avg_distinct/decimal.rs",
+              "vendor/datafusion-functions-aggregate-common/src/utils.rs"
+            ],
+            "exit_code": 0,
+            "started": "2026-09-17T08:28:32.773164+00:00",
+            "finished": "2026-09-17T08:28:32.835726+00:00",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-sync-state-review-sctywegb/gates/aggregate-format.log"
+          },
+          {
+            "name": "check",
+            "command": [
+              "cargo",
+              "check",
+              "--workspace",
+              "--all-targets",
+              "--locked",
+              "--offline",
+              "-j",
+              "2"
+            ],
+            "exit_code": 0,
+            "started": "2026-09-17T08:28:32.836108+00:00",
+            "finished": "2026-09-17T08:28:47.402781+00:00",
+            "sha256": "5c918682e3a34cc74a56e5ffe480a7dcaebef440b9b880e9a02e755ca296705a",
+            "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-sync-state-review-sctywegb/gates/check.log"
+          },
+          {
+            "name": "clippy",
+            "command": [
+              "cargo",
+              "clippy",
+              "--workspace",
+              "--all-targets",
+              "--locked",
+              "--offline",
+              "-j",
+              "2",
+              "--",
+              "-D",
+              "warnings"
+            ],
+            "exit_code": 0,
+            "started": "2026-09-17T08:28:47.403739+00:00",
+            "finished": "2026-09-17T08:29:04.445838+00:00",
+            "sha256": "09c395290c4a9a046ea270fc09c953097440caf1ebe03c153af53d4bfdb3a2fc",
+            "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-sync-state-review-sctywegb/gates/clippy.log"
+          },
+          {
+            "name": "test",
+            "command": [
+              "cargo",
+              "test",
+              "--workspace",
+              "--all-targets",
+              "--locked",
+              "--offline",
+              "-j",
+              "2"
+            ],
+            "exit_code": 0,
+            "started": "2026-09-17T08:29:04.446555+00:00",
+            "finished": "2026-09-17T08:35:34.509367+00:00",
+            "sha256": "e2a87d40b89cfc833c78dcf2b30699dffc4138ee6ee80d3c93e3cdab76e5ef32",
+            "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-sync-state-review-sctywegb/gates/test.log"
+          },
+          {
+            "name": "doc",
+            "command": [
+              "cargo",
+              "test",
+              "--workspace",
+              "--doc",
+              "--locked",
+              "--offline",
+              "-j",
+              "2"
+            ],
+            "exit_code": 0,
+            "started": "2026-09-17T08:35:34.511946+00:00",
+            "finished": "2026-09-17T08:35:51.636222+00:00",
+            "sha256": "7475a84848248b17472a66b0e7579622857ec4ce671fc4ef76c8753705fe4aa6",
+            "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-sync-state-review-sctywegb/gates/doc.log"
+          },
+          {
+            "name": "release-build",
+            "command": [
+              "cargo",
+              "build",
+              "-p",
+              "logex-node",
+              "--release",
+              "--locked",
+              "--offline",
+              "-j",
+              "2"
+            ],
+            "exit_code": 0,
+            "started": "2026-09-17T08:35:51.636963+00:00",
+            "finished": "2026-09-17T08:37:55.420505+00:00",
+            "sha256": "ccdabcb29914ce2dccde55f9fbfbc49f14fa1ac15a7eee4ee4f0e27a8a92a9a5",
+            "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-sync-state-review-sctywegb/gates/release-build.log"
+          }
+        ]
+      },
+      "workspace_tests": {
+        "passed": 1925,
+        "failed": 0,
+        "ignored": 24
+      }
+    },
+    {
+      "source_commit": "118088abb53e1e86616f311de076a8db991a520e",
+      "gates": {
+        "commit": "118088abb53e1e86616f311de076a8db991a520e",
+        "rustc": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+        "gates": [
+          {
+            "name": "vendor",
+            "command": [
+              "python3",
+              "tools/verify_datafusion_vendor.py"
+            ],
+            "exit_code": 0,
+            "started": "2026-09-17T09:02:04.141202+00:00",
+            "finished": "2026-09-17T09:02:04.273375+00:00",
+            "sha256": "95ada9e22c512e8346f3d8d057e7fba429b52506f4e037dcf35657f57d7ec451",
+            "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-sync-state-review-sctywegb/gates-final/vendor.log"
+          },
+          {
+            "name": "format",
+            "command": [
+              "cargo",
+              "fmt",
+              "--all",
+              "--",
+              "--check"
+            ],
+            "exit_code": 0,
+            "started": "2026-09-17T09:02:04.273844+00:00",
+            "finished": "2026-09-17T09:02:05.431161+00:00",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-sync-state-review-sctywegb/gates-final/format.log"
+          },
+          {
+            "name": "vendor-format",
+            "command": [
+              "rustfmt",
+              "--check",
+              "--edition",
+              "2024",
+              "--config-path",
+              "vendor/reth-network/rustfmt.toml",
+              "--config",
+              "skip_children=true",
+              "vendor/reth-network/src/eth_requests.rs",
+              "vendor/reth-network/src/session/active.rs",
+              "vendor/reth-network/src/session/mod.rs",
+              "vendor/reth-network/src/session/types.rs",
+              "vendor/reth-network/src/session/range_update.rs",
+              "vendor/reth-discv5/src/lib.rs"
+            ],
+            "exit_code": 0,
+            "started": "2026-09-17T09:02:05.431634+00:00",
+            "finished": "2026-09-17T09:02:05.507313+00:00",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-sync-state-review-sctywegb/gates-final/vendor-format.log"
+          },
+          {
+            "name": "enr-format",
+            "command": [
+              "rustfmt",
+              "--check",
+              "--edition",
+              "2021",
+              "--config",
+              "skip_children=true",
+              "vendor/enr/src/lib.rs"
+            ],
+            "exit_code": 0,
+            "started": "2026-09-17T09:02:05.507738+00:00",
+            "finished": "2026-09-17T09:02:05.563372+00:00",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-sync-state-review-sctywegb/gates-final/enr-format.log"
+          },
+          {
+            "name": "aggregate-format",
+            "command": [
+              "rustfmt",
+              "--check",
+              "--edition",
+              "2021",
+              "--config",
+              "max_width=90,skip_children=true",
+              "vendor/datafusion-functions-aggregate/src/sum.rs",
+              "vendor/datafusion-functions-aggregate/src/average.rs",
+              "vendor/datafusion-functions-aggregate-common/src/aggregate/sum_distinct/numeric.rs",
+              "vendor/datafusion-functions-aggregate-common/src/aggregate/avg_distinct/decimal.rs",
+              "vendor/datafusion-functions-aggregate-common/src/utils.rs"
+            ],
+            "exit_code": 0,
+            "started": "2026-09-17T09:02:05.563803+00:00",
+            "finished": "2026-09-17T09:02:05.630680+00:00",
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-sync-state-review-sctywegb/gates-final/aggregate-format.log"
+          },
+          {
+            "name": "check",
+            "command": [
+              "cargo",
+              "check",
+              "--workspace",
+              "--all-targets",
+              "--locked",
+              "--offline",
+              "-j",
+              "2"
+            ],
+            "exit_code": 0,
+            "started": "2026-09-17T09:02:05.631075+00:00",
+            "finished": "2026-09-17T09:02:15.286865+00:00",
+            "sha256": "012fb71a20557d29b411a4116271fff3fd9a69edaa2773ec3ae4285a6e977e65",
+            "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-sync-state-review-sctywegb/gates-final/check.log"
+          },
+          {
+            "name": "clippy",
+            "command": [
+              "cargo",
+              "clippy",
+              "--workspace",
+              "--all-targets",
+              "--locked",
+              "--offline",
+              "-j",
+              "2",
+              "--",
+              "-D",
+              "warnings"
+            ],
+            "exit_code": 0,
+            "started": "2026-09-17T09:02:15.287803+00:00",
+            "finished": "2026-09-17T09:02:24.738176+00:00",
+            "sha256": "e251aaa56487607ffc16ad1d106ddb093c4015c7c95196a8b3854c99978b1ff0",
+            "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-sync-state-review-sctywegb/gates-final/clippy.log"
+          },
+          {
+            "name": "test",
+            "command": [
+              "cargo",
+              "test",
+              "--workspace",
+              "--all-targets",
+              "--locked",
+              "--offline",
+              "-j",
+              "2"
+            ],
+            "exit_code": 0,
+            "started": "2026-09-17T09:02:24.738972+00:00",
+            "finished": "2026-09-17T09:06:09.456159+00:00",
+            "sha256": "06c10681b4f01a393db8914164c375dc966e23ec676e4dba3a2b9f0afe48dce0",
+            "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-sync-state-review-sctywegb/gates-final/test.log"
+          },
+          {
+            "name": "doc",
+            "command": [
+              "cargo",
+              "test",
+              "--workspace",
+              "--doc",
+              "--locked",
+              "--offline",
+              "-j",
+              "2"
+            ],
+            "exit_code": 0,
+            "started": "2026-09-17T09:06:09.460893+00:00",
+            "finished": "2026-09-17T09:06:19.919454+00:00",
+            "sha256": "2539d86dc10d110a25a7d8095fbb7bc6067f9fa77790427c9ec5a295dfbabcff",
+            "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-sync-state-review-sctywegb/gates-final/doc.log"
+          },
+          {
+            "name": "release-build",
+            "command": [
+              "cargo",
+              "build",
+              "-p",
+              "logex-node",
+              "--release",
+              "--locked",
+              "--offline",
+              "-j",
+              "2"
+            ],
+            "exit_code": 0,
+            "started": "2026-09-17T09:06:19.920061+00:00",
+            "finished": "2026-09-17T09:07:25.763128+00:00",
+            "sha256": "1625ae491bb371c42b20972979b89dcd1f2f4cbd257821eeccd0f3d87c9bc229",
+            "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-sync-state-review-sctywegb/gates-final/release-build.log"
+          }
+        ]
+      },
+      "workspace_tests": {
+        "passed": 1930,
+        "failed": 0,
+        "ignored": 24
+      }
+    }
+  ],
   "workspace_tests": {
-    "passed": 1925,
+    "passed": 1930,
     "failed": 0,
     "ignored": 24,
     "targets": 34
   },
   "evidence": {
     "path": "docs/audit/baselines/2026-09-17-sync-state-review-evidence.json.gz",
-    "files": 69,
-    "bytes_uncompressed": 1875667,
-    "bytes": 278663,
-    "sha256": "6894de30cef2fdcf12b57d08d106aa1a5341252b6fc5e19bb36060cba3dca55b"
+    "files": 99,
+    "bytes_uncompressed": 2773897,
+    "bytes": 413631,
+    "sha256": "40af21265ce08368afa0ce241d4fd2e9061b9ca7ae71f5232e7f656ade037ff9"
   },
   "validation": {
     "path": "docs/audit/baselines/2026-09-17-sync-state-review-validation.json.gz",
-    "files": 12,
-    "bytes_uncompressed": 224961,
-    "bytes": 41339,
-    "sha256": "6d5788dea3c55558621b6224ea30a6ef88f260c7a040731fbee1ea1b1f7f2e96"
+    "files": 36,
+    "bytes_uncompressed": 672672,
+    "bytes": 123361,
+    "sha256": "a732ea5b160a3f41b0457cfaab823c3ccb3c5ff8ca8a37c3fe742deb0c8e02ba"
   },
   "publication": {
     "state": "pending"
   },
   "boundaries": [
     "No live sync, deployment, remote host, production data changes or broad benchmarks.",
-    "Missing-consensus archive control is sequential; parent/sparse controls reproduce helper state, not full peer-loop outcomes.",
+    "Missing-consensus archive control is sequential; parent/sparse controls reproduce helper state, not full peer-loop outcomes. Selected-head stale-tip control uses a constructed verified-store state; separate signed fixtures exercise actual update acceptance, not a mainnet occurrence.",
     "Zero batch controls validate new early errors; no original panic run.",
     "Bundled maintenance race is reproduced through a public current-profile captured task; normal background scheduling skips that candidate.",
-    "A matching tip returns before anchor-window allocation; no throughput claim.",
+    "An ordinary matching tip returns before anchor-window allocation; known shorter/equal selection or a stale terminal at/above the selected height waits for complete selected ancestry. Ahead-selected and in-flight async materialization lag are retained boundaries; no throughput claim.",
     "Ordinary ingestion adds no reorg metadata writes. Range pruning was deferred pending historical descriptor input-order review.",
     "Pending intents resume before open returns; previously interrupted legacy operations have no retroactive intent.",
     "Batch5 gap-header memory and other roadmap areas remain open."

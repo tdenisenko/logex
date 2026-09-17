@@ -58,8 +58,10 @@ suffix, even when no overlapping anchor conflicted. A checkpoint-gap payload
 pipeline can commit a validated prefix before a later payload request is
 unavailable. Its tip need not have a materialized consensus anchor, so the next
 iteration could discard correct progress unnecessarily. A missing anchor is not
-evidence of a conflicting block. The correction requires an observed overlapping
-conflict before selecting a matching ancestor for a reorg.
+evidence of a conflicting block. The correction requires positive reorg evidence
+before selecting a matching ancestor: an observed overlapping conflict, or an
+explicitly selected shorter terminal whose complete ancestry is materialized
+(as detailed below).
 
 The decision also reads its anchor evidence and coverage from one consensus
 snapshot. The ordinary matching-tip case returns before copying any anchor range;
@@ -89,6 +91,45 @@ without taking the same lock twice. Contention reports `WouldBlock`, retains the
 durable reorg intent and invalidates queries until recovery. A task captured before
 a completed reorg fails its source-reference check instead of republishing the old
 manifest. These controls also verify successful repeated recovery afterward.
+
+## Selected-head review before merge
+
+**B5-14 — moderate: stale materialized anchors could hide a selected shorter execution
+head.** Light-client head advancement follows beacon slots; it does not require
+execution block height to increase. The verified head and its complete materialized
+ancestry are published in separate steps. The old matching-tip shortcut could therefore
+use a cached prior-fork tip while the selected ancestry was still being fetched. This
+behavior predates this PR. Independently, requiring an overlapping conflict for every
+rewind misses an explicitly selected shorter head that matches a retained ancestor;
+absent anchors alone still do not justify rewinding a partially ingested checkpoint gap.
+
+Commit `118088ab` inspects the actual verified selected head under the same consensus
+lock and waits cooperatively when known shorter/equal selection or a stale terminal
+at/above the selected height lacks complete selected ancestry. This also protects
+empty-tracker bootstrap from a same-height cached terminal with a different beacon
+identity. The complete materialized terminal must match the full selected anchor,
+including its beacon identity, before lower cached anchors establish a common ancestor.
+Merely overlaying the selected head onto older cached anchors would not prove their
+ancestry and is unsuitable. An explicitly selected shorter terminal can then authorize a
+rewind even without an overlapping different block hash.
+
+The initial stale-tip control selected an unsupported slot for its fixture and failed
+during setup; that failure is not regression evidence. The corrected control on exact
+`c6eec210` reaches and fails the stale `MatchingTip` assertion. Both original patches
+apply and reverse against their recorded source; the setup failure remains separately
+labeled. This is a consumer-state and signed-fixture boundary; no mainnet occurrence is
+claimed. When the selected head is ahead of both the tracked tip and materialized
+ceiling, the existing materialization-lag behavior is retained. The snapshot does not
+lock head selection across asynchronous network requests, and does not claim to
+eliminate all in-flight selection changes.
+
+A final call-path review found that the initial selected-head accessor rebuilt its
+beacon root using an allocating helper. Commit `9869104d` reads the existing derived
+anchor only when a verified store is present. Every production store assignment
+refreshes this cache; materialization and restore reapply it before atomically
+publishing the snapshot. This removes the extra per-iteration hash/allocation without
+adding persisted state or weakening selected authority. A materialized-only fallback
+summary is never treated as a verified selected head.
 
 ## Review boundaries and retained behavior
 
@@ -151,15 +192,20 @@ once rather than once per reverted hash. No throughput gain or regression is
 claimed, and no broad benchmark was run under the user's updated measurement
 policy.
 
-Source is frozen at `3baecd32`. Focused checks passed: 50 runtime controls,
-153 engine controls, one consensus snapshot control, seven canonical-reorg
-controls and eleven storage reorg tests (overlapping focused sets are not added
-into a separate total). The full workspace suite passes 1,925 tests with no
-failures and 24 existing ignores. All ten local gates pass, including documentation tests and the release build.
-Local gates pass; CI and merge remain pending.
+Final source is frozen at `9869104d`. Focused checks passed: 50 runtime controls,
+155 engine controls, four selected-head/snapshot/signature controls, seven
+canonical-reorg controls and eleven storage reorg tests (overlapping sets are
+not added into a separate total). All ten final-source local gates pass, including 1,930 workspace tests
+with zero failures and 24 existing ignores, documentation tests and release. Earlier
+sources `3baecd32` and `118088ab` passed ten local gates (1,925 and 1,930 tests,
+respectively; 24 ignores each). The first published head `c6eec210` also passed
+six CI jobs and ten Linux controls. These results are retained separately and
+do not substitute for final-source validation.
+Final-source CI and merge remain pending.
 
-The five original test-only patches apply and reverse exactly against their
-recorded baseline commits. Storage controls include 30 finite interruption points
+The six effective original test-only patches apply and reverse against their
+recorded baseline commits. The superseded fixture-setup patch is retained
+and labeled separately. Storage controls include 30 finite interruption points
 with repeated reopen, empty-log suffixes, malformed intent rejection and an
 interrupted recovery. The maintenance race uses an explicit bounded pause and
 owned temporary files. Initial sandbox listener restrictions, an incompatible
