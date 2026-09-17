@@ -13,6 +13,7 @@ use eyre::Result;
 use logex_types::LOGEX_CLIENT_VERSION;
 use reth_chainspec::{EthChainSpec, MAINNET};
 use reth_discv4::{Discv4Config, NatResolver};
+use reth_discv5::discv5::enr::{Enr, EnrKey};
 use reth_discv5::discv5::{Enr as Discv5Enr, ListenConfig};
 use reth_discv5::enr::EnrCombinedKeyWrapper;
 use reth_discv5::enr_to_discv4_id;
@@ -1069,15 +1070,13 @@ fn signed_enr_node_record_for_dial_families(
         ));
     }
     if families.ipv6
-        && let (Some(ip), Some(tcp_port)) = (
-            enr.ip6(),
-            signed_ipv6_tcp_port(enr).filter(|port| *port != 0),
-        )
+        && let (Some(ip), Some(tcp_port)) =
+            (enr.ip6(), ipv6_tcp_port(enr).filter(|port| *port != 0))
     {
         return Some(NodeRecord::new_with_ports(
             IpAddr::V6(ip),
             tcp_port,
-            Some(signed_ipv6_udp_port(enr).unwrap_or_default()),
+            Some(ipv6_udp_port(enr).unwrap_or_default()),
             peer_id,
         ));
     }
@@ -1090,8 +1089,8 @@ fn signed_enr_discovery_node_for_bind_ip(bind_ip: IpAddr, enr: &Discv5Enr) -> Op
     let (address, tcp_port, udp_port) = if bind_ip.is_ipv6() {
         (
             IpAddr::V6(enr.ip6()?),
-            signed_ipv6_tcp_port(enr),
-            signed_ipv6_udp_port(enr),
+            ipv6_tcp_port(enr),
+            ipv6_udp_port(enr),
         )
     } else {
         (IpAddr::V4(enr.ip4()?), enr.tcp4(), enr.udp4())
@@ -1115,7 +1114,7 @@ fn discovery_node_record(
 
 fn signed_enr_matches_discovery_bind_ip(bind_ip: IpAddr, enr: &Discv5Enr) -> bool {
     if bind_ip.is_ipv6() {
-        enr.ip6().is_some() && enr.udp6().is_some_and(|port| port != 0)
+        enr.udp6_socket().is_some_and(|socket| socket.port() != 0)
     } else {
         enr.ip4().is_some() && enr.udp4().is_some_and(|port| port != 0)
     }
@@ -1261,11 +1260,11 @@ fn default_dns_node_record(
     }
 
     let ip = enr.ip6()?;
-    let tcp_port = dns_ipv6_tcp_port(enr).filter(|port| *port != 0)?;
+    let tcp_port = ipv6_tcp_port(enr).filter(|port| *port != 0)?;
     Some(NodeRecord::new_with_ports(
         IpAddr::V6(ip),
         tcp_port,
-        Some(dns_ipv6_udp_port(enr).unwrap_or_default()),
+        Some(ipv6_udp_port(enr).unwrap_or_default()),
         peer_id,
     ))
 }
@@ -1283,8 +1282,8 @@ fn dns_boot_node_for_bind_ip(
     let (address, tcp_port, udp_port) = if bind_ip.is_ipv6() {
         (
             IpAddr::V6(update.enr.ip6()?),
-            dns_ipv6_tcp_port(&update.enr),
-            dns_ipv6_udp_port(&update.enr),
+            ipv6_tcp_port(&update.enr),
+            ipv6_udp_port(&update.enr),
         )
     } else {
         (
@@ -1338,7 +1337,10 @@ fn dns_signed_boot_node_for_bind_ip(
 
     if bind_ip.is_ipv6() {
         update.enr.ip6()?;
-        update.enr.udp6().filter(|port| *port != 0)?;
+        update
+            .enr
+            .udp6_socket()
+            .filter(|socket| socket.port() != 0)?;
     } else {
         update.enr.ip4()?;
         update.enr.udp4().filter(|port| *port != 0)?;
@@ -1353,8 +1355,8 @@ fn dns_node_record_for_bind_ip(
 ) -> Option<NodeRecord> {
     if bind_ip.is_ipv6() {
         let ip = update.enr.ip6().map(IpAddr::V6)?;
-        let tcp_port = dns_ipv6_tcp_port(&update.enr).filter(|port| *port != 0)?;
-        let udp_port = dns_ipv6_udp_port(&update.enr);
+        let tcp_port = ipv6_tcp_port(&update.enr).filter(|port| *port != 0)?;
+        let udp_port = ipv6_udp_port(&update.enr);
         return Some(NodeRecord::new_with_ports(
             ip,
             tcp_port,
@@ -1407,20 +1409,12 @@ fn dual_endpoint_prefers_ipv6(peer_id: PeerId) -> bool {
     peer_id.as_slice().last().is_some_and(|byte| byte & 1 == 1)
 }
 
-fn signed_ipv6_tcp_port(enr: &Discv5Enr) -> Option<u16> {
-    enr.tcp6().or_else(|| enr.tcp4())
+fn ipv6_tcp_port<K: EnrKey>(enr: &Enr<K>) -> Option<u16> {
+    enr.tcp6_socket().map(|socket| socket.port())
 }
 
-fn signed_ipv6_udp_port(enr: &Discv5Enr) -> Option<u16> {
-    enr.udp6().or_else(|| enr.udp4())
-}
-
-fn dns_ipv6_tcp_port(enr: &reth_network_peers::Enr<SecretKey>) -> Option<u16> {
-    enr.tcp6().or_else(|| enr.tcp4())
-}
-
-fn dns_ipv6_udp_port(enr: &reth_network_peers::Enr<SecretKey>) -> Option<u16> {
-    enr.udp6().or_else(|| enr.udp4())
+fn ipv6_udp_port<K: EnrKey>(enr: &Enr<K>) -> Option<u16> {
+    enr.udp6_socket().map(|socket| socket.port())
 }
 
 #[cfg(test)]
@@ -2029,7 +2023,7 @@ mod tests {
         assert_eq!(node.tcp_addr().ip(), IpAddr::V6(ipv6));
         assert_eq!(node.tcp_port, 30303);
         assert_eq!(node.udp_port, 30304);
-        assert!(!signed_enr_matches_discovery_bind_ip(
+        assert!(signed_enr_matches_discovery_bind_ip(
             IpAddr::V6(Ipv6Addr::UNSPECIFIED),
             &enr
         ));
@@ -2158,7 +2152,7 @@ mod tests {
     }
 
     #[test]
-    fn dns_signed_boot_node_rejects_ipv6_generic_udp_fallback() {
+    fn dns_signed_boot_node_accepts_ipv6_generic_udp_fallback() {
         let secret = SecretKey::from_byte_array(&[0x35; 32]).unwrap();
         let ipv6 = "2001:db8:35::1".parse::<Ipv6Addr>().unwrap();
         let enr = enr::Enr::<SecretKey>::builder()
@@ -2188,15 +2182,104 @@ mod tests {
                 .expect("IPv6 ENR with generic UDP remains usable as an unsigned discv5 candidate");
         assert_eq!(node.tcp_addr().ip(), IpAddr::V6(ipv6));
         assert_eq!(node.udp_port, 30303);
-        assert!(
-            dns_signed_boot_node_for_bind_ip(
-                IpAddr::V6(Ipv6Addr::UNSPECIFIED),
-                &fork_filter,
-                &update,
-            )
-            .is_none(),
-            "Reth discv5 rejects signed IPv6 ENRs unless they carry udp6"
+        let signed = dns_signed_boot_node_for_bind_ip(
+            IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+            &fork_filter,
+            &update,
+        )
+        .expect("shared UDP port must also seed signed IPv6 discovery");
+        assert_eq!(signed.to_string(), update.enr.to_string());
+        assert_eq!(
+            reth_discv5::discv5::IpMode::Ip6.get_contactable_addr(&signed),
+            Some((ipv6, 30303).into())
         );
+    }
+
+    #[tokio::test]
+    async fn shared_ipv6_tcp_port_survives_reth_discovery_events() {
+        use reth_discv5::discv5::{ConfigBuilder, Event, enr::CombinedKey};
+        let config = reth_discv5::Config::builder("[::1]:9001".parse().unwrap())
+            .discv5_config(
+                ConfigBuilder::new(ListenConfig::Ipv6 {
+                    ip: Ipv6Addr::LOCALHOST,
+                    port: 0,
+                })
+                .build(),
+            )
+            .build();
+        let secret = SecretKey::from_byte_array(&[0x37; 32]).unwrap();
+        // An owned ephemeral loopback listener with no bootnodes. No remote
+        // peer or packet is required: exercise the actual event adapter below.
+        let (service, _events) = tokio::time::timeout(
+            Duration::from_secs(5),
+            reth_discv5::Discv5::start(&secret, config),
+        )
+        .await
+        .expect("local discovery startup deadline")
+        .unwrap();
+        let observed: std::net::SocketAddr = "[::1]:9002".parse().unwrap();
+        for advertise_ip in [false, true] {
+            for (generic, specific, expected) in [
+                (Some(9001), None, 9001),
+                (Some(9001), Some(9003), 9003),
+                (Some(9001), Some(0), 0),
+                (None, None, 9002),
+            ] {
+                let mut builder = Discv5Enr::builder();
+                builder.udp4(9000);
+                if advertise_ip {
+                    builder.ip6(Ipv6Addr::LOCALHOST);
+                }
+                if let Some(port) = generic {
+                    builder.tcp4(port);
+                }
+                if let Some(port) = specific {
+                    builder.tcp6(port);
+                }
+                let enr = builder.build(&CombinedKey::generate_secp256k1()).unwrap();
+                let original = enr.to_string();
+                let direct = service.try_into_reachable(&enr, observed).unwrap();
+                assert_eq!(direct.tcp_port, expected);
+                assert_eq!(direct.udp_port, observed.port());
+                assert_eq!(direct.address, observed.ip());
+                assert_eq!(enr.to_string(), original);
+                let discovered = service
+                    .on_discv5_update(Event::SessionEstablished(enr, observed))
+                    .unwrap();
+                assert_eq!(discovered.node_record, direct);
+            }
+        }
+    }
+
+    #[test]
+    fn ipv6_invalid_specific_ports_do_not_select_shared_endpoints() {
+        let secret = SecretKey::from_byte_array(&[0x36; 32]).unwrap();
+        let enr = enr::Enr::<SecretKey>::builder()
+            .ip6(Ipv6Addr::LOCALHOST)
+            .tcp4(30303)
+            .udp4(30304)
+            .add_value(b"tcp6", &65_536u32)
+            .add_value(b"udp6", &65_536u32)
+            .build(&secret)
+            .unwrap();
+        assert!(ipv6_tcp_port(&enr).is_none());
+        assert!(ipv6_udp_port(&enr).is_none());
+        assert!(enr.to_string().parse::<Discv5Enr>().is_err());
+        let signed = Discv5Enr::builder()
+            .ip6(Ipv6Addr::LOCALHOST)
+            .tcp4(30303)
+            .udp4(30304)
+            .add_value(b"tcp6", &65_536u32)
+            .add_value(b"udp6", &65_536u32)
+            .build(&reth_discv5::discv5::enr::CombinedKey::generate_secp256k1())
+            .unwrap();
+        assert!(
+            signed_enr_node_record_for_dial_families(DialAddressFamilies::IPV6, &signed).is_none()
+        );
+        assert!(!signed_enr_matches_discovery_bind_ip(
+            IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+            &signed
+        ));
     }
 
     #[test]

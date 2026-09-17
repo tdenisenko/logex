@@ -1,0 +1,40 @@
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -416,11 +416,16 @@
+         None
+     }
+ 
+-    /// Provides a socket (based on the UDP port), if the IPv6 and UDP fields are specified.
++    /// Provides an IPv6 UDP socket, using the shared UDP port when `udp6` is absent.
++    /// An invalid IPv6-specific port does not fall back to the shared port.
+     #[must_use]
+     pub fn udp6_socket(&self) -> Option<SocketAddrV6> {
+         if let Some(ip6) = self.ip6() {
+-            if let Some(udp6) = self.udp6() {
++            // LogEx: EIP-778 shares `udp` only when `udp6` is absent.
++            if let Some(udp6) = self
++                .get_decodable::<u16>(UDP6_ENR_KEY)
++                .map_or_else(|| self.udp4(), Result::ok)
++            {
+                 return Some(SocketAddrV6::new(ip6, udp6, 0, 0));
+             }
+         }
+@@ -438,11 +443,16 @@
+         None
+     }
+ 
+-    /// Provides a socket (based on the TCP port), if the IPv6 and TCP6 fields are specified.
++    /// Provides an IPv6 TCP socket, using the shared TCP port when `tcp6` is absent.
++    /// An invalid IPv6-specific port does not fall back to the shared port.
+     #[must_use]
+     pub fn tcp6_socket(&self) -> Option<SocketAddrV6> {
+         if let Some(ip6) = self.ip6() {
+-            if let Some(tcp6) = self.tcp6() {
++            // LogEx: EIP-778 shares `tcp` only when `tcp6` is absent.
++            if let Some(tcp6) = self
++                .get_decodable::<u16>(TCP6_ENR_KEY)
++                .map_or_else(|| self.tcp4(), Result::ok)
++            {
+                 return Some(SocketAddrV6::new(ip6, tcp6, 0, 0));
+             }
+         }

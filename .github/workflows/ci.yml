@@ -48,6 +48,9 @@ jobs:
           vendor/reth-network/src/session/mod.rs
           vendor/reth-network/src/session/types.rs
           vendor/reth-network/src/session/range_update.rs
+          vendor/reth-discv5/src/lib.rs
+      - name: Check patched ENR formatting
+        run: rustfmt --check --edition 2021 --config skip_children=true vendor/enr/src/lib.rs
 
   clippy:
     name: Clippy

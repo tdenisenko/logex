@@ -229,9 +229,13 @@ fn endpoint_selection_udp_only_generic_ipv6_seed_preserves_identity() {
     assert_eq!(dns_seed.id, update.peer_id);
     assert_eq!(dns_seed.tcp_port, 0);
     assert_eq!(dns_seed.udp_port, 30304);
-    // Pinned discv5 still requires an explicit udp6 in its signed-record path;
-    // the existing unsigned-address path uses the resolved advertised UDP port.
-    assert!(!signed_enr_matches_discovery_bind_ip(bind, &signed));
-    assert!(dns_signed_boot_node_for_bind_ip(bind, &filter, &update).is_none());
+    // Signed and unsigned discovery now resolve the same shared UDP endpoint.
+    assert!(signed_enr_matches_discovery_bind_ip(bind, &signed));
+    assert_eq!(
+        dns_signed_boot_node_for_bind_ip(bind, &filter, &update)
+            .unwrap()
+            .to_string(),
+        signed.to_string()
+    );
     assert!(reth_discv5::BootNode::from_unsigned(configured_seed).is_ok());
 }

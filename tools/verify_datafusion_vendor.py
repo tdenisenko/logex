@@ -35,6 +35,23 @@ class Package:
 
 PACKAGES = (
     Package(
+        name="enr",
+        inventory_checksum="ae2056c9fe60b5e2f07e2d6a9ed545a45291bdf2e99d80510823591d63863693",
+        modified={
+            PurePosixPath("src/lib.rs"): "b34435ea6fcf4491ad2ed4a290a1e20295f2a1d8eb3c78d84b4634662050c183",
+        },
+        patch_checksum="008e041224280f02ea7f6139837db8f1ccbb56c9cc5f03d77426b171e16ccdd8",
+    ),
+    Package(
+        name="reth-discv5",
+        inventory_checksum="55974224f027af2dcbc5101f3cb1d1ccc5898f689528e9dc6170bbd26f33c16f",
+        modified={
+            PurePosixPath("Cargo.toml"): "833e730f0e582ad92f60397c61b0f2ec6538ab160b7f7ece4d1678b0950a956a",
+            PurePosixPath("src/lib.rs"): "a7269521c1bc76b8e0dee1ecd5371cd723eb60aa7106762578c0bb504fcd274b",
+        },
+        patch_checksum="3b9fe645e1c8b1d5df37c131144b16929e1f34101bfa47f019265c29f876e120",
+    ),
+    Package(
         name="datafusion-sql",
         inventory_checksum="0cde1d552a958a7a7dca76c473334db21d0317313821fb8ba49bc8156ad34ec8",
         modified={

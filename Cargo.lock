@@ -3345,8 +3345,6 @@ dependencies = [
 [[package]]
 name = "enr"
 version = "0.13.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "851bd664a3d3a3c175cff92b2f0df02df3c541b4895d0ae307611827aae46152"
 dependencies = [
  "alloy-rlp",
  "base64",
@@ -7019,7 +7017,6 @@ dependencies = [
 [[package]]
 name = "reth-discv5"
 version = "1.11.3"
-source = "git+https://github.com/paradigmxyz/reth.git?tag=v1.11.3#d6324d63e27ef6b7c49cdc9b1977c1b808234c7b"
 dependencies = [
  "alloy-primitives",
  "alloy-rlp",
