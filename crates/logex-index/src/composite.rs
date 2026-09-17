@@ -378,18 +378,16 @@ impl CompositeQuery {
     }
 
     /// Prefix scan: all rows for a given address across all topic0 values.
-    /// Uses range [address ++ 0x00..00, address ++ 0xFF..FF + 1).
+    /// Includes both suffix endpoints without incrementing the address prefix.
     pub fn scan_by_address(
         reader: &BTreeIndexReader,
         address: &[u8; 20],
     ) -> roaring::RoaringBitmap {
         let mut start = [0u8; ADDR_TOPIC0_KEY_SIZE];
         start[..20].copy_from_slice(address);
-        // end = address + 1 (increment the address portion)
-        let mut end = [0u8; ADDR_TOPIC0_KEY_SIZE];
+        let mut end = [0xff; ADDR_TOPIC0_KEY_SIZE];
         end[..20].copy_from_slice(address);
-        increment_prefix(&mut end[..20]);
-        reader.range(&start, &end)
+        reader.range_inclusive(&start, &end)
     }
 
     /// Look up (address, topic0, block_number) in the triple composite index.
@@ -488,22 +486,9 @@ impl CompositeQuery {
     pub fn scan_by_topic0(reader: &BTreeIndexReader, topic0: &[u8; 32]) -> roaring::RoaringBitmap {
         let mut start = [0u8; TOPIC0_TOPIC1_KEY_SIZE];
         start[..32].copy_from_slice(topic0);
-        let mut end = [0u8; TOPIC0_TOPIC1_KEY_SIZE];
+        let mut end = [0xff; TOPIC0_TOPIC1_KEY_SIZE];
         end[..32].copy_from_slice(topic0);
-        increment_prefix(&mut end[..32]);
-        reader.range(&start, &end)
-    }
-}
-
-/// Increment a big-endian byte slice by 1 (for exclusive upper bound).
-/// Wraps around on overflow (all 0xFF becomes all 0x00).
-fn increment_prefix(bytes: &mut [u8]) {
-    for byte in bytes.iter_mut().rev() {
-        let (val, overflow) = byte.overflowing_add(1);
-        *byte = val;
-        if !overflow {
-            return;
-        }
+        reader.range_inclusive(&start, &end)
     }
 }
 
@@ -514,6 +499,49 @@ mod tests {
     use logex_storage::ColumnFile;
     use logex_types::{LogRow, Source};
     use tempfile::TempDir;
+
+    fn assert_prefix_scan_matches_rows<const PREFIX: usize>(
+        scan: impl Fn(&BTreeIndexReader, &[u8; PREFIX]) -> roaring::RoaringBitmap,
+    ) {
+        let mut carry = [0x42; PREFIX];
+        carry[PREFIX - 1] = 0xff;
+        let mut next = [0x42; PREFIX];
+        next[PREFIX - 2] = 0x43;
+        next[PREFIX - 1] = 0;
+        let prefixes = [[0; PREFIX], [0x42; PREFIX], carry, next, [0xff; PREFIX]];
+        let suffixes = [[0; 32], [0x71; 32], [0xff; 32]];
+        let mut index = BTreeIndex::new(PREFIX + 32);
+        let mut rows = Vec::new();
+        for prefix in prefixes {
+            for suffix in suffixes {
+                let row_id = rows.len() as u32;
+                let key = [prefix.as_slice(), suffix.as_slice()].concat();
+                index.insert(&key, row_id);
+                rows.push((prefix, row_id));
+            }
+        }
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("prefix.bptree");
+        index.write_to_file(&path).unwrap();
+        let reader = BTreeIndexReader::open(&path).unwrap();
+        for prefix in prefixes.into_iter().chain([[0x80; PREFIX]]) {
+            let expected: roaring::RoaringBitmap = rows
+                .iter()
+                .filter_map(|(row_prefix, row_id)| (*row_prefix == prefix).then_some(*row_id))
+                .collect();
+            assert_eq!(scan(&reader, &prefix), expected, "prefix {prefix:02x?}");
+        }
+    }
+
+    #[test]
+    fn address_prefix_scan_matches_oracle_at_boundaries() {
+        assert_prefix_scan_matches_rows(CompositeQuery::scan_by_address);
+    }
+
+    #[test]
+    fn topic0_prefix_scan_matches_oracle_at_boundaries() {
+        assert_prefix_scan_matches_rows(CompositeQuery::scan_by_topic0);
+    }
 
     fn make_test_rows() -> Vec<LogRow> {
         vec![
@@ -777,16 +805,5 @@ mod tests {
         assert!(bm.contains(0));
         assert!(bm.contains(1));
         assert_eq!(bm.len(), 2);
-    }
-
-    #[test]
-    fn test_increment_prefix() {
-        let mut bytes = [0x00, 0x00, 0xFF];
-        increment_prefix(&mut bytes);
-        assert_eq!(bytes, [0x00, 0x01, 0x00]);
-
-        let mut bytes = [0xFF, 0xFF];
-        increment_prefix(&mut bytes);
-        assert_eq!(bytes, [0x00, 0x00]); // overflow wraps
     }
 }
