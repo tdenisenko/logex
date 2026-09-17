@@ -4,7 +4,7 @@ Review base: PR #216 merge `929a3639`, on `audit/query-decimal-average`.
 Corrections are committed in `71652e41`; final source `51fed125` also applies
 workspace formatting to the application regression file. All 44 focused
 application controls and 108 isolated package tests pass. All ten local gates pass, including 1,886 workspace tests with 24 existing
-ignores, documentation tests and the release build. Exact-head CI and merge remain pending.
+ignores, documentation tests and the release build. All six CI jobs passed on `6b7cdb2d`, including ten Linux volume/template cases with verified cleanup. [PR #217](https://github.com/tdenisenko/logex/pull/217) merged as `40d247e6`. The merge tree is identical to the tested head.
 
 ## B7-36: decimal subtotal wrap (P1)
 

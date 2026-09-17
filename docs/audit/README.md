@@ -46,7 +46,15 @@ reproductions for wrapped decimal means, incorrect empty average windows and neg
 scale factors (B7-36–38), a direct grouped-memory undercount (B7-39), and
 duration subtotal overflow (B7-40).
 Source `51fed125` passes 44 focused application tests, 108 isolated package tests
-and all ten local gates (1,886 workspace tests / 24 ignored). CI and merge remain pending.
+and all ten local gates (1,886 workspace tests / 24 ignored). Six CI jobs passed before PR #217 merged as `40d247e6`.
+
+The [native API worker review](native-query-workers.md) addresses synchronous
+filesystem scans and retained ingestion read locks in JSON-RPC/gRPC log methods
+(B8-05). Source `f2293fd4` passes 111 server/protocol controls, alongside 115 query
+controls with two existing ignores. All ten local gates pass (1,902 workspace
+tests / 24 ignored). Native API CI and merge remain pending.
+This is a native execution/lifetime correction; shared query memory and request
+admission remain open.
 
 ## Offline completion boundary
 

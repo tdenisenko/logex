@@ -1,0 +1,278 @@
+{
+  "base_commit": "40d247e6130210d2541d8ecf9ca3dc3a6c75a66b",
+  "source_commit": "f2293fd4c92400da4fa05a4bcbdbb0b909ceb114",
+  "findings_fixed": [
+    "B8-05"
+  ],
+  "validation": {
+    "commit": "f2293fd4c92400da4fa05a4bcbdbb0b909ceb114",
+    "rustc": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+    "gates": [
+      {
+        "name": "vendor",
+        "command": [
+          "python3",
+          "tools/verify_datafusion_vendor.py"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T06:58:49.206211+00:00",
+        "finished": "2026-09-17T06:58:49.326473+00:00",
+        "sha256": "95ada9e22c512e8346f3d8d057e7fba429b52506f4e037dcf35657f57d7ec451",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-query-resource-ownership-tuukmf_4/gates/vendor.log"
+      },
+      {
+        "name": "format",
+        "command": [
+          "cargo",
+          "fmt",
+          "--all",
+          "--",
+          "--check"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T06:58:49.326813+00:00",
+        "finished": "2026-09-17T06:58:50.214732+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-query-resource-ownership-tuukmf_4/gates/format.log"
+      },
+      {
+        "name": "vendor-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2024",
+          "--config-path",
+          "vendor/reth-network/rustfmt.toml",
+          "--config",
+          "skip_children=true",
+          "vendor/reth-network/src/eth_requests.rs",
+          "vendor/reth-network/src/session/active.rs",
+          "vendor/reth-network/src/session/mod.rs",
+          "vendor/reth-network/src/session/types.rs",
+          "vendor/reth-network/src/session/range_update.rs",
+          "vendor/reth-discv5/src/lib.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T06:58:50.215111+00:00",
+        "finished": "2026-09-17T06:58:50.350771+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-query-resource-ownership-tuukmf_4/gates/vendor-format.log"
+      },
+      {
+        "name": "enr-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2021",
+          "--config",
+          "skip_children=true",
+          "vendor/enr/src/lib.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T06:58:50.351217+00:00",
+        "finished": "2026-09-17T06:58:50.406817+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-query-resource-ownership-tuukmf_4/gates/enr-format.log"
+      },
+      {
+        "name": "aggregate-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2021",
+          "--config",
+          "max_width=90,skip_children=true",
+          "vendor/datafusion-functions-aggregate/src/sum.rs",
+          "vendor/datafusion-functions-aggregate/src/average.rs",
+          "vendor/datafusion-functions-aggregate-common/src/aggregate/sum_distinct/numeric.rs",
+          "vendor/datafusion-functions-aggregate-common/src/aggregate/avg_distinct/decimal.rs",
+          "vendor/datafusion-functions-aggregate-common/src/utils.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T06:58:50.407245+00:00",
+        "finished": "2026-09-17T06:58:50.472558+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-query-resource-ownership-tuukmf_4/gates/aggregate-format.log"
+      },
+      {
+        "name": "check",
+        "command": [
+          "cargo",
+          "check",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T06:58:50.472971+00:00",
+        "finished": "2026-09-17T06:58:57.721785+00:00",
+        "sha256": "e0d0cdf1bda0cfb9cf75731a46eef286f857d21c29ab11a170ee8189ba6d2735",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-query-resource-ownership-tuukmf_4/gates/check.log"
+      },
+      {
+        "name": "clippy",
+        "command": [
+          "cargo",
+          "clippy",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T06:58:57.722605+00:00",
+        "finished": "2026-09-17T06:59:07.398092+00:00",
+        "sha256": "7eaaf66cc2c67ae94fac7f04edeebdd602839e8572e71c71b70fb6ace697f834",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-query-resource-ownership-tuukmf_4/gates/clippy.log"
+      },
+      {
+        "name": "test",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T06:59:07.398694+00:00",
+        "finished": "2026-09-17T07:05:05.673058+00:00",
+        "sha256": "afc4818e9381c8260d1838694a30d9310283570b6ce8011995632ad52154fe4f",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-query-resource-ownership-tuukmf_4/gates/test.log"
+      },
+      {
+        "name": "doc",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--doc",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T07:05:05.675264+00:00",
+        "finished": "2026-09-17T07:05:18.783327+00:00",
+        "sha256": "d334808c6d8073d67838b393da890ef6e3e00f1411cd9cee47d787886ae79eae",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-query-resource-ownership-tuukmf_4/gates/doc.log"
+      },
+      {
+        "name": "release-build",
+        "command": [
+          "cargo",
+          "build",
+          "-p",
+          "logex-node",
+          "--release",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T07:05:18.784020+00:00",
+        "finished": "2026-09-17T07:06:58.032952+00:00",
+        "sha256": "63d3cf3eb7bff3fcb97b48a9f0a8287a30b43262a5c13d78c71542447e874377",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-query-resource-ownership-tuukmf_4/gates/release-build.log"
+      }
+    ]
+  },
+  "workspace_tests": {
+    "passed": 1902,
+    "failed": 0,
+    "ignored": 24,
+    "groups": 33
+  },
+  "investigation": {
+    "path": "docs/audit/baselines/2026-09-17-native-query-workers-evidence.json.gz",
+    "sha256": "6bb777ad0c08c7ab4c971deb1b7b487b4e4d5fded2751aa42d17ff3bc3f76a4c",
+    "bytes": 199396,
+    "files": 56,
+    "source": {
+      "base": "40d247e6130210d2541d8ecf9ca3dc3a6c75a66b",
+      "source": "f2293fd4c92400da4fa05a4bcbdbb0b909ceb114",
+      "branch": "audit/query-resource-ownership"
+    },
+    "final_source_identities": {
+      "crates/logex-query/src/lib.rs": "ecacf7311b1ad0d9707ba3303d3ff493071207b91ffa93b367d81baefdc9035d",
+      "crates/logex-query/src/native.rs": "c0ffdc2efde097327f518b40707cd3ece4ba07d58f14ea8892a66d7d106d2707",
+      "crates/logex-query/tests/snapshots.rs": "ec482e74df9dab66edbf39d7509d72fb7eda73d73c95fba6569f475602507777",
+      "crates/logex-server/src/handler.rs": "ca7a7588755220be58f6756673134fab3f3642c1410aa36d2adb87b1ae99f79c",
+      "crates/logex-server/src/grpc.rs": "3ffc159be662894af088d69ca489d61d06754590c5f48c7f8fe48fe1599a6097",
+      "crates/logex-server/tests/native_query_workers.rs": "ea223619612deb1f0a8ca17b1f2b0e8143df66afe6123ff4477dcec74247f911"
+    },
+    "checks": {
+      "focused-server-boxed-errors.log": {
+        "passed": 111,
+        "failed": 0,
+        "ignored": 0,
+        "groups": 3
+      },
+      "02-focused.log": {
+        "passed": 115,
+        "failed": 0,
+        "ignored": 2,
+        "groups": 5
+      }
+    },
+    "baseline_production_matches_base": true,
+    "original_assertions_failed": 6,
+    "unchanged_sql_and_dependency_graph": true,
+    "query_api_conformance_not_original_failure": true,
+    "handoff": {
+      "branch": "audit/query-resource-ownership",
+      "base_merge": "40d247e6130210d2541d8ecf9ca3dc3a6c75a66b",
+      "commit": "4b044e68030604db7311396f883663e0877b9e77",
+      "owned_paths": [
+        "crates/logex-query/src/native.rs",
+        "crates/logex-query/src/lib.rs",
+        "crates/logex-query/tests/snapshots.rs"
+      ],
+      "source_frozen": true,
+      "cargo_free": true,
+      "api": "execute_log_filter_on_snapshot_with_cancel(snapshot: &NativeStorageSnapshot, filter: &NativeLogFilter, cancel: Option<&QueryCancelCheck>) -> io::Result<Vec<LogRow>>",
+      "behavior": "Capture view while holding live storage guard, then execute without borrowing PartitionManager. Existing wrappers capture and delegate. New entry validates before execution and after success/error, including zero-limit pages. Per-checkpoint cancellation also validates snapshot. Reorg/close invalidation returns WouldBlock, taking precedence over a simultaneous cancellation error; cancellation on a valid view returns Interrupted. Ordering/pagination/captured row boundaries remain unchanged.",
+      "checks": {
+        "01-conformance.log": "4 new API conformance tests passed; raw/bundled append exclusion, asc/desc pages, concurrent repeated calls, wrapper fresh-view behavior, raw compaction, each actual cancellation/reorg checkpoint and invalidation-error precedence, close/reorg/zero-limit behavior",
+        "02-focused.log": "115 passed,2 existing ignores: query library79, pagination9, snapshots15, SQL aggregates6, SQL scan execution6",
+        "03-clippy.log": "cargo clippy --locked --offline -j2 -p logex-query --lib --test snapshots -- -D warnings passed",
+        "03-format.log": "rustfmt --check --edition2024 --config skip_children=true on three owned files passed",
+        "source_whitespace": "git diff --check -- crates/logex-query passed",
+        "04-visibility-format.log": "Visibility/docs-only public StorageSnapshot::validate follow-up: edition2024 rustfmt and scoped diff whitespace pass; no Cargo per parent, method body unchanged."
+      },
+      "provenance": [
+        "Before sources and SHA identities retained. New API did not exist on original base; tests are new API conformance, NOT original failing regressions. No failing candidate attempts.",
+        "The initial worker_count variable review did not establish an intended <=8 contract. Existing fan-out is bounded<=32; after parent review no worker code/test-observer change or worker regression was made. sql.rs source SHA remains exactly original.",
+        "No memory budgets/spill/config changes, new dependencies, vendor changes, benchmarks or remote tests. Memory policy remains a parent/user decision.",
+        "Parent owns server lock/worker lifecycle corrections, docs, full gates and publication. Parent files and .DS_Store left untouched.",
+        "Only workspace target used; no separate build targets created/deleted. TempDir test fixtures clean themselves; evidence retained.",
+        "Public validate enables server post-conversion snapshot checks without cloning snapshot metadata. Prior115-test/Clippy run used identical method body before visibility/docs-only change; parent owns final-source gates."
+      ],
+      "prior_commit": "ad681563d051790513c0fe69d9e0b19dd1acfbe5"
+    }
+  },
+  "review": "Native API scans release ingestion read locks after snapshot capture, execute on gated blocking workers, retain capacity until actual disposal and validate snapshot after conversion before cancellation.",
+  "limits": "Execution gate only. Queued requests, complete response bytes and global query memory/admission policy remain separate. Existing SQL fan-out and dependency graph unchanged. No benchmark or hard RSS bound claimed.",
+  "publication": "pending exact-head CI and merge",
+  "gate_logs": {
+    "path": "docs/audit/baselines/2026-09-17-native-query-workers-validation.json.gz",
+    "sha256": "6545c7499a41f5cbbb6e0d909220dba37c4d5cb9f881afff320af46026e240d3",
+    "bytes": 39409
+  }
+}
