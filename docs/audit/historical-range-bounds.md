@@ -3,7 +3,7 @@
 This storage follow-up is on `audit/historical-range-bounds`, based on PR #220
 merge `4635cbda`. It addresses B2-27 without sorting stored rows or changing the
 file format. Source is committed as `75a73e4d`; all ten local gates pass.
-Publication and CI remain before merge.
+CI passed; the verified merge is recorded below.
 
 ## Finding and scope
 
@@ -88,9 +88,11 @@ local gates pass: 1,940 workspace tests, zero failures, 24 existing ignores acro
 The [machine-readable record](baselines/2026-09-17-historical-range-bounds.json)
 links hashed archives of original controls, fixed checks, independent review, source
 inventories and full gate output. Inherited dependency/debug-linker warnings remain
-recorded; all final local gates passed. Publication and CI remain before merge.
+recorded; all final local gates passed. CI passed; the verified merge is recorded below.
 
 Removed the endpoint-only descriptor helper, duplicate descriptor-update logic and separate
 block-only range helper; no reorg pruning or serialized metadata was added.
 This milestone does not complete the offline audit or establish live-sync/release
 readiness.
+
+All six CI jobs passed on `d7a907e0`, including ten Linux volume/template cases with verified cleanup. [PR #221](https://github.com/tdenisenko/logex/pull/221) merged as `e54e9303`. The merge tree is identical to the tested head. B2-27 is closed for newly written data; remaining storage and broader audit work stays open.

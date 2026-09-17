@@ -156,32 +156,29 @@ summary is never treated as a verified selected head.
   not a total resident-memory guarantee. Local `JoinSet` ownership cancels pending
   workers when that pipeline exits.
 
-## Remaining B5-11: bounded checkpoint-gap headers
+## B5-11 follow-up: bounded checkpoint-gap headers
 
-The current gap path accumulates every header through the terminal anchor, then
+The original gap path accumulates every header through the terminal anchor, then
 adds one hash per header and retains both vectors during payload ingestion.
 Request page size and payload concurrency do not bound this O(gap) allocation.
 This is a source-confirmed retention issue; no RSS, OOM or throughput claim is made.
 
-The next scoped correction should preserve terminal-anchor authentication while
-using a disposable header spool and bounded page/chunk memory. It must cover
-fallible disk operations, cancellation, cleanup, malformed/truncated staging data
-and exact ingestion equivalence. Immediate forward publication before terminal
+The [checkpoint-gap follow-up](checkpoint-gap-memory.md), source `b327cf90`,
+preserves terminal-anchor authentication using disposable authenticated scratch
+and bounded page/chunk memory. Eleven new controls cover framing, cancellation,
+cleanup, I/O, terminal trust, fallback and ingestion equivalence. All ten local
+gates pass; exact-head CI and merge remain. Immediate forward publication before terminal
 authentication is unsuitable. An arbitrary maximum-gap rejection would prevent
 otherwise valid restarts and is not an equivalent remedy.
 
-## Additional storage-range review
+## Subsequent storage-range correction
 
-Reorg segment pruning is deliberately deferred until the historical writer's
-range contract is resolved. Historical descriptors currently use the first and
-last rows as extrema; the public writer does not explicitly require or validate
-monotonic row order. Production historical extraction is ordered, but that does
-not establish the contract for every accepted public input. Startup checks
-source endpoints and catalog shape rather than scanning every row for extrema.
-The follow-up must reproduce out-of-order input, establish accurate block/time
-ranges, and then prove that pruning preserves complete canonical retirement.
-This PR retains the full hash scan rather than relying on that unresolved
-assumption. No range-pruning improvement is claimed.
+At this milestone, historical descriptors used endpoints without an enforced
+row-order contract, so reorg pruning was deferred. The subsequent
+[historical bounds review](historical-range-bounds.md) reproduced native-query
+exclusions and corrected newly computed bounds in PR #221 (`e54e9303`). Existing
+underestimated descriptors are not retroactively repaired. The full reorg hash
+scan remains; no range-pruning improvement is claimed.
 
 ## Performance and validation
 

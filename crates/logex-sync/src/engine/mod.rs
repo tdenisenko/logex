@@ -31,6 +31,7 @@ use crate::validation::{
 };
 
 mod anchored;
+mod header_spool;
 mod helpers;
 mod historical;
 mod ingest;

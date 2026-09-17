@@ -1,3 +1,6 @@
+use super::header_spool::{
+    AppendError, HeaderSpoolReader, HeaderSpoolWriter, MAX_SPOOL_CHUNK_HEADERS,
+};
 use super::*;
 use crate::EXECUTION_HISTORY_TARGET_BLOCK;
 use crate::extract;
@@ -15,6 +18,9 @@ mod fetch_supervision_tests;
 
 #[cfg(test)]
 mod cancellation_tests;
+
+#[cfg(test)]
+mod checkpoint_spool_tests;
 
 fn historical_fetch_worker_exit_error(
     kind: &str,
@@ -2344,7 +2350,7 @@ impl SyncEngine {
         let Some(anchor) = consensus.next_anchor_after(current) else {
             return Ok(false);
         };
-        let Some(mut previous_header) = self.head_tracker.snapshot().last().cloned() else {
+        let Some(previous_header) = self.head_tracker.snapshot().last().cloned() else {
             tracing::warn!(
                 current,
                 anchor_block = anchor.block_number,
@@ -2368,12 +2374,24 @@ impl SyncEngine {
         let (request_timeout, request_attempts) =
             consensus_anchor_forward_header_policy(historical_backfill_active);
 
-        let mut headers = Vec::new();
+        let directory = self.storage.read().await.data_dir().to_path_buf();
+        let Some(spool) = cancelable(
+            &mut self.shutdown,
+            HeaderSpoolWriter::new(directory, previous_header),
+        )
+        .await
+        else {
+            self.finish_shutdown()?;
+            return Ok(false);
+        };
+        let mut spool = spool?;
         let mut header_peer = None;
         let mut next_block = start_block;
-        while next_block <= anchor.block_number {
-            let remaining = anchor.block_number.saturating_sub(next_block) + 1;
-            let request_count = remaining.min(self.config.header_batch_size.max(1));
+        let mut remaining = gap_blocks;
+        while remaining != 0 {
+            let request_count = remaining
+                .min(self.config.header_batch_size.max(1))
+                .min(MAX_SPOOL_CHUNK_HEADERS as u64);
             let header_result = cancelable(
                 &mut self.shutdown,
                 self.peers.get_headers_with_limits(
@@ -2413,52 +2431,46 @@ impl SyncEngine {
                 }
             };
 
-            if let Err(error) =
-                validate_downloaded_headers(next_block, Some(&previous_header), &batch)
-            {
-                tracing::warn!(
-                    start_block = next_block,
-                    headers = batch.len(),
-                    header_peer = %peer_id,
-                    %error,
-                    "checkpoint gap header validation failed"
-                );
-                self.peers.report_invalid_block_data(peer_id, "headers");
+            let Some(appended) = cancelable(&mut self.shutdown, spool.append(batch)).await else {
+                self.finish_shutdown()?;
                 return Ok(false);
+            };
+            spool = match appended {
+                Ok(spool) => spool,
+                Err(AppendError::InvalidHeaders(error)) => {
+                    tracing::warn!(start_block = next_block, header_peer = %peer_id, %error, "checkpoint gap header validation failed");
+                    self.peers.report_invalid_block_data(peer_id, "headers");
+                    return Ok(false);
+                }
+                Err(AppendError::Storage(error)) => return Err(error),
+            };
+            remaining -= request_count;
+            // The terminal number may be u64::MAX: finish before incrementing.
+            if remaining != 0 {
+                next_block = spool
+                    .last_header()
+                    .number
+                    .checked_add(1)
+                    .ok_or_else(|| eyre::eyre!("checkpoint header cursor overflow"))?;
             }
-
-            previous_header = batch
-                .last()
-                .cloned()
-                .expect("non-empty checkpoint gap header batch");
-            next_block = previous_header.number().saturating_add(1);
             header_peer.get_or_insert(peer_id);
-            headers.extend(batch);
         }
 
-        let Some(terminal_header) = headers.last() else {
+        if let Err(error) = spool.validate_anchor(&anchor) {
+            tracing::warn!(%error, anchor_block = anchor.block_number, "checkpoint gap terminal header did not match consensus anchor");
+            return Ok(false);
+        }
+        // No payload request or publication is possible before this transition.
+        let Some(sealed) = cancelable(&mut self.shutdown, spool.seal(anchor)).await else {
+            self.finish_shutdown()?;
             return Ok(false);
         };
-        let terminal_hash = terminal_header.hash_slow();
-        if let Err(error) = validate_header_matches_anchor(&anchor, terminal_header, terminal_hash)
-        {
-            tracing::warn!(
-                anchor_block = anchor.block_number,
-                expected_hash = %anchor.block_hash,
-                got_hash = %terminal_hash,
-                %error,
-                "checkpoint gap terminal header did not match consensus anchor"
-            );
-            return Ok(false);
-        }
-
+        let spool = sealed?;
         let header_peer = header_peer.expect("checkpoint gap contains at least one header batch");
-        let hashes: Vec<B256> = headers.iter().map(|header| header.hash_slow()).collect();
         let (progressed, last_head) = self
             .ingest_checkpoint_gap_fetch_pipeline(
                 header_peer,
-                headers,
-                hashes,
+                spool,
                 anchor,
                 historical_backfill_active,
             )
@@ -2483,40 +2495,40 @@ impl SyncEngine {
     async fn ingest_checkpoint_gap_fetch_pipeline(
         &mut self,
         header_peer: PeerId,
-        headers: Vec<Header>,
-        hashes: Vec<B256>,
+        mut spool: HeaderSpoolReader,
         anchor: ExecutionAnchor,
         historical_backfill_active: bool,
     ) -> Result<(bool, Option<Head>)> {
-        if headers.is_empty() {
-            return Ok((false, None));
-        }
-        if headers.len() != hashes.len() {
-            return Ok((false, None));
-        }
-
         let mut active_fetches = JoinSet::new();
-        let mut completed_fetches = BTreeMap::new();
+        let mut completed_fetches: BTreeMap<u64, ForwardGapFetchOutcome> = BTreeMap::new();
         let mut next_sequence = 0u64;
         let mut expected_sequence = 0u64;
-        let mut next_offset = 0usize;
-        let mut expected_offset = 0usize;
+        let mut remaining = spool.remaining();
         let mut progressed = false;
         let mut last_head = None;
 
-        while expected_offset < headers.len() {
+        while remaining != 0 {
             while active_fetches.len().saturating_add(completed_fetches.len())
                 < checkpoint_gap_pipeline_depth(self.peers.serving_peer_count())
-                && next_offset < headers.len()
+                && spool.remaining() != 0
             {
-                let remaining = headers.len().saturating_sub(next_offset);
-                let chunk_len = remaining.min(CHECKPOINT_GAP_PIPELINE_CHUNK_BLOCKS);
+                let chunk_len = spool
+                    .remaining()
+                    .min(CHECKPOINT_GAP_PIPELINE_CHUNK_BLOCKS as u64)
+                    as usize;
                 if chunk_len < checkpoint_gap_parallel_min_blocks() {
                     break;
                 }
-                let chunk_end = next_offset.saturating_add(chunk_len);
-                let chunk_headers = headers[next_offset..chunk_end].to_vec();
-                let chunk_hashes = hashes[next_offset..chunk_end].to_vec();
+                let Some(read) = cancelable(&mut self.shutdown, spool.read_chunk(chunk_len)).await
+                else {
+                    active_fetches.abort_all();
+                    self.finish_shutdown()?;
+                    return Ok((progressed, last_head));
+                };
+                let (read_spool, position, chunk) = read?;
+                spool = read_spool;
+                let chunk_headers = chunk.headers;
+                let chunk_hashes = chunk.hashes;
                 if !self
                     .spawn_checkpoint_gap_fetch_task(
                         next_sequence,
@@ -2527,45 +2539,52 @@ impl SyncEngine {
                     )
                     .await?
                 {
+                    let Some(rewound) =
+                        cancelable(&mut self.shutdown, spool.rewind(position)).await
+                    else {
+                        active_fetches.abort_all();
+                        self.finish_shutdown()?;
+                        return Ok((progressed, last_head));
+                    };
+                    spool = rewound?;
                     break;
                 }
-                next_sequence = next_sequence.saturating_add(1);
-                next_offset = chunk_end;
+                next_sequence = next_sequence
+                    .checked_add(1)
+                    .ok_or_else(|| eyre::eyre!("checkpoint sequence overflow"))?;
                 tokio::task::yield_now().await;
                 self.drain_historical_request_accounting();
             }
 
             if let Some(outcome) = completed_fetches.remove(&expected_sequence) {
+                let chunk_block_count = outcome.headers.len() as u64;
                 let Some(chunk) = self.materialize_checkpoint_gap_fetch_outcome(outcome)? else {
                     return Ok((progressed, last_head));
                 };
-                let (chunk_progressed, chunk_last_header, chunk_last_head) =
+                let (chunk_progressed, _, chunk_last_head) =
                     self.ingest_forward_gap_fetched_chunk(chunk, anchor).await?;
                 if !chunk_progressed {
                     return Ok((progressed, last_head));
                 }
-                let chunk_block_count = chunk_last_header
-                    .as_ref()
-                    .and_then(|header| {
-                        header
-                            .number()
-                            .checked_sub(headers[expected_offset].number())
-                            .map(|delta| delta.saturating_add(1) as usize)
-                    })
-                    .unwrap_or(0);
-                expected_offset = expected_offset.saturating_add(chunk_block_count);
-                expected_sequence = expected_sequence.saturating_add(1);
+                remaining = remaining
+                    .checked_sub(chunk_block_count)
+                    .ok_or_else(|| eyre::eyre!("checkpoint completed count mismatch"))?;
+                expected_sequence = expected_sequence
+                    .checked_add(1)
+                    .ok_or_else(|| eyre::eyre!("checkpoint sequence overflow"))?;
                 progressed = true;
                 last_head = chunk_last_head;
                 continue;
             }
 
             if active_fetches.is_empty() {
+                if remaining != spool.remaining() {
+                    return Err(eyre::eyre!("checkpoint fallback cursor mismatch"));
+                }
                 let (tail_progressed, tail_last_head) = self
                     .ingest_checkpoint_gap_sequential_tail(
                         header_peer,
-                        &headers[expected_offset..],
-                        &hashes[expected_offset..],
+                        spool,
                         anchor,
                         historical_backfill_active,
                     )
@@ -2709,8 +2728,7 @@ impl SyncEngine {
     async fn ingest_checkpoint_gap_sequential_tail(
         &mut self,
         header_peer: PeerId,
-        headers: &[Header],
-        hashes: &[B256],
+        mut spool: HeaderSpoolReader,
         anchor: ExecutionAnchor,
         historical_backfill_active: bool,
     ) -> Result<(bool, Option<Head>)> {
@@ -2719,13 +2737,21 @@ impl SyncEngine {
         let (request_timeout, request_attempts) =
             consensus_anchor_forward_payload_policy(historical_backfill_active);
 
-        for (chunk_headers, chunk_hashes) in headers
-            .chunks(self.config.fetch_batch_size)
-            .zip(hashes.chunks(self.config.fetch_batch_size))
-        {
+        while spool.remaining() != 0 {
             self.refill_checkpoint_gap_peers().await?;
-            let chunk_headers = chunk_headers.to_vec();
-            let chunk_hashes = chunk_hashes.to_vec();
+            let Some(read) = cancelable(
+                &mut self.shutdown,
+                spool.read_chunk(self.config.fetch_batch_size.max(1)),
+            )
+            .await
+            else {
+                self.finish_shutdown()?;
+                return Ok((progressed, last_head));
+            };
+            let (read_spool, _, chunk) = read?;
+            spool = read_spool;
+            let chunk_headers = chunk.headers;
+            let chunk_hashes = chunk.hashes;
             let Some(required_block) = chunk_headers.last().map(|header| header.number()) else {
                 continue;
             };

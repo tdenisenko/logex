@@ -1,0 +1,279 @@
+{
+  "date": "2026-09-17",
+  "branch": "audit/checkpoint-gap-memory",
+  "base": "e54e9303b9627a0fc5d7eb5e1e5f4e9edc71d542",
+  "source_commit": "b327cf90ef63f0fcd914f63d1c402e77aafc9f1b",
+  "source_inventory": {
+    "base": "e54e9303b9627a0fc5d7eb5e1e5f4e9edc71d542",
+    "source_commit": "b327cf90ef63f0fcd914f63d1c402e77aafc9f1b",
+    "files": [
+      {
+        "path": "Cargo.lock",
+        "bytes": 238867,
+        "sha256": "0d76e80e1db6d4d072f8701eea524d33b0a5906b274109cc624e5aa93197f7b8"
+      },
+      {
+        "path": "crates/logex-sync/Cargo.toml",
+        "bytes": 1800,
+        "sha256": "d0f60cda167ebad302e1e11bc1ae5de470731aa1ccd20dfdae930b48cfef4340"
+      },
+      {
+        "path": "crates/logex-sync/src/engine/anchored.rs",
+        "bytes": 350494,
+        "sha256": "ce7febf090f765390b59adf1ed651e893dcd866abc88df4da30a645cdcfa0f61"
+      },
+      {
+        "path": "crates/logex-sync/src/engine/anchored/checkpoint_spool_tests.rs",
+        "bytes": 8433,
+        "sha256": "33dfffc6a7d75fb2e6349e1d518e28540f276f68fd7d5d67a8a151ede9bb2e5c"
+      },
+      {
+        "path": "crates/logex-sync/src/engine/header_spool.rs",
+        "bytes": 9661,
+        "sha256": "8665afd76d6a0d94d0b561e0ead3dfa0a064ceae9eb7d49dc7e3aeb382d45091"
+      },
+      {
+        "path": "crates/logex-sync/src/engine/header_spool/tests.rs",
+        "bytes": 11273,
+        "sha256": "23251a88b3c1975386e4c6be3a8632bf9e92aede4b45866bb915314670a345a5"
+      },
+      {
+        "path": "crates/logex-sync/src/engine/mod.rs",
+        "bytes": 10500,
+        "sha256": "45dc1e84e7c3ed991c3c3602e8b8fbd2b11757c2a8044c00011b55ac43d952b1"
+      }
+    ]
+  },
+  "findings": [
+    "B5-11"
+  ],
+  "gates": {
+    "commit": "b327cf90ef63f0fcd914f63d1c402e77aafc9f1b",
+    "rustc": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+    "gates": [
+      {
+        "name": "vendor",
+        "command": [
+          "python3",
+          "tools/verify_datafusion_vendor.py"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T10:30:12.187717+00:00",
+        "finished": "2026-09-17T10:30:12.310529+00:00",
+        "sha256": "95ada9e22c512e8346f3d8d057e7fba429b52506f4e037dcf35657f57d7ec451",
+        "log": "/private/tmp/logex-audit-checkpoint-gap-20260917/gates/vendor.log"
+      },
+      {
+        "name": "format",
+        "command": [
+          "cargo",
+          "fmt",
+          "--all",
+          "--",
+          "--check"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T10:30:12.310851+00:00",
+        "finished": "2026-09-17T10:30:13.321987+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-audit-checkpoint-gap-20260917/gates/format.log"
+      },
+      {
+        "name": "vendor-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2024",
+          "--config-path",
+          "vendor/reth-network/rustfmt.toml",
+          "--config",
+          "skip_children=true",
+          "vendor/reth-network/src/eth_requests.rs",
+          "vendor/reth-network/src/session/active.rs",
+          "vendor/reth-network/src/session/mod.rs",
+          "vendor/reth-network/src/session/types.rs",
+          "vendor/reth-network/src/session/range_update.rs",
+          "vendor/reth-discv5/src/lib.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T10:30:13.322377+00:00",
+        "finished": "2026-09-17T10:30:13.398245+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-audit-checkpoint-gap-20260917/gates/vendor-format.log"
+      },
+      {
+        "name": "enr-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2021",
+          "--config",
+          "skip_children=true",
+          "vendor/enr/src/lib.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T10:30:13.398608+00:00",
+        "finished": "2026-09-17T10:30:13.450304+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-audit-checkpoint-gap-20260917/gates/enr-format.log"
+      },
+      {
+        "name": "aggregate-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2021",
+          "--config",
+          "max_width=90,skip_children=true",
+          "vendor/datafusion-functions-aggregate/src/sum.rs",
+          "vendor/datafusion-functions-aggregate/src/average.rs",
+          "vendor/datafusion-functions-aggregate-common/src/aggregate/sum_distinct/numeric.rs",
+          "vendor/datafusion-functions-aggregate-common/src/aggregate/avg_distinct/decimal.rs",
+          "vendor/datafusion-functions-aggregate-common/src/utils.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T10:30:13.450650+00:00",
+        "finished": "2026-09-17T10:30:13.512633+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-audit-checkpoint-gap-20260917/gates/aggregate-format.log"
+      },
+      {
+        "name": "check",
+        "command": [
+          "cargo",
+          "check",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T10:30:13.512989+00:00",
+        "finished": "2026-09-17T10:30:19.032789+00:00",
+        "sha256": "933f433f69b8f6afc87e564f5e8c7d99e26d5035b1ccbe7e6fab995f0123c81c",
+        "log": "/private/tmp/logex-audit-checkpoint-gap-20260917/gates/check.log"
+      },
+      {
+        "name": "clippy",
+        "command": [
+          "cargo",
+          "clippy",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T10:30:19.033512+00:00",
+        "finished": "2026-09-17T10:30:26.572402+00:00",
+        "sha256": "29f8d7321868abaf59adc39ce2b0d1329c7b41822efa778dfe764e6a98495ac2",
+        "log": "/private/tmp/logex-audit-checkpoint-gap-20260917/gates/clippy.log"
+      },
+      {
+        "name": "test",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T10:30:26.572925+00:00",
+        "finished": "2026-09-17T10:34:15.615145+00:00",
+        "sha256": "d026f649a51b5672f25c74c1526d24c1345ccbbf990e62094412c2ad920e2142",
+        "log": "/private/tmp/logex-audit-checkpoint-gap-20260917/gates/test.log"
+      },
+      {
+        "name": "doc",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--doc",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T10:34:15.617764+00:00",
+        "finished": "2026-09-17T10:34:26.193530+00:00",
+        "sha256": "92dbe4635716aaaed5fddcdc8caab35295f8fa18d9f0bc92633a12745058ab4a",
+        "log": "/private/tmp/logex-audit-checkpoint-gap-20260917/gates/doc.log"
+      },
+      {
+        "name": "release-build",
+        "command": [
+          "cargo",
+          "build",
+          "-p",
+          "logex-node",
+          "--release",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T10:34:26.194255+00:00",
+        "finished": "2026-09-17T10:35:17.973479+00:00",
+        "sha256": "317992d78531997fb0e378971f6c1696334d4e00f79540bf75b4c5d6c73c90ca",
+        "log": "/private/tmp/logex-audit-checkpoint-gap-20260917/gates/release-build.log"
+      }
+    ]
+  },
+  "workspace_tests": {
+    "passed": 1951,
+    "failed": 0,
+    "ignored": 24,
+    "targets": 35
+  },
+  "documentation_tests": {
+    "passed": 0,
+    "failed": 0,
+    "ignored": 0,
+    "targets": 8
+  },
+  "evidence": {
+    "path": "docs/audit/baselines/2026-09-17-checkpoint-gap-memory-evidence.json.gz",
+    "files": 20,
+    "bytes_uncompressed": 746359,
+    "bytes": 126326,
+    "sha256": "e987176b1eef2c8318821395df88c42ab49b9f8bae737c7957977cf21ba9ed88"
+  },
+  "validation": {
+    "path": "docs/audit/baselines/2026-09-17-checkpoint-gap-memory-validation.json.gz",
+    "files": 12,
+    "bytes_uncompressed": 226259,
+    "bytes": 41953,
+    "sha256": "4d542e7753d6fd7c2ec0e0e89eb64ad8ffa2b7a8862b77d86dacfe16a7e223da"
+  },
+  "publication": {
+    "state": "pending"
+  },
+  "boundaries": [
+    "Original O(gap) retained headers/hashes are source-confirmed; no original failing spool test, RSS or throughput measurement is claimed.",
+    "Bounded logical header records and fixed metadata; disk scratch remains O(gap), while page cache and existing payload memory remain separate.",
+    "Authenticated anonymous scratch is never durable authority. Terminal consensus validation remains mandatory before any payload ingestion.",
+    "Eleven new controls pass within 166 engine tests. Successful payload equivalence directly exercises production fetched-chunk ingestion, not external peer exchange.",
+    "Real queued append cancellation and explicit running owner completion tested; blocked real filesystem syscalls and clone/discard errors not fault-injected.",
+    "Cross-spool binding is standard fresh keyed-MAC design review; no direct cross-file copy control. Terminal MAX is spool conformance plus outer-loop source review.",
+    "Only the existing blake3 package dependency edge is added. No package version, authoritative format, ordinary live/historical commit-path or platform namespace change.",
+    "Owned local temporary fixtures only. No broad benchmark, live sync, remote host, production data, physical-volume or deployment changes.",
+    "Remaining offline audit and automatic repair work stay open; live sync and staging soak follow offline completion."
+  ]
+}

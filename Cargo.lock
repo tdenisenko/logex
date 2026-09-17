@@ -5267,6 +5267,7 @@ dependencies = [
  "alloy-eips",
  "alloy-primitives",
  "alloy-rlp",
+ "blake3",
  "enr",
  "eyre",
  "futures",
