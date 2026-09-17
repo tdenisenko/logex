@@ -327,6 +327,19 @@ impl PartitionManager {
             .apply_canonical_reorg(reverted_hashes, retained_headers, indexed_head)
     }
 
+    /// Admit a durable reorg intent, retaining exclusive storage ownership until
+    /// its consuming finish. Dropping an active handle requires reopen; an empty
+    /// no-op remains usable. No row scan runs during begin.
+    pub fn begin_canonical_reorg(
+        &mut self,
+        reverted_hashes: &[B256],
+        retained_headers: &[Header],
+        indexed_head: Option<ExecutionAnchor>,
+    ) -> std::io::Result<crate::native::PendingCanonicalReorg<'_>> {
+        self.inner
+            .begin_canonical_reorg(reverted_hashes, retained_headers, indexed_head)
+    }
+
     /// Change one block's row flags without changing chain progress.
     /// Canonical chain reorgs must use `apply_canonical_reorg` to recover rows and progress together.
     pub fn mark_non_canonical(&mut self, block_hash: B256) -> std::io::Result<u64> {

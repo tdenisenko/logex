@@ -9,6 +9,25 @@ use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+/// An admitted durable reorg exclusively borrows storage until completion.
+/// Dropping an active handle performs no I/O or rollback: writes remain blocked
+/// and read views invalid, until reopening completes the existing catalog intent.
+#[must_use = "finish the admitted reorg, or reopen storage before further access"]
+pub struct PendingCanonicalReorg<'a> {
+    storage: &'a mut NativeStorage,
+    active: bool,
+}
+
+impl PendingCanonicalReorg<'_> {
+    pub fn finish(self) -> io::Result<u64> {
+        if self.active {
+            self.storage.finish_canonical_reorg()
+        } else {
+            Ok(0)
+        }
+    }
+}
+
 impl NativeStorage {
     /// Durably retire a canonical suffix and rewind its progress as one recoverable operation.
     /// After interruption, opening storage completes the intent before exposing any rows.
@@ -18,6 +37,20 @@ impl NativeStorage {
         retained_headers: &[Header],
         indexed_head: Option<ExecutionAnchor>,
     ) -> io::Result<u64> {
+        self.begin_canonical_reorg(reverted_hashes, retained_headers, indexed_head)?
+            .finish()
+    }
+
+    /// Validate and durably admit the existing catalog intent without scanning
+    /// row sources. The caller may release its selection guard before finishing.
+    /// Checkpointing and catalog persistence can perform I/O; callers holding a
+    /// selection lock should checkpoint beforehand under exclusive storage access.
+    pub fn begin_canonical_reorg(
+        &mut self,
+        reverted_hashes: &[B256],
+        retained_headers: &[Header],
+        indexed_head: Option<ExecutionAnchor>,
+    ) -> io::Result<PendingCanonicalReorg<'_>> {
         self.ensure_writable()?;
         let old_headers = &self.catalog.state.recent_headers;
         if !old_headers.starts_with(retained_headers)
@@ -39,7 +72,10 @@ impl NativeStorage {
                     "an empty canonical reorg cannot change the indexed anchor",
                 ));
             }
-            return Ok(0);
+            return Ok(PendingCanonicalReorg {
+                storage: self,
+                active: false,
+            });
         }
         let intent = CanonicalReorgIntent {
             retained_header_count: retained_headers.len(),
@@ -54,7 +90,10 @@ impl NativeStorage {
         self.catalog.state.canonical_reorg = Some(intent);
         self.persist_catalog()?;
         durability::checkpoint("reorg_intent_published", self.paths.root())?;
-        self.finish_canonical_reorg()
+        Ok(PendingCanonicalReorg {
+            storage: self,
+            active: true,
+        })
     }
 
     pub(super) fn finish_canonical_reorg(&mut self) -> io::Result<u64> {

@@ -2389,6 +2389,9 @@ impl SyncEngine {
         let mut next_block = start_block;
         let mut remaining = gap_blocks;
         while remaining != 0 {
+            if consensus.with_current_anchor(&anchor, || ()).is_none() {
+                return Ok(false);
+            }
             let request_count = remaining
                 .min(self.config.header_batch_size.max(1))
                 .min(MAX_SPOOL_CHUNK_HEADERS as u64);
@@ -2512,6 +2515,9 @@ impl SyncEngine {
                 < checkpoint_gap_pipeline_depth(self.peers.serving_peer_count())
                 && spool.remaining() != 0
             {
+                if self.consensus.with_current_anchor(&anchor, || ()).is_none() {
+                    return Ok((progressed, last_head));
+                }
                 let chunk_len = spool
                     .remaining()
                     .min(CHECKPOINT_GAP_PIPELINE_CHUNK_BLOCKS as u64)
@@ -2561,7 +2567,7 @@ impl SyncEngine {
                 let Some(chunk) = self.materialize_checkpoint_gap_fetch_outcome(outcome)? else {
                     return Ok((progressed, last_head));
                 };
-                let (chunk_progressed, _, chunk_last_head) =
+                let (chunk_progressed, chunk_last_head) =
                     self.ingest_forward_gap_fetched_chunk(chunk, anchor).await?;
                 if !chunk_progressed {
                     return Ok((progressed, last_head));
@@ -2739,6 +2745,9 @@ impl SyncEngine {
 
         while spool.remaining() != 0 {
             self.refill_checkpoint_gap_peers().await?;
+            if self.consensus.with_current_anchor(&anchor, || ()).is_none() {
+                return Ok((progressed, last_head));
+            }
             let Some(read) = cancelable(
                 &mut self.shutdown,
                 spool.read_chunk(self.config.fetch_batch_size.max(1)),
@@ -2831,7 +2840,7 @@ impl SyncEngine {
                 body_receipt_elapsed: Duration::ZERO,
                 blocks,
             };
-            let (chunk_progressed, _, chunk_last_head) =
+            let (chunk_progressed, chunk_last_head) =
                 self.ingest_forward_gap_fetched_chunk(chunk, anchor).await?;
             if !chunk_progressed {
                 return Ok((progressed, last_head));
@@ -2847,7 +2856,7 @@ impl SyncEngine {
         &mut self,
         chunk: ForwardGapFetchedChunk,
         anchor: ExecutionAnchor,
-    ) -> Result<(bool, Option<Header>, Option<Head>)> {
+    ) -> Result<(bool, Option<Head>)> {
         let ForwardGapFetchedChunk {
             sequence,
             header_peer,
@@ -2857,7 +2866,7 @@ impl SyncEngine {
             blocks,
         } = chunk;
         if headers.is_empty() {
-            return Ok((false, None, None));
+            return Ok((false, None));
         }
         if blocks.len() != headers.len() {
             tracing::warn!(
@@ -2866,7 +2875,7 @@ impl SyncEngine {
                 blocks = blocks.len(),
                 "checkpoint gap fetched chunk has mismatched block count"
             );
-            return Ok((false, None, None));
+            return Ok((false, None));
         }
 
         let validation_started = std::time::Instant::now();
@@ -2883,70 +2892,46 @@ impl SyncEngine {
                 );
                 self.peers
                     .report_invalid_block_data(failure.peer, failure.response_kind);
-                return Ok((false, None, None));
+                return Ok((false, None));
             }
         };
 
-        let mut newly_serving_peers = HashSet::new();
         let block_count = validated.len() as u64;
         let mut rows = Vec::new();
-        let mut last_validated_header = None;
-        let mut last_head = None;
-        let mut last_progress_block = None;
-
-        for block in validated {
-            let HistoricalValidatedBlock {
-                header,
-                block_hash,
-                body_peer,
-                body,
-                receipt_peer,
-                receipts,
-                ..
-            } = block;
-            let block_number = header.number();
+        for block in &validated {
             extract::append_from_body_receipts(
                 &mut rows,
-                block_number,
-                block_hash,
-                header.timestamp(),
-                &body,
-                &receipts,
+                block.header.number(),
+                block.block_hash,
+                block.header.timestamp(),
+                &block.body,
+                &block.receipts,
             )?;
-            self.track_forward_header(header.clone())?;
-
-            self.peers.cache_canonical_block(&header, &body, &receipts);
-            self.note_serving_peer(header_peer, &mut newly_serving_peers);
-            self.note_serving_peer(body_peer, &mut newly_serving_peers);
-            self.note_serving_peer(receipt_peer, &mut newly_serving_peers);
-            last_head = Some(execution_head(block_number, block_hash, header.timestamp()));
-            last_validated_header = Some(header);
-            last_progress_block = Some(block_number);
         }
-
+        if !self
+            .publish_selected_forward_rows(&rows, &headers, &hashes, &anchor)
+            .await?
         {
-            let mut storage = self.storage.write().await;
-            if let Some(header) = &last_validated_header {
-                let recent_headers = self.head_tracker.snapshot();
-                let indexed_anchor = (header.number == anchor.block_number).then_some(&anchor);
-                // The checkpoint anchor is the end of the forward gap, so only
-                // the last update can carry it. Intermediate progress is covered
-                // by the same atomic batch and the final retained header window.
-                storage
-                    .ingest_canonical_batch(&rows, header, &recent_headers, indexed_anchor)
-                    .map_err(|error| eyre::eyre!("storage ingestion error: {error}"))?;
-                if !rows.is_empty()
-                    && let Some(ref subs) = self.subscriptions
-                {
-                    subs.notify(&rows);
-                }
-            }
+            return Ok((false, None));
         }
-
-        if let Some(block_number) = last_progress_block {
-            self.progress
-                .record_blocks(block_number, block_count, rows.len() as u64);
+        let mut newly_serving_peers = HashSet::new();
+        for block in validated {
+            self.peers
+                .cache_canonical_block(&block.header, &block.body, &block.receipts);
+            self.note_serving_peer(header_peer, &mut newly_serving_peers);
+            self.note_serving_peer(block.body_peer, &mut newly_serving_peers);
+            self.note_serving_peer(block.receipt_peer, &mut newly_serving_peers);
         }
+        if !rows.is_empty()
+            && let Some(ref subs) = self.subscriptions
+        {
+            subs.notify(&rows);
+        }
+        let last = headers.last().expect("nonempty validated gap chunk");
+        let last_hash = *hashes.last().expect("matching gap hash count");
+        self.progress
+            .record_blocks(last.number, block_count, rows.len() as u64);
+        let last_head = Some(execution_head(last.number, last_hash, last.timestamp));
 
         tracing::debug!(
             sequence,
@@ -2957,7 +2942,7 @@ impl SyncEngine {
             "checkpoint gap chunk verified and ingested"
         );
 
-        Ok((true, last_validated_header, last_head))
+        Ok((true, last_head))
     }
 
     async fn refill_checkpoint_gap_peers(&mut self) -> Result<()> {
@@ -3259,14 +3244,31 @@ impl SyncEngine {
                 }
 
                 let txs = assemble_txs(body, block_receipts);
-                self.track_forward_header(header.clone())?;
-
-                let recent_headers = self.head_tracker.snapshot();
+                let rows = extract::extract_from_block(
+                    block_number,
+                    block_hash,
+                    header.timestamp(),
+                    &txs,
+                )?;
+                if !self
+                    .publish_selected_forward_rows(
+                        &rows,
+                        std::slice::from_ref(header),
+                        std::slice::from_ref(&block_hash),
+                        &anchor,
+                    )
+                    .await?
+                {
+                    return Ok(progressed);
+                }
                 self.peers
                     .cache_canonical_block(header, body, block_receipts);
-                let log_count = self
-                    .ingest_block(header, block_hash, &txs, &recent_headers, Some(&anchor))
-                    .await?;
+                if !rows.is_empty()
+                    && let Some(ref subs) = self.subscriptions
+                {
+                    subs.notify(&rows);
+                }
+                let log_count = rows.len() as u64;
                 self.progress.record_block(block_number, log_count);
                 self.note_serving_peer(header_peer, &mut newly_serving_peers);
                 self.note_serving_peer(*body_peer, &mut newly_serving_peers);
@@ -6723,8 +6725,60 @@ impl SyncEngine {
 
     async fn apply_consensus_reorg_decision(
         &mut self,
-        decision: ConsensusReorgDecision,
+        mut decision: ConsensusReorgDecision,
     ) -> Result<bool> {
+        let mut reverted_rows = 0;
+        if matches!(&decision, ConsensusReorgDecision::Rewind(_)) {
+            let headers = self.head_tracker.snapshot();
+            let first = headers.first().map_or(0, Header::number);
+            let tip = self.head_tracker.tip();
+            let consensus = Arc::clone(&self.consensus);
+            let storage = Arc::clone(&self.storage);
+            let mut storage = storage.write().await;
+            // Flush pending row work before taking the consensus publication
+            // lock. Begin's repeated checkpoint is then clean under this guard.
+            storage.checkpoint_durable()?;
+            let storage_ref = &mut *storage;
+            let (fresh, pending) = consensus
+                .with_reorg_anchor_snapshot(
+                    first,
+                    tip,
+                    headers.len(),
+                    move |snapshot| -> Result<_> {
+                        let fresh = locate_consensus_reorg_in_snapshot(snapshot, &headers)?;
+                        let pending = if let ConsensusReorgDecision::Rewind(reorg) = &fresh {
+                            Some(
+                                storage_ref
+                                    .begin_canonical_reorg(
+                                        &reorg.reverted_hashes,
+                                        &reorg.retained_headers,
+                                        reorg.indexed_head,
+                                    )
+                                    .map_err(|error| {
+                                        eyre::eyre!("consensus reorg admission error: {error}")
+                                    })?,
+                            )
+                        } else {
+                            None
+                        };
+                        Ok((fresh, pending))
+                    },
+                )
+                .ok_or_else(|| {
+                    eyre::eyre!("invalid or oversized consensus reorg anchor window")
+                })??;
+            // The durable intent owns this operation now. A later selection
+            // change is reconciled normally; the full row scan holds no CL lock.
+            if let Some(pending) = pending {
+                reverted_rows = pending
+                    .finish()
+                    .map_err(|error| eyre::eyre!("consensus reorg transaction error: {error}"))?;
+            }
+            if let ConsensusReorgDecision::Rewind(reorg) = &fresh {
+                self.head_tracker.restore(reorg.retained_headers.clone());
+            }
+            decision = fresh;
+        }
         let reorg = match decision {
             ConsensusReorgDecision::Unchanged => return Ok(false),
             ConsensusReorgDecision::PendingMaterialization => {
@@ -6738,36 +6792,20 @@ impl SyncEngine {
                 {
                     self.finish_shutdown()?;
                 }
-                // Restart reconciliation before any forward or historical write.
                 return Ok(true);
             }
             ConsensusReorgDecision::Rewind(reorg) => reorg,
         };
-
-        let reverted_rows = {
-            let mut storage = self.storage.write().await;
-            storage
-                .apply_canonical_reorg(
-                    &reorg.reverted_hashes,
-                    &reorg.retained_headers,
-                    reorg.indexed_head,
-                )
-                .map_err(|error| eyre::eyre!("consensus reorg transaction error: {error}"))?
-        };
-
         self.peers.remove_cached_blocks(&reorg.reverted_hashes);
-        self.head_tracker.restore(reorg.retained_headers.clone());
         self.progress
             .rewind_to(reorg.indexed_head.map_or(0, |anchor| anchor.block_number));
         self.refresh_consensus_status().await;
-
         tracing::warn!(
             reverted_blocks = reorg.reverted_hashes.len(),
             reverted_rows,
             rewind_to = reorg.indexed_head.map(|anchor| anchor.block_number),
             "rewound indexed canonical state to match the latest consensus anchors"
         );
-
         Ok(true)
     }
 

@@ -201,31 +201,54 @@ impl HistoricalBatchWriter {
 }
 
 impl SyncEngine {
-    /// Write a block's logs to storage and notify subscribers.
-    pub(super) async fn ingest_block(
-        &self,
-        header: &Header,
-        block_hash: B256,
-        txs: &[(B256, Vec<Log>)],
-        recent_headers: &[Header],
-        anchor: Option<&ExecutionAnchor>,
-    ) -> Result<u64> {
-        let block_number = header.number();
-        let timestamp = header.timestamp();
-        let rows = extract::extract_from_block(block_number, block_hash, timestamp, txs)?;
-        let count = rows.len() as u64;
-
-        let mut storage = self.storage.write().await;
-        storage
-            .ingest_canonical_batch(&rows, header, recent_headers, anchor)
-            .map_err(|e| eyre::eyre!("storage ingestion error: {e}"))?;
-        if !rows.is_empty()
-            && let Some(ref subs) = self.subscriptions
-        {
-            subs.notify(&rows);
+    /// Publish validated forward data only while its captured terminal anchor
+    /// remains admitted. All preparation precedes the consensus publication lock.
+    pub(super) async fn publish_selected_forward_rows(
+        &mut self,
+        rows: &[LogRow],
+        headers: &[Header],
+        hashes: &[B256],
+        anchor: &ExecutionAnchor,
+    ) -> Result<bool> {
+        eyre::ensure!(
+            !headers.is_empty() && headers.len() == hashes.len(),
+            "invalid forward publication batch"
+        );
+        let mut tip = self.head_tracker.tip();
+        for (header, hash) in headers.iter().zip(hashes) {
+            if let Some((number, parent_hash)) = tip {
+                eyre::ensure!(
+                    number.checked_add(1) == Some(header.number)
+                        && parent_hash == header.parent_hash,
+                    "verified forward header {} does not extend tracked canonical tip {}",
+                    header.number,
+                    number
+                );
+            }
+            tip = Some((header.number, *hash));
         }
-
-        Ok(count)
+        let recent_headers = self.head_tracker.snapshot_with_append(headers);
+        let last = headers.last().expect("nonempty forward publication");
+        let indexed_anchor = (last.number == anchor.block_number).then_some(anchor);
+        let storage = Arc::clone(&self.storage);
+        let consensus = Arc::clone(&self.consensus);
+        let mut storage = storage.write().await;
+        let published = consensus
+            .with_current_anchor(anchor, || -> Result<()> {
+                storage
+                    .ingest_canonical_batch(rows, last, &recent_headers, indexed_anchor)
+                    .map_err(|error| eyre::eyre!("storage ingestion error: {error}"))?;
+                // Continuity was checked above; only append new headers, without
+                // restoring/rehashing the retained persistence window.
+                for header in headers {
+                    self.track_forward_header(header.clone())?;
+                }
+                Ok(())
+            })
+            .transpose()?
+            .is_some();
+        drop(storage);
+        Ok(published)
     }
 
     pub(super) fn record_historical_ingest_outcome(

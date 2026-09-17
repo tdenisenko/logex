@@ -7,7 +7,7 @@ use alloy_primitives::{Address, LogData, Signature, U256};
 use logex_storage::{PartitionManagerConfig, SegmentReader};
 use tempfile::TempDir;
 
-async fn fixture(initial: &Header) -> (SyncEngine, watch::Sender<bool>, impl Sized) {
+async fn fixture(initial: &Header) -> (SyncEngine, watch::Sender<bool>, impl Sized + use<>) {
     let (peers, resources) = engine_peer_fixture().await;
     let directory = TempDir::new().unwrap();
     let mut storage = PartitionManager::open(PartitionManagerConfig {
@@ -102,6 +102,17 @@ async fn spool(
         block_hash: previous.hash_slow(),
         receipts_root: previous.receipts_root,
     };
+    engine
+        .consensus
+        .replace_anchors(vec![
+            selection_record(initial, 0),
+            logex_cl::AnchorRecord {
+                anchor,
+                finalized: false,
+                parent_beacon_root: None,
+            },
+        ])
+        .unwrap();
     (writer.seal(anchor).await.unwrap(), oracle, anchor)
 }
 
@@ -231,4 +242,216 @@ async fn checkpoint_spool_rejected_tail_preserves_authenticated_partial_progress
     );
     assert_eq!(storage.total_rows(), 128);
     assert!(storage.chain_anchors().indexed_head.is_none());
+}
+
+fn selection_record(header: &Header, slot: u64) -> logex_cl::AnchorRecord {
+    logex_cl::AnchorRecord {
+        anchor: ExecutionAnchor {
+            beacon_root: B256::repeat_byte(slot as u8),
+            beacon_slot: slot,
+            block_number: header.number,
+            block_hash: header.hash_slow(),
+            receipts_root: header.receipts_root,
+        },
+        finalized: false,
+        parent_beacon_root: None,
+    }
+}
+
+async fn selection_publication_control(
+    depth: usize,
+    during_wait: bool,
+) -> (SyncEngine, Header, Header, impl Sized) {
+    let (initial, payload) = payload();
+    let (mut engine, shutdown, resources) = fixture(&initial).await;
+    engine.head_tracker = HeadTracker::new(depth);
+    engine.head_tracker.restore([initial.clone()]);
+    let (reader, oracle, old_anchor) = spool(&engine, &initial, 4).await;
+    let consensus = Arc::clone(&engine.consensus);
+    let common = selection_record(&initial, 0);
+    let old = logex_cl::AnchorRecord {
+        anchor: old_anchor,
+        finalized: false,
+        parent_beacon_root: None,
+    };
+    consensus.replace_anchors(vec![common, old]).unwrap();
+    let captured = consensus.next_anchor_after(initial.number).unwrap();
+    assert_eq!(captured, old_anchor);
+
+    let mut new_tip = initial.clone();
+    for header in &oracle {
+        new_tip = Header {
+            parent_hash: new_tip.hash_slow(),
+            extra_data: vec![42].into(),
+            ..header.clone()
+        };
+    }
+    let (_, _, chunk) = reader.read_chunk(128).await.unwrap();
+    let fetched = ForwardGapFetchedChunk {
+        sequence: 0,
+        header_peer: PeerId::ZERO,
+        blocks: vec![payload; chunk.headers.len()],
+        headers: chunk.headers,
+        hashes: chunk.hashes,
+        body_receipt_elapsed: Duration::ZERO,
+    };
+    let storage = Arc::clone(&engine.storage);
+    let held_storage = storage.read().await;
+    assert!(storage.try_read().is_ok());
+    let mut publication = Box::pin(engine.ingest_forward_gap_fetched_chunk(fetched, captured));
+    // Tokio's fair RwLock refuses a new reader once this consumer's writer
+    // is queued behind our held read. This proves storage-await placement,
+    // rather than merely observing pending parallel validation.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            assert!(futures::poll!(&mut publication).is_pending());
+            if storage.try_read().is_err() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("consumer queued for storage within the finite fixture deadline");
+    if during_wait {
+        consensus
+            .replace_anchors(vec![common, selection_record(&new_tip, 2)])
+            .unwrap();
+        assert_ne!(consensus.anchor_at(captured.block_number), Some(captured));
+    }
+    drop(held_storage);
+    assert_eq!(publication.await.unwrap().0, !during_wait);
+    if !during_wait {
+        consensus
+            .replace_anchors(vec![common, selection_record(&new_tip, 2)])
+            .unwrap();
+    }
+    let published = storage.read().await.sync_head().unwrap();
+    eprintln!(
+        "SELECTION_CONTROL depth={depth} during_wait={during_wait}: selected={} published={} shared={} retained_first={} rows={}",
+        new_tip.hash_slow(),
+        published.block_hash,
+        initial.number,
+        engine.head_tracker.snapshot()[0].number,
+        storage.read().await.total_rows()
+    );
+    assert_eq!(
+        published.block_hash,
+        if during_wait {
+            initial.hash_slow()
+        } else {
+            captured.block_hash
+        }
+    );
+    (engine, initial, new_tip, (shutdown, resources))
+}
+
+#[tokio::test]
+async fn selection_change_during_storage_wait_preserves_recoverable_ancestor() {
+    let (engine, initial, _selected, _resources) = selection_publication_control(3, true).await;
+    assert_eq!(engine.head_tracker.snapshot(), vec![initial.clone()]);
+    assert_eq!(engine.storage.read().await.total_rows(), 0);
+    let reconciliation = locate_consensus_reorg(&engine.consensus, &engine.head_tracker.snapshot());
+    eprintln!("FIXED retained-window reconciliation: {reconciliation:?}");
+    assert!(
+        reconciliation.is_ok(),
+        "obsolete work must not turn a known retained shared ancestor into a window-exceeded error"
+    );
+}
+
+#[tokio::test]
+async fn selection_change_after_publication_remains_recoverable() {
+    let (mut engine, initial, _selected, _resources) =
+        selection_publication_control(8, false).await;
+    let decision =
+        locate_consensus_reorg(&engine.consensus, &engine.head_tracker.snapshot()).unwrap();
+    assert!(
+        matches!(&decision, ConsensusReorgDecision::Rewind(reorg) if reorg.retained_headers.last() == Some(&initial) && reorg.reverted_hashes.len() == 4)
+    );
+    assert!(
+        engine
+            .apply_consensus_reorg_decision(decision)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        engine
+            .storage
+            .read()
+            .await
+            .sync_head()
+            .unwrap()
+            .block_number,
+        initial.number
+    );
+}
+
+#[tokio::test]
+async fn selection_missing_anchor_after_storage_wait_rejects_single_block_publication() {
+    let (initial, payload) = payload();
+    let (mut engine, _shutdown, _resources) = fixture(&initial).await;
+    let (_, headers, anchor) = spool(&engine, &initial, 1).await;
+    let mut rows = Vec::new();
+    extract::append_from_body_receipts(
+        &mut rows,
+        headers[0].number,
+        headers[0].hash_slow(),
+        headers[0].timestamp,
+        &payload.0.1,
+        &payload.1.1,
+    )
+    .unwrap();
+    let hashes = vec![headers[0].hash_slow()];
+    let storage = Arc::clone(&engine.storage);
+    let consensus = Arc::clone(&engine.consensus);
+    let held = storage.read().await;
+    let mut publish =
+        Box::pin(engine.publish_selected_forward_rows(&rows, &headers, &hashes, &anchor));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            assert!(futures::poll!(&mut publish).is_pending());
+            if storage.try_read().is_err() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    consensus.replace_anchors(vec![]).unwrap();
+    drop(held);
+    assert!(!publish.await.unwrap());
+    assert_eq!(engine.head_tracker.snapshot(), vec![initial.clone()]);
+    let storage = storage.read().await;
+    assert_eq!(storage.total_rows(), 0);
+    assert_eq!(storage.sync_head().unwrap().block_hash, initial.hash_slow());
+    assert!(!engine.peers.selection_cached_block(headers[0].hash_slow()));
+}
+
+#[tokio::test]
+async fn selection_storage_rejection_leaves_tracker_unchanged() {
+    let (initial, payload) = payload();
+    let (mut engine, _shutdown, _resources) = fixture(&initial).await;
+    let (_, headers, anchor) = spool(&engine, &initial, 1).await;
+    let mut rows = Vec::new();
+    extract::append_from_body_receipts(
+        &mut rows,
+        headers[0].number,
+        headers[0].hash_slow(),
+        headers[0].timestamp,
+        &payload.0.1,
+        &payload.1.1,
+    )
+    .unwrap();
+    // Deterministic storage InvalidInput, not an injected physical I/O failure.
+    rows[0].block_number += 1;
+    assert!(
+        engine
+            .publish_selected_forward_rows(&rows, &headers, &[headers[0].hash_slow()], &anchor)
+            .await
+            .is_err()
+    );
+    assert_eq!(engine.head_tracker.snapshot(), vec![initial]);
+    assert_eq!(engine.storage.read().await.total_rows(), 0);
+    assert!(!engine.peers.selection_cached_block(headers[0].hash_slow()));
 }

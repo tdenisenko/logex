@@ -286,54 +286,49 @@ impl ConsensusStore {
         tracked_tip: Option<(u64, B256)>,
         max_records: usize,
     ) -> Option<ReorgAnchorSnapshot> {
-        if tracked_tip.is_some_and(|(last, _)| first_block > last) {
-            return None;
-        }
+        self.with_reorg_anchor_snapshot(first_block, tracked_tip, max_records, |snapshot| snapshot)
+    }
+
+    /// Admit a synchronous publication against the current materialized anchor.
+    /// This serializes against in-memory selection replacement, not future
+    /// finality or cross-file durability. The callback must not await or call
+    /// consensus APIs, peer caches, subscribers, or progress callbacks.
+    pub fn with_current_anchor<R>(
+        &self,
+        anchor: &ExecutionAnchor,
+        publish: impl FnOnce() -> R,
+    ) -> Option<R> {
         let snapshot = self.inner.lock().unwrap();
-        let anchors = &snapshot.ordered_anchors;
-        let materialized_tip = anchors.last().map(|record| record.anchor);
-        // Accepted store updates and restore refresh this derived anchor. Only
-        // a verified store makes it selected-head evidence; otherwise the same
-        // summary is merely the materialized fallback. Reuse its cached root.
-        let selected = if snapshot.verified_light_client_store.is_some() {
-            snapshot.anchors.optimistic_head
-        } else {
-            None
-        };
-        if let Some(selected) = selected {
-            let requires_complete_lineage = tracked_tip
-                .is_some_and(|(last, _)| selected.block_number <= last)
-                || materialized_tip.is_some_and(|tip| tip.block_number >= selected.block_number);
-            if requires_complete_lineage && materialized_tip != Some(selected) {
-                // Do not combine a selected head with an older fork's lower
-                // anchors. Network materialization publishes the complete
-                // selected lineage and terminal together, removing its old tail.
-                return Some(ReorgAnchorSnapshot::PendingMaterialization);
-            }
-        }
-        let Some((last_block, tip_hash)) = tracked_tip else {
-            return Some(ReorgAnchorSnapshot::NoTrackedHeaders);
-        };
-        if let Ok(index) =
-            anchors.binary_search_by_key(&last_block, |record| record.anchor.block_number)
-            && anchors[index].anchor.block_hash == tip_hash
-        {
-            return Some(ReorgAnchorSnapshot::MatchingTip);
-        }
-        let start = anchors.partition_point(|record| record.anchor.block_number < first_block);
-        let end = anchors.partition_point(|record| record.anchor.block_number <= last_block);
-        if end - start > max_records {
+        if selected_lineage_pending(&snapshot, Some(anchor.block_number)) {
             return None;
         }
-        Some(ReorgAnchorSnapshot::Window {
-            anchors: anchors[start..end]
-                .iter()
-                .map(|record| record.anchor)
-                .collect(),
-            first_anchor_block: anchors.first().map(|record| record.anchor.block_number),
-            last_anchor_block: anchors.last().map(|record| record.anchor.block_number),
-            selected_head_is_lower: selected.is_some_and(|head| head.block_number < last_block),
-        })
+        let records = &snapshot.ordered_anchors;
+        let index = records
+            .binary_search_by_key(&anchor.block_number, |record| record.anchor.block_number)
+            .ok()?;
+        if records[index].anchor != *anchor {
+            return None;
+        }
+        Some(publish())
+    }
+
+    /// Re-evaluate a bounded reorg decision and publish synchronously while its
+    /// decisive snapshot stays current. Acquire execution storage before calling;
+    /// the callback must not await or re-enter consensus APIs/other callbacks.
+    pub fn with_reorg_anchor_snapshot<R>(
+        &self,
+        first_block: u64,
+        tracked_tip: Option<(u64, B256)>,
+        max_records: usize,
+        publish: impl FnOnce(ReorgAnchorSnapshot) -> R,
+    ) -> Option<R> {
+        let snapshot = self.inner.lock().unwrap();
+        Some(publish(build_reorg_anchor_snapshot(
+            &snapshot,
+            first_block,
+            tracked_tip,
+            max_records,
+        )?))
     }
 
     pub fn anchor_coverage(&self) -> AnchorCoverage {
@@ -750,6 +745,65 @@ impl ConsensusStore {
     pub fn state_path(&self) -> &Path {
         &self.path
     }
+}
+
+fn selected_optimistic_anchor(snapshot: &ConsensusSnapshot) -> Option<ExecutionAnchor> {
+    // Only a verified store gives this cached summary selected-head authority.
+    snapshot
+        .verified_light_client_store
+        .as_ref()
+        .and(snapshot.anchors.optimistic_head)
+}
+
+fn selected_lineage_pending(snapshot: &ConsensusSnapshot, tip_block: Option<u64>) -> bool {
+    let Some(selected) = selected_optimistic_anchor(snapshot) else {
+        return false;
+    };
+    let materialized_tip = snapshot.ordered_anchors.last().map(|record| record.anchor);
+    let requires_complete_lineage = tip_block.is_some_and(|last| selected.block_number <= last)
+        || materialized_tip.is_some_and(|tip| tip.block_number >= selected.block_number);
+    // Preserve ahead-of-materialization progress. This does not prove ancestry
+    // under an as-yet-unmaterialized higher selected head.
+    requires_complete_lineage && materialized_tip != Some(selected)
+}
+
+fn build_reorg_anchor_snapshot(
+    snapshot: &ConsensusSnapshot,
+    first_block: u64,
+    tracked_tip: Option<(u64, B256)>,
+    max_records: usize,
+) -> Option<ReorgAnchorSnapshot> {
+    if tracked_tip.is_some_and(|(last, _)| first_block > last) {
+        return None;
+    }
+    let anchors = &snapshot.ordered_anchors;
+    let selected = selected_optimistic_anchor(snapshot);
+    if selected_lineage_pending(snapshot, tracked_tip.map(|(number, _)| number)) {
+        return Some(ReorgAnchorSnapshot::PendingMaterialization);
+    }
+    let Some((last_block, tip_hash)) = tracked_tip else {
+        return Some(ReorgAnchorSnapshot::NoTrackedHeaders);
+    };
+    if let Ok(index) =
+        anchors.binary_search_by_key(&last_block, |record| record.anchor.block_number)
+        && anchors[index].anchor.block_hash == tip_hash
+    {
+        return Some(ReorgAnchorSnapshot::MatchingTip);
+    }
+    let start = anchors.partition_point(|record| record.anchor.block_number < first_block);
+    let end = anchors.partition_point(|record| record.anchor.block_number <= last_block);
+    if end - start > max_records {
+        return None;
+    }
+    Some(ReorgAnchorSnapshot::Window {
+        anchors: anchors[start..end]
+            .iter()
+            .map(|record| record.anchor)
+            .collect(),
+        first_anchor_block: anchors.first().map(|record| record.anchor.block_number),
+        last_anchor_block: anchors.last().map(|record| record.anchor.block_number),
+        selected_head_is_lower: selected.is_some_and(|head| head.block_number < last_block),
+    })
 }
 
 fn optimistic_cache_priority(status: &LightClientOptimisticUpdateStatus) -> (u64, usize) {
@@ -3047,6 +3101,129 @@ mod tests {
                 .updates_by_period
                 .len(),
             2
+        );
+    }
+    #[test]
+    fn selection_publication_admits_compatible_anchor_and_holds_snapshot_lock() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ConsensusStore::open(
+            directory.path(),
+            Some("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        )
+        .unwrap();
+        let initial = test_anchor(100);
+        store.replace_anchors(vec![initial]).unwrap();
+        assert_eq!(
+            store.with_current_anchor(&initial.anchor, || {
+                assert!(store.inner.try_lock().is_err());
+                7
+            }),
+            Some(7)
+        );
+        let mut finalized = initial;
+        finalized.finalized = true;
+        finalized.parent_beacon_root = Some(B256::repeat_byte(9));
+        store
+            .replace_anchors(vec![finalized, test_anchor(101)])
+            .unwrap();
+        assert_eq!(store.with_current_anchor(&initial.anchor, || 8), Some(8));
+        assert_eq!(
+            store.with_reorg_anchor_snapshot(
+                100,
+                Some((100, initial.anchor.block_hash)),
+                1,
+                |snapshot| {
+                    assert!(store.inner.try_lock().is_err());
+                    snapshot
+                }
+            ),
+            Some(ReorgAnchorSnapshot::MatchingTip)
+        );
+        for field in 0..4 {
+            let mut replaced = initial;
+            match field {
+                0 => replaced.anchor.block_hash = B256::repeat_byte(17),
+                1 => replaced.anchor.beacon_root = B256::repeat_byte(18),
+                2 => replaced.anchor.beacon_slot += 1,
+                _ => replaced.anchor.receipts_root = B256::repeat_byte(19),
+            }
+            store.replace_anchors(vec![replaced]).unwrap();
+            assert!(
+                store
+                    .with_current_anchor(&initial.anchor, || panic!("replaced anchor admitted"))
+                    .is_none()
+            );
+        }
+        store.replace_anchors(vec![]).unwrap();
+        assert!(
+            store
+                .with_current_anchor(&initial.anchor, || panic!("missing anchor admitted"))
+                .is_none()
+        );
+        assert!(
+            store
+                .with_reorg_anchor_snapshot(
+                    101,
+                    Some((100, initial.anchor.block_hash)),
+                    0,
+                    |_| panic!("invalid window admitted")
+                )
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn selection_publication_reuses_pending_lineage_and_ahead_progress_rules() {
+        let slot = recent_cache_fixture_slot();
+        let fixture = light_client::test_cached_light_client_fixture(slot);
+        let directory = tempfile::tempdir().unwrap();
+        let store = ConsensusStore::open(
+            directory.path(),
+            Some("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        )
+        .unwrap();
+        let old = test_anchor(100);
+        store.replace_anchors(vec![old]).unwrap();
+        let select = |number| {
+            let mut verified = fixture.store.clone();
+            verified.optimistic_header.beacon.slot = slot + 100;
+            verified.optimistic_header.execution =
+                Some(light_client::VerifiedExecutionPayloadHeader {
+                    block_number: number,
+                    block_hash: B256::repeat_byte(0xef),
+                    receipts_root: B256::ZERO,
+                });
+            let anchor = verified.optimistic_anchor().unwrap();
+            let mut snapshot = store.inner.lock().unwrap();
+            snapshot.verified_light_client_store = Some(verified);
+            apply_verified_store(&mut snapshot);
+            anchor
+        };
+        for height in [99, 100] {
+            select(height);
+            assert!(
+                store
+                    .with_current_anchor(&old.anchor, || panic!("pending selection admitted"))
+                    .is_none()
+            );
+        }
+        select(105);
+        // Preserve existing liveness policy, not a claim of ancestry to the
+        // unmaterialized higher selected head.
+        assert_eq!(store.with_current_anchor(&old.anchor, || true), Some(true));
+        let selected = select(100);
+        store
+            .replace_anchors(vec![AnchorRecord {
+                anchor: selected,
+                finalized: false,
+                parent_beacon_root: None,
+            }])
+            .unwrap();
+        assert_eq!(store.with_current_anchor(&selected, || true), Some(true));
+        assert!(
+            store
+                .with_current_anchor(&old.anchor, || panic!("old branch admitted"))
+                .is_none()
         );
     }
 }
