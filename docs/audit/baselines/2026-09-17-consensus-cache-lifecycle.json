@@ -1,0 +1,500 @@
+{
+  "date": "2026-09-17",
+  "branch": "audit/consensus-resource-lifecycle",
+  "base": "6fc297c9b818e5ff731af353fa96172ead4bffd3",
+  "source_commit": "1310497ad62d50afb3802064248f894151471247",
+  "source_inventory": {
+    "base": "6fc297c9b818e5ff731af353fa96172ead4bffd3",
+    "source_commit": "1310497ad62d50afb3802064248f894151471247",
+    "files": [
+      {
+        "path": "vendor/libp2p-gossipsub/.cargo_vcs_info.json",
+        "sha256": "fb409ba6264a8589d80b1a39b5732892afaa5828942352c7cde6aa3dc2acde43",
+        "bytes": 113
+      },
+      {
+        "path": "vendor/libp2p-gossipsub/CHANGELOG.md",
+        "sha256": "7755ed96bf7f4710a434922fa007f2f3d9efb54c3dde63d701f1cc693a68159f",
+        "bytes": 15918
+      },
+      {
+        "path": "vendor/libp2p-gossipsub/Cargo.lock",
+        "sha256": "9c251863c193ed1c83b1e63ccc6765b553fc3cf4687464377e1b4bbc8d3cf1eb",
+        "bytes": 48738
+      },
+      {
+        "path": "vendor/libp2p-gossipsub/Cargo.toml",
+        "sha256": "0e8db4bae3efe861d432bb895baefb868a7fba6f0d4f7dc5ee65bde05bbe4d61",
+        "bytes": 2945
+      },
+      {
+        "path": "vendor/libp2p-gossipsub/Cargo.toml.orig",
+        "sha256": "8371682c75f245dffee584d481700da01b09575ed96bef6f062e84553acc4fb0",
+        "bytes": 1757
+      },
+      {
+        "path": "vendor/libp2p-gossipsub/LOGEX-PATCH.diff",
+        "sha256": "e25f34ffe5f3ea42cc480a78322b72ea805a6156797623e1e3de2fbb9ada2f29",
+        "bytes": 6654
+      },
+      {
+        "path": "vendor/libp2p-gossipsub/LOGEX-PATCH.md",
+        "sha256": "c5b316207a464db776871c21728f79363019b1216246f14c5365fafb415aa43f",
+        "bytes": 3418
+      },
+      {
+        "path": "vendor/libp2p-gossipsub/LOGEX-UPSTREAM-SHA256",
+        "sha256": "795183902927a7de54e1f7927d0038f0758420d365f92f357908b3d62fe47289",
+        "bytes": 2946
+      },
+      {
+        "path": "vendor/libp2p-gossipsub/src/backoff.rs",
+        "sha256": "0af5e555567d7788602f8ad1ff977ce0a9214585a13d88a86421be40a661aa22",
+        "bytes": 7551
+      },
+      {
+        "path": "vendor/libp2p-gossipsub/src/behaviour/tests.rs",
+        "sha256": "91bcca73037e152f868ae79ea4b16b1924db7173dcb9261997124dc38f083ff8",
+        "bytes": 213773
+      },
+      {
+        "path": "vendor/libp2p-gossipsub/src/behaviour.rs",
+        "sha256": "8310bb396e324a837bd7f073fd8ffb5c34a199087f8ee0e15e19b827ba826c6f",
+        "bytes": 145419
+      },
+      {
+        "path": "vendor/libp2p-gossipsub/src/config.rs",
+        "sha256": "78433a00e1272a673d9794179f292e72f0c128cc0f03b164accc9f74b31064ed",
+        "bytes": 53776
+      },
+      {
+        "path": "vendor/libp2p-gossipsub/src/error.rs",
+        "sha256": "4151bee368a96ac01338ca765618ef4d44c3bb864b63444301ddd8d846dfffe0",
+        "bytes": 5994
+      },
+      {
+        "path": "vendor/libp2p-gossipsub/src/generated/compat/mod.rs",
+        "sha256": "b46ffabbff515cdcc5bce0fc3c54f01b3aa0525199d4f79228b0e7c13d53c5ab",
+        "bytes": 46
+      },
+      {
+        "path": "vendor/libp2p-gossipsub/src/generated/compat/pb.rs",
+        "sha256": "20ec3660d700f07aa29813222b5899217ad175993c786e6f1ab01f818e0b3354",
+        "bytes": 2736
+      },
+      {
+        "path": "vendor/libp2p-gossipsub/src/generated/compat.proto",
+        "sha256": "b429afd2343843617f886f09b62a06fbb00a84d910f2b47810e4be3ae300b517",
+        "bytes": 226
+      },
+      {
+        "path": "vendor/libp2p-gossipsub/src/generated/gossipsub/mod.rs",
+        "sha256": "b46ffabbff515cdcc5bce0fc3c54f01b3aa0525199d4f79228b0e7c13d53c5ab",
+        "bytes": 46
+      },
+      {
+        "path": "vendor/libp2p-gossipsub/src/generated/gossipsub/pb.rs",
+        "sha256": "01e1679d6a9ed0a939327a72594970df8efbe2942f67c38628466a7607c56d83",
+        "bytes": 20440
+      },
+      {
+        "path": "vendor/libp2p-gossipsub/src/generated/mod.rs",
+        "sha256": "fb32d5c38ecdb43a5a63a58e59ed0405df640fc6ad2eb60702dcf32f26fd0944",
+        "bytes": 69
+      },
+      {
+        "path": "vendor/libp2p-gossipsub/src/generated/rpc.proto",
+        "sha256": "0a069b08f38a5931951ca6744d75fbe2bdd30a3966eeaa2c9f174828e803eaea",
+        "bytes": 2050
+      },
+      {
+        "path": "vendor/libp2p-gossipsub/src/gossip_promises.rs",
+        "sha256": "0ca8fea2cf104fe8549cb4981dd7fbd2633bd9865733e5895011952e99931a64",
+        "bytes": 4549
+      },
+      {
+        "path": "vendor/libp2p-gossipsub/src/handler.rs",
+        "sha256": "32ff1b36444486984fb6a431ef97c62391061139ee75325a4d7482e3696e1d83",
+        "bytes": 22954
+      },
+      {
+        "path": "vendor/libp2p-gossipsub/src/lib.rs",
+        "sha256": "70bab73b87d8b809b20c11c5e086f0d15b3cb56aaa0fca26c79413ceb191ca7a",
+        "bytes": 6206
+      },
+      {
+        "path": "vendor/libp2p-gossipsub/src/mcache.rs",
+        "sha256": "ecc6d605222d6a56035f974df4cacf80beee8fa98c16c96f4c8aa3d5a94b77b7",
+        "bytes": 13080
+      },
+      {
+        "path": "vendor/libp2p-gossipsub/src/metrics.rs",
+        "sha256": "387681b4d9e9952523e68eb2b67f427bd3d21499d78b9d9699d91d954246ffbb",
+        "bytes": 27551
+      },
+      {
+        "path": "vendor/libp2p-gossipsub/src/peer_score/params.rs",
+        "sha256": "e7a59baa4e72044a5123e355e655fb578ecc3718aa237af1ba76a3b2b1b1c88a",
+        "bytes": 17530
+      },
+      {
+        "path": "vendor/libp2p-gossipsub/src/peer_score/tests.rs",
+        "sha256": "7da4eff4ff7fe8b7f417730bb63c8002f964bca4e9c6af892c2b7c8c772c0cf1",
+        "bytes": 35595
+      },
+      {
+        "path": "vendor/libp2p-gossipsub/src/peer_score.rs",
+        "sha256": "87fe77e4c82e8a2a4f9cc352a7300ad5ed54dce2bdf9792c538356ea4468e225",
+        "bytes": 39225
+      },
+      {
+        "path": "vendor/libp2p-gossipsub/src/protocol.rs",
+        "sha256": "b2b447220a3c1aeb8bd56a92f7c6c2920d959ceefcd1a7035fd1ec4b433eb95b",
+        "bytes": 26620
+      },
+      {
+        "path": "vendor/libp2p-gossipsub/src/rpc.rs",
+        "sha256": "9f0b94b8fb5e1052aecc642cf145c47d41b7fb7096e7c8d94cab6de622061039",
+        "bytes": 7369
+      },
+      {
+        "path": "vendor/libp2p-gossipsub/src/rpc_proto.rs",
+        "sha256": "47e1b7d87d3c7b5dc23add7ab6015caca14a119e4b5a7f1ee6cccd6956ecf100",
+        "bytes": 4396
+      },
+      {
+        "path": "vendor/libp2p-gossipsub/src/subscription_filter.rs",
+        "sha256": "a7fa8e4da268914ce76c6839b9a0a32a28adb8dc8539fe1e97216d80a71ac8aa",
+        "bytes": 14293
+      },
+      {
+        "path": "vendor/libp2p-gossipsub/src/time_cache.rs",
+        "sha256": "454fa2013bb25585a31170e0f7a36ac91caccf57ee6531fc1f489ea13a0719a2",
+        "bytes": 8139
+      },
+      {
+        "path": "vendor/libp2p-gossipsub/src/topic.rs",
+        "sha256": "0249c4bd950c2a9340127b395f82b7a55fa8fd8339dd67c35b0b8f8f26b6082d",
+        "bytes": 3908
+      },
+      {
+        "path": "vendor/libp2p-gossipsub/src/transform.rs",
+        "sha256": "43cd9ffcb62adee8d868bb7c972da8f8b0fd944b876dab7558850ee0ade6e8b9",
+        "bytes": 3262
+      },
+      {
+        "path": "vendor/libp2p-gossipsub/src/types.rs",
+        "sha256": "00f6e2ae34e30400736e24bc973303cb936b0a4b798b9fd1d39c90b3f0da24a9",
+        "bytes": 22158
+      },
+      {
+        "path": "vendor/libp2p-gossipsub/tests/smoke.rs",
+        "sha256": "6935da6d8fbb4b501d3f621a11b2892d5c8c5c2ad1555dfb4bcff2e866ed7617",
+        "bytes": 7664
+      },
+      {
+        "path": "Cargo.toml",
+        "sha256": "448a05c948138f6d6f146b12ea99ce93f0e137faf804e23a232ec9762f8778fc",
+        "bytes": 4331
+      },
+      {
+        "path": "Cargo.lock",
+        "sha256": "1674195c5c4382a4309fa66a0b1b62b8d7e0e65cacb0dfc19b6897aef161ccfd",
+        "bytes": 238724
+      },
+      {
+        "path": "tools/verify_datafusion_vendor.py",
+        "sha256": "570e7d868efe5c494588d15b222d61bf9a01fd0ad8fa085acd3b1c00fc9326f3",
+        "bytes": 12469
+      },
+      {
+        "path": ".github/workflows/ci.yml",
+        "sha256": "a191c52ddb68f662672a43e0dc847ad23096dbd4e176511fd2279f476dac4a48",
+        "bytes": 5285
+      }
+    ]
+  },
+  "findings": [
+    "B3-68"
+  ],
+  "gates": {
+    "commit": "1310497ad62d50afb3802064248f894151471247",
+    "rustc": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+    "gates": [
+      {
+        "name": "vendor",
+        "command": [
+          "python3",
+          "tools/verify_datafusion_vendor.py"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T12:58:12.891543+00:00",
+        "finished": "2026-09-17T12:58:13.022356+00:00",
+        "sha256": "66c8356dd4a2753b376fc6b222ceda74bb495616f72e05bb062c7fb877a81bd1",
+        "log": "/private/tmp/logex-audit-consensus-resource-20260917/gates/vendor.log"
+      },
+      {
+        "name": "format",
+        "command": [
+          "cargo",
+          "fmt",
+          "--all",
+          "--",
+          "--check"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T12:58:13.022905+00:00",
+        "finished": "2026-09-17T12:58:14.073406+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-audit-consensus-resource-20260917/gates/format.log"
+      },
+      {
+        "name": "vendor-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2024",
+          "--config-path",
+          "vendor/reth-network/rustfmt.toml",
+          "--config",
+          "skip_children=true",
+          "vendor/reth-network/src/eth_requests.rs",
+          "vendor/reth-network/src/session/active.rs",
+          "vendor/reth-network/src/session/mod.rs",
+          "vendor/reth-network/src/session/types.rs",
+          "vendor/reth-network/src/session/range_update.rs",
+          "vendor/reth-discv5/src/lib.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T12:58:14.073980+00:00",
+        "finished": "2026-09-17T12:58:14.146252+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-audit-consensus-resource-20260917/gates/vendor-format.log"
+      },
+      {
+        "name": "enr-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2021",
+          "--config",
+          "skip_children=true",
+          "vendor/enr/src/lib.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T12:58:14.146917+00:00",
+        "finished": "2026-09-17T12:58:14.202685+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-audit-consensus-resource-20260917/gates/enr-format.log"
+      },
+      {
+        "name": "gossipsub-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2021",
+          "--config",
+          "skip_children=true",
+          "vendor/libp2p-gossipsub/src/time_cache.rs",
+          "vendor/libp2p-gossipsub/src/behaviour.rs",
+          "vendor/libp2p-gossipsub/src/behaviour/tests.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T12:58:14.203115+00:00",
+        "finished": "2026-09-17T12:58:14.346927+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-audit-consensus-resource-20260917/gates/gossipsub-format.log"
+      },
+      {
+        "name": "gossipsub-expiry",
+        "command": [
+          "cargo",
+          "test",
+          "--manifest-path",
+          "vendor/libp2p-gossipsub/Cargo.toml",
+          "--lib",
+          "logex_expiry",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T12:58:14.347405+00:00",
+        "finished": "2026-09-17T12:58:14.672765+00:00",
+        "sha256": "79a950858534298b768402ad856d05d46ef2b33de6c4184bb2dbcb2f754e2509",
+        "log": "/private/tmp/logex-audit-consensus-resource-20260917/gates/gossipsub-expiry.log"
+      },
+      {
+        "name": "aggregate-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2021",
+          "--config",
+          "max_width=90,skip_children=true",
+          "vendor/datafusion-functions-aggregate/src/sum.rs",
+          "vendor/datafusion-functions-aggregate/src/average.rs",
+          "vendor/datafusion-functions-aggregate-common/src/aggregate/sum_distinct/numeric.rs",
+          "vendor/datafusion-functions-aggregate-common/src/aggregate/avg_distinct/decimal.rs",
+          "vendor/datafusion-functions-aggregate-common/src/utils.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T12:58:14.673146+00:00",
+        "finished": "2026-09-17T12:58:14.739319+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-audit-consensus-resource-20260917/gates/aggregate-format.log"
+      },
+      {
+        "name": "check",
+        "command": [
+          "cargo",
+          "check",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T12:58:14.739764+00:00",
+        "finished": "2026-09-17T12:58:20.958941+00:00",
+        "sha256": "372331e2eb5cec4205ebec41678cdd4a240a68ca3e21e5baf61248538b205f2b",
+        "log": "/private/tmp/logex-audit-consensus-resource-20260917/gates/check.log"
+      },
+      {
+        "name": "clippy",
+        "command": [
+          "cargo",
+          "clippy",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T12:58:20.959897+00:00",
+        "finished": "2026-09-17T12:58:37.993343+00:00",
+        "sha256": "1a2e74bf9900ede4c5244c200e3390c39693edf7815f5cf677e6c1578bbb20d5",
+        "log": "/private/tmp/logex-audit-consensus-resource-20260917/gates/clippy.log"
+      },
+      {
+        "name": "test",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T12:58:37.994435+00:00",
+        "finished": "2026-09-17T13:02:41.943167+00:00",
+        "sha256": "a6feec086444f3ee57d6d4348a659942ccdfab7810fc0dcd9555e10587195116",
+        "log": "/private/tmp/logex-audit-consensus-resource-20260917/gates/test.log"
+      },
+      {
+        "name": "doc",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--doc",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T13:02:41.946710+00:00",
+        "finished": "2026-09-17T13:02:59.451651+00:00",
+        "sha256": "83c59f674c717c83c09b5b7496a342d63e2e8fbfd29fe0b5b7a70dbbf0e00198",
+        "log": "/private/tmp/logex-audit-consensus-resource-20260917/gates/doc.log"
+      },
+      {
+        "name": "release-build",
+        "command": [
+          "cargo",
+          "build",
+          "-p",
+          "logex-node",
+          "--release",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T13:02:59.452459+00:00",
+        "finished": "2026-09-17T13:04:48.796491+00:00",
+        "sha256": "cb4527cae34185d01ad503204ac0f0f84183b5474bcb2066b74b875658a647da",
+        "log": "/private/tmp/logex-audit-consensus-resource-20260917/gates/release-build.log"
+      }
+    ]
+  },
+  "workspace_tests": {
+    "passed": 1962,
+    "failed": 0,
+    "ignored": 24,
+    "targets": 35
+  },
+  "documentation_tests": {
+    "passed": 0,
+    "failed": 0,
+    "ignored": 0,
+    "targets": 8
+  },
+  "supplementary_final_expiry_tests": {
+    "passed": 3,
+    "failed": 0,
+    "ignored": 0,
+    "targets": 1
+  },
+  "focused_dependency_library": {
+    "passed": 154,
+    "failed": 0,
+    "ignored": 0,
+    "scope": "standalone published test dependency graph, before telemetry-only reorder; exact final expiry and full workspace gates rerun"
+  },
+  "evidence": {
+    "path": "docs/audit/baselines/2026-09-17-consensus-cache-lifecycle-evidence.json.gz",
+    "files": 68,
+    "bytes_uncompressed": 995712,
+    "bytes": 193440,
+    "sha256": "6c178a8c702d75464d3723db591bf85bab7e98084629b2f25c468be23c2073c9"
+  },
+  "validation": {
+    "path": "docs/audit/baselines/2026-09-17-consensus-cache-lifecycle-validation.json.gz",
+    "files": 15,
+    "bytes_uncompressed": 240067,
+    "bytes": 45742,
+    "sha256": "6f556bcab24ba9a1b218d1b6f1a004061a7d5c5bba5cd4420a2a19476f4dc85e"
+  },
+  "publication": {
+    "state": "pending"
+  },
+  "boundaries": [
+    "Original production source plus additive private-clock tests fails three behavioral controls after compilation. Earlier package-membership, missing-cache and DNS logs are setup errors.",
+    "Application lock changes only same-version gossipsub source/checksum; standalone test lock adds quickcheck1.0.3/env_logger0.8.4 and format4, preserving existing versions.",
+    "Full standalone library154/CL366/strictCLClippy precede the metrics-start reorder. Final three expiry tests, all workspace gates and vendor verification cover final committed source.",
+    "Supplementary standalone strict Clippy fails on unchanged upstream lint sites. No lint suppressions, smoke test deletion or unrelated source cleanup.",
+    "Exact upstream generated EOF blank lines and literal unified-diff context preserved despite broad staged whitespace check; reviewed modified source passes scoped check.",
+    "Logical expiry correction and idle entry pruning do not establish an aggregate memory bound, allocator/RSS shrinkage, or improved chain progress/throughput.",
+    "Protected history, optional fork/period payload policy and incremental consensus persistence design remain open. Canonical anchors are not truncated.",
+    "No storage writes, persisted fields, ingestion barriers, benchmarks, remote-host operations, live sync, production-data changes or deployment.",
+    "Automatic verified offline repair, query resource policy and integrated acceptance remain open; live sync/staging follows offline completion."
+  ]
+}

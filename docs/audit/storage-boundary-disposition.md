@@ -3,7 +3,7 @@
 This pass starts from PR #224 merge `2b86b8a6` on
 `audit/storage-boundary-disposition`. It completes the remaining structural
 page/compression/bundle, raw-reader, WAL/journal and catalog review. Source `a7eae4b9` is committed after focused checks and independent review.
-All ten final-source gates pass; exact-head CI and merge remain. Shared query memory policy and automatic
+All ten final-source gates and six CI jobs pass; PR #225 merged as `6fc297c9`. Shared query memory policy and automatic
 verified offline repair remain separate work.
 
 ## Plain scalar allocation ordering
@@ -117,4 +117,6 @@ The [machine-readable record](baselines/2026-09-17-storage-boundary-disposition.
 links hash-verified archives of original/fixed evidence, finite test output,
 source reviews and complete final gate logs. Existing future-compatibility and
 linker warnings remain in the logs; all gates pass. Source is `a7eae4b957520fe642832ac5bd2b52b79a229c79`.
-Exact-head CI and merge remain before batch-2 offline closure.
+Exact-head CI and merge passed; verified closure follows.
+
+All six CI jobs passed on `8e4d1d89`, including ten Linux volume/template cases with verified cleanup. [PR #225](https://github.com/tdenisenko/logex/pull/225) merged as `6fc297c9`. The merge tree is identical to the tested head. B2-28 and batch-2 structural storage review are closed; shared query resource policy, automatic verified repair and integrated acceptance remain separate work.
