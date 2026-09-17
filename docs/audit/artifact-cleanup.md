@@ -83,3 +83,19 @@ Linux/macOS CI jobs at head `04b09053` in run `34958538490` before merge
 This pass neither completes the offline audit nor establishes live-sync readiness.
 The remaining batch dispositions, volume supervision, offline repair and subsequent
 live/staging acceptance remain tracked in the audit ledger and local roadmap.
+
+## September 17 incremental compiler cache cleanup
+
+During the sync-state review, local free space fell to approximately 11.4 GiB.
+After all active Rust checks released their build ownership, the cleanup removed
+764 older directories under this repository's `target/debug/incremental` only.
+Four recently modified cache directories per crate were retained, and five
+candidates whose contents had changed since inventory were skipped. Sources,
+dependency outputs, release binaries, current audit evidence and unrelated files
+were retained. No remote host was accessed.
+
+Filesystem available space increased by approximately 41.7 GiB, to 53.1 GiB.
+This is a before/after free-space observation, not a sum of file references; APFS
+sharing and concurrent machine activity affect the exact physical gain. The
+per-directory receipt is retained with the
+[sync-state review evidence](sync-state-review.md).

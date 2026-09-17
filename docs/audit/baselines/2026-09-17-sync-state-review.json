@@ -1,0 +1,330 @@
+{
+  "date": "2026-09-17",
+  "branch": "audit/sync-state-review",
+  "base": "43bb6bc07ad3510304afe28ff7ff503405d2f5cb",
+  "source_commit": "3baecd32f0a95eb84e8f1ea7b79b15f298658fa7",
+  "source_inventory": {
+    "base": "43bb6bc07ad3510304afe28ff7ff503405d2f5cb",
+    "source_commit": "3baecd32f0a95eb84e8f1ea7b79b15f298658fa7",
+    "files": [
+      {
+        "change": "M",
+        "path": "crates/logex-cl/src/lib.rs",
+        "bytes": 113369,
+        "sha256": "3a3d8bbd28f4d18ab152835eaf25cc1d5c4dfb893adb06c8a7597d725f5b9c58"
+      },
+      {
+        "change": "M",
+        "path": "crates/logex-node/src/runtime.rs",
+        "bytes": 96785,
+        "sha256": "a4194612c13dd85f8db6583e3ad35cf3f7a97732aabb4b3c0a3b1910eb1e388c"
+      },
+      {
+        "change": "M",
+        "path": "crates/logex-storage/src/native/catalog.rs",
+        "bytes": 43079,
+        "sha256": "9208fbabde78b30a1f1618780d6ccc2daf635bfc02d2e8deb263c44deab46053"
+      },
+      {
+        "change": "A",
+        "path": "crates/logex-storage/src/native/reorg.rs",
+        "bytes": 3928,
+        "sha256": "8bcf7744e3083f65451ad24a516c7cf0c1ed66ef51eca15889ae6fc0c5396ab5"
+      },
+      {
+        "change": "M",
+        "path": "crates/logex-storage/src/native/segment.rs",
+        "bytes": 128804,
+        "sha256": "ff53179d847a975d9c30ccab1a145c340ea1a02c18d4f3471fc1a0a57a3f1f9b"
+      },
+      {
+        "change": "M",
+        "path": "crates/logex-storage/src/native/storage.rs",
+        "bytes": 368130,
+        "sha256": "226c2a7df9abfdb00bcc7ad94c6e84a905af4ce60a7087f4fabb1e50cb518941"
+      },
+      {
+        "change": "M",
+        "path": "crates/logex-storage/src/partition.rs",
+        "bytes": 17966,
+        "sha256": "1682598c783a85e36a5adc69e6b04b967502bb2f3b01f933cd2d6136449b0146"
+      },
+      {
+        "change": "M",
+        "path": "crates/logex-sync/src/engine/anchored.rs",
+        "bytes": 344226,
+        "sha256": "ba87354bea482f2c87d15f69a9740c25eb4774635a57dec0f3866f8a68029388"
+      },
+      {
+        "change": "M",
+        "path": "crates/logex-sync/src/engine/anchored/cancellation_tests.rs",
+        "bytes": 19075,
+        "sha256": "578ea0bb485ce2074acf445a2dea54485f91bd26dc942075ab5d599e4e4529b7"
+      },
+      {
+        "change": "M",
+        "path": "crates/logex-sync/src/engine/anchored/fetch_supervision_tests.rs",
+        "bytes": 14375,
+        "sha256": "bc1fa0489f99610fb04c7abfb719ffeb691d001ee4cc8c7d160d799c7aafc22d"
+      },
+      {
+        "change": "M",
+        "path": "crates/logex-sync/src/engine/helpers.rs",
+        "bytes": 20644,
+        "sha256": "47c11a9fb6906e5af55ed65ed60dc09d5bfaf4ddb709278246250fde4817d122"
+      },
+      {
+        "change": "M",
+        "path": "crates/logex-sync/src/engine/historical.rs",
+        "bytes": 1415,
+        "sha256": "40ce774331f141f70e1d6004b1eec8ce977948e05783c2e7c6703f0ffe8d17f1"
+      },
+      {
+        "change": "M",
+        "path": "crates/logex-sync/src/engine/ingest.rs",
+        "bytes": 26480,
+        "sha256": "3d84fbee104f2b92c457b7cc15e1548f1aa9452eb5bd1e0572586c90ab1ae748"
+      },
+      {
+        "change": "D",
+        "path": "crates/logex-sync/src/engine/live.rs"
+      },
+      {
+        "change": "M",
+        "path": "crates/logex-sync/src/engine/mod.rs",
+        "bytes": 10482,
+        "sha256": "7b21141d5a143495df8794e4c835e0582caa9f08cff79280ffd8adbde138ad17"
+      }
+    ]
+  },
+  "findings": [
+    "B5-07",
+    "B5-08",
+    "B5-09",
+    "B5-10",
+    "B5-12",
+    "B5-13"
+  ],
+  "gates": {
+    "commit": "3baecd32f0a95eb84e8f1ea7b79b15f298658fa7",
+    "rustc": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+    "gates": [
+      {
+        "name": "vendor",
+        "command": [
+          "python3",
+          "tools/verify_datafusion_vendor.py"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T08:28:31.471832+00:00",
+        "finished": "2026-09-17T08:28:31.615833+00:00",
+        "sha256": "95ada9e22c512e8346f3d8d057e7fba429b52506f4e037dcf35657f57d7ec451",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-sync-state-review-sctywegb/gates/vendor.log"
+      },
+      {
+        "name": "format",
+        "command": [
+          "cargo",
+          "fmt",
+          "--all",
+          "--",
+          "--check"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T08:28:31.616431+00:00",
+        "finished": "2026-09-17T08:28:32.652273+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-sync-state-review-sctywegb/gates/format.log"
+      },
+      {
+        "name": "vendor-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2024",
+          "--config-path",
+          "vendor/reth-network/rustfmt.toml",
+          "--config",
+          "skip_children=true",
+          "vendor/reth-network/src/eth_requests.rs",
+          "vendor/reth-network/src/session/active.rs",
+          "vendor/reth-network/src/session/mod.rs",
+          "vendor/reth-network/src/session/types.rs",
+          "vendor/reth-network/src/session/range_update.rs",
+          "vendor/reth-discv5/src/lib.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T08:28:32.652661+00:00",
+        "finished": "2026-09-17T08:28:32.720739+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-sync-state-review-sctywegb/gates/vendor-format.log"
+      },
+      {
+        "name": "enr-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2021",
+          "--config",
+          "skip_children=true",
+          "vendor/enr/src/lib.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T08:28:32.721070+00:00",
+        "finished": "2026-09-17T08:28:32.772795+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-sync-state-review-sctywegb/gates/enr-format.log"
+      },
+      {
+        "name": "aggregate-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2021",
+          "--config",
+          "max_width=90,skip_children=true",
+          "vendor/datafusion-functions-aggregate/src/sum.rs",
+          "vendor/datafusion-functions-aggregate/src/average.rs",
+          "vendor/datafusion-functions-aggregate-common/src/aggregate/sum_distinct/numeric.rs",
+          "vendor/datafusion-functions-aggregate-common/src/aggregate/avg_distinct/decimal.rs",
+          "vendor/datafusion-functions-aggregate-common/src/utils.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T08:28:32.773164+00:00",
+        "finished": "2026-09-17T08:28:32.835726+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-sync-state-review-sctywegb/gates/aggregate-format.log"
+      },
+      {
+        "name": "check",
+        "command": [
+          "cargo",
+          "check",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T08:28:32.836108+00:00",
+        "finished": "2026-09-17T08:28:47.402781+00:00",
+        "sha256": "5c918682e3a34cc74a56e5ffe480a7dcaebef440b9b880e9a02e755ca296705a",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-sync-state-review-sctywegb/gates/check.log"
+      },
+      {
+        "name": "clippy",
+        "command": [
+          "cargo",
+          "clippy",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T08:28:47.403739+00:00",
+        "finished": "2026-09-17T08:29:04.445838+00:00",
+        "sha256": "09c395290c4a9a046ea270fc09c953097440caf1ebe03c153af53d4bfdb3a2fc",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-sync-state-review-sctywegb/gates/clippy.log"
+      },
+      {
+        "name": "test",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T08:29:04.446555+00:00",
+        "finished": "2026-09-17T08:35:34.509367+00:00",
+        "sha256": "e2a87d40b89cfc833c78dcf2b30699dffc4138ee6ee80d3c93e3cdab76e5ef32",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-sync-state-review-sctywegb/gates/test.log"
+      },
+      {
+        "name": "doc",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--doc",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T08:35:34.511946+00:00",
+        "finished": "2026-09-17T08:35:51.636222+00:00",
+        "sha256": "7475a84848248b17472a66b0e7579622857ec4ce671fc4ef76c8753705fe4aa6",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-sync-state-review-sctywegb/gates/doc.log"
+      },
+      {
+        "name": "release-build",
+        "command": [
+          "cargo",
+          "build",
+          "-p",
+          "logex-node",
+          "--release",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T08:35:51.636963+00:00",
+        "finished": "2026-09-17T08:37:55.420505+00:00",
+        "sha256": "ccdabcb29914ce2dccde55f9fbfbc49f14fa1ac15a7eee4ee4f0e27a8a92a9a5",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-sync-state-review-sctywegb/gates/release-build.log"
+      }
+    ]
+  },
+  "workspace_tests": {
+    "passed": 1925,
+    "failed": 0,
+    "ignored": 24,
+    "targets": 34
+  },
+  "evidence": {
+    "path": "docs/audit/baselines/2026-09-17-sync-state-review-evidence.json.gz",
+    "files": 69,
+    "bytes_uncompressed": 1875667,
+    "bytes": 278663,
+    "sha256": "6894de30cef2fdcf12b57d08d106aa1a5341252b6fc5e19bb36060cba3dca55b"
+  },
+  "validation": {
+    "path": "docs/audit/baselines/2026-09-17-sync-state-review-validation.json.gz",
+    "files": 12,
+    "bytes_uncompressed": 224961,
+    "bytes": 41339,
+    "sha256": "6d5788dea3c55558621b6224ea30a6ef88f260c7a040731fbee1ea1b1f7f2e96"
+  },
+  "publication": {
+    "state": "pending"
+  },
+  "boundaries": [
+    "No live sync, deployment, remote host, production data changes or broad benchmarks.",
+    "Missing-consensus archive control is sequential; parent/sparse controls reproduce helper state, not full peer-loop outcomes.",
+    "Zero batch controls validate new early errors; no original panic run.",
+    "Bundled maintenance race is reproduced through a public current-profile captured task; normal background scheduling skips that candidate.",
+    "A matching tip returns before anchor-window allocation; no throughput claim.",
+    "Ordinary ingestion adds no reorg metadata writes. Range pruning was deferred pending historical descriptor input-order review.",
+    "Pending intents resume before open returns; previously interrupted legacy operations have no retroactive intent.",
+    "Batch5 gap-header memory and other roadmap areas remain open."
+  ]
+}
