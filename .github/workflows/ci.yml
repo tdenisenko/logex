@@ -52,12 +52,15 @@ jobs:
       - name: Check patched ENR formatting
         run: rustfmt --check --edition 2021 --config skip_children=true vendor/enr/src/lib.rs
 
-      - name: Check patched SUM formatting
+      - name: Check patched aggregate formatting
         run: >-
           rustfmt --check --edition 2021
           --config max_width=90,skip_children=true
           vendor/datafusion-functions-aggregate/src/sum.rs
+          vendor/datafusion-functions-aggregate/src/average.rs
           vendor/datafusion-functions-aggregate-common/src/aggregate/sum_distinct/numeric.rs
+          vendor/datafusion-functions-aggregate-common/src/aggregate/avg_distinct/decimal.rs
+          vendor/datafusion-functions-aggregate-common/src/utils.rs
 
   clippy:
     name: Clippy
