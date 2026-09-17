@@ -1,0 +1,383 @@
+{
+  "date": "2026-09-18",
+  "branch": "audit/offline-segment-repair",
+  "base": "77d03349c1c4474517a448131c02a4bda0780b84",
+  "source_commit": "9d454ff9da3d957f1c1d012d6ad6ac300557ef11",
+  "source_inventory": {
+    "base": "77d03349c1c4474517a448131c02a4bda0780b84",
+    "files": {
+      "crates/logex-storage/src/column.rs": {
+        "original": {
+          "saved": "original-crates__logex-storage__src__column.rs",
+          "bytes": 106285,
+          "sha256": "036c057519b8bfacf5e2e6830022ff5f95a89b499cb5c76413569ee01a985374"
+        },
+        "final": {
+          "bytes": 106296,
+          "sha256": "17fe812029a015f6385f1ccb6b1a5a0b83045fd5ee889de12905cf5a8c3a255f"
+        }
+      },
+      "crates/logex-storage/src/column_artifact.rs": {
+        "original": {
+          "saved": "original-crates__logex-storage__src__column_artifact.rs",
+          "bytes": 21554,
+          "sha256": "88d669b1d7067411b2bf93f117034b22f8d69af7f66b59c05e8073d8ec2318e2"
+        },
+        "final": {
+          "bytes": 27225,
+          "sha256": "63949c9a6f97e11ac38f3ee70e6cc591a923d2c03a1b2c7c1a39af4668604c23"
+        }
+      },
+      "crates/logex-storage/src/native/catalog.rs": {
+        "original": {
+          "saved": "original-crates__logex-storage__src__native__catalog.rs",
+          "bytes": 43079,
+          "sha256": "9208fbabde78b30a1f1618780d6ccc2daf635bfc02d2e8deb263c44deab46053"
+        },
+        "final": {
+          "bytes": 46460,
+          "sha256": "503482296d18f0fad6b16f17d9268bf48346d584c4041a29469fd206fd1171e5"
+        }
+      },
+      "crates/logex-storage/src/native/directory_lock.rs": {
+        "original": null,
+        "final": {
+          "bytes": 3640,
+          "sha256": "384ef25a4695c12a4937485bdfbc873f993a517304fc719f1f4dbe3c3937439b"
+        }
+      },
+      "crates/logex-storage/src/native/inspection.rs": {
+        "original": null,
+        "final": {
+          "bytes": 12889,
+          "sha256": "556f39d643d923ddae41aa699a621abb27769129f7fc5bcba7f01b9674d44789"
+        }
+      },
+      "crates/logex-storage/src/native/inspection/tests.rs": {
+        "original": null,
+        "final": {
+          "bytes": 17410,
+          "sha256": "8ff7838ad87a5825ef80fb44abd58dc3a6a258e0a7a9c133a758c09b7d2b85e4"
+        }
+      },
+      "crates/logex-storage/src/native/mod.rs": {
+        "original": {
+          "saved": "original-crates__logex-storage__src__native__mod.rs",
+          "bytes": 694,
+          "sha256": "70c4ee6f5f5eadd95cb39d9b469c34f3778509cb6e167c7b0902ba968c8e0956"
+        },
+        "final": {
+          "bytes": 892,
+          "sha256": "aa04905be55f59cbc3d756212cbd571f77f0148dfdb72eafbffe32dc5353554c"
+        }
+      },
+      "crates/logex-storage/src/native/storage.rs": {
+        "original": {
+          "saved": "original-crates__logex-storage__src__native__storage.rs",
+          "bytes": 391056,
+          "sha256": "fd9b804842093b86f9bc9e847af9bfb4ae946b9d163522b016fa6aafd7abac84"
+        },
+        "final": {
+          "bytes": 389822,
+          "sha256": "a42a3206f65f1dadd12df3e56a41eb27bdfbc6ff9615c8151dfcf1c52ec41943"
+        }
+      },
+      "crates/logex-storage/src/segment_reader.rs": {
+        "original": {
+          "saved": "original-crates__logex-storage__src__segment_reader.rs",
+          "bytes": 117534,
+          "sha256": "8f438d3b531785960bb49ce267af4af4a1404b85e92f0ff477d0a26d078e4797"
+        },
+        "final": {
+          "bytes": 135248,
+          "sha256": "72e41df401a44692e754fb879a3ee50727f33ac984baa29aeba6cc0ee2dbeb12"
+        }
+      }
+    }
+  },
+  "gates": {
+    "commit": "9d454ff9da3d957f1c1d012d6ad6ac300557ef11",
+    "rustc": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+    "gates": [
+      {
+        "name": "dashboard",
+        "command": [
+          "node",
+          "--test",
+          "tools/dashboard-query.test.mjs",
+          "tools/dashboard-rendering.test.mjs",
+          "tools/dashboard-status.test.mjs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T21:21:13.178350+00:00",
+        "finished": "2026-09-17T21:21:13.586389+00:00",
+        "sha256": "65f011f7c6247bab2ccc525f55bfc3f0458c80d66f70b38159cab1fab42b8c42",
+        "log": "/private/tmp/logex-audit-offline-repair-20260918/gates/dashboard.log"
+      },
+      {
+        "name": "vendor",
+        "command": [
+          "python3",
+          "tools/verify_datafusion_vendor.py"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T21:21:13.587002+00:00",
+        "finished": "2026-09-17T21:21:13.720949+00:00",
+        "sha256": "6755a02cf45534df3ee2ceb1312a5de76c07ade7dd1320e318bb2bbe38d0a97c",
+        "log": "/private/tmp/logex-audit-offline-repair-20260918/gates/vendor.log"
+      },
+      {
+        "name": "format",
+        "command": [
+          "cargo",
+          "fmt",
+          "--all",
+          "--",
+          "--check"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T21:21:13.721320+00:00",
+        "finished": "2026-09-17T21:21:14.838276+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-audit-offline-repair-20260918/gates/format.log"
+      },
+      {
+        "name": "vendor-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2024",
+          "--config-path",
+          "vendor/reth-network/rustfmt.toml",
+          "--config",
+          "skip_children=true",
+          "vendor/reth-network/src/eth_requests.rs",
+          "vendor/reth-network/src/session/active.rs",
+          "vendor/reth-network/src/session/mod.rs",
+          "vendor/reth-network/src/session/types.rs",
+          "vendor/reth-network/src/session/range_update.rs",
+          "vendor/reth-discv5/src/lib.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T21:21:14.838627+00:00",
+        "finished": "2026-09-17T21:21:14.908648+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-audit-offline-repair-20260918/gates/vendor-format.log"
+      },
+      {
+        "name": "enr-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2021",
+          "--config",
+          "skip_children=true",
+          "vendor/enr/src/lib.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T21:21:14.908957+00:00",
+        "finished": "2026-09-17T21:21:14.960868+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-audit-offline-repair-20260918/gates/enr-format.log"
+      },
+      {
+        "name": "gossipsub-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2021",
+          "--config",
+          "skip_children=true",
+          "vendor/libp2p-gossipsub/src/time_cache.rs",
+          "vendor/libp2p-gossipsub/src/behaviour.rs",
+          "vendor/libp2p-gossipsub/src/behaviour/tests.rs",
+          "vendor/libp2p-gossipsub/src/subscription_filter.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T21:21:14.961229+00:00",
+        "finished": "2026-09-17T21:21:15.061650+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-audit-offline-repair-20260918/gates/gossipsub-format.log"
+      },
+      {
+        "name": "aggregate-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2021",
+          "--config",
+          "max_width=90,skip_children=true",
+          "vendor/datafusion-functions-aggregate/src/sum.rs",
+          "vendor/datafusion-functions-aggregate/src/average.rs",
+          "vendor/datafusion-functions-aggregate-common/src/aggregate/sum_distinct/numeric.rs",
+          "vendor/datafusion-functions-aggregate-common/src/aggregate/avg_distinct/decimal.rs",
+          "vendor/datafusion-functions-aggregate-common/src/utils.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T21:21:15.062023+00:00",
+        "finished": "2026-09-17T21:21:15.124585+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-audit-offline-repair-20260918/gates/aggregate-format.log"
+      },
+      {
+        "name": "check",
+        "command": [
+          "cargo",
+          "check",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T21:21:15.125019+00:00",
+        "finished": "2026-09-17T21:21:31.335519+00:00",
+        "sha256": "2fdfa25ba13a6593325d15b925f48d37872ef4b7fdb59b6802fdd96bce686471",
+        "log": "/private/tmp/logex-audit-offline-repair-20260918/gates/check.log"
+      },
+      {
+        "name": "clippy",
+        "command": [
+          "cargo",
+          "clippy",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T21:21:31.336553+00:00",
+        "finished": "2026-09-17T21:21:47.299465+00:00",
+        "sha256": "05fe1dc1583ac9bb49eac2d67ccec78c64d46c612674dbe053daf17b4830abc4",
+        "log": "/private/tmp/logex-audit-offline-repair-20260918/gates/clippy.log"
+      },
+      {
+        "name": "test",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T21:21:47.300354+00:00",
+        "finished": "2026-09-17T21:28:38.843332+00:00",
+        "sha256": "c2de94c30218378b0a868cc9540b1df4603b0a25f270543cf63bc5e549c18311",
+        "log": "/private/tmp/logex-audit-offline-repair-20260918/gates/test.log"
+      },
+      {
+        "name": "doc",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--doc",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T21:28:38.847889+00:00",
+        "finished": "2026-09-17T21:28:56.395750+00:00",
+        "sha256": "e9dfcf5cab581ce2681570b6b488bd307f108594ead7e78e157822c7a399da99",
+        "log": "/private/tmp/logex-audit-offline-repair-20260918/gates/doc.log"
+      },
+      {
+        "name": "release-build",
+        "command": [
+          "cargo",
+          "build",
+          "-p",
+          "logex-node",
+          "--release",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T21:28:56.396472+00:00",
+        "finished": "2026-09-17T21:30:47.252712+00:00",
+        "sha256": "eae5df84ee7b39f5c898a6a60ae9b4bfe9f86735c0dba1fbcd2878d7ef7f4048",
+        "log": "/private/tmp/logex-audit-offline-repair-20260918/gates/release-build.log"
+      }
+    ]
+  },
+  "workspace_tests": {
+    "passed": 2103,
+    "failed": 0,
+    "ignored": 24,
+    "targets": 37
+  },
+  "documentation_tests": {
+    "passed": 0,
+    "failed": 0,
+    "ignored": 0,
+    "targets": 8
+  },
+  "focused_inspection": {
+    "passed": 24,
+    "failed": 0,
+    "ignored": 0,
+    "targets": 1
+  },
+  "storage_tests": {
+    "passed": 377,
+    "failed": 0,
+    "ignored": 8,
+    "targets": 3
+  },
+  "draft_controls": {
+    "passed": 19,
+    "failed": 4,
+    "ignored": 0,
+    "targets": 1
+  },
+  "browser_tests": {
+    "passed": 36,
+    "failed": 0
+  },
+  "evidence": {
+    "path": "docs/audit/baselines/2026-09-18-offline-repair-inspection-evidence.json.gz",
+    "files": 32,
+    "bytes_uncompressed": 1028231,
+    "bytes": 185906,
+    "sha256": "8b0de2f62545fb9d066588047927f16e946a11c682eb1b67d051aeae7b10d705"
+  },
+  "validation": {
+    "path": "docs/audit/baselines/2026-09-18-offline-repair-inspection-validation.json.gz",
+    "files": 15,
+    "bytes_uncompressed": 253105,
+    "bytes": 49295,
+    "sha256": "371d0ac477b0810deca4ad58d822e541388089cb925a119a7cf489906296e403"
+  },
+  "publication": {
+    "state": "pending"
+  },
+  "boundaries": [
+    "This is the explicit read-only primary-data inspection prerequisite; no repair command, automatic startup scan, replacement fetch, index rebuild, quarantine or repair publication is implemented.",
+    "Tests use isolated finite local fixtures and no live peers/production data/remote host. Original startup remains intentionally lightweight; draft before/after controls are development regressions, not original-repository findings.",
+    "The returned inspection retains exclusive cooperative inode ownership. Immutability checks cover contents, directory entries and modification times; filesystem read access times are not covered.",
+    "Caller source limits bound specified row/artifact/decode work, not RSS. Existing format-bounded catalog/manifest/bundle metadata loads precede those allowances. Captured raw lengths constrain inspection reads after preflight.",
+    "Logical commitment verification and catalog extrema do not establish consensus truth or complete-block coverage. Derived indexes and redundant manifest-bound hints are not exhaustively verified; incomplete recovery is preserved and blocks source verdicts.",
+    "Ordinary ingestion and query limits, persisted formats, write barriers and toolchain/dependencies are unchanged. No throughput improvement or benchmark claim is made.",
+    "Two draft code gaps (empty raw sources and bundled ID/kind comparison) and an invalid unbound-fixture assumption were resolved before source freeze. Present empty paged/canonical artifacts remain structurally checked.",
+    "Offline repair, networking/query policy, integrated acceptance and later live/staging validation remain open."
+  ]
+}
