@@ -43,6 +43,7 @@ struct LiveTransferSessions {
 }
 
 struct LiveTransferSession {
+    identity: Arc<()>,
     subscription: Erc20TransferSubscription,
     scope: LiveSubscriptionScope,
     notifications: VecDeque<Erc20TransferNotification>,
@@ -145,6 +146,7 @@ impl SubscriptionManager {
         let receiver = session.sender.subscribe();
         LiveTransferSessionAttachment {
             id,
+            identity: Arc::clone(&session.identity),
             snapshot,
             receiver,
         }
@@ -178,17 +180,25 @@ impl SubscriptionManager {
         sessions.sessions.remove(&id).is_some()
     }
 
-    fn detach_live_transfer_session(&self, id: &str) {
+    fn detach_live_transfer_session(&self, id: &str, identity: &Arc<()>) {
         let Some(id) = normalize_subscription_id(id.to_string()) else {
             return;
         };
         let mut sessions = self.live_transfers();
-        if let Some(session) = sessions.sessions.get_mut(&id) {
+        if let Some(session) = sessions.sessions.get_mut(&id)
+            && Arc::ptr_eq(&session.identity, identity)
+        {
             session.active_connections = session.active_connections.saturating_sub(1);
-            let should_expire = session.scope == LiveSubscriptionScope::Dashboard
-                && session.active_connections == 0;
-            if should_expire {
-                session.expires_at = Some(Instant::now() + DASHBOARD_SESSION_TIMEOUT);
+            if session.active_connections == 0 {
+                match session.scope {
+                    LiveSubscriptionScope::Ephemeral => {
+                        sessions.sessions.remove(&id);
+                    }
+                    LiveSubscriptionScope::Dashboard => {
+                        session.expires_at = Some(Instant::now() + DASHBOARD_SESSION_TIMEOUT);
+                    }
+                    LiveSubscriptionScope::Service => {}
+                }
             }
         }
     }
@@ -284,6 +294,7 @@ struct Erc20TransferNotification {
 
 struct LiveTransferSessionAttachment {
     id: String,
+    identity: Arc<()>,
     snapshot: LiveTransferSessionSnapshot,
     receiver: broadcast::Receiver<Arc<Vec<Erc20TransferNotification>>>,
 }
@@ -343,6 +354,7 @@ impl LiveTransferSession {
     fn new(subscription: Erc20TransferSubscription, scope: LiveSubscriptionScope) -> Self {
         let (sender, _) = broadcast::channel(LIVE_TRANSFER_CHANNEL_CAPACITY);
         Self {
+            identity: Arc::new(()),
             subscription,
             scope,
             notifications: VecDeque::new(),
@@ -358,7 +370,7 @@ impl LiveTransferSession {
     }
 
     fn push_notifications(&mut self, notifications: &[Erc20TransferNotification]) {
-        for notification in notifications.iter().rev() {
+        for notification in notifications {
             self.notifications.push_front(notification.clone());
             while self.notifications.len() > LIVE_TRANSFER_HISTORY_LIMIT {
                 self.notifications.pop_back();
@@ -651,11 +663,12 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>) {
 }
 
 // Detach even when storage failure cancels the entire socket future.
-struct DetachSession<'a>(&'a SubscriptionManager, String);
+// This token identifies an entry without keeping its broadcast sender alive.
+struct DetachSession<'a>(&'a SubscriptionManager, String, Arc<()>);
 
 impl Drop for DetachSession<'_> {
     fn drop(&mut self) {
-        self.0.detach_live_transfer_session(&self.1);
+        self.0.detach_live_transfer_session(&self.1, &self.2);
     }
 }
 
@@ -675,7 +688,11 @@ async fn handle_live_transfer_ws(
         }
     };
     let mut attachment = subs.upsert_live_transfer_session(requested_id, scope, subscription, true);
-    let _detach = DetachSession(&subs, attachment.id.clone());
+    let _detach = DetachSession(
+        &subs,
+        attachment.id.clone(),
+        Arc::clone(&attachment.identity),
+    );
 
     tracing::debug!(
         kind = "erc20Transfers",
@@ -1053,7 +1070,7 @@ mod tests {
         assert_eq!(snapshot.active_connections, 1);
         assert_eq!(snapshot.expires_in_seconds, None);
 
-        mgr.detach_live_transfer_session("dashboard-1");
+        mgr.detach_live_transfer_session("dashboard-1", &attachment.identity);
         {
             let mut sessions = mgr.live_transfers();
             sessions.sessions.get_mut("dashboard-1").unwrap().expires_at =
@@ -1078,7 +1095,7 @@ mod tests {
         let owned = manager.clone();
         let (ready, started) = tokio::sync::oneshot::channel();
         let work = tokio::spawn(async move {
-            let _detach = DetachSession(&owned, attachment.id);
+            let _detach = DetachSession(&owned, attachment.id, attachment.identity);
             ready.send(()).unwrap();
             std::future::pending::<()>().await;
         });
@@ -1095,6 +1112,222 @@ mod tests {
         let snapshot = manager.live_transfer_session("owned-session").unwrap();
         assert_eq!(snapshot.active_connections, 0);
         assert!(snapshot.expires_in_seconds.is_some());
+    }
+
+    #[test]
+    fn session_identity_survives_delete_and_recreate() {
+        let manager = SubscriptionManager::new();
+        let subscription =
+            Erc20TransferSubscription::new(vec![Address::repeat_byte(0xA1)], vec![], None, None)
+                .unwrap();
+        let mut old = manager.upsert_live_transfer_session(
+            Some("reused".into()),
+            LiveSubscriptionScope::Dashboard,
+            subscription.clone(),
+            true,
+        );
+        let old_guard = DetachSession(&manager, old.id.clone(), Arc::clone(&old.identity));
+        assert!(manager.remove_live_transfer_session(&old.id));
+        assert!(matches!(
+            old.receiver.try_recv(),
+            Err(broadcast::error::TryRecvError::Closed)
+        ));
+        let replacement = manager.upsert_live_transfer_session(
+            Some(old.id.clone()),
+            LiveSubscriptionScope::Dashboard,
+            subscription,
+            true,
+        );
+        let replacement_guard = DetachSession(
+            &manager,
+            replacement.id.clone(),
+            Arc::clone(&replacement.identity),
+        );
+        drop(old_guard);
+        let snapshot = manager.live_transfer_session(&replacement.id).unwrap();
+        assert_eq!(
+            snapshot.active_connections, 1,
+            "old owner detached replacement"
+        );
+        assert!(snapshot.expires_in_seconds.is_none());
+        drop(replacement_guard);
+        let snapshot = manager.live_transfer_session(&replacement.id).unwrap();
+        assert_eq!(snapshot.active_connections, 0);
+        assert!(snapshot.expires_in_seconds.is_some());
+    }
+
+    #[test]
+    fn named_ephemeral_session_ends_with_its_last_owner() {
+        let manager = SubscriptionManager::new();
+        let request: SubscribeRequest = serde_json::from_value(serde_json::json!({
+            "type": "erc20Transfers", "subscriptionId": "named-ephemeral",
+            "addresses": [format!("{:#x}", Address::repeat_byte(0xA1))]
+        }))
+        .unwrap();
+        let scope = request.live_session_scope();
+        assert_eq!(scope, LiveSubscriptionScope::Ephemeral);
+        let id = request.subscription_id.clone();
+        let subscription = request.into_erc20_transfer_subscription().unwrap();
+        let first = manager.upsert_live_transfer_session(id, scope, subscription.clone(), true);
+        let first_guard = DetachSession(&manager, first.id.clone(), Arc::clone(&first.identity));
+        let second =
+            manager.upsert_live_transfer_session(Some(first.id.clone()), scope, subscription, true);
+        let second_guard = DetachSession(&manager, second.id.clone(), Arc::clone(&second.identity));
+        assert_eq!(
+            manager
+                .live_transfer_session(&first.id)
+                .unwrap()
+                .active_connections,
+            2
+        );
+        drop(first_guard);
+        assert_eq!(
+            manager
+                .live_transfer_session(&second.id)
+                .unwrap()
+                .active_connections,
+            1
+        );
+        drop(second_guard);
+        assert!(
+            manager.live_transfer_session(&second.id).is_none(),
+            "ephemeral session survived its last owner"
+        );
+    }
+
+    #[test]
+    fn retained_upsert_preserves_owners_history_and_uses_current_configuration() {
+        let manager = SubscriptionManager::new();
+        let wallet = Address::repeat_byte(0xA1);
+        let token = Address::repeat_byte(0xBB);
+        let other_token = Address::repeat_byte(0xCC);
+        let initial =
+            Erc20TransferSubscription::new(vec![wallet], vec![token], None, None).unwrap();
+        let mut first = manager.upsert_live_transfer_session(
+            Some("updated".into()),
+            LiveSubscriptionScope::Dashboard,
+            initial,
+            true,
+        );
+        let first_guard = DetachSession(&manager, first.id.clone(), Arc::clone(&first.identity));
+        manager.notify(&[make_transfer_log(token, wallet, wallet, 1, 1)]);
+        first.receiver.try_recv().unwrap();
+        let updated =
+            Erc20TransferSubscription::new(vec![wallet], vec![other_token], None, None).unwrap();
+        let second = manager.upsert_live_transfer_session(
+            Some(first.id.clone()),
+            LiveSubscriptionScope::Service,
+            updated,
+            true,
+        );
+        let second_guard = DetachSession(&manager, second.id.clone(), Arc::clone(&second.identity));
+        assert!(Arc::ptr_eq(&first.identity, &second.identity));
+        assert_eq!(second.snapshot.notifications.len(), 1);
+        assert_eq!(second.snapshot.active_connections, 2);
+        manager.notify(&[make_transfer_log(token, wallet, wallet, 1, 2)]);
+        assert!(matches!(
+            first.receiver.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+        manager.notify(&[
+            make_transfer_log(other_token, wallet, wallet, 1, 3),
+            make_transfer_log(other_token, wallet, wallet, 1, 4),
+        ]);
+        let batch = first.receiver.try_recv().unwrap();
+        assert_eq!(
+            batch.iter().map(|n| n.block_number).collect::<Vec<_>>(),
+            vec![3, 4]
+        );
+        let snapshot = manager.live_transfer_session(&second.id).unwrap();
+        assert_eq!(
+            snapshot
+                .notifications
+                .iter()
+                .map(|n| n.block_number)
+                .collect::<Vec<_>>(),
+            vec![4, 3, 1]
+        );
+        drop(first_guard);
+        assert_eq!(
+            manager
+                .live_transfer_session(&second.id)
+                .unwrap()
+                .active_connections,
+            1
+        );
+        drop(second_guard);
+        let snapshot = manager.live_transfer_session(&second.id).unwrap();
+        assert_eq!(snapshot.scope, LiveSubscriptionScope::Service);
+        assert_eq!(snapshot.active_connections, 0);
+        assert!(snapshot.expires_in_seconds.is_none());
+    }
+
+    fn history_session() -> LiveTransferSession {
+        LiveTransferSession::new(
+            Erc20TransferSubscription::new(vec![Address::repeat_byte(0xA1)], vec![], None, None)
+                .unwrap(),
+            LiveSubscriptionScope::Service,
+        )
+    }
+
+    fn history_notification(index: u32) -> Erc20TransferNotification {
+        let mut notification =
+            Erc20TransferSubscription::new(vec![Address::repeat_byte(0xA1)], vec![], None, None)
+                .unwrap()
+                .notification_for(&make_transfer_log(
+                    Address::repeat_byte(0xBB),
+                    Address::repeat_byte(0xA1),
+                    Address::repeat_byte(0xC1),
+                    1,
+                    1,
+                ))
+                .unwrap();
+        notification.log_index = index;
+        notification
+    }
+
+    #[test]
+    fn retained_history_is_independent_of_publication_batches() {
+        let mut batched = history_session();
+        batched.push_notifications(&[history_notification(0), history_notification(1)]);
+        batched.push_notifications(&[history_notification(2)]);
+        let mut individual = history_session();
+        for index in 0..3 {
+            individual.push_notifications(&[history_notification(index)]);
+        }
+        let indexes = |session: &LiveTransferSession| {
+            session
+                .notifications
+                .iter()
+                .map(|n| n.log_index)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(indexes(&batched), indexes(&individual));
+        assert_eq!(indexes(&batched), vec![2, 1, 0]);
+    }
+
+    #[test]
+    fn retained_history_evicts_oldest_within_and_across_batches() {
+        let mut session = history_session();
+        let prototype = history_notification(0);
+        let notifications: Vec<_> = (0..=LIVE_TRANSFER_HISTORY_LIMIT as u32)
+            .map(|index| {
+                let mut notification = prototype.clone();
+                notification.log_index = index;
+                notification
+            })
+            .collect();
+        session.push_notifications(&notifications);
+        assert_eq!(session.notifications.len(), LIVE_TRANSFER_HISTORY_LIMIT);
+        assert_eq!(session.dropped_notifications, 1);
+        assert_eq!(
+            session.notifications.front().unwrap().log_index,
+            LIVE_TRANSFER_HISTORY_LIMIT as u32
+        );
+        assert_eq!(session.notifications.back().unwrap().log_index, 1);
+        session.push_notifications(&[history_notification(LIVE_TRANSFER_HISTORY_LIMIT as u32 + 1)]);
+        assert_eq!(session.dropped_notifications, 2);
+        assert_eq!(session.notifications.back().unwrap().log_index, 2);
     }
 
     #[test]
