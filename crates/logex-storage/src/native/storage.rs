@@ -14,6 +14,7 @@ use super::recovery::{IngestRoute, RecoveryJournal};
 #[cfg(test)]
 use super::segment::{append_compacted_rows, append_rows, persist_segment_manifest};
 use crate::durability::{self, Publication};
+use crate::row_bounds::RowBounds;
 use crate::state::SyncHead;
 use crate::wal::{EncodedWalBatch, WriteAheadLog};
 use crate::{ColumnFile, NullBitmap, SegmentReader};
@@ -23,7 +24,7 @@ use super::catalog::{
     StorageCatalogPaths, StorageState, validate_cached_headers,
 };
 use super::segment::{
-    append_ingest_rows, apply_ordered_rows_to_descriptor, apply_rows_to_descriptor,
+    append_ingest_rows, apply_row_bounds_to_descriptor, apply_rows_to_descriptor,
     compact_ingest_segment, compact_segment, persist_ingest_manifest,
     persist_ingest_manifest_with_columns, segment_uses_current_compaction_profile,
     verify_raw_segment_files_complete, write_bundled_rows,
@@ -1086,6 +1087,7 @@ impl NativeStorage {
         self.complete_checkpoint_batch()
     }
 
+    /// Preserve caller row order while recording exact bounds over every row.
     pub fn write_historical_batch(
         &mut self,
         rows: &[logex_types::LogRow],
@@ -1140,7 +1142,7 @@ impl NativeStorage {
                 ));
             }
             let chunk = &candidate[..take];
-            let (columns, revision) = super::segment::write_new_historical_bundle(
+            let (columns, revision, bounds) = super::segment::write_new_historical_bundle(
                 &segment_dir,
                 &descriptor,
                 chunk,
@@ -1148,7 +1150,7 @@ impl NativeStorage {
             )?;
             descriptor.source_commitment = revision.next;
             descriptor.source_state = None;
-            apply_ordered_rows_to_descriptor(&mut descriptor, chunk);
+            apply_row_bounds_to_descriptor(&mut descriptor, bounds);
             let columns = columns.apply_to(&mut descriptor);
             persist_ingest_manifest_with_columns(
                 &self.paths,
@@ -1213,18 +1215,26 @@ impl NativeStorage {
                 }
             }
             let chunk = &rows[offset..offset + take];
-            if existing_rows > 0
-                && historical_segment_would_exceed_block_span(
+            // This fold replaces the existing block-span scan and also supplies
+            // exact time bounds for unordered accepted input. New bundles collect
+            // the same summary during their existing preflight validation.
+            let bounds = if existing_rows > 0 {
+                RowBounds::from_rows(chunk)
+            } else {
+                None
+            };
+            if bounds.is_some_and(|bounds| {
+                historical_segment_would_exceed_block_span(
                     &self.catalog.segments[segment_index],
-                    chunk,
+                    bounds,
                 )
-            {
+            }) {
                 self.finalize_historical_segment()?;
                 continue;
             }
 
             let publication = self.segment_publication(segment_id);
-            let (columns, revision) = if existing_rows == 0 {
+            let (columns, revision, bounds) = if existing_rows == 0 {
                 super::segment::write_new_historical_bundle(
                     &segment_dir,
                     &self.catalog.segments[segment_index],
@@ -1251,11 +1261,11 @@ impl NativeStorage {
                     inspected,
                     &revision,
                 )?;
-                (columns, revision)
+                (columns, revision, bounds)
             };
             {
                 let descriptor = &mut self.catalog.segments[segment_index];
-                apply_ordered_rows_to_descriptor(descriptor, chunk);
+                apply_row_bounds_to_descriptor(descriptor, bounds);
                 descriptor.source_commitment = revision.next;
                 descriptor.source_state = revision.state;
                 let columns = columns.apply_to(descriptor);
@@ -2844,11 +2854,10 @@ fn verify_segment_integrity(
 
 fn historical_segment_would_exceed_block_span(
     descriptor: &SegmentDescriptor,
-    rows: &[LogRow],
+    bounds: RowBounds,
 ) -> bool {
-    let Some((min_block, max_block)) = rows_block_range(rows) else {
-        return false;
-    };
+    let min_block = bounds.min_block;
+    let max_block = bounds.max_block;
     let min_block = descriptor
         .min_block
         .map(|current| current.min(min_block))
@@ -2884,18 +2893,6 @@ fn compacted_historical_row_prefix_len(row_count: usize, target_rows: usize) -> 
     } else {
         row_count
     }
-}
-
-fn rows_block_range(rows: &[LogRow]) -> Option<(u64, u64)> {
-    let mut iter = rows.iter().map(|row| row.block_number);
-    let first = iter.next()?;
-    let mut min_block = first;
-    let mut max_block = first;
-    for block_number in iter {
-        min_block = min_block.min(block_number);
-        max_block = max_block.max(block_number);
-    }
-    Some((min_block, max_block))
 }
 
 fn has_raw_segment_artifacts(dir: &Path) -> io::Result<bool> {
@@ -9080,5 +9077,310 @@ mod tests {
         );
         assert_eq!(fs::read(&manifest_path).unwrap(), manifest);
         assert_reorg_state(&storage, &headers, &rows, true);
+    }
+
+    fn historical_range_rows(values: &[(u64, u64)]) -> Vec<LogRow> {
+        let mut rows = make_rows(values.len(), 100);
+        for (row, &(block, timestamp)) in rows.iter_mut().zip(values) {
+            row.block_number = block;
+            row.timestamp = timestamp;
+        }
+        rows
+    }
+
+    fn assert_exact_row_bounds(storage: &NativeStorage, expected: &[LogRow]) {
+        let mut physical = Vec::new();
+        for descriptor in storage
+            .segments()
+            .iter()
+            .filter(|segment| segment.row_count > 0)
+        {
+            let reader = SegmentReader::open(&storage.segment_path(descriptor.id)).unwrap();
+            let rows = reader.read_log_rows(None).unwrap();
+            let wanted = (
+                rows.iter().map(|row| row.block_number).min(),
+                rows.iter().map(|row| row.block_number).max(),
+                rows.iter().map(|row| row.timestamp).min(),
+                rows.iter().map(|row| row.timestamp).max(),
+            );
+            assert_eq!(
+                (
+                    descriptor.min_block,
+                    descriptor.max_block,
+                    descriptor.min_timestamp,
+                    descriptor.max_timestamp
+                ),
+                wanted,
+                "catalog segment {}",
+                descriptor.id
+            );
+            let manifest =
+                SegmentManifest::load(&storage.paths.segment_manifest_path(descriptor.id))
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(
+                (
+                    manifest.min_block,
+                    manifest.max_block,
+                    manifest.min_timestamp,
+                    manifest.max_timestamp
+                ),
+                wanted,
+                "manifest segment {}",
+                descriptor.id
+            );
+            let meta = storage.partition_meta(descriptor);
+            assert_eq!(
+                (
+                    Some(meta.min_block),
+                    Some(meta.max_block),
+                    meta.min_timestamp,
+                    meta.max_timestamp
+                ),
+                wanted
+            );
+            assert_eq!(descriptor.row_count, rows.len() as u64);
+            physical.extend(rows);
+        }
+        assert_eq!(
+            physical, expected,
+            "metadata calculation must preserve caller row order and payloads"
+        );
+    }
+
+    #[test]
+    fn historical_range_bounds_cover_new_append_rotation_and_replay_routes() {
+        let unordered = historical_range_rows(&[(100, 1000), (5, 50), (900, 9900), (101, 1001)]);
+        let cases = [
+            ("staged-new", 100, vec![unordered.clone()], vec![4]),
+            ("dense-new", 4, vec![unordered.clone()], vec![4]),
+            (
+                "staged-independent-time",
+                100,
+                vec![historical_range_rows(&[
+                    (100, 1000),
+                    (101, 50),
+                    (102, 9900),
+                    (103, 1001),
+                ])],
+                vec![4],
+            ),
+            (
+                "dense-independent-time",
+                4,
+                vec![historical_range_rows(&[
+                    (100, 1000),
+                    (101, 50),
+                    (102, 9900),
+                    (103, 1001),
+                ])],
+                vec![4],
+            ),
+            (
+                "staged-append",
+                12,
+                vec![make_rows(2, 60), unordered.clone()],
+                vec![6],
+            ),
+            (
+                "row-rotation",
+                6,
+                vec![
+                    make_rows(2, 60),
+                    historical_range_rows(&[
+                        (100, 1000),
+                        (5, 50),
+                        (900, 9900),
+                        (4, 40),
+                        (101, 1001),
+                    ]),
+                ],
+                vec![6, 1],
+            ),
+            (
+                "block-span-rotation",
+                100,
+                vec![
+                    make_rows(2, 70_000),
+                    historical_range_rows(&[
+                        (70_002, 700_020),
+                        (1, 10),
+                        (70_003, 700_030),
+                        (70_004, 700_040),
+                    ]),
+                ],
+                vec![2, 4],
+            ),
+            (
+                "dense-rotation-remainder",
+                6,
+                vec![
+                    make_rows(1, 60),
+                    historical_range_rows(&[
+                        (100, 1000),
+                        (5, 50),
+                        (900, 9900),
+                        (3, 30),
+                        (700, 7000),
+                        (101, 1001),
+                        (200, 2000),
+                        (2, 20),
+                        (1200, 12000),
+                        (4, 40),
+                        (800, 8000),
+                        (201, 2001),
+                        (300, 3000),
+                    ]),
+                ],
+                vec![1, 6, 6, 1],
+            ),
+        ];
+        for (name, target, batches, counts) in cases {
+            for checkpoint in [false, true] {
+                let tmp = TempDir::new().unwrap();
+                let config = NativeStorageConfig {
+                    data_dir: tmp.path().to_owned(),
+                    hot_target_rows: target,
+                    ..Default::default()
+                };
+                let mut storage = NativeStorage::open(config.clone()).unwrap();
+                let mut expected = Vec::new();
+                for batch in &batches {
+                    storage.write_historical_batch(batch).unwrap();
+                    expected.extend_from_slice(batch);
+                    assert_exact_row_bounds(&storage, &expected);
+                }
+                assert_eq!(
+                    storage
+                        .segments()
+                        .iter()
+                        .filter(|s| s.row_count > 0)
+                        .map(|s| s.row_count)
+                        .collect::<Vec<_>>(),
+                    counts,
+                    "{name}"
+                );
+                if checkpoint {
+                    storage.checkpoint_durable().unwrap();
+                }
+                drop(storage);
+                for _ in 0..2 {
+                    let reopened = NativeStorage::open(config.clone()).unwrap();
+                    assert_exact_row_bounds(&reopened, &expected);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn historical_range_bounds_preserve_raw_and_bundled_live_controls() {
+        let rows = historical_range_rows(&[(100, 1000), (5, 50), (900, 9900), (101, 1001)]);
+        for bundled in [false, true] {
+            let tmp = TempDir::new().unwrap();
+            let config = NativeStorageConfig {
+                data_dir: tmp.path().to_owned(),
+                hot_target_rows: 100,
+                ..Default::default()
+            };
+            let mut storage = NativeStorage::open(config.clone()).unwrap();
+            if bundled {
+                let header = ingestion_header(901, B256::ZERO);
+                storage
+                    .ingest_canonical_batch(&rows, &header, std::slice::from_ref(&header), None)
+                    .unwrap();
+            } else {
+                storage.write_batch(&rows).unwrap();
+            }
+            storage.checkpoint_durable().unwrap();
+            let descriptor = storage.catalog.active_hot_segment().unwrap();
+            assert_eq!(descriptor.column_bundle.is_some(), bundled);
+            assert_exact_row_bounds(&storage, &rows);
+            drop(storage);
+            assert_exact_row_bounds(&NativeStorage::open(config).unwrap(), &rows);
+        }
+    }
+
+    #[test]
+    fn historical_range_bounds_cover_append_to_supported_raw_prefixes() {
+        for identified in [false, true] {
+            let tmp = TempDir::new().unwrap();
+            let config = NativeStorageConfig {
+                data_dir: tmp.path().to_owned(),
+                hot_target_rows: 100,
+                ..Default::default()
+            };
+            let mut storage = NativeStorage::open(config.clone()).unwrap();
+            let id = storage.ensure_active_historical_segment().unwrap();
+            let index = storage
+                .catalog
+                .segments
+                .iter()
+                .position(|segment| segment.id == id)
+                .unwrap();
+            let mut descriptor = storage.catalog.segments[index].clone();
+            if !identified {
+                descriptor.source_namespace = None;
+                descriptor.source_commitment = None;
+                descriptor.source_state = None;
+            }
+            let initial = make_rows(2, 60);
+            let revision =
+                crate::commitment::AppendRevision::new(descriptor.source_state.as_ref(), &initial)
+                    .unwrap();
+            let identity =
+                descriptor
+                    .source_namespace
+                    .map(|namespace| crate::column::SourceIdentity {
+                        namespace: namespace.0,
+                        generation: descriptor.generation,
+                        segment_id: descriptor.id,
+                        kind: descriptor.kind,
+                    });
+            append_ingest_rows(
+                &storage.segment_path(id),
+                0,
+                &initial,
+                Publication::Durable,
+                identity,
+                &revision,
+            )
+            .unwrap();
+            apply_rows_to_descriptor(&mut descriptor, &initial);
+            descriptor.source_commitment = revision.next;
+            descriptor.source_state = revision.state;
+            persist_ingest_manifest(&storage.paths, &descriptor, Publication::Durable).unwrap();
+            storage.catalog.segments[index] = descriptor;
+            storage.persist_catalog().unwrap();
+            drop(storage);
+            let mut storage = NativeStorage::open(config.clone()).unwrap();
+            assert!(!super::super::segment::segment_is_compacted(&storage.paths, id).unwrap());
+            let added = historical_range_rows(&[(100, 1000), (5, 50), (900, 9900), (101, 1001)]);
+            storage.write_historical_batch(&added).unwrap();
+            storage.checkpoint_durable().unwrap();
+            assert_eq!(storage.active_historical_segment_id(), Some(id));
+            assert!(super::super::segment::segment_is_compacted(&storage.paths, id).unwrap());
+            let expected = [initial, added].concat();
+            assert_exact_row_bounds(&storage, &expected);
+            drop(storage);
+            assert_exact_row_bounds(&NativeStorage::open(config).unwrap(), &expected);
+        }
+    }
+
+    #[test]
+    fn historical_range_bounds_empty_and_single_row_are_exact() {
+        let tmp = TempDir::new().unwrap();
+        let mut storage = NativeStorage::open(NativeStorageConfig {
+            data_dir: tmp.path().to_owned(),
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(storage.write_historical_batch(&[]).unwrap().is_empty());
+        assert_eq!(storage.total_rows(), 0);
+        let rows = historical_range_rows(&[(0, 0)]);
+        storage.write_historical_batch(&rows).unwrap();
+        let before = storage.catalog.clone();
+        assert!(storage.write_historical_batch(&[]).unwrap().is_empty());
+        assert_eq!(storage.catalog, before);
+        assert_exact_row_bounds(&storage, &rows);
     }
 }

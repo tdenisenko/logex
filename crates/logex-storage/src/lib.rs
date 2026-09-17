@@ -9,6 +9,7 @@ pub mod native;
 mod page;
 mod partition;
 mod reader;
+mod row_bounds;
 mod segment_reader;
 mod state;
 mod wal;

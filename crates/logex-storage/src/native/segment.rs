@@ -18,6 +18,7 @@ use crate::page::{
     encode_u64_page, encode_var_bytes_page, read_page_index, write_page_index,
 };
 use crate::reader::{ColumnReader, RawBytesColumn, RawFixedColumn};
+use crate::row_bounds::RowBounds;
 use crate::segment_reader::SegmentReader;
 
 use super::catalog::{
@@ -556,7 +557,11 @@ pub(crate) fn write_new_historical_bundle(
     descriptor: &SegmentDescriptor,
     rows: &[LogRow],
     replace_existing: bool,
-) -> std::io::Result<(EncodedColumns, crate::commitment::AppendRevision)> {
+) -> std::io::Result<(
+    EncodedColumns,
+    crate::commitment::AppendRevision,
+    Option<RowBounds>,
+)> {
     let invalid = || {
         std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -569,13 +574,14 @@ pub(crate) fn write_new_historical_bundle(
     let namespace = descriptor.source_namespace.ok_or_else(invalid)?;
     let root = descriptor.source_commitment.ok_or_else(invalid)?;
     let state = descriptor.source_state.as_ref().ok_or_else(invalid)?;
-    state.validate_new_append(namespace.0, root, rows)?;
+    let bounds = state.validate_new_append(namespace.0, root, rows)?;
     if replace_existing && segment_dir.exists() {
         fs::remove_dir_all(segment_dir)?;
     }
-    write_bundled_rows_with_callback(segment_dir, rows, || {
+    let (columns, revision) = write_bundled_rows_with_callback(segment_dir, rows, || {
         crate::commitment::AppendRevision::new(Some(state), rows)
-    })
+    })?;
+    Ok((columns, revision, bounds))
 }
 
 fn write_bundled_rows_with_callback<T>(
@@ -1164,80 +1170,41 @@ fn finish_column_workers<T, C, const N: usize>(
 }
 
 pub(crate) fn apply_rows_to_descriptor(descriptor: &mut SegmentDescriptor, rows: &[LogRow]) {
-    if rows.is_empty() {
-        return;
-    }
-
-    let min_block = rows.iter().map(|row| row.block_number).min().unwrap_or(0);
-    let max_block = rows.iter().map(|row| row.block_number).max().unwrap_or(0);
-    let min_timestamp = rows.iter().map(|row| row.timestamp).min().unwrap_or(0);
-    let max_timestamp = rows.iter().map(|row| row.timestamp).max().unwrap_or(0);
-
-    descriptor.min_block = Some(
-        descriptor
-            .min_block
-            .map(|current| current.min(min_block))
-            .unwrap_or(min_block),
-    );
-    descriptor.max_block = Some(
-        descriptor
-            .max_block
-            .map(|current| current.max(max_block))
-            .unwrap_or(max_block),
-    );
-    descriptor.min_timestamp = Some(
-        descriptor
-            .min_timestamp
-            .map(|current| current.min(min_timestamp))
-            .unwrap_or(min_timestamp),
-    );
-    descriptor.max_timestamp = Some(
-        descriptor
-            .max_timestamp
-            .map(|current| current.max(max_timestamp))
-            .unwrap_or(max_timestamp),
-    );
-    descriptor.row_count += rows.len() as u64;
+    apply_row_bounds_to_descriptor(descriptor, RowBounds::from_rows(rows));
 }
 
-pub(crate) fn apply_ordered_rows_to_descriptor(
+pub(crate) fn apply_row_bounds_to_descriptor(
     descriptor: &mut SegmentDescriptor,
-    rows: &[LogRow],
+    bounds: Option<RowBounds>,
 ) {
-    let (Some(first), Some(last)) = (rows.first(), rows.last()) else {
+    let Some(bounds) = bounds else {
         return;
     };
-
-    let min_block = first.block_number.min(last.block_number);
-    let max_block = first.block_number.max(last.block_number);
-    let min_timestamp = first.timestamp.min(last.timestamp);
-    let max_timestamp = first.timestamp.max(last.timestamp);
-
     descriptor.min_block = Some(
         descriptor
             .min_block
-            .map(|current| current.min(min_block))
-            .unwrap_or(min_block),
+            .map_or(bounds.min_block, |value| value.min(bounds.min_block)),
     );
     descriptor.max_block = Some(
         descriptor
             .max_block
-            .map(|current| current.max(max_block))
-            .unwrap_or(max_block),
+            .map_or(bounds.max_block, |value| value.max(bounds.max_block)),
     );
     descriptor.min_timestamp = Some(
         descriptor
             .min_timestamp
-            .map(|current| current.min(min_timestamp))
-            .unwrap_or(min_timestamp),
+            .map_or(bounds.min_timestamp, |value| {
+                value.min(bounds.min_timestamp)
+            }),
     );
     descriptor.max_timestamp = Some(
         descriptor
             .max_timestamp
-            .map(|current| current.max(max_timestamp))
-            .unwrap_or(max_timestamp),
+            .map_or(bounds.max_timestamp, |value| {
+                value.max(bounds.max_timestamp)
+            }),
     );
-    descriptor.row_count += rows.len() as u64;
+    descriptor.row_count += bounds.row_count;
 }
 
 /// Compaction, bundled canonical updates, and standalone manifest refresh share
@@ -3427,7 +3394,7 @@ mod tests {
                 fs::create_dir_all(&dir).unwrap();
                 fs::write(dir.join("stale"), b"uncommitted artifact").unwrap();
             }
-            let (columns, revision) =
+            let (columns, revision, _) =
                 write_new_historical_bundle(&dir, &descriptor, rows, replace_existing).unwrap();
             assert_eq!(columns.columns, serial.columns);
             assert_eq!(revision.previous, expected.previous);
