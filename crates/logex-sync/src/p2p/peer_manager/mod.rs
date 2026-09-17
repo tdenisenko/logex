@@ -2373,3 +2373,16 @@ mod range_policy_tests;
 #[rustfmt::skip]
 #[path = "../../../../../vendor/reth-network/src/session/types.rs"]
 mod range_snapshot_types;
+
+#[cfg(test)]
+impl PeerManager {
+    /// Test-only observation; never starts a peer request or changes cache state.
+    pub(crate) fn selection_cached_block(&self, hash: B256) -> bool {
+        reth_storage_api::BlockReader::block(
+            self.serve_cache.as_ref(),
+            alloy_eips::BlockHashOrNumber::Hash(hash),
+        )
+        .unwrap()
+        .is_some()
+    }
+}

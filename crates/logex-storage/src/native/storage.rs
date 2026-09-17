@@ -50,6 +50,7 @@ fn legacy_prefix_recovery_hook(before_manifest: bool) {
 
 #[path = "reorg.rs"]
 mod reorg;
+pub use reorg::PendingCanonicalReorg;
 
 const HISTORICAL_STAGING_MAX_BLOCK_SPAN: u64 = 65_536;
 
@@ -9382,5 +9383,48 @@ mod tests {
         assert!(storage.write_historical_batch(&[]).unwrap().is_empty());
         assert_eq!(storage.catalog, before);
         assert_exact_row_bounds(&storage, &rows);
+    }
+    #[test]
+    fn canonical_reorg_admission_handle_finish_and_drop_recover() {
+        for finish in [false, true] {
+            let tmp = TempDir::new().unwrap();
+            let (mut storage, headers, rows) = reorg_fixture(tmp.path());
+            let config = storage.config.clone();
+            storage.checkpoint_durable().unwrap();
+            durability::inject_failure(usize::MAX);
+            storage.checkpoint_durable().unwrap();
+            assert!(
+                durability::take_events().is_empty(),
+                "clean repeated checkpoint performs no durability work"
+            );
+            let view = storage.read_view_token();
+            let pending = storage
+                .begin_canonical_reorg(
+                    &headers[1..]
+                        .iter()
+                        .map(Header::hash_slow)
+                        .collect::<Vec<_>>(),
+                    &headers[..1],
+                    Some(reorg_anchor(&headers[0])),
+                )
+                .unwrap();
+            assert!(!view.is_valid());
+            if finish {
+                assert_eq!(pending.finish().unwrap(), 2);
+                assert_reorg_state(&storage, &headers, &rows, true);
+            } else {
+                durability::take_events();
+                drop(pending);
+                assert!(
+                    durability::take_events().is_empty(),
+                    "drop must not scan or roll back"
+                );
+                assert!(storage.write_batch(&rows[..1]).is_err());
+                assert!(!storage.read_view_token().is_valid());
+            }
+            drop(storage);
+            let reopened = NativeStorage::open(config).unwrap();
+            assert_reorg_state(&reopened, &headers, &rows, true);
+        }
     }
 }

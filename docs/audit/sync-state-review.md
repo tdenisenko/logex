@@ -167,7 +167,8 @@ The [checkpoint-gap follow-up](checkpoint-gap-memory.md), source `b327cf90`,
 preserves terminal-anchor authentication using disposable authenticated scratch
 and bounded page/chunk memory. Eleven new controls cover framing, cancellation,
 cleanup, I/O, terminal trust, fallback and ingestion equivalence. All ten local
-gates pass; exact-head CI and merge remain. Immediate forward publication before terminal
+gates and CI passed before PR #222 merged as `bdee0df8`. Immediate forward
+publication before terminal
 authentication is unsuitable. An arbitrary maximum-gap rejection would prevent
 otherwise valid restarts and is not an equivalent remedy.
 
@@ -215,3 +216,12 @@ and publication status are updated there before closure. Batch 5 remains open
 for the specific remaining work described above.
 
 All six CI jobs passed on `89af308f`, including ten Linux volume/template cases with verified cleanup. [PR #220](https://github.com/tdenisenko/logex/pull/220) merged as `4635cbda`. The merge tree is identical to the tested head. The remaining batch-5 and storage-range items remain open.
+
+## Subsequent selection integration
+
+The [selection integration follow-up](sync-selection-integration.md) extends the
+same-snapshot decisions above through synchronous admission after storage waits.
+It corrects reproduced obsolete forward publication and queued-rewind behavior
+without holding CL across the complete reorg scan. Source `b61e6363` passes
+focused checks, final review and all ten local gates (1,960 tests /
+24 ignores); CI and merge remain.

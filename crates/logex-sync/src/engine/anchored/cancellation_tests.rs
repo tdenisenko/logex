@@ -592,3 +592,175 @@ async fn pending_selected_lineage_waits_without_progress_and_cancels() {
     assert_eq!(engine.head_tracker.tip_header(), Some(&header));
     assert_eq!(storage.read().await.sync_head(), original_head);
 }
+
+#[tokio::test]
+async fn selected_chain_return_during_queued_reorg_must_preserve_published_suffix() {
+    let (mut engine, _shutdown, _resources) = fixture().await;
+    let first = Header {
+        number: 100,
+        timestamp: 1,
+        ..Default::default()
+    };
+    let second = Header {
+        number: 101,
+        timestamp: 2,
+        parent_hash: first.hash_slow(),
+        ..Default::default()
+    };
+    let third = Header {
+        number: 102,
+        timestamp: 3,
+        parent_hash: second.hash_slow(),
+        ..Default::default()
+    };
+    let original = vec![first.clone(), second.clone(), third.clone()];
+    let replacement_second = Header {
+        timestamp: 12,
+        ..second.clone()
+    };
+    let replacement_third = Header {
+        timestamp: 13,
+        parent_hash: replacement_second.hash_slow(),
+        ..third.clone()
+    };
+    let record = |header: &Header| logex_cl::AnchorRecord {
+        anchor: ExecutionAnchor {
+            beacon_root: B256::repeat_byte(header.timestamp as u8),
+            beacon_slot: header.timestamp,
+            block_number: header.number,
+            block_hash: header.hash_slow(),
+            receipts_root: header.receipts_root,
+        },
+        finalized: false,
+        parent_beacon_root: None,
+    };
+    // Storage/cache fixtures deliberately isolate the real reorg publication
+    // path. No peer payload, EVM, signed mainnet lineage or live network claim.
+    {
+        let mut storage = engine.storage.write().await;
+        for (index, header) in original.iter().enumerate() {
+            let row = logex_types::LogRow {
+                block_number: header.number,
+                block_hash: header.hash_slow(),
+                timestamp: header.timestamp,
+                tx_hash: B256::repeat_byte(header.number as u8),
+                tx_index: 0,
+                log_index: 0,
+                address: alloy_primitives::Address::repeat_byte(1),
+                topic0: None,
+                topic1: None,
+                topic2: None,
+                topic3: None,
+                data: Default::default(),
+                data_len: 0,
+                source: logex_types::Source::Receipt,
+            };
+            storage
+                .ingest_canonical_batch(
+                    &[row],
+                    header,
+                    &original[..=index],
+                    Some(&record(header).anchor),
+                )
+                .unwrap();
+        }
+        storage.checkpoint_durable().unwrap();
+    }
+    engine.head_tracker.restore(original.clone());
+    engine.progress.record_blocks(102, 3, 3);
+    for header in &original {
+        engine
+            .peers
+            .cache_canonical_block(header, &Default::default(), &[]);
+    }
+    assert!(engine.peers.selection_cached_block(third.hash_slow()));
+    let consensus = Arc::clone(&engine.consensus);
+    consensus
+        .replace_anchors(vec![
+            record(&first),
+            record(&replacement_second),
+            record(&replacement_third),
+        ])
+        .unwrap();
+    let decision = locate_consensus_reorg(&consensus, &original).unwrap();
+    let ConsensusReorgDecision::Rewind(ref reorg) = decision else {
+        panic!("fixture must select the real rewind path")
+    };
+    assert_eq!(reorg.retained_headers, vec![first.clone()]);
+    assert_eq!(
+        reorg.reverted_hashes,
+        vec![second.hash_slow(), third.hash_slow()]
+    );
+
+    let storage = Arc::clone(&engine.storage);
+    let held_read = storage.read().await;
+    let mut queued = Box::pin(engine.apply_consensus_reorg_decision(decision));
+    // Poll the actual action until fair RwLock admission proves its writer is
+    // queued behind our owned reader; do not infer the boundary from a sleep.
+    let enqueued = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            assert!(futures::poll!(&mut queued).is_pending());
+            if storage.try_read().is_err() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    if enqueued.is_err() {
+        drop(held_read);
+        drop(queued);
+        panic!("real reorg writer never queued within finite control timeout");
+    }
+    // Consensus returns to the already-published original chain before storage
+    // admits the old decision. No verified-store shortcut is injected.
+    consensus
+        .replace_anchors(original.iter().map(record).collect())
+        .unwrap();
+    assert!(matches!(
+        locate_consensus_reorg(&consensus, &original).unwrap(),
+        ConsensusReorgDecision::Unchanged
+    ));
+    drop(held_read);
+    let outcome = tokio::time::timeout(Duration::from_secs(5), &mut queued)
+        .await
+        .unwrap()
+        .unwrap();
+    drop(queued);
+    let tip_cached = engine.peers.selection_cached_block(third.hash_slow());
+    let tracked = engine.head_tracker.tip_header().unwrap().number;
+    let progress = engine.current_block();
+    let storage = storage.read().await;
+    let persisted = storage.sync_head().unwrap().block_number;
+    let reader = logex_storage::SegmentReader::open(&storage.hot_partition().meta.path).unwrap();
+    let rows = reader.read_log_rows(None).unwrap();
+    let canonical = reader.read_canonical().unwrap();
+    let selected_blocks = rows
+        .iter()
+        .enumerate()
+        .filter_map(|(index, row)| {
+            canonical
+                .is_present(index as u64)
+                .then_some(row.block_number)
+        })
+        .collect::<Vec<_>>();
+    eprintln!(
+        "REORG_SELECTION_CONTROL: current selected A102; action={outcome}; persisted={persisted}; tracked={tracked}; progress={progress}; canonical={selected_blocks:?}; A102_cached={tip_cached}; physical_rows={}",
+        rows.len()
+    );
+    assert_eq!(
+        rows.len(),
+        3,
+        "physical rows remain; this is not a permanent data loss control"
+    );
+    assert_eq!(
+        (persisted, tracked, progress),
+        (102, 102, 102),
+        "obsolete queued rewind must not discard current selected progress"
+    );
+    assert_eq!(selected_blocks, vec![100, 101, 102]);
+    assert!(
+        tip_cached,
+        "obsolete rewind must not evict current selected block"
+    );
+}

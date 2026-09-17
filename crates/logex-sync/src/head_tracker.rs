@@ -57,6 +57,27 @@ impl HeadTracker {
             .collect()
     }
 
+    /// Build the persistence window for an already-validated extension without
+    /// mutating this tracker or rehashing retained headers. Callers publish the
+    /// window first, then append only the new headers after storage succeeds.
+    pub(crate) fn snapshot_with_append(&self, headers: &[Header]) -> Vec<Header> {
+        let retained = self
+            .max_depth
+            .saturating_sub(headers.len())
+            .min(self.recent.len());
+        self.recent
+            .iter()
+            .skip(self.recent.len() - retained)
+            .map(|tracked| tracked.header.clone())
+            .chain(
+                headers
+                    .iter()
+                    .skip(headers.len().saturating_sub(self.max_depth))
+                    .cloned(),
+            )
+            .collect()
+    }
+
     /// Record a new block. Returns `None` if it extends the chain normally,
     /// or `Some(ReorgInfo)` if a reorg is detected.
     ///
@@ -277,5 +298,28 @@ mod tests {
         assert_eq!(tracker.tip(), Some((102, third.hash_slow())));
         assert_eq!(tracker.tip_header(), Some(&third));
         assert_eq!(tracker.snapshot(), vec![first, second, third]);
+    }
+    #[test]
+    fn prospective_snapshot_preserves_tracker_and_matches_bounded_append() {
+        for depth in [0, 1, 3, 8] {
+            for added in [0, 1, 4, 9] {
+                let mut tracker = HeadTracker::new(depth);
+                let mut previous = header(100, B256::ZERO, 1);
+                tracker.track(previous.clone());
+                let mut incoming = Vec::new();
+                for _ in 0..added {
+                    previous = header(previous.number + 1, previous.hash_slow(), 2);
+                    incoming.push(previous.clone());
+                }
+                let old = tracker.snapshot();
+                let prospective = tracker.snapshot_with_append(&incoming);
+                assert_eq!(tracker.snapshot(), old);
+                for header in incoming {
+                    tracker.track(header);
+                }
+                assert_eq!(tracker.snapshot(), prospective);
+                assert!(prospective.len() <= depth);
+            }
+        }
     }
 }

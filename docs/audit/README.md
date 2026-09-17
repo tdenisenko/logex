@@ -249,4 +249,11 @@ and the [initial results](baselines/2026-09-07.md) for raw samples and validatio
 The [checkpoint-gap memory review](checkpoint-gap-memory.md) addresses B5-11's
 whole-gap header/hash retention with bounded authenticated temporary storage.
 Source `b327cf90` passes ten local gates (1,951 tests / 24 existing ignores).
-CI and merge remain; other sync integration items remain open.
+All six CI jobs and ten Linux controls passed before PR #222 merged as `bdee0df8`. Other sync integration items remain open.
+
+The [sync selection integration review](sync-selection-integration.md) corrects
+obsolete forward and rewind publication after storage waits (B5-15/B5-16).
+Source `b61e6363` passes two final source reviews and ten local gates
+(1,960 tests / 24 ignores). CI and merge remain. The accompanying
+historical disposition covers ancestry, ordered outcomes and empty/genesis
+progress; broader offline audit and integrated acceptance stay open.
