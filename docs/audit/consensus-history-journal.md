@@ -3,7 +3,7 @@
 Base: PR #233 merge `22fcd71d73dfec375bc3837fdf91ae126d5a4f06`.
 Branch: `audit/consensus-history-journal`. The user approved an incremental
 checksummed journal with periodic checkpoints, preserving required trusted
-anchors. Implementation and all eleven local gates are complete; exact-head CI and merge remain.
+anchors. Implementation and all eleven local gates are complete; PR #234 merged as `115ac554` after all six CI jobs.
 Finding B3-69 records the demonstrated full-history mutation cost and the scoped correction.
 
 ## Scope and existing cost
@@ -114,3 +114,5 @@ startup and `info` controls preserve older formats and incomplete native groups;
 archival retains every file byte and the relocated group replays successfully.
 No production/remote files, dependencies, unsafe code or SQL behavior changed.
 Exact-head CI and merge remain.
+
+All six CI jobs passed on `a13b29f6` and ten Linux volume/template controls passed with verified cleanup. [PR #234](https://github.com/tdenisenko/logex/pull/234) merged as `115ac554`. The merge tree is identical to the tested head. B3-69 is closed for incremental consensus persistence with periodic checkpoints. Required trust/serving history is retained. Aggregate networking admission, shared query resources, dashboard review, verified repair and integrated acceptance remain open.

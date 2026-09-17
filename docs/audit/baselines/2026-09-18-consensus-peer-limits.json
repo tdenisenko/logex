@@ -1,0 +1,292 @@
+{
+  "date": "2026-09-18",
+  "branch": "audit/consensus-network-admission",
+  "base": "115ac55431be4b7df60f45ce1a6c8f4582ec33a5",
+  "source_commit": "2cc8bba7acc3d8948305751b16a61ef6fd390612",
+  "source_inventory": {
+    "base": "115ac55431be4b7df60f45ce1a6c8f4582ec33a5",
+    "source_commit": "2cc8bba7acc3d8948305751b16a61ef6fd390612",
+    "files": {
+      "crates/logex-cl/src/network.rs": {
+        "original": {
+          "bytes": 534668,
+          "sha256": "b0726dc39ff76702fee18ea2bbe93aea0ef72f8f82b6bc456c9b05f93fccd967"
+        },
+        "final": {
+          "bytes": 538144,
+          "sha256": "6a618819065fdd85f98ff0b02069227565f8efa222bc7c51bc9f78934fad7ca4"
+        }
+      },
+      "crates/logex-node/src/cli.rs": {
+        "original": {
+          "bytes": 23481,
+          "sha256": "d7410954b6465d944cb310eafc4043d887969a983ef1a031357921ed7114e3fb"
+        },
+        "final": {
+          "bytes": 23602,
+          "sha256": "5cd6628185c2565bad342f4439e5c7b7f3be271153812b7388db7dde910df286"
+        }
+      }
+    }
+  },
+  "findings": [
+    "B3-70"
+  ],
+  "gates": {
+    "commit": "2cc8bba7acc3d8948305751b16a61ef6fd390612",
+    "rustc": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+    "gates": [
+      {
+        "name": "vendor",
+        "command": [
+          "python3",
+          "tools/verify_datafusion_vendor.py"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T18:39:07.528719+00:00",
+        "finished": "2026-09-17T18:39:07.660469+00:00",
+        "sha256": "66c8356dd4a2753b376fc6b222ceda74bb495616f72e05bb062c7fb877a81bd1",
+        "log": "/private/tmp/logex-audit-consensus-admission-20260918/gates/vendor.log"
+      },
+      {
+        "name": "format",
+        "command": [
+          "cargo",
+          "fmt",
+          "--all",
+          "--",
+          "--check"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T18:39:07.660843+00:00",
+        "finished": "2026-09-17T18:39:08.775523+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-audit-consensus-admission-20260918/gates/format.log"
+      },
+      {
+        "name": "vendor-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2024",
+          "--config-path",
+          "vendor/reth-network/rustfmt.toml",
+          "--config",
+          "skip_children=true",
+          "vendor/reth-network/src/eth_requests.rs",
+          "vendor/reth-network/src/session/active.rs",
+          "vendor/reth-network/src/session/mod.rs",
+          "vendor/reth-network/src/session/types.rs",
+          "vendor/reth-network/src/session/range_update.rs",
+          "vendor/reth-discv5/src/lib.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T18:39:08.776074+00:00",
+        "finished": "2026-09-17T18:39:08.848172+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-audit-consensus-admission-20260918/gates/vendor-format.log"
+      },
+      {
+        "name": "enr-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2021",
+          "--config",
+          "skip_children=true",
+          "vendor/enr/src/lib.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T18:39:08.848742+00:00",
+        "finished": "2026-09-17T18:39:08.905560+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-audit-consensus-admission-20260918/gates/enr-format.log"
+      },
+      {
+        "name": "gossipsub-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2021",
+          "--config",
+          "skip_children=true",
+          "vendor/libp2p-gossipsub/src/time_cache.rs",
+          "vendor/libp2p-gossipsub/src/behaviour.rs",
+          "vendor/libp2p-gossipsub/src/behaviour/tests.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T18:39:08.906094+00:00",
+        "finished": "2026-09-17T18:39:09.009436+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-audit-consensus-admission-20260918/gates/gossipsub-format.log"
+      },
+      {
+        "name": "aggregate-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2021",
+          "--config",
+          "max_width=90,skip_children=true",
+          "vendor/datafusion-functions-aggregate/src/sum.rs",
+          "vendor/datafusion-functions-aggregate/src/average.rs",
+          "vendor/datafusion-functions-aggregate-common/src/aggregate/sum_distinct/numeric.rs",
+          "vendor/datafusion-functions-aggregate-common/src/aggregate/avg_distinct/decimal.rs",
+          "vendor/datafusion-functions-aggregate-common/src/utils.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T18:39:09.009916+00:00",
+        "finished": "2026-09-17T18:39:09.081840+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-audit-consensus-admission-20260918/gates/aggregate-format.log"
+      },
+      {
+        "name": "check",
+        "command": [
+          "cargo",
+          "check",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T18:39:09.083050+00:00",
+        "finished": "2026-09-17T18:39:15.910911+00:00",
+        "sha256": "81d09ef1191da4805e4031b89d63884d6c3d135aebf642f18e7750937ed6ea52",
+        "log": "/private/tmp/logex-audit-consensus-admission-20260918/gates/check.log"
+      },
+      {
+        "name": "clippy",
+        "command": [
+          "cargo",
+          "clippy",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T18:39:15.911753+00:00",
+        "finished": "2026-09-17T18:39:23.084091+00:00",
+        "sha256": "d1762a1fd81381488d99fc96a86b5b7e19c55c64e0557a8b95f929296e46c1dd",
+        "log": "/private/tmp/logex-audit-consensus-admission-20260918/gates/clippy.log"
+      },
+      {
+        "name": "test",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T18:39:23.085080+00:00",
+        "finished": "2026-09-17T18:43:13.674153+00:00",
+        "sha256": "79bd70696d253ed08c9cf948bacf8c997b4ebcc1e6181057f2237073fabd188d",
+        "log": "/private/tmp/logex-audit-consensus-admission-20260918/gates/test.log"
+      },
+      {
+        "name": "doc",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--doc",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T18:43:13.677720+00:00",
+        "finished": "2026-09-17T18:43:24.121947+00:00",
+        "sha256": "946fc7fce25e83be30c77c2f69f5058561e12f1c17ad2584a30a7fd7ac7679fc",
+        "log": "/private/tmp/logex-audit-consensus-admission-20260918/gates/doc.log"
+      },
+      {
+        "name": "release-build",
+        "command": [
+          "cargo",
+          "build",
+          "-p",
+          "logex-node",
+          "--release",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T18:43:24.122785+00:00",
+        "finished": "2026-09-17T18:44:32.570906+00:00",
+        "sha256": "7f31e93ff83dd20c7cbf79d0cfa07159d232dc2208d9df45ca42c914611ced9f",
+        "log": "/private/tmp/logex-audit-consensus-admission-20260918/gates/release-build.log"
+      }
+    ]
+  },
+  "workspace_tests": {
+    "passed": 2058,
+    "failed": 0,
+    "ignored": 24,
+    "targets": 37
+  },
+  "documentation_tests": {
+    "passed": 0,
+    "failed": 0,
+    "ignored": 0,
+    "targets": 8
+  },
+  "focused_consensus_tests": {
+    "passed": 391,
+    "failed": 0,
+    "ignored": 1,
+    "targets": 1
+  },
+  "original_arithmetic_control": {
+    "passed": 0,
+    "failed": 1,
+    "ignored": 0,
+    "targets": 1
+  },
+  "evidence": {
+    "path": "docs/audit/baselines/2026-09-18-consensus-peer-limits-evidence.json.gz",
+    "files": 15,
+    "bytes_uncompressed": 644414,
+    "bytes": 119009,
+    "sha256": "e9348a9c625d0af13bb3256426d9b5e029801d2c184c5575da4948afa68b1686"
+  },
+  "validation": {
+    "path": "docs/audit/baselines/2026-09-18-consensus-peer-limits-validation.json.gz",
+    "files": 14,
+    "bytes_uncompressed": 243925,
+    "bytes": 46576,
+    "sha256": "944350d173358a7c1c95b943c2d46b91f5670a007621dd802243dc20e59a367e"
+  },
+  "publication": {
+    "state": "pending"
+  },
+  "boundaries": [
+    "Original production configuration plus one additive arithmetic-only test reproduces silently reduced scaled limits. It creates no connections and allocates no buffers proportional to configured peers.",
+    "Checked u64 scaling and u32 conversion preserve exact ceil ratios. Largest representable target is3,303,820,996 on tested64-bit hosts; zero and ordinary defaults remain unchanged.",
+    "Invalid peer counts fail as the first ConsensusNetwork constructor operation before identity/discovery/transport setup. Overall node startup may already have initialized shared state.",
+    "The changed CLI help describes the peer target and zero behavior. No operational peer quota, dependency, data format or per-message ingestion work was added.",
+    "Protected obsolete-fork metadata, aggregate gossip cache/history/topic retention and priority control queues remain open source-review findings. Gossip overload policy is pending; shared query resource policy is separate.",
+    "No benchmark, live sync, production dataset, remote-host work or release-readiness claim."
+  ]
+}

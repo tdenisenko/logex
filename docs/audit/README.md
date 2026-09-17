@@ -64,8 +64,16 @@ full-history copying and rewriting on ordinary trusted-state changes (B3-69).
 Source `1b751e5a` uses typed deltas, a checksummed committed frontier and periodic
 checkpoints while retaining required anchors and serving payloads. Focused
 consensus and node checks pass, alongside all eleven local gates (2,055 tests /
-24 existing ignores). Source and local gates are complete; exact-head CI and merge remain.
+24 existing ignores). PR #234 merged as `115ac554` after all six CI jobs and ten Linux controls.
 This does not close aggregate networking admission or batch 3.
+
+The [consensus network admission review](consensus-network-admission.md) fixes
+silently reduced large configured peer limits (B3-70). Checked startup arithmetic
+preserves ordinary and zero semantics and rejects unrepresentable values before
+consensus identity/transport setup. Source `2cc8bba7` passes independent review
+and all eleven local gates (2,058 tests / 24 existing ignores). Exact-head CI and
+merge remain. Protected metadata and gossip cache/topic/control ownership are
+recorded as separate open findings; this change adds no ingestion work.
 
 | Batch | Review area | Status / acceptance |
 | --- | --- | --- |

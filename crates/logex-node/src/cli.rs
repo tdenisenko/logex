@@ -315,7 +315,10 @@ Security:
         #[arg(long, default_value = "9000")]
         cl_p2p_port: u16,
 
-        /// Maximum dialable consensus-layer peers retained from discovery.
+        /// Target number of consensus-layer peers.
+        ///
+        /// Zero disables aggregate established-connection limits; per-peer and
+        /// pending-connection limits remain active.
         #[arg(long, default_value = "32")]
         cl_max_peers: usize,
 
