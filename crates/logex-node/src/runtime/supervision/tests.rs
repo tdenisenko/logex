@@ -120,7 +120,7 @@ async fn shutdown_signal_remains_responsive_during_a_storage_probe() {
     );
     let signal = async {
         observed.await.unwrap();
-        "local stop control"
+        Ok("local stop control")
     };
     let result = tokio::time::timeout(
         Duration::from_secs(5),
@@ -176,7 +176,7 @@ async fn engine_error_during_signal_shutdown_is_a_failure() {
     let mut failures = vec![];
     let exit = fixture
         .supervisor()
-        .run(engine, ready("test signal"), pending(), |message| {
+        .run(engine, ready(Ok("test signal")), pending(), |message| {
             failures.push(message.to_owned())
         })
         .await;
@@ -195,7 +195,7 @@ async fn engine_shutdown_timeout_is_a_failure() {
     let exit = supervisor
         .run(
             pending::<Result<(), &str>>(),
-            ready("test signal"),
+            ready(Ok("test signal")),
             pending(),
             |message| failures.push(message.to_owned()),
         )
@@ -212,13 +212,65 @@ async fn normal_signal_shutdown_is_successful() {
     let mut failures = vec![];
     let exit = fixture
         .supervisor()
-        .run(engine, ready("test signal"), pending(), |message| {
+        .run(engine, ready(Ok("test signal")), pending(), |message| {
             failures.push(message.to_owned())
         })
         .await;
     assert_eq!(exit, ExitCode::SUCCESS);
     assert!(failures.is_empty());
     assert!(*fixture.shutdown.borrow());
+}
+
+#[tokio::test]
+async fn signal_listener_error_arms_cleanup_and_stops_the_engine() {
+    let mut fixture = Fixture::new();
+    let shutdown = fixture.shutdown.subscribe();
+    let engine = engine_after_shutdown(shutdown.clone(), Ok(()));
+    let armed = std::cell::Cell::new(0);
+    let mut failures = vec![];
+    let error = std::io::Error::new(std::io::ErrorKind::BrokenPipe, "local signal source closed");
+    let exit = fixture
+        .supervisor_with_hook(|| {
+            assert!(!*shutdown.borrow());
+            armed.set(armed.get() + 1);
+        })
+        .run(engine, ready(Err(error)), pending(), |message| {
+            assert_eq!(armed.get(), 1);
+            failures.push(message.to_owned());
+        })
+        .await;
+    assert_eq!(exit, ExitCode::FAILURE);
+    assert_eq!(armed.get(), 1);
+    assert_eq!(
+        failures,
+        ["shutdown signal listener failed: local signal source closed"]
+    );
+    assert!(*shutdown.borrow());
+    fixture.assert_stopped();
+}
+
+#[tokio::test]
+async fn signal_listener_error_preserves_the_engine_shutdown_deadline() {
+    let mut fixture = Fixture::new();
+    let shutdown = fixture.shutdown.subscribe();
+    let mut failures = vec![];
+    let mut supervisor = fixture.supervisor();
+    supervisor.shutdown_timeout = Duration::ZERO;
+    let exit = supervisor
+        .run(
+            pending::<Result<(), &str>>(),
+            ready(Err(std::io::Error::other("local registration failure"))),
+            pending(),
+            |message| failures.push(message.to_owned()),
+        )
+        .await;
+    assert_eq!(exit, ExitCode::FAILURE);
+    assert_eq!(
+        failures,
+        ["shutdown signal listener failed: local registration failure"]
+    );
+    assert!(*shutdown.borrow());
+    fixture.assert_stopped();
 }
 
 #[tokio::test]
@@ -308,7 +360,7 @@ async fn runtime_failure_wins_over_simultaneously_ready_normal_exit() {
         .supervisor()
         .run(
             ready(Ok::<(), &str>(())),
-            ready("test signal"),
+            ready(Ok("test signal")),
             pending(),
             |_| {},
         )
@@ -561,7 +613,7 @@ async fn requested_shutdown_stops_services_without_false_failure() {
     let engine = engine_after_shutdown(fixture.shutdown.subscribe(), Ok(()));
     let exit = fixture
         .supervisor()
-        .run(engine, ready("test signal"), pending(), |_| {})
+        .run(engine, ready(Ok("test signal")), pending(), |_| {})
         .await;
     assert_eq!(exit, ExitCode::SUCCESS);
     for task in [http, grpc, indexer] {
@@ -631,7 +683,7 @@ async fn explicit_worker_failure_during_engine_cleanup_remains_latched() {
     };
     let _ = fixture
         .supervisor()
-        .run(engine, ready("test signal"), pending(), |_| {})
+        .run(engine, ready(Ok("test signal")), pending(), |_| {})
         .await;
     // run_sync checks this permanent latch again after the shared cleanup;
     // the independently armed worker watchdog stays alive until process exit.
@@ -661,7 +713,7 @@ async fn every_stop_trigger_arms_deadline_once_before_shutdown_notification() {
         };
         let signal = async {
             if trigger == 2 {
-                "test signal"
+                Ok("test signal")
             } else {
                 pending().await
             }

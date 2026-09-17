@@ -25,7 +25,7 @@ pub(super) struct SyncSupervisor<'a, F> {
 
 enum StopTrigger {
     Engine(Result<(), String>),
-    Signal(&'static str),
+    Signal(std::io::Result<&'static str>),
     StorageHealth(StorageHealthFailure),
     RuntimeFailure {
         component: &'static str,
@@ -38,7 +38,7 @@ impl<F: FnOnce()> SyncSupervisor<'_, F> {
     pub(super) async fn run<E: Display>(
         self,
         engine: impl Future<Output = Result<(), E>>,
-        signal: impl Future<Output = &'static str>,
+        signal: impl Future<Output = std::io::Result<&'static str>>,
         storage_health: impl Future<Output = StorageHealthFailure>,
         mut on_failure: impl FnMut(&str),
     ) -> ExitCode {
@@ -91,8 +91,16 @@ impl<F: FnOnce()> SyncSupervisor<'_, F> {
                 }
                 true
             }
-            StopTrigger::Signal(signal) => {
+            StopTrigger::Signal(Ok(signal)) => {
                 tracing::info!(signal, "shutdown requested, stopping node gracefully");
+                false
+            }
+            StopTrigger::Signal(Err(error)) => {
+                record_failure(
+                    &mut exit,
+                    &mut on_failure,
+                    format!("shutdown signal listener failed: {error}"),
+                );
                 false
             }
             StopTrigger::StorageHealth(failure) => {

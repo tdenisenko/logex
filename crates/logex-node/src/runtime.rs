@@ -1661,25 +1661,42 @@ fn recent_checkpoint_max_age_secs() -> u64 {
         .saturating_mul(MAINNET_SECONDS_PER_SLOT)
 }
 
-async fn wait_for_shutdown_signal() -> &'static str {
+async fn wait_for_shutdown_signal() -> std::io::Result<&'static str> {
     #[cfg(unix)]
     {
-        let mut interrupt =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
-                .expect("failed to install SIGINT handler");
-        let mut terminate =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                .expect("failed to install SIGTERM handler");
+        let mut interrupt = tokio::signal::unix::signal(
+            tokio::signal::unix::SignalKind::interrupt(),
+        )
+        .map_err(|error| {
+            std::io::Error::new(
+                error.kind(),
+                format!("failed to install SIGINT handler: {error}"),
+            )
+        })?;
+        let mut terminate = tokio::signal::unix::signal(
+            tokio::signal::unix::SignalKind::terminate(),
+        )
+        .map_err(|error| {
+            std::io::Error::new(
+                error.kind(),
+                format!("failed to install SIGTERM handler: {error}"),
+            )
+        })?;
         tokio::select! {
-            _ = interrupt.recv() => "SIGINT",
-            _ = terminate.recv() => "SIGTERM",
+            event = interrupt.recv() => event.map(|()| "SIGINT"),
+            event = terminate.recv() => event.map(|()| "SIGTERM"),
         }
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "shutdown signal stream closed",
+            )
+        })
     }
 
     #[cfg(not(unix))]
     {
-        let _ = tokio::signal::ctrl_c().await;
-        "SIGINT"
+        tokio::signal::ctrl_c().await.map(|()| "SIGINT")
     }
 }
 
@@ -1688,6 +1705,35 @@ mod tests {
     use super::*;
     use alloy_primitives::B256;
 
+    #[cfg(unix)]
+    #[test]
+    fn signal_registration_failure_does_not_unwind() {
+        use futures_util::FutureExt;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let handle = runtime.handle().clone();
+        drop(runtime);
+        let _entered = handle.enter();
+        // The closed driver returns a registration error before installing any
+        // OS handler. No process signal is sent or existing runtime altered.
+        let outcome = std::panic::catch_unwind(|| wait_for_shutdown_signal().now_or_never());
+        assert!(
+            outcome.is_ok(),
+            "signal registration errors must reach supervision"
+        );
+        let error = outcome
+            .unwrap()
+            .expect("registration must fail immediately")
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("failed to install SIGINT handler")
+        );
+        assert!(error.to_string().contains("signal driver gone"));
+    }
     #[test]
     fn runtime_failure_watchdog_expires_without_application_runtime() {
         for initially_failed in [true, false] {

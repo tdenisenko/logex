@@ -264,17 +264,17 @@ pub fn run_compact(config: PartitionManagerConfig, limit: Option<usize>) {
 }
 
 pub fn run_info(config: PartitionManagerConfig) {
-    let consensus = match open_consensus_for_info(&config.data_dir) {
-        Ok(consensus) => consensus,
-        Err(error) => {
-            tracing::error!(%error, "failed to open consensus state for storage info");
-            std::process::exit(1);
-        }
-    };
     let storage = match PartitionManager::open(config) {
         Ok(s) => s,
         Err(e) => {
             tracing::error!(error = %e, "failed to open storage");
+            std::process::exit(1);
+        }
+    };
+    let consensus = match open_consensus_for_info(&storage) {
+        Ok(consensus) => consensus,
+        Err(error) => {
+            tracing::error!(%error, "failed to open consensus state for storage info");
             std::process::exit(1);
         }
     };
@@ -342,7 +342,12 @@ pub fn run_info(config: PartitionManagerConfig) {
     }
 }
 
-fn open_consensus_for_info(data_dir: &Path) -> Result<Option<ConsensusStore>, ConsensusStateError> {
+fn open_consensus_for_info(
+    storage: &PartitionManager,
+) -> Result<Option<ConsensusStore>, ConsensusStateError> {
+    // Retain the exclusive directory owner across both state reads, so info
+    // cannot combine consensus from before a writer's exit with newer storage.
+    let data_dir = storage.data_dir();
     if consensus_state_exists(data_dir)? {
         ConsensusStore::open(data_dir, None).map(Some)
     } else {
@@ -361,12 +366,17 @@ mod tests {
     #[test]
     fn info_preserves_consensus_open_errors() {
         let temp = tempfile::tempdir().unwrap();
-        assert!(open_consensus_for_info(temp.path()).unwrap().is_none());
+        let storage = PartitionManager::open(PartitionManagerConfig {
+            data_dir: temp.path().to_owned(),
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(open_consensus_for_info(&storage).unwrap().is_none());
         std::fs::create_dir(temp.path().join("cl")).unwrap();
         let legacy = temp.path().join("cl/consensus_state.json");
         std::fs::write(&legacy, b"legacy evidence").unwrap();
         assert!(matches!(
-            open_consensus_for_info(temp.path()),
+            open_consensus_for_info(&storage),
             Err(ConsensusStateError::ParseState { .. })
         ));
         assert_eq!(std::fs::read(legacy).unwrap(), b"legacy evidence");
