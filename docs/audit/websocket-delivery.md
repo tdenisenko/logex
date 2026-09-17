@@ -1,7 +1,7 @@
 # WebSocket delivery continuity and snapshot lifetime
 
 Base: PR #230 merge `a4eafd463205eeefe38d47abd7a3326c6d2cd071`.
-Branch: `audit/websocket-delivery`. Implementation and eleven local gates are complete; exact-head CI and merge remain.
+Branch: `audit/websocket-delivery`. Implementation and eleven local gates are complete; PR #231 merged as `334ec9ef` after all six CI jobs.
 
 ## Findings and scope
 
@@ -63,4 +63,6 @@ existing benchmark ignores. Five browser callback controls pass under Node
 run with `node --test` after extraction. `LOGEX_WS_HTML` selects an alternate
 HTML source, including the archived original for reproducing the two failures.
 This does not add a Node requirement to Cargo or CI. Strict server Clippy and
-formatting pass. Exact-head CI and merge remain.
+formatting pass. Exact-head CI and merge passed; verified closure follows.
+
+All six CI jobs passed on `863fa017` and ten Linux volume/template controls passed with verified cleanup. [PR #231](https://github.com/tdenisenko/logex/pull/231) merged as `334ec9ef`. The merge tree is identical to the tested head. B8-15–16 are closed within detected-gap termination and acknowledgement ownership scope. Reorg notifications, other ERC20 parsing/event review, shared query budgets, dashboard, verified repair and integrated acceptance remain open.

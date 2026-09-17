@@ -1,0 +1,284 @@
+{
+  "date": "2026-09-17",
+  "branch": "audit/erc20-subscription-inputs",
+  "base": "334ec9ef985773341572b00969b7c8d48be47dbe",
+  "source_commit": "cdb175430e8e2bc67a4b5638fb6530d9abba1ef1",
+  "source_inventory": {
+    "base": "334ec9ef985773341572b00969b7c8d48be47dbe",
+    "source_commit": "cdb175430e8e2bc67a4b5638fb6530d9abba1ef1",
+    "files": {
+      "crates/logex-server/src/ws.rs": {
+        "original": {
+          "bytes": 75903,
+          "sha256": "bf5df9178ad24a3a058e3a8ca62a52086ed81ab76cffbef8addfe6012d150b73"
+        },
+        "final": {
+          "bytes": 95007,
+          "sha256": "e910bde4edb50206ca9f1efda5aeaf1da05295117dca81e371d2c388d85ce88a"
+        }
+      }
+    }
+  },
+  "findings": [
+    "B8-17",
+    "B8-18",
+    "B8-19"
+  ],
+  "gates": {
+    "commit": "cdb175430e8e2bc67a4b5638fb6530d9abba1ef1",
+    "rustc": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+    "gates": [
+      {
+        "name": "vendor",
+        "command": [
+          "python3",
+          "tools/verify_datafusion_vendor.py"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T16:23:29.772148+00:00",
+        "finished": "2026-09-17T16:23:29.932668+00:00",
+        "sha256": "66c8356dd4a2753b376fc6b222ceda74bb495616f72e05bb062c7fb877a81bd1",
+        "log": "/private/tmp/logex-audit-erc20-inputs-20260917/gates/vendor.log"
+      },
+      {
+        "name": "format",
+        "command": [
+          "cargo",
+          "fmt",
+          "--all",
+          "--",
+          "--check"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T16:23:29.933011+00:00",
+        "finished": "2026-09-17T16:23:30.972004+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-audit-erc20-inputs-20260917/gates/format.log"
+      },
+      {
+        "name": "vendor-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2024",
+          "--config-path",
+          "vendor/reth-network/rustfmt.toml",
+          "--config",
+          "skip_children=true",
+          "vendor/reth-network/src/eth_requests.rs",
+          "vendor/reth-network/src/session/active.rs",
+          "vendor/reth-network/src/session/mod.rs",
+          "vendor/reth-network/src/session/types.rs",
+          "vendor/reth-network/src/session/range_update.rs",
+          "vendor/reth-discv5/src/lib.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T16:23:30.972367+00:00",
+        "finished": "2026-09-17T16:23:31.040010+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-audit-erc20-inputs-20260917/gates/vendor-format.log"
+      },
+      {
+        "name": "enr-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2021",
+          "--config",
+          "skip_children=true",
+          "vendor/enr/src/lib.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T16:23:31.040357+00:00",
+        "finished": "2026-09-17T16:23:31.092022+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-audit-erc20-inputs-20260917/gates/enr-format.log"
+      },
+      {
+        "name": "gossipsub-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2021",
+          "--config",
+          "skip_children=true",
+          "vendor/libp2p-gossipsub/src/time_cache.rs",
+          "vendor/libp2p-gossipsub/src/behaviour.rs",
+          "vendor/libp2p-gossipsub/src/behaviour/tests.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T16:23:31.092362+00:00",
+        "finished": "2026-09-17T16:23:31.189139+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-audit-erc20-inputs-20260917/gates/gossipsub-format.log"
+      },
+      {
+        "name": "aggregate-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2021",
+          "--config",
+          "max_width=90,skip_children=true",
+          "vendor/datafusion-functions-aggregate/src/sum.rs",
+          "vendor/datafusion-functions-aggregate/src/average.rs",
+          "vendor/datafusion-functions-aggregate-common/src/aggregate/sum_distinct/numeric.rs",
+          "vendor/datafusion-functions-aggregate-common/src/aggregate/avg_distinct/decimal.rs",
+          "vendor/datafusion-functions-aggregate-common/src/utils.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T16:23:31.189499+00:00",
+        "finished": "2026-09-17T16:23:31.253029+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-audit-erc20-inputs-20260917/gates/aggregate-format.log"
+      },
+      {
+        "name": "check",
+        "command": [
+          "cargo",
+          "check",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T16:23:31.253427+00:00",
+        "finished": "2026-09-17T16:23:37.034916+00:00",
+        "sha256": "deb7bca57d83b4663b23d10015bf0e2d5cc202792b2b6a4ba5d784d03c5fec6e",
+        "log": "/private/tmp/logex-audit-erc20-inputs-20260917/gates/check.log"
+      },
+      {
+        "name": "clippy",
+        "command": [
+          "cargo",
+          "clippy",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T16:23:37.035686+00:00",
+        "finished": "2026-09-17T16:23:41.553336+00:00",
+        "sha256": "6f357938d4ad0e6086bc0dd6ee562f9b779dc9c3e95863b51db96ccd7b88063a",
+        "log": "/private/tmp/logex-audit-erc20-inputs-20260917/gates/clippy.log"
+      },
+      {
+        "name": "test",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T16:23:41.553800+00:00",
+        "finished": "2026-09-17T16:28:05.163058+00:00",
+        "sha256": "1b1dbb76e593738c560aa49f09de404bff2b3b6567f212514568d64130f85e5e",
+        "log": "/private/tmp/logex-audit-erc20-inputs-20260917/gates/test.log"
+      },
+      {
+        "name": "doc",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--doc",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T16:28:05.165299+00:00",
+        "finished": "2026-09-17T16:28:14.898740+00:00",
+        "sha256": "74259e1ba85f748e37cbab3d0683859debfdf1af13b00470e88535b69a1344ba",
+        "log": "/private/tmp/logex-audit-erc20-inputs-20260917/gates/doc.log"
+      },
+      {
+        "name": "release-build",
+        "command": [
+          "cargo",
+          "build",
+          "-p",
+          "logex-node",
+          "--release",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T16:28:14.899272+00:00",
+        "finished": "2026-09-17T16:29:56.799178+00:00",
+        "sha256": "13a1fa2ec9c6a9581f5da30d935185ffaa9321ea25b688f8a316a0b0c1356a41",
+        "log": "/private/tmp/logex-audit-erc20-inputs-20260917/gates/release-build.log"
+      }
+    ]
+  },
+  "workspace_tests": {
+    "passed": 2016,
+    "failed": 0,
+    "ignored": 24,
+    "targets": 37
+  },
+  "documentation_tests": {
+    "passed": 0,
+    "failed": 0,
+    "ignored": 0,
+    "targets": 8
+  },
+  "original_input_controls": {
+    "passed": 0,
+    "failed": 3,
+    "ignored": 0,
+    "targets": 1
+  },
+  "final_server_tests": {
+    "passed": 158,
+    "failed": 0,
+    "ignored": 2,
+    "targets": 6
+  },
+  "evidence": {
+    "path": "docs/audit/baselines/2026-09-17-erc20-subscription-inputs-evidence.json.gz",
+    "files": 17,
+    "bytes_uncompressed": 251873,
+    "bytes": 49500,
+    "sha256": "58339709768ec89f69c00ede927af39549bbffdd41f4b5473e536c23754d9ce8"
+  },
+  "validation": {
+    "path": "docs/audit/baselines/2026-09-17-erc20-subscription-inputs-validation.json.gz",
+    "files": 14,
+    "bytes_uncompressed": 239879,
+    "bytes": 45519,
+    "sha256": "690a257746bf993d579b115b9202c39af215dd4b43c9410a22d886fdd18e7845"
+  },
+  "publication": {
+    "state": "pending"
+  },
+  "boundaries": [
+    "Three finite original-source regression groups fail: literal-object field coercion, bare hexadecimal prefix and extra Transfer topic. Exact original source and test-only patch are retained.",
+    "Typed field visitors retain address-list forms, aliases, optional bounds and exact unsigned integer JSON values through u64. Full uint256 bounds use decimal or hexadecimal strings; floating/exponent forms remain unsupported.",
+    "Exact three-topic Transfer classification preserves zero transfers, padded addresses, inclusive amount bounds and arbitrary chain logs outside the ERC20 hook.",
+    "Fixed hex buffers and skipping decimal leading-zero arithmetic remove clear implementation work. No new input quota or measured performance claim.",
+    "Invalid admission preserves the existing session. No ingestion-write, persisted format, SQL, dependency, production data, remote host, live chain or benchmark change.",
+    "Reorg notifications, shared query budgets, dashboard, verified offline repair and integrated acceptance remain open."
+  ]
+}
