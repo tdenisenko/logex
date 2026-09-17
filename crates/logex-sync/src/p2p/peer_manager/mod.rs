@@ -52,6 +52,8 @@ use crate::tasks;
 #[cfg(test)]
 mod address_selection_tests;
 #[cfg(test)]
+mod admission_tests;
+#[cfg(test)]
 mod advertisement_tests;
 
 mod lifecycle;
@@ -328,6 +330,8 @@ pub(super) enum PeerRequestKind {
 impl PeerManager {
     /// Create a new peer manager backed by Reth's network/session stack.
     pub async fn new(config: PeerManagerConfig) -> Result<Self> {
+        // Reject unrepresentable dependency limits before any asynchronous setup.
+        let (peer_config, sessions_config) = execution_peer_configs(config.max_peers)?;
         let PeerManagerConfig {
             secret_key,
             listener_port,
@@ -413,21 +417,6 @@ impl PeerManager {
             );
         }
         let serve_cache = Arc::new(ServeCacheProvider::new());
-        let (max_outbound, max_inbound) = peer_connection_limits(max_peers);
-        let max_concurrent_dials = max_outbound
-            .saturating_mul(4)
-            .clamp(32, MAX_CONCURRENT_OUTBOUND_DIALS);
-        let peer_config = PeersConfig::default()
-            .with_max_outbound(max_outbound)
-            .with_max_inbound(max_inbound)
-            .with_max_concurrent_dials(max_concurrent_dials)
-            .with_refill_slots_interval(REFILL_SLOTS_INTERVAL)
-            .with_backoff_durations(DIAL_BACKOFF_DURATIONS)
-            .with_enforce_enr_fork_id(false);
-        let mut sessions_config =
-            SessionsConfig::default().with_upscaled_event_buffer(peer_config.max_peers());
-        sessions_config.limits.max_pending_outbound = Some(max_concurrent_dials as u32);
-        sessions_config.limits.max_pending_inbound = Some(max_inbound as u32);
 
         let mut discovery = Discv4Config::builder();
         discovery
@@ -913,6 +902,33 @@ async fn resolve_startup_nat(nat_resolver: NatResolver) -> NatResolver {
         }
         None => nat_resolver,
     }
+}
+
+// Build only configuration values here: this must run before constructor side effects.
+fn execution_peer_configs(max_peers: usize) -> Result<(PeersConfig, SessionsConfig)> {
+    let (max_outbound, max_inbound) = peer_connection_limits(max_peers);
+    // The pinned Reth helper doubles the peer count before capping the buffer.
+    max_peers.checked_mul(2).ok_or_else(|| {
+        eyre::eyre!("max_peers {max_peers} overflows the session event-buffer calculation")
+    })?;
+    let max_pending_inbound = u32::try_from(max_inbound).map_err(|_| {
+        eyre::eyre!("max_peers {max_peers} derives an inbound session limit exceeding u32::MAX")
+    })?;
+    let max_concurrent_dials = max_outbound
+        .saturating_mul(4)
+        .clamp(32, MAX_CONCURRENT_OUTBOUND_DIALS);
+    let peer_config = PeersConfig::default()
+        .with_max_outbound(max_outbound)
+        .with_max_inbound(max_inbound)
+        .with_max_concurrent_dials(max_concurrent_dials)
+        .with_refill_slots_interval(REFILL_SLOTS_INTERVAL)
+        .with_backoff_durations(DIAL_BACKOFF_DURATIONS)
+        .with_enforce_enr_fork_id(false);
+    let mut sessions_config =
+        SessionsConfig::default().with_upscaled_event_buffer(peer_config.max_peers());
+    sessions_config.limits.max_pending_outbound = Some(max_concurrent_dials as u32);
+    sessions_config.limits.max_pending_inbound = Some(max_pending_inbound);
+    Ok((peer_config, sessions_config))
 }
 
 fn peer_connection_limits(max_peers: usize) -> (usize, usize) {

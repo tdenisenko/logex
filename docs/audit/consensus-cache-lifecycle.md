@@ -4,7 +4,7 @@ Base: PR #225 merge `6fc297c9b818e5ff731af353fa96172ead4bffd3`.
 Branch: `audit/consensus-resource-lifecycle`.
 This milestone fixes duplicate-ID expiry in the pinned gossip dependency. It
 does not close aggregate network admission, protected-history lifetime or the
-broader offline audit. All twelve final-source local gates pass; exact-head CI and merge remain.
+broader offline audit. All twelve final-source gates and six CI jobs pass; PR #226 merged as `595e9974`.
 
 ## Confirmed finding
 
@@ -122,4 +122,11 @@ original-source controls, final reviews and known supplementary lint failures.
 The full 154-test standalone library suite and 366 consensus tests passed before
 the telemetry-only timer reorder; final expiry and workspace gates cover the final
 source. Existing linker/future-compatibility warnings remain in the complete logs.
-Exact-head CI and merge remain before closing B3-68.
+Exact-head CI and merge passed; verified closure follows.
+
+All six CI jobs passed on `c5f3fd0b`, including the standalone expiry regressions on Linux/macOS and ten Linux volume/template cases with verified cleanup. [PR #226](https://github.com/tdenisenko/logex/pull/226) merged as `595e9974`. The merge tree is identical to the tested head. B3-68 is closed; aggregate gossip admission, history lifetime/persistence, shared query resource policy, automatic verified repair and integrated acceptance remain open.
+
+After local gates and exact-head CI, the disposable standalone dependency target
+was removed: 3,672 build files containing 704,618,546 logical file bytes. The
+source snapshots, logs and evidence remain. No other build tree or remote host
+was changed by this cleanup.

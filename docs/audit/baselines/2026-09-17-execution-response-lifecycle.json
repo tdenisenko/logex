@@ -1,0 +1,285 @@
+{
+  "date": "2026-09-17",
+  "branch": "audit/execution-response-lifecycle",
+  "base": "595e99745631c515d1c13f8909426af539947095",
+  "source_commit": "eecd57d771dfd0ab673cfdf9cc441d16547822fd",
+  "source_inventory": {
+    "base": "595e99745631c515d1c13f8909426af539947095",
+    "source_commit": "eecd57d771dfd0ab673cfdf9cc441d16547822fd",
+    "files": [
+      {
+        "path": "crates/logex-sync/src/p2p/peer_manager/mod.rs",
+        "sha256": "b3cba5d2e26898cde79cb1d0271c3f5e92ab6d5d4cde5dab9e97dd3e8e047e45",
+        "bytes": 86549
+      },
+      {
+        "path": "crates/logex-sync/src/p2p/peer_manager/admission_tests.rs",
+        "sha256": "9477fd9c4a9d696eb550fd8b3b716f6dbab8ba28a0028870cc7c6dd092d38db3",
+        "bytes": 3548
+      }
+    ]
+  },
+  "findings": [
+    "B4-49"
+  ],
+  "gates": {
+    "commit": "eecd57d771dfd0ab673cfdf9cc441d16547822fd",
+    "rustc": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+    "gates": [
+      {
+        "name": "vendor",
+        "command": [
+          "python3",
+          "tools/verify_datafusion_vendor.py"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T13:29:04.829325+00:00",
+        "finished": "2026-09-17T13:29:04.962707+00:00",
+        "sha256": "66c8356dd4a2753b376fc6b222ceda74bb495616f72e05bb062c7fb877a81bd1",
+        "log": "/private/tmp/logex-audit-execution-response-20260917/gates/vendor.log"
+      },
+      {
+        "name": "format",
+        "command": [
+          "cargo",
+          "fmt",
+          "--all",
+          "--",
+          "--check"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T13:29:04.963048+00:00",
+        "finished": "2026-09-17T13:29:06.042919+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-audit-execution-response-20260917/gates/format.log"
+      },
+      {
+        "name": "vendor-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2024",
+          "--config-path",
+          "vendor/reth-network/rustfmt.toml",
+          "--config",
+          "skip_children=true",
+          "vendor/reth-network/src/eth_requests.rs",
+          "vendor/reth-network/src/session/active.rs",
+          "vendor/reth-network/src/session/mod.rs",
+          "vendor/reth-network/src/session/types.rs",
+          "vendor/reth-network/src/session/range_update.rs",
+          "vendor/reth-discv5/src/lib.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T13:29:06.043357+00:00",
+        "finished": "2026-09-17T13:29:06.110371+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-audit-execution-response-20260917/gates/vendor-format.log"
+      },
+      {
+        "name": "enr-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2021",
+          "--config",
+          "skip_children=true",
+          "vendor/enr/src/lib.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T13:29:06.110694+00:00",
+        "finished": "2026-09-17T13:29:06.163550+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-audit-execution-response-20260917/gates/enr-format.log"
+      },
+      {
+        "name": "gossipsub-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2021",
+          "--config",
+          "skip_children=true",
+          "vendor/libp2p-gossipsub/src/time_cache.rs",
+          "vendor/libp2p-gossipsub/src/behaviour.rs",
+          "vendor/libp2p-gossipsub/src/behaviour/tests.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T13:29:06.163913+00:00",
+        "finished": "2026-09-17T13:29:06.260548+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-audit-execution-response-20260917/gates/gossipsub-format.log"
+      },
+      {
+        "name": "aggregate-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2021",
+          "--config",
+          "max_width=90,skip_children=true",
+          "vendor/datafusion-functions-aggregate/src/sum.rs",
+          "vendor/datafusion-functions-aggregate/src/average.rs",
+          "vendor/datafusion-functions-aggregate-common/src/aggregate/sum_distinct/numeric.rs",
+          "vendor/datafusion-functions-aggregate-common/src/aggregate/avg_distinct/decimal.rs",
+          "vendor/datafusion-functions-aggregate-common/src/utils.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T13:29:06.260926+00:00",
+        "finished": "2026-09-17T13:29:06.324201+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-audit-execution-response-20260917/gates/aggregate-format.log"
+      },
+      {
+        "name": "check",
+        "command": [
+          "cargo",
+          "check",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T13:29:06.324595+00:00",
+        "finished": "2026-09-17T13:29:10.673702+00:00",
+        "sha256": "bb0df5799664eb4b568d462bb02b4a298cfac27fab28ce4d7bfe6fbb1da7c0d1",
+        "log": "/private/tmp/logex-audit-execution-response-20260917/gates/check.log"
+      },
+      {
+        "name": "clippy",
+        "command": [
+          "cargo",
+          "clippy",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T13:29:10.674560+00:00",
+        "finished": "2026-09-17T13:29:15.142758+00:00",
+        "sha256": "d2d1a68886a30f04289f75169dba58570d40349348c5ef2a69cc5963301a6de6",
+        "log": "/private/tmp/logex-audit-execution-response-20260917/gates/clippy.log"
+      },
+      {
+        "name": "test",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T13:29:15.143290+00:00",
+        "finished": "2026-09-17T13:32:52.166602+00:00",
+        "sha256": "a3f772cf57609776308069b9a112db64770c28e0346c63da199122bf321fb34d",
+        "log": "/private/tmp/logex-audit-execution-response-20260917/gates/test.log"
+      },
+      {
+        "name": "doc",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--doc",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T13:32:52.171811+00:00",
+        "finished": "2026-09-17T13:33:01.464470+00:00",
+        "sha256": "d3a209417f67ebf630ba0ca696d251e0c077d755333a28442156cda1df50ff45",
+        "log": "/private/tmp/logex-audit-execution-response-20260917/gates/doc.log"
+      },
+      {
+        "name": "release-build",
+        "command": [
+          "cargo",
+          "build",
+          "-p",
+          "logex-node",
+          "--release",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T13:33:01.465679+00:00",
+        "finished": "2026-09-17T13:33:53.592632+00:00",
+        "sha256": "dc87f77f440c76f275c597a2aadd07b2ad711b3902dbe9ed3267d3209c09ce87",
+        "log": "/private/tmp/logex-audit-execution-response-20260917/gates/release-build.log"
+      }
+    ]
+  },
+  "workspace_tests": {
+    "passed": 1968,
+    "failed": 0,
+    "ignored": 24,
+    "targets": 35
+  },
+  "documentation_tests": {
+    "passed": 0,
+    "failed": 0,
+    "ignored": 0,
+    "targets": 8
+  },
+  "original_arithmetic_witnesses": {
+    "passed": 0,
+    "failed": 2,
+    "ignored": 0,
+    "targets": 1
+  },
+  "focused_final": {
+    "passed": 6,
+    "failed": 0,
+    "ignored": 0,
+    "targets": 1
+  },
+  "evidence": {
+    "path": "docs/audit/baselines/2026-09-17-execution-response-lifecycle-evidence.json.gz",
+    "files": 13,
+    "bytes_uncompressed": 151606,
+    "bytes": 35785,
+    "sha256": "e6c9f516bf204e35b9e8a945999b08ecee15598cb5996a1c338342bb4d4c2f30"
+  },
+  "validation": {
+    "path": "docs/audit/baselines/2026-09-17-execution-response-lifecycle-validation.json.gz",
+    "files": 14,
+    "bytes_uncompressed": 237067,
+    "bytes": 45253,
+    "sha256": "c4bb9934d62ab8312b5f50ea61e95738b93094d9c1b102109a10dacf972f97bd"
+  },
+  "publication": {
+    "state": "pending"
+  },
+  "boundaries": [
+    "Original arithmetic witnesses call exact original peer split code and fail downstream representability assertions. They do not execute original casts/scaler or construct a network/channel using those values.",
+    "Six final controls inspect real small configuration objects and call the public invalid constructor without a Tokio runtime; early error is verified. No enormous channel allocation, live startup or resource exhaustion test.",
+    "Numeric maxima are representational, not practical operating recommendations. 32-bit conditional source reviewed; no 32-bit target compiled.",
+    "Execution constructor preflight precedes its NAT/network work. Node runtime reaches that constructor after shared setup, then logs and exits1 on error.",
+    "Existing live request/response contents, protocol limits, same-session accounting, provider API and cache ownership are unchanged. No per-request or ingestion work added.",
+    "Current per-message, per-operation, queue and cache controls are distinct from global process memory admission. No RSS, throughput, per-node absolute byte bound or instant cancellation guarantee inferred.",
+    "Canceled already-admitted requests and owned provider copies are documented existing lifetimes; optional early skip/cursor-aware API changes are not implemented without a demonstrated need.",
+    "All vendor sources unchanged from PR226. Local standalone gossip expiry rerun omitted for this unrelated fix; exact-source local/platform controls are recorded in PR226 and current Linux/macOS CI runs them again.",
+    "No benchmark, live sync, remote host, production-data change, deployment or dependency update. Query policy, automatic verified repair and integrated acceptance remain separate."
+  ]
+}

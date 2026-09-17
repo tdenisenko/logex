@@ -8,8 +8,13 @@ The current [consensus cache lifecycle review](consensus-cache-lifecycle.md) fix
 expired duplicate-ID reads and idle heartbeat retention (B3-68). Three original
 controls fail before the correction and pass afterward; focused integration and
 independent review pass. Source `1310497a` passes all twelve local gates
-(1,962 workspace tests / 24 ignores); CI/merge remain. Trusted-history
+(1,962 workspace tests / 24 ignores); PR #226 merged as `595e9974` after all six CI jobs and ten Linux controls. Trusted-history
 persistence and aggregate network admission remain separate open work.
+
+The [execution response lifecycle review](execution-response-lifecycle.md) records
+inbound/outgoing ownership dispositions and fixes unrepresentable peer-count
+configuration before startup (B4-49). Source `eecd57d7` passes six focused controls,
+strict sync Clippy, independent review and all eleven local gates (1,968 tests / 24 ignores); CI/merge remain.
 
 ## Batch ledger
 
