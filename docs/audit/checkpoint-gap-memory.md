@@ -2,7 +2,7 @@
 
 This batch-5 follow-up is on `audit/checkpoint-gap-memory`, based on PR #221
 merge `e54e9303`. Source `b327cf90` is committed and independently reviewed.
-All ten local gates pass; publication and CI remain before merge.
+All ten local gates and CI pass; the verified merge is recorded below.
 It addresses the B5-11 retention finding recorded in the
 [sync-state review](sync-state-review.md).
 
@@ -117,4 +117,6 @@ links hashed archives of the preserved original source, exact focused commands a
 intermediate outcomes, independent review, source inventories and complete gate
 logs. All recorded source and log hashes were independently verified. Existing
 vendored dependency and debug-linker warnings remain recorded; all final gates
-pass. Publication and CI results will be recorded before closure.
+pass. Final CI and merge results are recorded below.
+
+All six CI jobs passed on `eb59b7fc`, including ten Linux volume/template cases with verified cleanup. [PR #222](https://github.com/tdenisenko/logex/pull/222) merged as `bdee0df8`. The merge tree is identical to the tested head. B5-11 is closed within its documented scope; other sync integration and broader offline audit work remain open.
