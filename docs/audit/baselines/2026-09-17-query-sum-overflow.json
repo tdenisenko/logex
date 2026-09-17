@@ -1,0 +1,395 @@
+{
+  "base_commit": "8fd2e55f3f8fa952ad6ebd460365df8589492604",
+  "source_commit": "52ce3bfde3b6b160eef4bfc070e9b0ccbc15e5ca",
+  "findings_fixed": [
+    "B7-32",
+    "B7-33",
+    "B7-34",
+    "B7-35"
+  ],
+  "validation": {
+    "commit": "52ce3bfde3b6b160eef4bfc070e9b0ccbc15e5ca",
+    "rustc": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+    "gates": [
+      {
+        "name": "vendor",
+        "command": [
+          "python3",
+          "tools/verify_datafusion_vendor.py"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T05:18:15.599502+00:00",
+        "finished": "2026-09-17T05:18:15.720432+00:00",
+        "sha256": "9b0ca39acc44bc5551d3c10a02ac6b5c5d0a47c1a6f32817f77d5370dca064f6",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-query-sum-overflow-195cl0mo/gates/vendor.log"
+      },
+      {
+        "name": "format",
+        "command": [
+          "cargo",
+          "fmt",
+          "--all",
+          "--",
+          "--check"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T05:18:15.720789+00:00",
+        "finished": "2026-09-17T05:18:16.764462+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-query-sum-overflow-195cl0mo/gates/format.log"
+      },
+      {
+        "name": "vendor-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2024",
+          "--config-path",
+          "vendor/reth-network/rustfmt.toml",
+          "--config",
+          "skip_children=true",
+          "vendor/reth-network/src/eth_requests.rs",
+          "vendor/reth-network/src/session/active.rs",
+          "vendor/reth-network/src/session/mod.rs",
+          "vendor/reth-network/src/session/types.rs",
+          "vendor/reth-network/src/session/range_update.rs",
+          "vendor/reth-discv5/src/lib.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T05:18:16.764890+00:00",
+        "finished": "2026-09-17T05:18:16.836548+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-query-sum-overflow-195cl0mo/gates/vendor-format.log"
+      },
+      {
+        "name": "enr-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2021",
+          "--config",
+          "skip_children=true",
+          "vendor/enr/src/lib.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T05:18:16.836936+00:00",
+        "finished": "2026-09-17T05:18:16.887806+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-query-sum-overflow-195cl0mo/gates/enr-format.log"
+      },
+      {
+        "name": "aggregate-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2021",
+          "--config",
+          "max_width=90,skip_children=true",
+          "vendor/datafusion-functions-aggregate/src/sum.rs",
+          "vendor/datafusion-functions-aggregate-common/src/aggregate/sum_distinct/numeric.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T05:18:16.888180+00:00",
+        "finished": "2026-09-17T05:18:16.938888+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-query-sum-overflow-195cl0mo/gates/aggregate-format.log"
+      },
+      {
+        "name": "check",
+        "command": [
+          "cargo",
+          "check",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T05:18:16.939276+00:00",
+        "finished": "2026-09-17T05:18:25.433940+00:00",
+        "sha256": "6f782dd272d8ee2366c587af7207846884d013a29a9591f05b269869eaf66ce1",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-query-sum-overflow-195cl0mo/gates/check.log"
+      },
+      {
+        "name": "clippy",
+        "command": [
+          "cargo",
+          "clippy",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T05:18:25.434515+00:00",
+        "finished": "2026-09-17T05:18:31.846170+00:00",
+        "sha256": "a80b3aeb1680d22f30939a6084b0e792c0fea85a2952de71711f1f260f317a85",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-query-sum-overflow-195cl0mo/gates/clippy.log"
+      },
+      {
+        "name": "test",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T05:18:31.846904+00:00",
+        "finished": "2026-09-17T05:23:52.461371+00:00",
+        "sha256": "1c1acc70a029ab4b319ff1dafc7f875c2ba13d919265e54088d0b65ac4e96dbf",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-query-sum-overflow-195cl0mo/gates/test.log"
+      },
+      {
+        "name": "doc",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--doc",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T05:23:52.463305+00:00",
+        "finished": "2026-09-17T05:24:00.781748+00:00",
+        "sha256": "61f08bcd3b52249d6a441ab50f2e6ec98076b751c728bfd691244e118310fc30",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-query-sum-overflow-195cl0mo/gates/doc.log"
+      },
+      {
+        "name": "release-build",
+        "command": [
+          "cargo",
+          "build",
+          "-p",
+          "logex-node",
+          "--release",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T05:24:00.782498+00:00",
+        "finished": "2026-09-17T05:27:05.431515+00:00",
+        "sha256": "031218bb199610a8505a85772ebdec4ef2416e9698728de38023fa891e1e14ec",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-query-sum-overflow-195cl0mo/gates/release-build.log"
+      }
+    ]
+  },
+  "workspace_tests": {
+    "passed": 1875,
+    "failed": 0,
+    "ignored": 24,
+    "groups": 31
+  },
+  "retained_investigation": {
+    "path": "docs/audit/baselines/2026-09-17-query-sum-overflow-evidence.json.gz",
+    "sha256": "6ca77e0400c15b94ee75944bdd29dcb7355dd3a7bf6664c526f626e270d4bbf9",
+    "compressed_bytes": 410938,
+    "decoded_bytes": 2013010,
+    "files": 105,
+    "final_source_hashes": {
+      ".github/workflows/ci.yml": "79b92c825f14c12438047c71f1a5726060325900778850b08bed9e37384b9f7e",
+      "Cargo.toml": "1f6c928d7c6d37ae816b5cf5714e5eeedb5943846e5da4ff47cd2e6969532885",
+      "Cargo.lock": "d51aedcb3ca61d2e62558b3b6c8fa6eabddd07c018b127c8bc4a7ccd3d921b4c",
+      "crates/logex-query/tests/sql_sum_overflow.rs": "09d505e7dba7522833e3e2f9cdeec3a415edf251fb67939fcba2ba3c6d75b759",
+      "tools/verify_datafusion_vendor.py": "4f86dff4bd2ddbfe587ef0d269e304388da37528ac6e994ec9b7adae085d1ed6",
+      "vendor/datafusion-functions-aggregate/src/sum.rs": "7e32b0693d0cc0f3f87ea06f8d1eec24c1a7867fc0075e739d61336dabae4f80",
+      "vendor/datafusion-functions-aggregate-common/src/aggregate/sum_distinct/numeric.rs": "200e613a0e19b80d5dfa3404ce5c5a405dc905cd8b66608ae4f0de244b5cf124",
+      "vendor/datafusion-functions-aggregate-common/LOGEX-PATCH.md": "7df64dd2f37828340f7458f384c70523263fcbb1ccaed72a2f21db2c9662849b",
+      "vendor/datafusion-functions-aggregate-common/LOGEX-PATCH.diff": "b0ef11b60394384d09168661f7afc2f4193108ada1952030af3b962dc172bea1",
+      "vendor/datafusion-functions-aggregate-common/LOGEX-UPSTREAM-SHA256": "44ecc4490539baefaafe85c44058a761aa1afb343bb38aad4c4fe24197fa142a",
+      "vendor/datafusion-functions-aggregate/LOGEX-PATCH.md": "a5190aa6f220424dc938f3580e35d15ba550e68f80779e8d2c311df7a48261ab",
+      "vendor/datafusion-functions-aggregate/LOGEX-PATCH.diff": "71de71b771a96e9ff9956a5530774c129d62f71413e7e77729d7109430228362",
+      "vendor/datafusion-functions-aggregate/LOGEX-UPSTREAM-SHA256": "ffa15a2b3a48646a9276999ab6afc77b3a20b0917b788137262d386be1b6ce69"
+    },
+    "checks": {
+      "19-entry-focused.log": {
+        "passed": 33,
+        "failed": 0,
+        "ignored": 2,
+        "groups": 4
+      },
+      "17-entry-package.log": {
+        "passed": 81,
+        "failed": 0,
+        "ignored": 0,
+        "groups": 1
+      },
+      "09-common-package.log": {
+        "passed": 18,
+        "failed": 0,
+        "ignored": 0,
+        "groups": 1
+      }
+    },
+    "isolated_files_matching_vendor": 70,
+    "isolated_locks_preserve_resolved_versions": true,
+    "isolated_manifest_only_adds_sibling_common_override": true,
+    "baseline_sources_match_original_archives": true,
+    "original_baseline_state_sources_verified": true,
+    "package_review": {
+      "packages": [
+        {
+          "name": "datafusion-functions-aggregate",
+          "original_archive_matches_lock": true,
+          "original_files": 41,
+          "complete_inventory_matches_archive": true,
+          "modified": [
+            "src/sum.rs"
+          ],
+          "forward_matches": true,
+          "reverse_matches": true,
+          "patch_sha256": "71de71b771a96e9ff9956a5530774c129d62f71413e7e77729d7109430228362",
+          "final_source_hashes": {
+            "src/sum.rs": "7e32b0693d0cc0f3f87ea06f8d1eec24c1a7867fc0075e739d61336dabae4f80"
+          },
+          "fixture_removed": true
+        },
+        {
+          "name": "datafusion-functions-aggregate-common",
+          "original_archive_matches_lock": true,
+          "original_files": 31,
+          "complete_inventory_matches_archive": true,
+          "modified": [
+            "src/aggregate/sum_distinct/numeric.rs"
+          ],
+          "forward_matches": true,
+          "reverse_matches": true,
+          "patch_sha256": "b0ef11b60394384d09168661f7afc2f4193108ada1952030af3b962dc172bea1",
+          "final_source_hashes": {
+            "src/aggregate/sum_distinct/numeric.rs": "200e613a0e19b80d5dfa3404ce5c5a405dc905cd8b66608ae4f0de244b5cf124"
+          },
+          "fixture_removed": true
+        }
+      ],
+      "root_lock_only_source_overrides": true
+    },
+    "handoff": {
+      "branch": "audit/query-sum-overflow",
+      "commit": "52ce3bfde3b6b160eef4bfc070e9b0ccbc15e5ca",
+      "owned_paths": [
+        ".github/workflows/ci.yml",
+        "Cargo.toml",
+        "Cargo.lock",
+        "crates/logex-query/tests/sql_sum_overflow.rs",
+        "tools/verify_datafusion_vendor.py",
+        "vendor/datafusion-functions-aggregate/",
+        "vendor/datafusion-functions-aggregate-common/"
+      ],
+      "findings": {
+        "B7-32": {
+          "before": "Int64/UInt64 SUM silently wraps across scalar, grouped, DISTINCT and window cases",
+          "after": "explicit SUM overflow error from checked fixed-width running operations; successful return/state types unchanged"
+        },
+        "B7-33": {
+          "before": "NULL-only sliding DISTINCT frames and last-valid-value exit produce0 instead ofNULL",
+          "after": "ignore NULL backing values; NULL when no valid values remain",
+          "scope": "public SQL baseline02 fails two NULL cases; truly empty preceding-frame SQL control already passed via executor bypass; direct private accumulator now also returnsNULL"
+        },
+        "B7-34": {
+          "before": "DECIMAL(38,0) and DECIMAL(76,0) SUM exceeds declared precision and serializes invalid/truncated-looking strings",
+          "after": "validate declared precision as well as native backing width; direct tests cover32/64/128/256 decimal storage"
+        },
+        "B7-35": {
+          "before": "key-only sliding DISTINCT state loses duplicate multiplicities: original exact implementation returns0 after merge([5,5]) then retract(5), expected5",
+          "after": "same list state repeats primitive keys, checks total/i32 offset bounds before fallible reserve, and uses SingleRowListArrayBuilder; merge/retract retains multiplicity",
+          "scope": "direct Accumulator trait defect; production sliding-window path does not call state/merge; no public SQL reachability claim"
+        }
+      },
+      "contract_boundary": "Checked semantics are for running states, not only final mathematical sums. Errors can depend on order, partitioning, DISTINCT hash-set iteration and window transition order. Engine adds entering rows before retracting old rows, so successive single-row i64MAX frames now explicitly error on their transient union even though each final frame fits. This deliberate conservative behavior change was approved by parent and has exact before-success and after-error evidence. No widening/deferred general numeric state.",
+      "preserved": "Float64 original summation/grouped paths and rounding retained. Common DISTINCT checked constructor is opt-in only for SUM; existing AVG consumers untouched. Native arbitrary-precision data SUM and established result representations pass prior contracts.",
+      "failure_handling": "Scalar/sliding batches stage sums and counts, leaving state unchanged on error. Grouped/map accumulators poison partially modified state and reject emission/reuse. Counter merges/retractions checked. NULL/FILTER masks retained, converted group states share primitive buffers.",
+      "memory": "Sliding DISTINCT size estimates retained allocation from peak usable HashMap capacity using existing bucket estimator with saturating fallback. It is not exact heap accounting or global admission guarantee. State serialization can expand from distinct cardinality to valid frame row count; current public window execution never serializes this state.",
+      "checks": {
+        "17-entry-package.log": "81 aggregate library tests passed on final Entry source",
+        "18-entry-application.log": "14 application controls passed",
+        "19-entry-focused.log": "33 application controls passed; 2 explicit benchmarks ignored: overflow5, contracts9, aggregates6, grouping13",
+        "20-entry-clippy.log": "cargo clippy --locked --offline -j2 -p logex-query --test sql_sum_overflow -- -D warnings passed",
+        "17-entry-vendor-verification.log": "449 original files across9 complete vendored packages verified with final source/patch hashes",
+        "17-entry-vendor-format.log": "targeted rustfmt --check --edition2021 --config max_width=90,skip_children=true passed both modified aggregate Rust files",
+        "09-common-package.log": "18 common library tests passed; common source unchanged in Entry follow-up",
+        "whitespace": "git diff --check passed scoped source/provenance files excluding reversible unified patch artifact"
+      },
+      "attempts": {
+        "01": "Original registry baseline assertion:9 public queries all incorrectly succeed (wrapped/out-of-precision output). Exact test and original sum/common source files saved.",
+        "02": "Original baseline1 pass2 fail: successful representable single-row window transition; overflow matrix fails; sliding DISTINCT NULL matrix fails2 cases while truly empty frame passes.",
+        "03": "Candidate compile failure: SumType missing Send bound for existing NullState/set_nulls; exact candidate sum/common snapshots saved.",
+        "04": "Candidate2 pass1 expected contract-boundary failure: fixes overflow/NULL tests, old successful-frame assertion now sees approved transient SUM error.",
+        "05": "Candidate compile failure: direct test used absent direct arrow crate import; corrected to datafusion::arrow. Exact source snapshots saved.",
+        "06": "Candidate3 pass1 fail: direct state multiplicity assertion returnsNULL expected5. This includes prior NULL fix, NOT exact original output. State encoding still original key-only logic.",
+        "07": "Candidate13 pass across new4 and existing9 app tests; state fix/6 direct vendor tests added; snapshots saved.",
+        "08": "Isolated aggregate package80 library tests pass, incl6 new controls.",
+        "09": "Isolated common package18 library tests pass.",
+        "10": "Peak retained-capacity refinement; aggregate80 pass; vendor verification/format pass; source snapshot saved.",
+        "11": "List offset bound and metadata-only early-allocation-boundary unit test; aggregate81 pass; primitive direct ListArray constructor candidate.",
+        "12": "Final existing SingleRowListArrayBuilder source and final public tests;33 app tests pass2 ignored; verifier/format pass.",
+        "13": "Final aggregate81 pass.",
+        "14": "Final focused Clippy passes.",
+        "15": "EXACT ORIGINAL PRODUCTION sum/common source restored only in isolated package, with one added tiny assertion. Fails with Int64(0) expected5, proving B7-35 original output. No root source changes and no huge fixture allocated.",
+        "16": "Final isolated source restored; aggregate81 pass; final verifier/format pass. Owned target deleted afterward.",
+        "17": "Reviewed single-Entry refinement; exact before/final sum snapshots retained; aggregate81 passed; verifier/format pass. HashMap alias/hashbrown0.14.5 source evidence retained.",
+        "18": "Final Entry application14 passed.",
+        "19": "Final Entry complete focused application33 passed,2 ignored.",
+        "20": "Final Entry focused Clippy passed."
+      },
+      "provenance_limits": [
+        "All task probes are assertions; no diagnostic-print-only result is presented as assertion evidence. Attempt06 is candidate evidence and attempt15 is exact-original internal API evidence.",
+        "Aggregate isolated published-lock copy changes only common package source to its sibling patched copy, keeping versions/other edges; common isolated lock remains published. These package tests are library tests, not doctests or end-to-end server tests.",
+        "Archived final-source-identities and isolated-package-identities identify tested sources/manifests/locks. Root graphs independently exercised by app checks.",
+        "AVG DISTINCT decimal uses original common unchecked constructor; source retained as adjacent-source lead, no independent wrong-average assertion or correctness claim.",
+        "No arithmetic performance benchmark or global query memory/admission claim."
+      ],
+      "cleanup": {
+        "removed_target": "/tmp/logex-query-sum-overflow-BG6xGO/package-target",
+        "allocated_file_bytes_before_removal": 1846743040,
+        "workspace_target_retained": true,
+        "parent_review_approved_cleanup": true
+      },
+      "cargo_free": true,
+      "source_frozen": true,
+      "prior_passing_commit": "d2d13a65c07ff3d7681eb10824df490c4ef3f78c",
+      "entry_refinement": "Single hashbrown 0.14.5 Entry lookup per sliding DISTINCT value; checked arithmetic, failure poisoning, multiplicity, and peak-capacity estimate retained. Exact prior source in 17-before-entry-sum.rs; final source in final-entry and 17-entry-sum.rs. This map is not std::collections::HashMap.",
+      "checks_before_entry": {
+        "12-final-focused.log": "33 passed: sql_sum_overflow5 (4 public SQL tests +1 direct Accumulator state test), sql_aggregate_contracts9, sql_aggregates6, sql_grouping_aggregates13;2 explicit benchmark tests ignored",
+        "16-final-package.log": "81 library tests passed for isolated aggregate crate, including7 new direct accumulator tests; full final source restored after exact baseline API check",
+        "09-common-package.log": "18 library tests passed for isolated aggregate-common crate; source identical to final modified common file",
+        "14-final-clippy.log": "cargo clippy --locked --offline -j2 -p logex-query --test sql_sum_overflow -- -D warnings passed; existing dependency deprecation/future-incompat warnings remain",
+        "16-final-vendor-verification.log": "complete archive inventories and exact reviewed patches verified",
+        "16-final-vendor-format.log": "rustfmt --check --edition 2021 --config max_width=90,skip_children=true vendor/datafusion-functions-aggregate/src/sum.rs vendor/datafusion-functions-aggregate-common/src/aggregate/sum_distinct/numeric.rs passed; same command added to CI",
+        "lock-equivalence.json": "all parsed root lock contents identical after only two pinned51 path source/checksum substitutions",
+        "whitespace": "source/docs diff check excluding standard unified patch artifacts passed; no unrelated upstream formatting changes"
+      },
+      "cleanup_before_entry": {
+        "removed_target": "/tmp/logex-query-sum-overflow-BG6xGO/package-target",
+        "allocated_bytes_before_removal": 2917605376,
+        "workspace_target_retained": true
+      }
+    }
+  },
+  "review": "Checked scalar, grouped, distinct, partial-state and sliding arithmetic; preserved public result types and original floating-point kernels. Conservative subtotal errors, including transient window states, are explicit behavior.",
+  "performance": "No ingestion or storage change; primitive group layout retained, all-null fast paths preserved. No benchmark campaign or timing guarantee.",
+  "publication": "pending exact-head CI and merge",
+  "gate_logs": {
+    "path": "docs/audit/baselines/2026-09-17-query-sum-overflow-validation.json.gz",
+    "sha256": "d0dbeabadfef60b3d27983dbc530ed4496615da51735220f704e191e9cdad775",
+    "bytes": 39054
+  }
+}

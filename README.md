@@ -556,6 +556,13 @@ Exact sums of the hexadecimal data column return base-ten strings for every
 aggregate projection in a supported query, including sums of integer literals
 alongside the data total. These sums preserve arbitrary integer precision.
 Ordinary numeric-only aggregates retain the SQL engine's result types.
+Ordinary integer and decimal sums reject overflow in a running subtotal or partial
+result, including totals beyond the declared decimal precision. A later value
+that would bring the final total into range does not undo an earlier error;
+execution order and partitioning can affect such boundary cases. Sliding windows
+also check temporary totals while moving between frames, so they can reject a
+transition even when each final frame total fits. Floating-point sums retain the
+engine's existing rounding and non-finite behavior.
 Exact data aggregation supports sums, addition/subtraction of sums, conditional
 inputs and optional grouping by address. Other aggregate shapes use the general
 SQL engine, where data remains hexadecimal text; they may reject it as nonnumeric.

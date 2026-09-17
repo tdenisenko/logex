@@ -31,8 +31,15 @@ merged as `657c99f4`.
 The [aggregate result-contract review](query-aggregate-contracts.md) checks the
 mixed exact/numeric output contract and fixes typed aggregate name collisions
 (B7-31). All nine local gates pass on `c95ed325` (1,870 tests / 24 ignored), plus
-500 isolated planner tests. Exact-head CI and merge remain. Ordinary integer
-SUM overflow (B7-32) is confirmed and recorded for the next correction.
+500 isolated planner tests. Six CI jobs passed before PR #215 merged as `8fd2e55f`. Its ordinary-integer
+SUM overflow finding (B7-32) is covered by the following scoped correction.
+
+The [ordinary sum review](query-sum-overflow.md) addresses the confirmed fixed-width
+and decimal-precision failures plus distinct-window null/state defects (B7-32–35).
+Source `52ce3bfd` passes 33 focused tests, 99 isolated package tests and all ten
+workspace gates (1,875 tests / 24 ignored). CI and merge remain. Its checked-subtotal contract
+preserves existing result types and explicitly reports overflow, including
+transient window states. Decimal-average helper behavior remains separate.
 
 ## Offline completion boundary
 
