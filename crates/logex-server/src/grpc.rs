@@ -261,6 +261,7 @@ fn proto_filter_to_native_filter(request: &GetLogsRequest) -> Result<NativeLogFi
     }
 
     let mut filter = NativeLogFilter::new();
+    filter.min_topic_count = request.topics.len();
     filter.from_block = request.from_block;
     filter.to_block = request.to_block;
     filter.block_hash = parse_optional_b256(&request.block_hash, "block_hash")?;

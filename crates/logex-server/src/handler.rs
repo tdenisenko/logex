@@ -326,11 +326,7 @@ impl RpcMethod {
                 }
                 let filter: EthFilter = serde_json::from_value(params.remove(0))
                     .map_err(|error| format!("invalid filter: {error}"))?;
-                if filter.block_hash.is_some()
-                    && (filter.from_block.is_some() || filter.to_block.is_some())
-                {
-                    return Err("blockHash is mutually exclusive with fromBlock/toBlock".into());
-                }
+                filter.validate()?;
                 if filter
                     .limit
                     .is_some_and(|limit| limit > MAX_LOG_FILTER_LIMIT)

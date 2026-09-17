@@ -14,7 +14,7 @@ use tokio::sync::broadcast;
 
 use logex_types::LogRow;
 
-use crate::eth_filter::{EthFilter, RpcLog, matches_filter, parse_address};
+use crate::eth_filter::{EthFilter, RpcLog, parse_address};
 use crate::handler::AppState;
 
 /// Capacity of the broadcast channel for new logs.
@@ -262,7 +262,7 @@ enum LiveSubscriptionScope {
 
 #[derive(Debug)]
 enum Subscription {
-    Logs(EthFilter),
+    Logs(Box<logex_storage::native::NativeLogFilter>),
     Erc20Transfers(Erc20TransferSubscription),
 }
 
@@ -317,7 +317,10 @@ struct LiveTransferSessionSnapshot {
 impl SubscribeRequest {
     fn into_subscription(self) -> Result<Subscription, String> {
         match self.subscription_type {
-            SubscriptionKind::Logs => Ok(Subscription::Logs(self.filter)),
+            SubscriptionKind::Logs => self
+                .filter
+                .to_stream_filter()
+                .map(|filter| Subscription::Logs(Box::new(filter))),
             SubscriptionKind::Erc20Transfers => self
                 .into_erc20_transfer_subscription()
                 .map(Subscription::Erc20Transfers),
@@ -767,7 +770,7 @@ impl Subscription {
             Self::Logs(filter) => {
                 let matching: Vec<RpcLog> = rows
                     .iter()
-                    .filter(|row| matches_filter(row, filter))
+                    .filter(|row| logex_query::matches_native_filter(row, filter))
                     .map(RpcLog::from)
                     .collect();
                 if matching.is_empty() {
@@ -958,6 +961,121 @@ mod tests {
     use super::*;
     use alloy_primitives::{Address, B256, Bytes, bytes};
     use logex_types::Source;
+
+    #[test]
+    fn raw_log_numeric_bounds_and_empty_addresses_match_expected_rows() {
+        let mut mismatches = Vec::new();
+        for filter in [
+            r#"{"fromBlock":"0xa","toBlock":"0xa"}"#,
+            r#"{"fromBlock":"0xa","toBlock":"0xa","address":[]}"#,
+        ] {
+            let request: SubscribeRequest =
+                serde_json::from_str(&format!(r#"{{"type":"logs","filter":{filter}}}"#)).unwrap();
+            let subscription = request.into_subscription().unwrap();
+            let payload = subscription.payload_for(&[
+                make_log(0xAA, 9),
+                make_log(0xAA, 10),
+                make_log(0xAA, 11),
+            ]);
+            let rows: Option<serde_json::Value> =
+                payload.map(|payload| serde_json::from_str(&payload).unwrap());
+            let blocks: Vec<_> = rows
+                .as_ref()
+                .and_then(|rows| rows.as_array())
+                .into_iter()
+                .flatten()
+                .map(|row| row["blockNumber"].clone())
+                .collect();
+            if blocks != vec![serde_json::json!("0xa")] {
+                mismatches.push(format!("filter={filter}, blocks={blocks:?}"));
+            }
+        }
+        assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
+    }
+
+    #[test]
+    fn raw_log_subscription_rejects_conflicts_excess_topics_and_named_bounds() {
+        let mut accepted = Vec::new();
+        for filter in [
+            r#"{"topics":[null,null,null,null,null]}"#.to_owned(),
+            format!(
+                r#"{{"blockHash":"0x{}","fromBlock":"0xa"}}"#,
+                "00".repeat(32)
+            ),
+            r#"{"fromBlock":"latest"}"#.to_owned(),
+        ] {
+            let request: SubscribeRequest =
+                serde_json::from_str(&format!(r#"{{"type":"logs","filter":{filter}}}"#)).unwrap();
+            if request.into_subscription().is_ok() {
+                accepted.push(filter);
+            }
+        }
+        assert!(accepted.is_empty(), "accepted: {accepted:?}");
+    }
+
+    #[test]
+    fn raw_log_wildcard_arity_and_query_pagination_fields_preserve_stream_semantics() {
+        let rows: Vec<_> = (0..5)
+            .map(|count| {
+                let mut row = make_log(0xAA, 10);
+                row.log_index = count;
+                row.topic0 = (count > 0).then_some(B256::ZERO);
+                row.topic1 = (count > 1).then_some(B256::ZERO);
+                row.topic2 = (count > 2).then_some(B256::ZERO);
+                row.topic3 = (count > 3).then_some(B256::ZERO);
+                row
+            })
+            .collect();
+        for (topics, required) in [
+            (serde_json::json!(null), 0),
+            (serde_json::json!([]), 0),
+            (serde_json::json!([null]), 1),
+            (serde_json::json!([[]]), 1),
+            (serde_json::json!([null, null, null, null]), 4),
+            (
+                serde_json::json!([[null, format!("{:#x}", B256::repeat_byte(8))]]),
+                1,
+            ),
+        ] {
+            let wire = serde_json::json!({"type":"logs","filter":{"topics":topics,"address":[],"fromBlock":"earliest","toBlock":"0xa","limit":0,"offset":10001}}).to_string();
+            let request: SubscribeRequest = serde_json::from_str(&wire).unwrap();
+            let subscription = request.into_subscription().unwrap();
+            let payload = subscription.payload_for(&rows).unwrap();
+            let payload: serde_json::Value = serde_json::from_str(&payload).unwrap();
+            let ids: Vec<_> = payload
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| {
+                    u32::from_str_radix(
+                        row["logIndex"].as_str().unwrap().trim_start_matches("0x"),
+                        16,
+                    )
+                    .unwrap()
+                })
+                .collect();
+            assert_eq!(ids, (required..5).collect::<Vec<_>>());
+        }
+    }
+
+    #[test]
+    fn raw_log_decoder_rejects_literal_nested_invalid_filter_shapes() {
+        for filter in [
+            r#"[null,null,null,[],null,null,0]"#,
+            r#"{"topics":[[null,true]]}"#,
+            r#"{"address":{"$serde_json::private::RawValue":"\"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\""}}"#,
+            r#"{"topics":[{"$serde_json::private::RawValue":"[]"}]}"#,
+            r#"{"fromBlock":"safe"}"#,
+            r#"{"fromBlock":"finalized"}"#,
+            r#"{"fromBlock":"pending"}"#,
+        ] {
+            let wire = format!(r#"{{"type":"logs","filter":{filter}}}"#);
+            let result = serde_json::from_str::<SubscribeRequest>(&wire)
+                .map_err(|error| error.to_string())
+                .and_then(SubscribeRequest::into_subscription);
+            assert!(result.is_err(), "accepted {filter}");
+        }
+    }
 
     fn make_log(addr_byte: u8, block: u64) -> LogRow {
         LogRow {
@@ -1375,7 +1493,9 @@ mod tests {
         let batch = rx.recv().await.unwrap();
         let matching: Vec<RpcLog> = batch
             .iter()
-            .filter(|row| matches_filter(row, &filter))
+            .filter(|row| {
+                logex_query::matches_native_filter(row, &filter.to_stream_filter().unwrap())
+            })
             .map(RpcLog::from)
             .collect();
 

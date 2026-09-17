@@ -123,7 +123,7 @@ fn execute_log_filter_snapshot_inner(
         }
     };
     check()?;
-    if filter.limit == Some(0) {
+    if filter.limit == Some(0) || filter.min_topic_count > filter.topics.len() {
         return Ok(Vec::new());
     }
     let mut rows = Vec::new();
@@ -286,11 +286,12 @@ pub fn candidate_row_ids(
             columns.push(name);
         }
     }
-    for (name, constraint) in ["topic0", "topic1", "topic2", "topic3"]
+    for (index, (name, constraint)) in ["topic0", "topic1", "topic2", "topic3"]
         .into_iter()
         .zip(&filter.topics)
+        .enumerate()
     {
-        if !matches!(constraint, TopicConstraint::Any) {
+        if index < filter.min_topic_count || !matches!(constraint, TopicConstraint::Any) {
             columns.push(name);
         }
     }
@@ -306,6 +307,9 @@ pub(crate) fn candidate_row_ids_for_reader(
     event_bloom_prechecked: bool,
     row_count: u64,
 ) -> std::io::Result<Vec<u32>> {
+    if filter.min_topic_count > filter.topics.len() {
+        return Ok(Vec::new());
+    }
     let physical_rows = reader.read_row_count()?;
     if row_count > physical_rows {
         return Err(io::Error::new(
@@ -361,12 +365,9 @@ pub(crate) fn candidate_row_ids_for_reader(
     Ok(row_ids)
 }
 
+/// Check predicates carried by a log row. Callers handle canonical bitmap
+/// enforcement, result ordering and pagination separately.
 pub fn matches_native_filter(row: &LogRow, filter: &NativeLogFilter) -> bool {
-    if filter.canonical_only {
-        // Canonical-only enforcement is handled by the canonical bitmap before
-        // rows are materialized.
-    }
-
     if let Some(block_hash) = filter.block_hash
         && row.block_hash != block_hash
     {
@@ -418,28 +419,18 @@ pub fn matches_native_filter(row: &LogRow, filter: &NativeLogFilter) -> bool {
         return false;
     }
 
-    let row_topics = [row.topic0, row.topic1, row.topic2, row.topic3];
-    for (topic, constraint) in row_topics.into_iter().zip(filter.topics.iter()) {
-        match constraint {
-            TopicConstraint::Any => {}
-            TopicConstraint::One(expected) => {
-                if topic != Some(*expected) {
-                    return false;
-                }
-            }
-            TopicConstraint::AnyOf(candidates) => {
-                if let Some(topic) = topic {
-                    if !candidates.contains(&topic) {
-                        return false;
-                    }
-                } else {
-                    return false;
-                }
-            }
-        }
+    if filter.min_topic_count > filter.topics.len() {
+        return false;
     }
-
-    true
+    let row_topics = [row.topic0, row.topic1, row.topic2, row.topic3];
+    row_topics
+        .into_iter()
+        .zip(&filter.topics)
+        .enumerate()
+        .all(|(index, (topic, constraint))| {
+            (index >= filter.min_topic_count || topic.is_some())
+                && topic_matches_constraint(topic, constraint)
+        })
 }
 
 fn build_candidate_bitmap(
@@ -805,7 +796,7 @@ fn refine_candidate_bitmap_from_columns(
     }
 
     for (index, constraint) in filter.topics.iter().enumerate() {
-        if matches!(constraint, TopicConstraint::Any) {
+        if index >= filter.min_topic_count && matches!(constraint, TopicConstraint::Any) {
             continue;
         }
         let row_ids = row_ids_from_bitmap(result.as_ref());
@@ -814,7 +805,10 @@ fn refine_candidate_bitmap_from_columns(
             row_ids.as_deref(),
             row_count,
             values,
-            |topic| topic_matches_constraint(*topic, constraint),
+            |topic| {
+                (index >= filter.min_topic_count || topic.is_some())
+                    && topic_matches_constraint(*topic, constraint)
+            },
         ));
         if result.as_ref().is_some_and(RoaringBitmap::is_empty) {
             return Ok(result);
@@ -1048,6 +1042,99 @@ mod tests {
                 source: Source::Receipt,
             },
         ]
+    }
+
+    #[test]
+    fn required_topic_presence_refines_indexed_and_unindexed_candidates() {
+        let dir = tempfile::tempdir().unwrap();
+        let prototype = make_test_rows()[0].clone();
+        let shapes = [
+            [false, false, false, false],
+            [true, false, false, false],
+            [true, true, false, false],
+            [false, true, false, false],
+            [true, false, true, false],
+            [true, true, true, true],
+        ];
+        let rows: Vec<_> = shapes
+            .into_iter()
+            .enumerate()
+            .map(|(index, shape)| {
+                let mut row = prototype.clone();
+                row.log_index = index as u32;
+                row.topic0 = shape[0].then_some(B256::ZERO);
+                row.topic1 = shape[1].then_some(B256::ZERO);
+                row.topic2 = shape[2].then_some(B256::ZERO);
+                row.topic3 = shape[3].then_some(B256::ZERO);
+                row
+            })
+            .collect();
+        write_legacy_source(dir.path(), &rows);
+        for indexed in [false, true] {
+            if indexed {
+                IndexBuilder::build_all_indexes(dir.path()).unwrap();
+            }
+            let reader = SegmentReader::open(dir.path()).unwrap();
+            let checkpoint = IndexReadCheckpoint::open(dir.path(), &reader).unwrap();
+            assert_eq!(
+                checkpoint
+                    .as_ref()
+                    .and_then(|checkpoint| checkpoint.artifact_id("topic0.bptree"))
+                    .is_some(),
+                indexed
+            );
+            for count in 0..=5 {
+                let filter = NativeLogFilter {
+                    min_topic_count: count,
+                    ..NativeLogFilter::new()
+                };
+                let expected: Vec<u32> = shapes
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, shape)| {
+                        count <= 4 && shape.iter().take(count).all(|present| *present)
+                    })
+                    .map(|(index, _)| index as u32)
+                    .collect();
+                let actual =
+                    candidate_row_ids(dir.path(), &filter, true, rows.len() as u64).unwrap();
+                assert_eq!(actual, expected, "indexed={indexed},arity={count}");
+                let direct: Vec<_> = rows
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, row)| matches_native_filter(row, &filter))
+                    .map(|(index, _)| index as u32)
+                    .collect();
+                assert_eq!(direct, expected);
+                // Without index refinement, candidates remain a conservative superset.
+                let unrefined =
+                    candidate_row_ids(dir.path(), &filter, false, rows.len() as u64).unwrap();
+                let refined: Vec<_> = unrefined
+                    .into_iter()
+                    .filter(|&index| matches_native_filter(&rows[index as usize], &filter))
+                    .collect();
+                assert_eq!(refined, expected);
+            }
+            let impossible =
+                NativeLogFilter::new().with_topic(0, TopicConstraint::AnyOf(Vec::new()));
+            assert!(
+                candidate_row_ids(dir.path(), &impossible, true, rows.len() as u64)
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(
+                rows.iter()
+                    .all(|row| !matches_native_filter(row, &impossible))
+            );
+            let combined = NativeLogFilter {
+                min_topic_count: 2,
+                ..NativeLogFilter::new().with_topic(1, TopicConstraint::One(B256::ZERO))
+            };
+            assert_eq!(
+                candidate_row_ids(dir.path(), &combined, true, rows.len() as u64).unwrap(),
+                vec![2, 5]
+            );
+        }
     }
 
     fn make_alternate_rows() -> Vec<LogRow> {
