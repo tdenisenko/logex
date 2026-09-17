@@ -42,7 +42,11 @@ impl StorageSnapshot {
         }
     }
 
-    fn validate(&self) -> io::Result<()> {
+    /// Check whether reorg or storage-close invalidation changed this view.
+    /// Returns `WouldBlock` when callers must retry with a fresh snapshot.
+    /// Call again after response conversion, including failed execution, to
+    /// prevent an invalidated view from becoming a successful response.
+    pub fn validate(&self) -> io::Result<()> {
         if self
             .validity
             .as_ref()
