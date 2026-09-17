@@ -3,14 +3,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use axum::extract::State;
-use axum::response::Json;
+use axum::extract::rejection::JsonRejection;
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Json, Response};
 
 use logex_query::{self, DEFAULT_QUERY_PAGE_SIZE, NativeStorageSnapshot, QueryCancelCheck};
 use logex_storage::PartitionManager;
 use logex_types::{LOGEX_CLIENT_VERSION, SyncStatus};
 
 use crate::eth_filter::{EthFilter, RpcLog};
-use crate::jsonrpc::{JsonRpcRequest, JsonRpcResponse};
+use crate::jsonrpc::{JsonRpcDocument, JsonRpcRequest, JsonRpcResponse};
 use crate::storage_metrics::CachedStorageMetrics;
 
 use crate::ws::SubscriptionManager;
@@ -276,77 +278,144 @@ impl Drop for ActiveQueryGuard {
 /// Handle a JSON-RPC request.
 pub async fn handle_jsonrpc(
     State(state): State<Arc<AppState>>,
-    Json(request): Json<JsonRpcRequest>,
-) -> Json<JsonRpcResponse> {
-    let id = request.id.clone();
+    document: Result<Json<JsonRpcDocument>, JsonRejection>,
+) -> Response {
+    let request = match document {
+        Ok(Json(JsonRpcDocument::Request(request))) => request,
+        Ok(Json(JsonRpcDocument::InvalidRequest)) | Err(JsonRejection::JsonDataError(_)) => {
+            return Json(JsonRpcResponse::invalid_request()).into_response();
+        }
+        Ok(Json(JsonRpcDocument::UnsupportedBatch)) => {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "JSON-RPC batches are not supported",
+            )
+                .into_response();
+        }
+        Err(JsonRejection::JsonSyntaxError(_)) => {
+            return Json(JsonRpcResponse::parse_error()).into_response();
+        }
+        Err(rejection) => return rejection.into_response(),
+    };
+    let notification = request.id.is_none();
+    let response = dispatch_jsonrpc(state, request).await;
+    if notification {
+        StatusCode::NO_CONTENT.into_response()
+    } else {
+        Json(response).into_response()
+    }
+}
+
+enum RpcMethod {
+    GetLogs(EthFilter),
+    BlockNumber,
+    ClientVersion,
+    NetworkVersion,
+    Unknown,
+}
+
+impl RpcMethod {
+    fn parse(method: &str, params: Option<serde_json::Value>) -> Result<Self, String> {
+        let method = match method {
+            "eth_getLogs" => {
+                let Some(serde_json::Value::Array(mut params)) = params else {
+                    return Err("eth_getLogs requires exactly one positional filter".into());
+                };
+                if params.len() != 1 {
+                    return Err("eth_getLogs requires exactly one positional filter".into());
+                }
+                let filter: EthFilter = serde_json::from_value(params.remove(0))
+                    .map_err(|error| format!("invalid filter: {error}"))?;
+                if filter.block_hash.is_some()
+                    && (filter.from_block.is_some() || filter.to_block.is_some())
+                {
+                    return Err("blockHash is mutually exclusive with fromBlock/toBlock".into());
+                }
+                if filter
+                    .limit
+                    .is_some_and(|limit| limit > MAX_LOG_FILTER_LIMIT)
+                {
+                    return Err(format!("limit must be at most {MAX_LOG_FILTER_LIMIT}"));
+                }
+                if filter.offset >= MAX_LOG_FILTER_LIMIT {
+                    return Err(format!("offset must be less than {MAX_LOG_FILTER_LIMIT}"));
+                }
+                return Ok(Self::GetLogs(filter));
+            }
+            "eth_blockNumber" => Self::BlockNumber,
+            "web3_clientVersion" => Self::ClientVersion,
+            "net_version" => Self::NetworkVersion,
+            _ => return Ok(Self::Unknown),
+        };
+        let empty = match params {
+            None => true,
+            Some(serde_json::Value::Array(values)) => values.is_empty(),
+            Some(serde_json::Value::Object(values)) => values.is_empty(),
+            _ => false,
+        };
+        if !empty {
+            return Err("method takes no parameters".into());
+        }
+        Ok(method)
+    }
+}
+
+async fn dispatch_jsonrpc(state: Arc<AppState>, request: JsonRpcRequest) -> JsonRpcResponse {
+    let id = request.id.unwrap_or_default();
+    let method = match RpcMethod::parse(&request.method, request.params) {
+        Ok(method) => method,
+        Err(error) => return JsonRpcResponse::invalid_params(id, error),
+    };
     // Metadata methods remain available without opening storage.
-    if !matches!(request.method.as_str(), "eth_getLogs" | "eth_blockNumber") {
-        return Json(match request.method.as_str() {
-            "web3_clientVersion" => JsonRpcResponse::success(id, LOGEX_CLIENT_VERSION.into()),
-            "net_version" => JsonRpcResponse::success(id, "1".into()),
-            _ => JsonRpcResponse::method_not_found(id),
-        });
+    match method {
+        RpcMethod::ClientVersion => {
+            return JsonRpcResponse::success(id, LOGEX_CLIENT_VERSION.into());
+        }
+        RpcMethod::NetworkVersion => return JsonRpcResponse::success(id, "1".into()),
+        RpcMethod::Unknown => return JsonRpcResponse::method_not_found(id),
+        _ => {}
     }
     let query = match state.query_control.start_concurrent() {
         Ok(query) => query,
-        Err(reason) => return Json(JsonRpcResponse::internal_error(id, reason)),
+        Err(reason) => return JsonRpcResponse::internal_error(id, reason),
     };
-    let response = match request.method.as_str() {
-        "eth_getLogs" => state
-            .run_blocking_query(&query, move |snapshot, head, cancel| {
-                handle_eth_get_logs(snapshot, head, &request, &cancel).map_err(io::Error::other)
-            })
-            .await
-            .map_err(|error| error.to_string()),
-        "eth_blockNumber" => {
+    let response = match method {
+        RpcMethod::GetLogs(filter) => {
+            state
+                .run_blocking_query(&query, move |snapshot, head, cancel| {
+                    handle_eth_get_logs(snapshot, head, filter, &cancel)
+                })
+                .await
+        }
+        RpcMethod::BlockNumber => {
             let storage = match state.read_storage().await {
                 Ok(storage) => storage,
-                Err(reason) => return Json(JsonRpcResponse::internal_error(id, reason)),
+                Err(reason) => return JsonRpcResponse::internal_error(id, reason),
             };
-            handle_eth_block_number(&storage, &request)
+            Ok(serde_json::Value::String(format!(
+                "0x{:x}",
+                storage.head_block().unwrap_or(0)
+            )))
         }
-        _ => Ok(JsonRpcResponse::method_not_found(id.clone())),
+        RpcMethod::ClientVersion | RpcMethod::NetworkVersion | RpcMethod::Unknown => {
+            unreachable!("metadata returned before query admission")
+        }
     };
-
     if let Some(reason) = state.storage_failure() {
-        return Json(JsonRpcResponse::internal_error(id, reason));
+        return JsonRpcResponse::internal_error(id, reason);
     }
-    Json(response.unwrap_or_else(|e: String| JsonRpcResponse::internal_error(id, e)))
+    match response {
+        Ok(result) => JsonRpcResponse::success(id, result),
+        Err(error) => JsonRpcResponse::internal_error(id, error.to_string()),
+    }
 }
 
 fn handle_eth_get_logs(
     snapshot: &NativeStorageSnapshot,
     head_block: u64,
-    req: &JsonRpcRequest,
+    filter: EthFilter,
     cancel: &logex_query::QueryCancelCheck,
-) -> Result<JsonRpcResponse, String> {
-    let id = req.id.clone();
-    let params = req
-        .params
-        .as_ref()
-        .and_then(|p| p.as_array())
-        .ok_or_else(|| "params must be an array".to_string())?;
-
-    if params.is_empty() {
-        return Err("eth_getLogs requires a filter parameter".into());
-    }
-
-    let filter: EthFilter =
-        serde_json::from_value(params[0].clone()).map_err(|e| format!("invalid filter: {e}"))?;
-
-    if filter.block_hash.is_some() && (filter.from_block.is_some() || filter.to_block.is_some()) {
-        return Err("blockHash is mutually exclusive with fromBlock/toBlock".into());
-    }
-
-    if let Some(limit) = filter.limit
-        && limit > MAX_LOG_FILTER_LIMIT
-    {
-        return Err(format!("limit must be at most {MAX_LOG_FILTER_LIMIT}"));
-    }
-    if filter.offset >= MAX_LOG_FILTER_LIMIT {
-        return Err(format!("offset must be less than {MAX_LOG_FILTER_LIMIT}"));
-    }
-
+) -> io::Result<serde_json::Value> {
     let mut native_filter = filter.to_native_filter(head_block);
     native_filter.limit = Some(
         filter
@@ -359,23 +428,9 @@ fn handle_eth_get_logs(
         snapshot,
         &native_filter,
         Some(cancel),
-    )
-    .map_err(|error| error.to_string())?;
+    )?;
     let logs: Vec<RpcLog> = rows.iter().map(RpcLog::from).collect();
-
-    let json = serde_json::to_value(&logs).map_err(|e| e.to_string())?;
-    Ok(JsonRpcResponse::success(id, json))
-}
-
-fn handle_eth_block_number(
-    storage: &PartitionManager,
-    req: &JsonRpcRequest,
-) -> Result<JsonRpcResponse, String> {
-    let block = storage.head_block().unwrap_or(0);
-    Ok(JsonRpcResponse::success(
-        req.id.clone(),
-        serde_json::Value::String(format!("0x{block:x}")),
-    ))
+    serde_json::to_value(&logs).map_err(io::Error::other)
 }
 
 #[cfg(test)]
@@ -388,6 +443,72 @@ mod tests {
     use tempfile::TempDir;
 
     use crate::eth_filter::{AddressFilter, BlockId};
+
+    async fn decode_rpc_response(response: Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[test]
+    fn notification_waits_for_native_work_and_drop_permanently_cancels_it() {
+        use std::future::Future;
+        use std::task::Poll;
+        let (_tmp, storage) = setup_storage();
+        let state = Arc::new(AppState::new(storage, None, SyncStatus::default()));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let occupied = tokio::task::spawn_blocking(move || {
+                let _ = entered_tx.send(());
+                let _ = release_rx.recv();
+            });
+            entered_rx.await.unwrap();
+            let document =
+                serde_json::from_str(r#"{"jsonrpc":"2.0","method":"eth_getLogs","params":[{}]}"#)
+                    .unwrap();
+            let mut notification = Box::pin(handle_jsonrpc(
+                State(Arc::clone(&state)),
+                Ok(Json(document)),
+            ));
+            let first =
+                std::future::poll_fn(|cx| Poll::Ready(notification.as_mut().poll(cx))).await;
+            assert!(
+                first.is_pending(),
+                "notification acknowledged before native execution"
+            );
+            let token = state
+                .query_control
+                .active
+                .lock()
+                .unwrap()
+                .concurrent
+                .last()
+                .unwrap()
+                .upgrade()
+                .unwrap();
+            assert!(!token.load(Ordering::Acquire));
+            assert!(
+                state.storage.try_write().is_ok(),
+                "queued notification kept ingestion lock"
+            );
+            drop(notification);
+            assert!(token.load(Ordering::Acquire));
+            release_tx.send(()).unwrap();
+            occupied.await.unwrap();
+            let workers = state.native_query_workers.get().unwrap();
+            let _capacity = workers.acquire().await.unwrap();
+            let fresh = state.query_control.start_concurrent().unwrap();
+            assert!(!fresh.was_canceled());
+            assert!(token.load(Ordering::Acquire));
+        });
+    }
 
     #[test]
     fn storage_failure_permanently_closes_all_admission_and_cancels_tokens() {
@@ -431,17 +552,18 @@ mod tests {
             "web3_clientVersion",
             "net_version",
         ] {
-            let request = serde_json::from_value(serde_json::json!({
-                "jsonrpc": "2.0", "method": method, "params": [{}], "id": 1,
-            }))
+            let request = serde_json::from_str(&serde_json::json!({
+                "jsonrpc": "2.0", "method": method, "params": if method == "eth_getLogs" { serde_json::json!([{}]) } else { serde_json::json!([]) }, "id": 1,
+            }).to_string())
             .unwrap();
-            let Json(response) = tokio::time::timeout(
+            let response = tokio::time::timeout(
                 std::time::Duration::from_secs(1),
-                handle_jsonrpc(State(Arc::clone(&state)), Json(request)),
+                handle_jsonrpc(State(Arc::clone(&state)), Ok(Json(request))),
             )
             .await
             .unwrap();
-            assert_eq!(response.error.is_some(), method.starts_with("eth_"));
+            let response = decode_rpc_response(response).await;
+            assert_eq!(response.get("error").is_some(), method.starts_with("eth_"));
         }
     }
 
@@ -896,12 +1018,13 @@ mod tests {
             "id": 1
         });
 
-        let request: JsonRpcRequest = serde_json::from_value(req_json).unwrap();
-        let Json(response) = handle_jsonrpc(State(state), Json(request)).await;
+        let request = serde_json::from_str(&req_json.to_string()).unwrap();
+        let response =
+            decode_rpc_response(handle_jsonrpc(State(state), Ok(Json(request))).await).await;
 
-        assert!(response.error.is_none());
+        assert!(response.get("error").is_none());
         let logs: Vec<serde_json::Value> =
-            serde_json::from_value(response.result.unwrap()).unwrap();
+            serde_json::from_value(response["result"].clone()).unwrap();
         assert_eq!(logs.len(), 1);
         assert!(logs[0]["address"].as_str().unwrap().contains(&addr));
     }
@@ -918,11 +1041,12 @@ mod tests {
             "id": 1
         });
 
-        let request: JsonRpcRequest = serde_json::from_value(req_json).unwrap();
-        let Json(response) = handle_jsonrpc(State(state), Json(request)).await;
+        let request = serde_json::from_str(&req_json.to_string()).unwrap();
+        let response =
+            decode_rpc_response(handle_jsonrpc(State(state), Ok(Json(request))).await).await;
 
-        assert!(response.error.is_none());
-        let block = response.result.unwrap();
+        assert!(response.get("error").is_none());
+        let block = &response["result"];
         assert_eq!(block, "0xc8"); // 200
     }
 
@@ -938,12 +1062,13 @@ mod tests {
             "id": 1
         });
 
-        let request: JsonRpcRequest = serde_json::from_value(req_json).unwrap();
-        let Json(response) = handle_jsonrpc(State(state), Json(request)).await;
+        let request = serde_json::from_str(&req_json.to_string()).unwrap();
+        let response =
+            decode_rpc_response(handle_jsonrpc(State(state), Ok(Json(request))).await).await;
 
-        assert!(response.error.is_none());
+        assert!(response.get("error").is_none());
         assert_eq!(
-            response.result.unwrap(),
+            response["result"],
             serde_json::Value::String(LOGEX_CLIENT_VERSION.into())
         );
     }
