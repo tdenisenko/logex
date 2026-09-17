@@ -365,21 +365,44 @@ mod tests {
 
     #[test]
     fn info_preserves_consensus_open_errors() {
+        for name in ["consensus_state.json", "consensus_state.bin"] {
+            let temp = tempfile::tempdir().unwrap();
+            let storage = PartitionManager::open(PartitionManagerConfig {
+                data_dir: temp.path().to_owned(),
+                ..Default::default()
+            })
+            .unwrap();
+            assert!(open_consensus_for_info(&storage).unwrap().is_none());
+            std::fs::create_dir(temp.path().join("cl")).unwrap();
+            let legacy = temp.path().join("cl").join(name);
+            std::fs::write(&legacy, b"legacy evidence").unwrap();
+            assert!(matches!(
+                open_consensus_for_info(&storage),
+                Err(ConsensusStateError::ParseState { .. })
+            ));
+            assert_eq!(std::fs::read(legacy).unwrap(), b"legacy evidence");
+        }
+    }
+
+    #[test]
+    fn info_preserves_incomplete_consensus_journal() {
         let temp = tempfile::tempdir().unwrap();
         let storage = PartitionManager::open(PartitionManagerConfig {
             data_dir: temp.path().to_owned(),
             ..Default::default()
         })
         .unwrap();
-        assert!(open_consensus_for_info(&storage).unwrap().is_none());
-        std::fs::create_dir(temp.path().join("cl")).unwrap();
-        let legacy = temp.path().join("cl/consensus_state.json");
-        std::fs::write(&legacy, b"legacy evidence").unwrap();
-        assert!(matches!(
-            open_consensus_for_info(&storage),
-            Err(ConsensusStateError::ParseState { .. })
-        ));
-        assert_eq!(std::fs::read(legacy).unwrap(), b"legacy evidence");
+        let current = logex_cl::consensus_state_path(temp.path());
+        let directory = current.parent().unwrap();
+        std::fs::create_dir_all(directory).unwrap();
+        let evidence = directory.join("retained-evidence");
+        std::fs::write(&evidence, b"preserve unavailable state").unwrap();
+        assert!(open_consensus_for_info(&storage).is_err());
+        assert_eq!(
+            std::fs::read(evidence).unwrap(),
+            b"preserve unavailable state"
+        );
+        assert!(!current.exists());
     }
 
     #[test]

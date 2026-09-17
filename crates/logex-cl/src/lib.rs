@@ -18,11 +18,14 @@ mod candidate_metadata;
 mod chain;
 mod discovery_key;
 mod history_range_scan;
+mod journal;
 mod light_client;
 mod network;
 mod rpc;
 mod rpc_memory;
 mod snapshot_format;
+mod state_delta;
+use state_delta::StateDelta;
 
 pub(crate) use beacon_block::{VerifiedBeaconBlock, decode_verified_beacon_block};
 pub use chain::{
@@ -46,7 +49,9 @@ pub use network::{
 use rpc::RawRpcResponse;
 
 const CONSENSUS_STATE_DIR: &str = "cl";
-const CONSENSUS_STATE_FILE: &str = "consensus_state.bin";
+const CONSENSUS_STATE_FILE: &str = "CURRENT";
+const CONSENSUS_STORE_DIR: &str = "consensus_state";
+const LEGACY_BINARY_STATE_FILE: &str = "consensus_state.bin";
 const LEGACY_CONSENSUS_STATE_FILE: &str = "consensus_state.json";
 /// Mainnet reference age limit for opening the consensus store. The Electra
 /// reference assumes at least 8,388,608 ETH of active balance; it is not a
@@ -74,6 +79,8 @@ pub enum ConsensusStateError {
     StorageFailed(Arc<str>),
     #[error("invalid verified consensus payload metadata: {0}")]
     InvalidCachedPayload(String),
+    #[error("invalid consensus mutation: {0}")]
+    InvalidMutation(String),
     #[error("invalid checkpoint string: {0}")]
     InvalidCheckpoint(String),
     #[error(
@@ -166,8 +173,8 @@ pub struct ConsensusStore {
     path: PathBuf,
     inner: Arc<Mutex<ConsensusSnapshot>>,
     // Readers never wait for filesystem I/O. Writers serialize the entire
-    // candidate -> durable replacement -> publication transaction.
-    writer: Mutex<()>,
+    // prepare delta -> durable frontier -> publication transaction.
+    writer: Mutex<journal::Journal>,
     storage_failure: tokio::sync::watch::Sender<Option<Arc<str>>>,
 }
 
@@ -177,75 +184,88 @@ impl ConsensusStore {
         checkpoint: Option<&str>,
     ) -> Result<Self, ConsensusStateError> {
         let path = consensus_state_path(data_dir.as_ref());
-        let (mut snapshot, mut needs_save) = match fs::File::open(&path) {
-            Ok(file) => {
-                let snapshot =
-                    snapshot_format::read(file).map_err(|source| match source.kind() {
-                        io::ErrorKind::InvalidData | io::ErrorKind::UnexpectedEof => {
-                            ConsensusStateError::ParseState {
-                                path: path.clone(),
-                                message: source.to_string(),
-                            }
-                        }
-                        _ => ConsensusStateError::ReadState {
-                            path: path.clone(),
-                            source,
-                        },
-                    })?;
-                let snapshot = restore_snapshot(snapshot).map_err(|message| {
+        let (mut snapshot, mut journal, fresh) = if state_entry_exists(path.parent().unwrap())? {
+            let (journal, snapshot) = journal::Journal::open::<StateDelta>(
+                &path,
+                |snapshot| {
+                    restore_snapshot(snapshot)
+                        .map_err(|message| io::Error::new(io::ErrorKind::InvalidData, message))
+                },
+                |snapshot, delta| delta.apply_replayed(snapshot),
+            )
+            .map_err(|source| match source.kind() {
+                io::ErrorKind::InvalidData | io::ErrorKind::UnexpectedEof => {
                     ConsensusStateError::ParseState {
                         path: path.clone(),
-                        message,
+                        message: source.to_string(),
                     }
+                }
+                _ => ConsensusStateError::ReadState {
+                    path: path.clone(),
+                    source,
+                },
+            })?;
+            let snapshot =
+                restore_snapshot(snapshot).map_err(|message| ConsensusStateError::ParseState {
+                    path: path.clone(),
+                    message,
                 })?;
-                (snapshot, false)
-            }
-            Err(source) if source.kind() == io::ErrorKind::NotFound => {
-                // A dangling state-file link is an existing, unavailable state,
-                // not permission to initialize a replacement database.
-                if state_entry_exists(&path)? {
-                    return Err(ConsensusStateError::ReadState { path, source });
-                }
-                let legacy = data_dir
-                    .as_ref()
-                    .join(CONSENSUS_STATE_DIR)
-                    .join(LEGACY_CONSENSUS_STATE_FILE);
+            (snapshot, Some(journal), false)
+        } else {
+            for name in [LEGACY_BINARY_STATE_FILE, LEGACY_CONSENSUS_STATE_FILE] {
+                let legacy = data_dir.as_ref().join(CONSENSUS_STATE_DIR).join(name);
                 if state_entry_exists(&legacy)? {
-                    return Err(ConsensusStateError::ParseState {
-                        path: legacy,
-                        message: "legacy consensus snapshot has no integrity envelope; use a recent checkpoint in a fresh data directory; existing files were not changed".into(),
-                    });
+                    return Err(ConsensusStateError::ParseState { path: legacy, message: "older consensus format requires a recent checkpoint in a fresh data directory; existing files were not changed".into() });
                 }
-                let checkpoint = checkpoint.ok_or(ConsensusStateError::MissingCheckpoint)?;
-                (load_checkpoint_descriptor(checkpoint)?, true)
             }
-            Err(source) => return Err(ConsensusStateError::ReadState { path, source }),
+            (
+                load_checkpoint_descriptor(
+                    checkpoint.ok_or(ConsensusStateError::MissingCheckpoint)?,
+                )?,
+                None,
+                true,
+            )
         };
-        if !needs_save && let Some(checkpoint) = checkpoint {
+        let reconcile = if !fresh && let Some(checkpoint) = checkpoint {
             let requested = load_checkpoint_descriptor(checkpoint)?.checkpoint;
-            needs_save = reconcile_checkpoint(&mut snapshot, requested)?;
-        }
+            reconcile_checkpoint(&mut snapshot, requested)?
+        } else {
+            false
+        };
+        // A durable journal may advance the trusted slot beyond its checkpoint.
         ensure_snapshot_within_weak_subjectivity_period(&snapshot)?;
-        // Only startup may initialize directories. An already opened store must
-        // fail if its directory disappears instead of creating a replacement.
-        if needs_save {
-            let parent = path.parent().expect("consensus state path has a parent");
+        if fresh {
+            let directory = path.parent().unwrap();
+            let parent = directory.parent().unwrap();
             create_synced_directory(parent).map_err(|source| {
                 ConsensusStateError::PersistState {
                     path: path.clone(),
                     source,
                 }
             })?;
+            let initialized = initialize_journal(&path, &snapshot).map_err(|source| {
+                ConsensusStateError::PersistState {
+                    path: path.clone(),
+                    source,
+                }
+            })?;
+            journal = Some(initialized);
+        } else if reconcile {
+            journal
+                .as_mut()
+                .unwrap()
+                .checkpoint(&path, &snapshot)
+                .map_err(|source| ConsensusStateError::PersistState {
+                    path: path.clone(),
+                    source,
+                })?;
         }
         let store = Self {
             path,
             inner: Arc::new(Mutex::new(snapshot)),
-            writer: Mutex::new(()),
+            writer: Mutex::new(journal.expect("opened or initialized consensus journal")),
             storage_failure: tokio::sync::watch::channel(None).0,
         };
-        if needs_save {
-            store.persist()?;
-        }
         Ok(store)
     }
 
@@ -420,19 +440,13 @@ impl ConsensusStore {
     }
 
     pub fn replace_anchors(&self, anchors: Vec<AnchorRecord>) -> Result<(), ConsensusStateError> {
-        self.update(|snapshot| {
-            snapshot.ordered_anchors = normalize_anchor_records(anchors);
-            recompute_snapshot_anchors(snapshot);
-        })
+        self.update_delta(StateDelta::ReplaceAnchors(normalize_anchor_records(
+            anchors,
+        )))
     }
 
     pub fn append_anchors(&self, anchors: Vec<AnchorRecord>) -> Result<(), ConsensusStateError> {
-        self.update(|snapshot| {
-            snapshot.ordered_anchors.extend(anchors);
-            let ordered = std::mem::take(&mut snapshot.ordered_anchors);
-            snapshot.ordered_anchors = normalize_anchor_records(ordered);
-            recompute_snapshot_anchors(snapshot);
-        })
+        self.update_delta(StateDelta::UpsertAnchors(normalize_anchor_records(anchors)))
     }
 
     pub fn replace_anchor_range(
@@ -442,43 +456,28 @@ impl ConsensusStore {
         anchors: Vec<AnchorRecord>,
     ) -> Result<(), ConsensusStateError> {
         let anchors = normalize_anchor_records(anchors);
-        let contained = start_block <= end_block
-            && anchors
-                .iter()
-                .all(|record| (start_block..=end_block).contains(&record.anchor.block_number));
-        self.update_if_with_writer(
-            move |current| {
-                let range = contained.then(|| {
-                    let existing = &current.ordered_anchors;
-                    let start = existing.partition_point(|r| r.anchor.block_number < start_block);
-                    let end = existing.partition_point(|r| r.anchor.block_number <= end_block);
-                    start..end
-                });
-                if range
-                    .as_ref()
-                    .is_some_and(|range| current.ordered_anchors[range.clone()] == anchors)
-                {
+        self.update_if(move |current| {
+            if start_block <= end_block
+                && anchors
+                    .iter()
+                    .all(|r| (start_block..=end_block).contains(&r.anchor.block_number))
+            {
+                let start = current
+                    .ordered_anchors
+                    .partition_point(|r| r.anchor.block_number < start_block);
+                let end = current
+                    .ordered_anchors
+                    .partition_point(|r| r.anchor.block_number <= end_block);
+                if current.ordered_anchors[start..end] == anchors {
                     return Ok(None);
                 }
-                Ok(Some(move |snapshot: &mut ConsensusSnapshot| {
-                    if let Some(range) = range {
-                        snapshot.ordered_anchors.splice(range, anchors);
-                    } else {
-                        // Preserve the public method's merge behavior when supplied
-                        // records lie outside the replaced interval.
-                        snapshot.ordered_anchors.retain(|record| {
-                            record.anchor.block_number < start_block
-                                || record.anchor.block_number > end_block
-                        });
-                        snapshot.ordered_anchors.extend(anchors);
-                        let ordered = std::mem::take(&mut snapshot.ordered_anchors);
-                        snapshot.ordered_anchors = normalize_anchor_records(ordered);
-                    }
-                    recompute_snapshot_anchors(snapshot);
-                }))
-            },
-            write_snapshot,
-        )
+            }
+            Ok(Some(StateDelta::ReplaceRange {
+                start: start_block,
+                end: end_block,
+                anchors,
+            }))
+        })
         .map(|_| ())
     }
 
@@ -490,16 +489,10 @@ impl ConsensusStore {
     ) -> Result<(), ConsensusStateError> {
         light_client::normalize_cached_context(&mut payload, status.header.beacon_slot)
             .map_err(ConsensusStateError::InvalidCachedPayload)?;
-        self.update(|snapshot| {
-            snapshot.checkpoint.beacon_slot = Some(store.bootstrap_slot());
-            snapshot.light_client.bootstrap = Some(status);
-            snapshot.light_client.finality_update = None;
-            snapshot.light_client.optimistic_update = None;
-            snapshot.light_client_payloads.bootstrap = Some(payload);
-            snapshot.light_client_payloads.finality_update = None;
-            snapshot.light_client_payloads.optimistic_update = None;
-            snapshot.verified_light_client_store = Some(store);
-            apply_verified_store(snapshot);
+        self.update_delta(StateDelta::Bootstrap {
+            status,
+            payload,
+            store: Box::new(store),
         })
     }
 
@@ -513,50 +506,45 @@ impl ConsensusStore {
     ) -> Result<bool, ConsensusStateError> {
         light_client::normalize_cached_context(&mut payload, status.attested_header.beacon_slot)
             .map_err(ConsensusStateError::InvalidCachedPayload)?;
-        self.update_if_with_writer(
-            |current| {
-                let cached = current
-                    .light_client_payloads
+        self.update_if(|current| {
+            let cached = current
+                .light_client_payloads
+                .finality_update
+                .as_ref()
+                .map(|payload| {
+                    light_client::decode_finality_update(&payload.bytes).map_err(|error| {
+                        ConsensusStateError::InvalidCachedPayload(format!(
+                            "cached finality update: {error}"
+                        ))
+                    })
+                })
+                .transpose()?;
+            let replace_payload = cached.as_ref().is_none_or(|previous| {
+                finality_cache_priority(&status) > finality_cache_priority(previous)
+            });
+            let replace_summary =
+                current
+                    .light_client
                     .finality_update
                     .as_ref()
-                    .map(|payload| {
-                        light_client::decode_finality_update(&payload.bytes).map_err(|error| {
-                            ConsensusStateError::InvalidCachedPayload(format!(
-                                "cached finality update: {error}"
-                            ))
-                        })
-                    })
-                    .transpose()?;
-                let replace_payload = cached.as_ref().is_none_or(|previous| {
-                    finality_cache_priority(&status) > finality_cache_priority(previous)
-                });
-                let replace_summary =
-                    current
-                        .light_client
-                        .finality_update
-                        .as_ref()
-                        .is_none_or(|previous| {
-                            finality_cache_priority(&status) > finality_cache_priority(previous)
-                        });
-                if !replace_payload
-                    && !replace_summary
-                    && current.verified_light_client_store.as_ref() == Some(&store)
-                {
-                    return Ok(None);
-                }
-                Ok(Some(move |snapshot: &mut ConsensusSnapshot| {
-                    if replace_summary {
-                        snapshot.light_client.finality_update = Some(status);
-                    }
-                    if replace_payload {
-                        snapshot.light_client_payloads.finality_update = Some(payload);
-                    }
-                    snapshot.verified_light_client_store = Some(store);
-                    apply_verified_store(snapshot);
-                }))
-            },
-            write_snapshot,
-        )
+                    .is_none_or(|previous| {
+                        finality_cache_priority(&status) > finality_cache_priority(previous)
+                    });
+            if !replace_payload
+                && !replace_summary
+                && current.verified_light_client_store.as_ref() == Some(&store)
+            {
+                return Ok(None);
+            }
+            Ok(Some(StateDelta::VerifiedPatch {
+                store: Box::new(store),
+                finality: replace_summary.then(|| Box::new(status)),
+                finality_payload: replace_payload.then_some(payload),
+                optimistic: None,
+                optimistic_payload: None,
+                periods: BTreeMap::new(),
+            }))
+        })
     }
 
     /// Record verified state independently of the best diagnostic summary and
@@ -569,50 +557,45 @@ impl ConsensusStore {
     ) -> Result<bool, ConsensusStateError> {
         light_client::normalize_cached_context(&mut payload, status.attested_header.beacon_slot)
             .map_err(ConsensusStateError::InvalidCachedPayload)?;
-        self.update_if_with_writer(
-            |current| {
-                let cached = current
-                    .light_client_payloads
+        self.update_if(|current| {
+            let cached = current
+                .light_client_payloads
+                .optimistic_update
+                .as_ref()
+                .map(|payload| {
+                    light_client::decode_optimistic_update(&payload.bytes).map_err(|error| {
+                        ConsensusStateError::InvalidCachedPayload(format!(
+                            "cached optimistic update: {error}"
+                        ))
+                    })
+                })
+                .transpose()?;
+            let replace_payload = cached.as_ref().is_none_or(|previous| {
+                optimistic_cache_priority(&status) > optimistic_cache_priority(previous)
+            });
+            let replace_summary =
+                current
+                    .light_client
                     .optimistic_update
                     .as_ref()
-                    .map(|payload| {
-                        light_client::decode_optimistic_update(&payload.bytes).map_err(|error| {
-                            ConsensusStateError::InvalidCachedPayload(format!(
-                                "cached optimistic update: {error}"
-                            ))
-                        })
-                    })
-                    .transpose()?;
-                let replace_payload = cached.as_ref().is_none_or(|previous| {
-                    optimistic_cache_priority(&status) > optimistic_cache_priority(previous)
-                });
-                let replace_summary =
-                    current
-                        .light_client
-                        .optimistic_update
-                        .as_ref()
-                        .is_none_or(|previous| {
-                            optimistic_cache_priority(&status) > optimistic_cache_priority(previous)
-                        });
-                if !replace_payload
-                    && !replace_summary
-                    && current.verified_light_client_store.as_ref() == Some(&store)
-                {
-                    return Ok(None);
-                }
-                Ok(Some(move |snapshot: &mut ConsensusSnapshot| {
-                    if replace_summary {
-                        snapshot.light_client.optimistic_update = Some(status);
-                    }
-                    if replace_payload {
-                        snapshot.light_client_payloads.optimistic_update = Some(payload);
-                    }
-                    snapshot.verified_light_client_store = Some(store);
-                    apply_verified_store(snapshot);
-                }))
-            },
-            write_snapshot,
-        )
+                    .is_none_or(|previous| {
+                        optimistic_cache_priority(&status) > optimistic_cache_priority(previous)
+                    });
+            if !replace_payload
+                && !replace_summary
+                && current.verified_light_client_store.as_ref() == Some(&store)
+            {
+                return Ok(None);
+            }
+            Ok(Some(StateDelta::VerifiedPatch {
+                store: Box::new(store),
+                optimistic: replace_summary.then_some(status),
+                optimistic_payload: replace_payload.then_some(payload),
+                finality: None,
+                finality_payload: None,
+                periods: BTreeMap::new(),
+            }))
+        })
     }
 
     pub(crate) fn record_verified_applied_update(
@@ -623,9 +606,9 @@ impl ConsensusStore {
         // Match insertion's last-record-wins behavior before comparing payloads.
         let verified_updates_by_period: BTreeMap<_, _> =
             verified_updates_by_period.into_iter().collect();
-        self.update_if_with_writer(
-            move |current| {
-                let optimistic_changed = current
+        self.update_if(move |current| {
+            let optimistic_changed =
+                current
                     .light_client
                     .optimistic_update
                     .as_ref()
@@ -633,43 +616,44 @@ impl ConsensusStore {
                         optimistic_cache_priority(&applied.optimistic_status)
                             > optimistic_cache_priority(previous)
                     });
-                let finality_changed = applied.finality_status.as_ref().is_some_and(|status| {
-                    current
-                        .light_client
-                        .finality_update
-                        .as_ref()
-                        .is_none_or(|previous| {
-                            finality_cache_priority(status) > finality_cache_priority(previous)
-                        })
-                });
-                let payloads_changed =
-                    verified_updates_by_period.iter().any(|(period, payload)| {
-                        current.light_client_payloads.updates_by_period.get(period) != Some(payload)
-                    });
-                if !optimistic_changed
-                    && !finality_changed
-                    && !payloads_changed
-                    && current.verified_light_client_store.as_ref() == Some(&applied.store)
-                {
-                    return Ok(None);
-                }
-                Ok(Some(move |snapshot: &mut ConsensusSnapshot| {
-                    if optimistic_changed {
-                        snapshot.light_client.optimistic_update = Some(applied.optimistic_status);
-                    }
-                    if finality_changed {
-                        snapshot.light_client.finality_update = applied.finality_status;
-                    }
-                    snapshot
-                        .light_client_payloads
-                        .updates_by_period
-                        .extend(verified_updates_by_period);
-                    snapshot.verified_light_client_store = Some(applied.store);
-                    apply_verified_store(snapshot);
-                }))
-            },
-            write_snapshot,
-        )
+            let finality_changed = applied.finality_status.as_ref().is_some_and(|status| {
+                current
+                    .light_client
+                    .finality_update
+                    .as_ref()
+                    .is_none_or(|previous| {
+                        finality_cache_priority(status) > finality_cache_priority(previous)
+                    })
+            });
+            let payloads_changed = verified_updates_by_period.iter().any(|(period, payload)| {
+                current.light_client_payloads.updates_by_period.get(period) != Some(payload)
+            });
+            if !optimistic_changed
+                && !finality_changed
+                && !payloads_changed
+                && current.verified_light_client_store.as_ref() == Some(&applied.store)
+            {
+                return Ok(None);
+            }
+            let periods = verified_updates_by_period
+                .into_iter()
+                .filter(|(period, payload)| {
+                    current.light_client_payloads.updates_by_period.get(period) != Some(payload)
+                })
+                .collect();
+            Ok(Some(StateDelta::VerifiedPatch {
+                store: Box::new(applied.store),
+                optimistic: optimistic_changed.then_some(applied.optimistic_status),
+                finality: if finality_changed {
+                    applied.finality_status.map(Box::new)
+                } else {
+                    None
+                },
+                finality_payload: None,
+                optimistic_payload: None,
+                periods,
+            }))
+        })
         .map(|_| ())
     }
 
@@ -677,69 +661,100 @@ impl ConsensusStore {
         &self,
         store: VerifiedLightClientStore,
     ) -> Result<(), ConsensusStateError> {
-        self.update(|snapshot| {
-            snapshot.verified_light_client_store = Some(store);
-            apply_verified_store(snapshot);
-        })
+        self.update_delta(StateDelta::verified(store))
     }
 
-    /// Subscribe to the first failed save. The error remains latched even when
-    /// there were no subscribers at the time of failure; reopening is required.
+    /// The first uncertain write stops further mutations until a fresh open.
     pub fn subscribe_storage_failure(&self) -> tokio::sync::watch::Receiver<Option<Arc<str>>> {
         self.storage_failure.subscribe()
     }
 
     pub fn persist(&self) -> Result<(), ConsensusStateError> {
-        self.update(|_| {})
+        let mut journal = self.writer.lock().unwrap();
+        self.ensure_storage_available()?;
+        let candidate = self.inner.lock().unwrap().clone();
+        journal
+            .checkpoint(&self.path, &candidate)
+            .map_err(|source| self.latch_failure(source))
     }
 
+    fn ensure_storage_available(&self) -> Result<(), ConsensusStateError> {
+        match self.storage_failure.borrow().clone() {
+            Some(message) => Err(ConsensusStateError::StorageFailed(message)),
+            None => Ok(()),
+        }
+    }
+
+    fn latch_failure(&self, source: io::Error) -> ConsensusStateError {
+        let error = ConsensusStateError::PersistState {
+            path: self.path.clone(),
+            source,
+        };
+        self.storage_failure
+            .send_replace(Some(error.to_string().into()));
+        error
+    }
+
+    fn update_delta(&self, delta: StateDelta) -> Result<(), ConsensusStateError> {
+        self.update_if(|_| Ok(Some(delta))).map(|_| ())
+    }
+
+    fn update_if(
+        &self,
+        prepare: impl FnOnce(&ConsensusSnapshot) -> Result<Option<StateDelta>, ConsensusStateError>,
+    ) -> Result<bool, ConsensusStateError> {
+        self.update_if_with_writer(prepare, |journal, path, delta| journal.append(path, delta))
+    }
+
+    fn update_if_with_writer(
+        &self,
+        prepare: impl FnOnce(&ConsensusSnapshot) -> Result<Option<StateDelta>, ConsensusStateError>,
+        write: impl FnOnce(&mut journal::Journal, &Path, &StateDelta) -> io::Result<()>,
+    ) -> Result<bool, ConsensusStateError> {
+        let mut journal = self.writer.lock().unwrap();
+        self.ensure_storage_available()?;
+        let Some(delta) = prepare(&self.inner.lock().unwrap())? else {
+            return Ok(false);
+        };
+        delta
+            .validate()
+            .map_err(|error| ConsensusStateError::InvalidMutation(error.to_string()))?;
+        if journal.checkpoint_due() {
+            // History-sized copies occur only at periodic checkpoints. Readers
+            // keep the old state while the candidate is serialized and synced.
+            let mut candidate = self.inner.lock().unwrap().clone();
+            delta
+                .apply(&mut candidate)
+                .map_err(|source| self.latch_failure(source))?;
+            journal
+                .checkpoint(&self.path, &candidate)
+                .map_err(|source| self.latch_failure(source))?;
+            *self.inner.lock().unwrap() = candidate;
+        } else {
+            write(&mut journal, &self.path, &delta).map_err(|source| self.latch_failure(source))?;
+            // Prepared local deltas satisfy their structural invariants before
+            // commit; replay additionally checks encoded anchor ordering.
+            delta
+                .apply(&mut self.inner.lock().unwrap())
+                .map_err(|source| self.latch_failure(source))?;
+        }
+        Ok(true)
+    }
+
+    #[cfg(test)]
     fn update(
         &self,
         mutate: impl FnOnce(&mut ConsensusSnapshot),
     ) -> Result<(), ConsensusStateError> {
-        self.update_with_writer(mutate, write_snapshot)
-    }
-
-    fn update_with_writer(
-        &self,
-        mutate: impl FnOnce(&mut ConsensusSnapshot),
-        write: impl FnOnce(&Path, &ConsensusSnapshot) -> io::Result<()>,
-    ) -> Result<(), ConsensusStateError> {
-        self.update_if_with_writer(|_| Ok(Some(mutate)), write)
-            .map(|_| ())
-    }
-
-    fn update_if_with_writer<M: FnOnce(&mut ConsensusSnapshot)>(
-        &self,
-        prepare: impl FnOnce(&ConsensusSnapshot) -> Result<Option<M>, ConsensusStateError>,
-        write: impl FnOnce(&Path, &ConsensusSnapshot) -> io::Result<()>,
-    ) -> Result<bool, ConsensusStateError> {
-        let _writer = self.writer.lock().unwrap();
-        if let Some(message) = self.storage_failure.borrow().clone() {
-            return Err(ConsensusStateError::StorageFailed(message));
-        }
-        let (mut candidate, mutate) = {
-            let current = self.inner.lock().unwrap();
-            let Some(mutate) = prepare(&current)? else {
-                return Ok(false);
-            };
-            (current.clone(), mutate)
-        };
+        let mut journal = self.writer.lock().unwrap();
+        self.ensure_storage_available()?;
+        let mut candidate = self.inner.lock().unwrap().clone();
         mutate(&mut candidate);
-        if let Err(source) = write(&self.path, &candidate) {
-            let error = ConsensusStateError::PersistState {
-                path: self.path.clone(),
-                source,
-            };
-            // The rename may have succeeded before a directory-sync failure.
-            // Retrying from the old in-memory snapshot would be unsafe; only a
-            // fresh open may reconcile the durable state after any write error.
-            self.storage_failure
-                .send_replace(Some(error.to_string().into()));
-            return Err(error);
-        }
+        journal
+            .checkpoint(&self.path, &candidate)
+            .map_err(|source| self.latch_failure(source))?;
         *self.inner.lock().unwrap() = candidate;
-        Ok(true)
+        Ok(())
     }
 
     pub fn state_path(&self) -> &Path {
@@ -881,18 +896,64 @@ fn reconcile_checkpoint(
     }
 }
 
-/// Durably replace one complete snapshot. Temp files are unique and owned, so
-/// failed writes neither truncate the published file nor reuse another writer's
-/// scratch path. Sync the file before rename and its directory before publishing.
-fn write_snapshot(path: &Path, snapshot: &ConsensusSnapshot) -> io::Result<()> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| io::Error::other("consensus state has no parent"))?;
-    let mut staged = logex_fs::StagedFile::new_in(parent, ".consensus-state-")?;
-    snapshot_format::write(staged.as_file_mut(), snapshot)?;
-    staged.as_file().sync_all()?;
-    staged.persist(path)?;
-    fs::File::open(parent)?.sync_all()
+#[cfg(test)]
+thread_local! {
+    static INITIALIZATION_FAILURE: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+fn initialization_phase(phase: &'static str) -> io::Result<()> {
+    if INITIALIZATION_FAILURE.with(|failure| failure.get() == Some(phase)) {
+        INITIALIZATION_FAILURE.with(|failure| failure.set(None));
+        return Err(io::Error::other(format!(
+            "injected initialization failure at {phase}"
+        )));
+    }
+    Ok(())
+}
+
+/// Fully initialize an owned staging directory before publishing its name.
+/// As with the existing store, callers own the data directory exclusively; node
+/// startup enforces this with its directory lock. Concurrent initializers are
+/// not supported by the rename transaction.
+fn initialize_journal(path: &Path, snapshot: &ConsensusSnapshot) -> io::Result<journal::Journal> {
+    let directory = path.parent().expect("CURRENT has a state directory");
+    let parent = directory.parent().expect("state directory has a parent");
+    let staged = logex_fs::StagedDirectory::new_in(parent, ".consensus-state-")?;
+    let result = (|| {
+        let journal =
+            journal::Journal::create(&staged.path().join(CONSENSUS_STATE_FILE), snapshot)?;
+        fs::File::open(staged.path())?.sync_all()?;
+        #[cfg(test)]
+        initialization_phase("staged")?;
+        match fs::symlink_metadata(directory) {
+            Ok(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    "consensus state directory already exists",
+                ));
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        fs::rename(staged.path(), directory)?;
+        #[cfg(test)]
+        initialization_phase("renamed")?;
+        fs::File::open(parent)?.sync_all()?;
+        #[cfg(test)]
+        initialization_phase("synced")?;
+        Ok(journal)
+    })();
+    if result.is_err() {
+        // Only our unpublished staging directory may be removed. If rename
+        // succeeded before a sync error, the published directory stays intact.
+        if let Err(error) = fs::remove_dir_all(staged.path())
+            && error.kind() != io::ErrorKind::NotFound
+        {
+            tracing::warn!(%error, "retained failed consensus initialization staging directory");
+        }
+    }
+    result
 }
 
 fn create_synced_directory(path: &Path) -> io::Result<()> {
@@ -1151,24 +1212,27 @@ impl ConsensusSnapshotExt for ConsensusSnapshot {
     }
 }
 
-/// Path of the current integrity-checked consensus snapshot.
+/// Path of the checksummed committed frontier. Its parent directory contains
+/// the complete consensus state and must be archived or moved as one group.
 pub fn consensus_state_path(data_dir: &Path) -> PathBuf {
     data_dir
         .join(CONSENSUS_STATE_DIR)
+        .join(CONSENSUS_STORE_DIR)
         .join(CONSENSUS_STATE_FILE)
 }
 
 /// Include older-format entries so callers cannot treat an existing store as a
 /// fresh directory. Presence does not imply validity; opening validates contents.
 pub fn consensus_state_exists(data_dir: &Path) -> Result<bool, ConsensusStateError> {
-    if state_entry_exists(&consensus_state_path(data_dir))? {
+    if state_entry_exists(consensus_state_path(data_dir).parent().unwrap())? {
         return Ok(true);
     }
-    state_entry_exists(
-        &data_dir
-            .join(CONSENSUS_STATE_DIR)
-            .join(LEGACY_CONSENSUS_STATE_FILE),
-    )
+    for name in [LEGACY_BINARY_STATE_FILE, LEGACY_CONSENSUS_STATE_FILE] {
+        if state_entry_exists(&data_dir.join(CONSENSUS_STATE_DIR).join(name))? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn state_entry_exists(path: &Path) -> Result<bool, ConsensusStateError> {
@@ -1190,10 +1254,303 @@ mod tests {
     use std::time::Duration;
     use tempfile::TempDir;
 
-    fn snapshot_bytes(snapshot: &ConsensusSnapshot) -> Vec<u8> {
-        let mut output = io::Cursor::new(Vec::new());
-        snapshot_format::write(&mut output, snapshot).unwrap();
-        output.into_inner()
+    fn install_snapshot(path: &Path, snapshot: &ConsensusSnapshot) -> Vec<u8> {
+        let parent = path.parent().unwrap();
+        if parent.exists() {
+            fs::remove_dir_all(parent).unwrap();
+        }
+        fs::create_dir_all(parent).unwrap();
+        journal::Journal::create(path, snapshot).unwrap();
+        fs::read(path).unwrap()
+    }
+
+    fn checkpoint_file(path: &Path) -> PathBuf {
+        fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|entry| {
+                entry.is_dir()
+                    && entry
+                        .file_name()
+                        .unwrap()
+                        .to_str()
+                        .unwrap()
+                        .starts_with("generation-")
+            })
+            .unwrap()
+            .join("checkpoint.bin")
+    }
+
+    #[test]
+    fn initialization_failure_preserves_published_group_and_cleans_only_staging() {
+        for phase in ["staged", "renamed", "synced"] {
+            let temp = TempDir::new().unwrap();
+            INITIALIZATION_FAILURE.with(|failure| failure.set(Some(phase)));
+            let result =
+                ConsensusStore::open(temp.path(), Some(&format!("{:#x}", B256::repeat_byte(1))));
+            assert!(result.is_err(), "{phase}");
+            let path = consensus_state_path(temp.path());
+            let entries = fs::read_dir(temp.path().join(CONSENSUS_STATE_DIR))
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect::<Vec<_>>();
+            assert!(
+                !entries
+                    .iter()
+                    .any(|name| name.to_str().unwrap().starts_with(".consensus-state-"))
+            );
+            if phase == "staged" {
+                assert!(!path.parent().unwrap().exists());
+                assert!(!consensus_state_exists(temp.path()).unwrap());
+            } else {
+                assert!(path.is_file());
+                let current = fs::read(&path).unwrap();
+                assert_eq!(
+                    ConsensusStore::open(temp.path(), None)
+                        .unwrap()
+                        .checkpoint()
+                        .beacon_root,
+                    B256::repeat_byte(1)
+                );
+                assert_eq!(fs::read(path).unwrap(), current);
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_prepared_delta_rejects_before_commit_without_latching_writer() {
+        let temp = TempDir::new().unwrap();
+        let store =
+            ConsensusStore::open(temp.path(), Some(&format!("{:#x}", B256::repeat_byte(1))))
+                .unwrap();
+        let before = fs::read(store.state_path()).unwrap();
+        assert!(matches!(
+            store.update_delta(StateDelta::UpsertAnchors(vec![
+                test_anchor(3),
+                test_anchor(1)
+            ])),
+            Err(ConsensusStateError::InvalidMutation(_))
+        ));
+        assert_eq!(fs::read(store.state_path()).unwrap(), before);
+        assert!(store.ordered_anchors().is_empty());
+        assert!(store.subscribe_storage_failure().borrow().is_none());
+        store.append_anchors(vec![test_anchor(2)]).unwrap();
+        assert_eq!(
+            ConsensusStore::open(temp.path(), None)
+                .unwrap()
+                .ordered_anchors(),
+            vec![test_anchor(2)]
+        );
+    }
+
+    #[test]
+    fn replay_rejects_invalid_intermediate_delta_even_when_later_overwritten() {
+        for malformed_store in [false, true] {
+            let temp = TempDir::new().unwrap();
+            let fixture =
+                crate::light_client::test_cached_light_client_fixture(recent_cache_fixture_slot());
+            let (store, _) = initialized_fixture_store(&temp, &fixture);
+            let good = StateDelta::VerifiedPatch {
+                store: Box::new(fixture.store.clone()),
+                finality: None,
+                optimistic: None,
+                finality_payload: fixture.payloads.finality_update.clone(),
+                optimistic_payload: None,
+                periods: BTreeMap::new(),
+            };
+            let mut bad = good.clone();
+            if let StateDelta::VerifiedPatch {
+                store,
+                finality_payload,
+                ..
+            } = &mut bad
+            {
+                if malformed_store {
+                    store.previous_max_active_participants = 513;
+                } else {
+                    finality_payload.as_mut().unwrap().bytes.truncate(3);
+                }
+            }
+            // Encode otherwise valid checksummed frames directly to model local
+            // corruption with recomputed integrity, not an ordinary verified API.
+            let mut journal = store.writer.lock().unwrap();
+            journal.append(store.state_path(), &bad).unwrap();
+            journal.append(store.state_path(), &good).unwrap();
+            drop(journal);
+            let before = fs::read(store.state_path()).unwrap();
+            assert!(matches!(
+                ConsensusStore::open(temp.path(), None),
+                Err(ConsensusStateError::ParseState { .. })
+            ));
+            assert_eq!(fs::read(store.state_path()).unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn journal_anchor_deltas_match_full_snapshot_reference() {
+        let temp = TempDir::new().unwrap();
+        let store =
+            ConsensusStore::open(temp.path(), Some(&format!("{:#x}", B256::repeat_byte(1))))
+                .unwrap();
+        let mut reference = store.inner.lock().unwrap().clone();
+        let mut linked = test_anchor(3);
+        linked.finalized = true;
+        linked.parent_beacon_root = Some(test_anchor(2).anchor.beacon_root);
+        let operations = vec![
+            StateDelta::ReplaceAnchors(vec![
+                test_anchor(1),
+                test_anchor(2),
+                linked,
+                test_anchor(8),
+            ]),
+            StateDelta::UpsertAnchors(vec![test_anchor(0), test_anchor(2), test_anchor(9)]),
+            StateDelta::ReplaceRange {
+                start: 2,
+                end: 3,
+                anchors: vec![],
+            },
+            StateDelta::ReplaceRange {
+                start: 5,
+                end: 1,
+                anchors: vec![linked],
+            },
+            StateDelta::ReplaceRange {
+                start: 1,
+                end: 2,
+                anchors: vec![test_anchor(0), test_anchor(7)],
+            },
+            StateDelta::UpsertAnchors(vec![test_anchor(u64::MAX)]),
+            StateDelta::ReplaceRange {
+                start: 0,
+                end: u64::MAX,
+                anchors: vec![],
+            },
+            StateDelta::UpsertAnchors(vec![linked]),
+        ];
+        for delta in operations {
+            match &delta {
+                StateDelta::ReplaceAnchors(rows) => reference.ordered_anchors = rows.clone(),
+                StateDelta::UpsertAnchors(rows) => {
+                    reference.ordered_anchors.extend_from_slice(rows)
+                }
+                StateDelta::ReplaceRange {
+                    start,
+                    end,
+                    anchors,
+                } => {
+                    reference
+                        .ordered_anchors
+                        .retain(|r| r.anchor.block_number < *start || r.anchor.block_number > *end);
+                    reference.ordered_anchors.extend_from_slice(anchors);
+                }
+                _ => unreachable!(),
+            }
+            reference.ordered_anchors = normalize_anchor_records(reference.ordered_anchors);
+            recompute_snapshot_anchors(&mut reference);
+            store.update_delta(delta).unwrap();
+            assert_eq!(*store.inner.lock().unwrap(), reference);
+            assert_eq!(
+                *ConsensusStore::open(temp.path(), None)
+                    .unwrap()
+                    .inner
+                    .lock()
+                    .unwrap(),
+                reference
+            );
+        }
+        store.persist().unwrap();
+        assert_eq!(
+            *ConsensusStore::open(temp.path(), None)
+                .unwrap()
+                .inner
+                .lock()
+                .unwrap(),
+            reference
+        );
+    }
+
+    #[test]
+    fn journal_periodic_checkpoint_keeps_mutation_and_reader_semantics() {
+        let temp = TempDir::new().unwrap();
+        let store =
+            ConsensusStore::open(temp.path(), Some(&format!("{:#x}", B256::repeat_byte(1))))
+                .unwrap();
+        store
+            .append_anchors(vec![test_anchor(1), test_anchor(3)])
+            .unwrap();
+        store.writer.lock().unwrap().force_checkpoint_due_for_test();
+        store.append_anchors(vec![test_anchor(4)]).unwrap();
+        assert_eq!(
+            store.ordered_anchors(),
+            ConsensusStore::open(temp.path(), None)
+                .unwrap()
+                .ordered_anchors()
+        );
+        // The next ordinary delta must replay against a nonempty checkpoint's
+        // reconstructed gap cache, not the skipped serialized default zero.
+        store
+            .replace_anchor_range(1, 3, vec![test_anchor(2)])
+            .unwrap();
+        let reopened = ConsensusStore::open(temp.path(), None).unwrap();
+        assert_eq!(
+            *store.inner.lock().unwrap(),
+            *reopened.inner.lock().unwrap()
+        );
+        store.writer.lock().unwrap().force_checkpoint_due_for_test();
+        let before = store.inner.lock().unwrap().clone();
+        let saved = temp.path().join("held-current");
+        fs::rename(store.state_path(), &saved).unwrap();
+        assert!(store.append_anchors(vec![test_anchor(5)]).is_err());
+        assert_eq!(*store.inner.lock().unwrap(), before);
+        assert!(store.subscribe_storage_failure().borrow().is_some());
+        fs::rename(saved, store.state_path()).unwrap();
+        assert_eq!(
+            *ConsensusStore::open(temp.path(), None)
+                .unwrap()
+                .inner
+                .lock()
+                .unwrap(),
+            before
+        );
+    }
+
+    #[test]
+    fn journal_single_anchor_record_does_not_serialize_old_history() {
+        let temp = TempDir::new().unwrap();
+        let store =
+            ConsensusStore::open(temp.path(), Some(&format!("{:#x}", B256::repeat_byte(1))))
+                .unwrap();
+        store
+            .replace_anchors((100..116).map(test_anchor).collect())
+            .unwrap();
+        store.persist().unwrap();
+        let checkpoint = checkpoint_file(store.state_path());
+        let journal = checkpoint.parent().unwrap().join("journal.bin");
+        let before = fs::metadata(&journal).unwrap().len();
+        store.append_anchors(vec![test_anchor(200)]).unwrap();
+        let bytes = fs::read(&journal).unwrap();
+        let delta_bytes = &bytes[before as usize..];
+        let text = String::from_utf8_lossy(delta_bytes);
+        assert!(text.contains("UpsertAnchors"));
+        assert!(text.contains("\"block_number\":200"));
+        assert!(!text.contains("\"block_number\":100"));
+        let mut legacy = io::Cursor::new(Vec::new());
+        // This retained original serializer demonstrates the previous operation's
+        // full snapshot content on the same finite logical state, without timing.
+        snapshot_format::write(&mut legacy, &store.inner.lock().unwrap()).unwrap();
+        assert!(String::from_utf8_lossy(legacy.get_ref()).contains("\"block_number\": 100"));
+        assert!(delta_bytes.len() < legacy.get_ref().len());
+        eprintln!(
+            "finite persistence witness: original full snapshot {} bytes; new one-anchor frame {} bytes",
+            legacy.get_ref().len(),
+            delta_bytes.len()
+        );
+        assert_eq!(
+            store.ordered_anchors(),
+            ConsensusStore::open(temp.path(), None)
+                .unwrap()
+                .ordered_anchors()
+        );
     }
 
     fn verified_header(
@@ -1318,7 +1675,7 @@ mod tests {
             crate::light_client::test_cached_light_client_fixture(recent_cache_fixture_slot());
         let temp = TempDir::new().unwrap();
         let path = consensus_state_path(temp.path());
-        fs::create_dir(path.parent().unwrap()).unwrap();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
         let snapshot = ConsensusSnapshot {
             checkpoint: fixture.checkpoint,
             anchors: ChainAnchors::default(),
@@ -1328,7 +1685,7 @@ mod tests {
             light_client_payloads: fixture.payloads,
             verified_light_client_store: Some(fixture.store),
         };
-        fs::write(&path, snapshot_bytes(&snapshot)).unwrap();
+        install_snapshot(&path, &snapshot);
         assert!(ConsensusStore::open(temp.path(), None).is_ok());
         for family in 0..4 {
             let mut malformed = snapshot.clone();
@@ -1353,8 +1710,7 @@ mod tests {
                 _ => unreachable!(),
             };
             payload.bytes.truncate(3);
-            let bytes = snapshot_bytes(&malformed);
-            fs::write(&path, &bytes).unwrap();
+            let bytes = install_snapshot(&path, &malformed);
             assert!(
                 matches!(
                     ConsensusStore::open(temp.path(), None),
@@ -1422,8 +1778,8 @@ mod tests {
                 fs::read_dir(store.state_path().parent().unwrap())
                     .unwrap()
                     .count(),
-                1,
-                "failed save must clean up its staging file"
+                2,
+                "failed save must retain its generation without a staging CURRENT"
             );
             let reopened = ConsensusStore::open(temp.path(), None).unwrap();
             assert_eq!(*reopened.inner.lock().unwrap(), before);
@@ -1439,7 +1795,8 @@ mod tests {
         )
         .unwrap();
         store.append_anchors(vec![test_anchor(10)]).unwrap();
-        let path = store.state_path().to_owned();
+        store.persist().unwrap();
+        let path = checkpoint_file(store.state_path());
         drop(store);
         let mut bytes = fs::read(&path).unwrap();
         let prefix = b"\"receipts_root\": \"0x";
@@ -1951,16 +2308,17 @@ mod tests {
         let (resume_tx, resume_rx) = mpsc::channel();
         let writer_store = Arc::clone(&store);
         let writer = std::thread::spawn(move || {
-            writer_store.update_with_writer(
-                |candidate| {
-                    candidate.ordered_anchors.push(test_anchor(10));
-                    candidate.ordered_anchors.push(test_anchor(12));
-                    recompute_snapshot_anchors(candidate);
+            writer_store.update_if_with_writer(
+                |_| {
+                    Ok(Some(StateDelta::UpsertAnchors(vec![
+                        test_anchor(10),
+                        test_anchor(12),
+                    ])))
                 },
-                |path, candidate| {
+                |journal, path, delta| {
                     entered_tx.send(()).unwrap();
                     resume_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-                    write_snapshot(path, candidate)
+                    journal.append(path, delta)
                 },
             )
         });
@@ -2034,14 +2392,15 @@ mod tests {
         let store =
             ConsensusStore::open(temp.path(), Some(&format!("{:#x}", B256::repeat_byte(1))))
                 .unwrap();
-        let result = store.update_with_writer(
-            |candidate| {
-                candidate.ordered_anchors.push(test_anchor(10));
-                candidate.ordered_anchors.push(test_anchor(12));
-                recompute_snapshot_anchors(candidate);
+        let result = store.update_if_with_writer(
+            |_| {
+                Ok(Some(StateDelta::UpsertAnchors(vec![
+                    test_anchor(10),
+                    test_anchor(12),
+                ])))
             },
-            |path, candidate| {
-                write_snapshot(path, candidate)?;
+            |journal, path, delta| {
+                journal.append(path, delta)?;
                 // Model an error reported after replacement. The caller cannot
                 // assume whether the new file became durable in this case.
                 Err(io::Error::other("injected error after replacement"))
@@ -2102,8 +2461,7 @@ mod tests {
             context_bytes: None,
             bytes: vec![1, 2, 3],
         });
-        let bytes = snapshot_bytes(&snapshot);
-        fs::write(store.state_path(), &bytes).unwrap();
+        let bytes = install_snapshot(store.state_path(), &snapshot);
         assert!(matches!(
             ConsensusStore::open(temp.path(), None),
             Err(ConsensusStateError::ParseState { .. })
@@ -2129,7 +2487,7 @@ mod tests {
             previous_max_active_participants: 0,
             current_max_active_participants: 0,
         });
-        fs::write(store.state_path(), snapshot_bytes(&snapshot)).unwrap();
+        install_snapshot(store.state_path(), &snapshot);
         let valid = ConsensusStore::open(temp.path(), None).unwrap();
         assert_eq!(valid.trusted_beacon_slot(), Some(slot));
         assert_eq!(
@@ -2142,8 +2500,7 @@ mod tests {
             .as_mut()
             .unwrap()
             .previous_max_active_participants = 513;
-        let bytes = snapshot_bytes(&snapshot);
-        fs::write(store.state_path(), &bytes).unwrap();
+        let bytes = install_snapshot(store.state_path(), &snapshot);
         let error = ConsensusStore::open(temp.path(), None).unwrap_err();
         assert!(matches!(error, ConsensusStateError::ParseState { .. }));
         assert!(error.to_string().contains("participant count"));
@@ -2157,6 +2514,7 @@ mod tests {
         fs::create_dir(temp.path().join("cl")).unwrap();
         let missing_target = temp.path().join("missing-state.json");
         let path = consensus_state_path(temp.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::os::unix::fs::symlink(&missing_target, &path).unwrap();
         assert!(matches!(
             ConsensusStore::open(temp.path(), Some(&format!("{:#x}", B256::repeat_byte(1)))),
@@ -2190,7 +2548,7 @@ mod tests {
                     parent_beacon_root: None,
                 })
                 .collect();
-            fs::write(store.state_path(), snapshot_bytes(&snapshot)).unwrap();
+            install_snapshot(store.state_path(), &snapshot);
             assert!(
                 matches!(
                     ConsensusStore::open(temp.path(), None),

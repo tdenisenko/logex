@@ -645,10 +645,12 @@ return an error instead of a partial or misleading result.
 - Use a recent checkpoint. If a checkpoint or persisted consensus snapshot is
   outside the weak-subjectivity freshness window, LogEx requires a fresh data
   directory and a recent checkpoint.
-- Consensus snapshots use an integrity-checked `cl/consensus_state.bin` format.
-  Legacy `cl/consensus_state.json` files are preserved but cannot be reopened;
-  start with a recent checkpoint in a fresh data directory. Snapshot integrity
-  failures stop startup and `info` with an error; they do not reset stored data.
+- Consensus state uses checksummed checkpoints and an incremental journal in
+  `cl/consensus_state/`. Its `CURRENT` file identifies the committed state; keep
+  the whole directory together when preserving it. Missing or damaged committed
+  artifacts stop startup and `info` with an error; they do not reset stored data.
+  Older `cl/consensus_state.bin` and `cl/consensus_state.json` files are preserved
+  but cannot be reopened. Use a recent checkpoint in a fresh data directory.
 - Graceful shutdown is supported. Use `Ctrl-C` or `SIGTERM`; LogEx coordinates
   shutdown across sync, HTTP, gRPC, indexing, and storage.
 - The low-disk guard stops syncing gracefully before the writable data path is

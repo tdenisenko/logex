@@ -3,7 +3,7 @@
 Base: PR #232 merge `c85df998f7759d63f6e0701fabceb0ddb765edbb`.
 Branch: `audit/reorg-subscription-delivery`. Producer, consumer and storage source reviews are recorded.
 The user approved removal events and surviving retained-history snapshots.
-Source `eaee66f80f3ad18dc19d9fbe264906a5739e5abc` is committed. Implementation and eleven local gates are complete; exact-head CI and merge remain.
+Source `eaee66f80f3ad18dc19d9fbe264906a5739e5abc` is committed. Implementation and eleven local gates are complete; PR #233 merged as `22fcd71d` after all six CI jobs.
 
 ## Baseline findings
 
@@ -112,7 +112,7 @@ empty blocks, commit-phase failures, compaction and a later segment read failure
 after earlier removal delivery are covered. All eleven local gates pass on the
 committed source: 2,031 workspace tests, zero failures, 24 existing ignores,
 eight documentation-test targets and the release node build. Formatting, patched
-vendor checks, workspace check and strict Clippy pass. Exact-head CI and merge remain.
+vendor checks, workspace check and strict Clippy pass. Exact-head CI and merge passed; verified closure follows.
 
 ## Cleanup and implementation cost
 
@@ -143,3 +143,5 @@ Evidence SHA-256: `b238278ffd34f2701a1381e3c8abfcba46e813d66dd6957b559c437cb5b51
 Validation SHA-256: `c9ed428b402824b99402757cb8a6de474f0003784164813c1bf96e505366a4f0`.
 Existing dependency deprecation/future-compatibility notices remain outside this
 change; no test was ignored or removed to make these gates pass.
+
+All six CI jobs passed on `8cd5f3d5` and ten Linux volume/template controls passed with verified cleanup. [PR #233](https://github.com/tdenisenko/logex/pull/233) merged as `22fcd71d`. The merge tree is identical to the tested head. B8-20–21 are closed within committed reorg removal delivery and retained-history reconciliation. Broader resource policy, dashboard review, verified repair and integrated acceptance remain open.

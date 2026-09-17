@@ -1,0 +1,326 @@
+{
+  "date": "2026-09-18",
+  "branch": "audit/consensus-history-journal",
+  "base": "22fcd71d73dfec375bc3837fdf91ae126d5a4f06",
+  "source_commit": "1b751e5a686fdc544ae58a45fa4ed7a3355fcafe",
+  "source_inventory": {
+    "base": "22fcd71d73dfec375bc3837fdf91ae126d5a4f06",
+    "source_commit": "1b751e5a686fdc544ae58a45fa4ed7a3355fcafe",
+    "files": {
+      "crates/logex-cl/src/journal.rs": {
+        "final": {
+          "bytes": 38862,
+          "sha256": "ffa80dd10a329c58ffe3998bad767b3d5c97c0dd447f4709e1c2aaec1fe529bb"
+        }
+      },
+      "crates/logex-cl/src/lib.rs": {
+        "original": {
+          "bytes": 127992,
+          "sha256": "f4c197d0f120cc9081cbbb038090e9600a8cebbcfee3ee8f9b9116d5d890c0fc"
+        },
+        "final": {
+          "bytes": 140890,
+          "sha256": "3aa5f58c7d5452f36d1e64b62a5720858a76989b66fc759b4a8a2c072e357695"
+        }
+      },
+      "crates/logex-cl/src/snapshot_format.rs": {
+        "original": {
+          "bytes": 10641,
+          "sha256": "c6ea186e45c0adcc64aa7cf7bcdd74b9e5d62b27fe4ea74d81b33cd170baa08f"
+        },
+        "final": {
+          "bytes": 11759,
+          "sha256": "3e64efec0d77fd6e1ac4a3f5a2f70cfa22d60a496d6ff5f1f779d28d204ee8b3"
+        }
+      },
+      "crates/logex-cl/src/state_delta.rs": {
+        "final": {
+          "bytes": 10287,
+          "sha256": "b77f97527b71c051c367e57237b88f463a9134b558da5cc4bba230c6ed8ae22b"
+        }
+      },
+      "crates/logex-node/src/commands.rs": {
+        "original": {
+          "bytes": 16721,
+          "sha256": "220cd40f35b826ecb12edcef807ba48a52497385bc6a4c4ccf7bb0e713d2da60"
+        },
+        "final": {
+          "bytes": 17675,
+          "sha256": "ea521685add533697115608a855f632359e916ded725dd0cf1d6ef9790882e21"
+        }
+      },
+      "crates/logex-node/src/runtime.rs": {
+        "original": {
+          "bytes": 96785,
+          "sha256": "a4194612c13dd85f8db6583e3ad35cf3f7a97732aabb4b3c0a3b1910eb1e388c"
+        },
+        "final": {
+          "bytes": 100421,
+          "sha256": "34d1c4fed43ec85ef43286b032f7e56e264e920b57c1dfde70acc7b07effb026"
+        }
+      }
+    }
+  },
+  "findings": [
+    "B3-69"
+  ],
+  "gates": {
+    "commit": "1b751e5a686fdc544ae58a45fa4ed7a3355fcafe",
+    "rustc": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+    "gates": [
+      {
+        "name": "vendor",
+        "command": [
+          "python3",
+          "tools/verify_datafusion_vendor.py"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T18:07:33.449304+00:00",
+        "finished": "2026-09-17T18:07:33.585658+00:00",
+        "sha256": "66c8356dd4a2753b376fc6b222ceda74bb495616f72e05bb062c7fb877a81bd1",
+        "log": "/private/tmp/logex-audit-consensus-journal-20260918/gates/vendor.log"
+      },
+      {
+        "name": "format",
+        "command": [
+          "cargo",
+          "fmt",
+          "--all",
+          "--",
+          "--check"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T18:07:33.586042+00:00",
+        "finished": "2026-09-17T18:07:34.717780+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-audit-consensus-journal-20260918/gates/format.log"
+      },
+      {
+        "name": "vendor-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2024",
+          "--config-path",
+          "vendor/reth-network/rustfmt.toml",
+          "--config",
+          "skip_children=true",
+          "vendor/reth-network/src/eth_requests.rs",
+          "vendor/reth-network/src/session/active.rs",
+          "vendor/reth-network/src/session/mod.rs",
+          "vendor/reth-network/src/session/types.rs",
+          "vendor/reth-network/src/session/range_update.rs",
+          "vendor/reth-discv5/src/lib.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T18:07:34.718161+00:00",
+        "finished": "2026-09-17T18:07:34.791726+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-audit-consensus-journal-20260918/gates/vendor-format.log"
+      },
+      {
+        "name": "enr-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2021",
+          "--config",
+          "skip_children=true",
+          "vendor/enr/src/lib.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T18:07:34.792126+00:00",
+        "finished": "2026-09-17T18:07:34.856165+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-audit-consensus-journal-20260918/gates/enr-format.log"
+      },
+      {
+        "name": "gossipsub-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2021",
+          "--config",
+          "skip_children=true",
+          "vendor/libp2p-gossipsub/src/time_cache.rs",
+          "vendor/libp2p-gossipsub/src/behaviour.rs",
+          "vendor/libp2p-gossipsub/src/behaviour/tests.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T18:07:34.856610+00:00",
+        "finished": "2026-09-17T18:07:34.962919+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-audit-consensus-journal-20260918/gates/gossipsub-format.log"
+      },
+      {
+        "name": "aggregate-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2021",
+          "--config",
+          "max_width=90,skip_children=true",
+          "vendor/datafusion-functions-aggregate/src/sum.rs",
+          "vendor/datafusion-functions-aggregate/src/average.rs",
+          "vendor/datafusion-functions-aggregate-common/src/aggregate/sum_distinct/numeric.rs",
+          "vendor/datafusion-functions-aggregate-common/src/aggregate/avg_distinct/decimal.rs",
+          "vendor/datafusion-functions-aggregate-common/src/utils.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T18:07:34.963335+00:00",
+        "finished": "2026-09-17T18:07:35.032212+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-audit-consensus-journal-20260918/gates/aggregate-format.log"
+      },
+      {
+        "name": "check",
+        "command": [
+          "cargo",
+          "check",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T18:07:35.032748+00:00",
+        "finished": "2026-09-17T18:07:46.199656+00:00",
+        "sha256": "b91e60a70acb4d080030eecf111586e25d8ba2e6ad9e391e615124ee7efefbed",
+        "log": "/private/tmp/logex-audit-consensus-journal-20260918/gates/check.log"
+      },
+      {
+        "name": "clippy",
+        "command": [
+          "cargo",
+          "clippy",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T18:07:46.200807+00:00",
+        "finished": "2026-09-17T18:08:01.119226+00:00",
+        "sha256": "122c9ec789f7b914d5424a3f4b1c8fba472c9d90fc18af8cc76322990d69f72b",
+        "log": "/private/tmp/logex-audit-consensus-journal-20260918/gates/clippy.log"
+      },
+      {
+        "name": "test",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T18:08:01.120028+00:00",
+        "finished": "2026-09-17T18:12:22.848295+00:00",
+        "sha256": "c46a24579c84d4592f03dfd6b7518e78976325e03727cb49fe603d1ac4ba4270",
+        "log": "/private/tmp/logex-audit-consensus-journal-20260918/gates/test.log"
+      },
+      {
+        "name": "doc",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--doc",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T18:12:22.852849+00:00",
+        "finished": "2026-09-17T18:12:37.714784+00:00",
+        "sha256": "a8db8e87fb33d1798fe137a314115df90aa20e2df98a93e2ac76fbaa62fe8b0b",
+        "log": "/private/tmp/logex-audit-consensus-journal-20260918/gates/doc.log"
+      },
+      {
+        "name": "release-build",
+        "command": [
+          "cargo",
+          "build",
+          "-p",
+          "logex-node",
+          "--release",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T18:12:37.715569+00:00",
+        "finished": "2026-09-17T18:13:48.198034+00:00",
+        "sha256": "084a9c1904cdd708f0dea40785971be43df832df9827606b0cfa59663f7b1db3",
+        "log": "/private/tmp/logex-audit-consensus-journal-20260918/gates/release-build.log"
+      }
+    ]
+  },
+  "workspace_tests": {
+    "passed": 2055,
+    "failed": 0,
+    "ignored": 24,
+    "targets": 37
+  },
+  "documentation_tests": {
+    "passed": 0,
+    "failed": 0,
+    "ignored": 0,
+    "targets": 8
+  },
+  "focused_consensus_tests": {
+    "passed": 388,
+    "failed": 0,
+    "ignored": 1,
+    "targets": 1
+  },
+  "focused_node_tests": {
+    "passed": 237,
+    "failed": 0,
+    "ignored": 0,
+    "targets": 3
+  },
+  "evidence": {
+    "path": "docs/audit/baselines/2026-09-18-consensus-history-journal-evidence.json.gz",
+    "files": 27,
+    "bytes_uncompressed": 492732,
+    "bytes": 112101,
+    "sha256": "5a5bae18d146bf9f79bcfd35270d0fa113d9d35b80cecf48086149271c0519e9"
+  },
+  "validation": {
+    "path": "docs/audit/baselines/2026-09-18-consensus-history-journal-validation.json.gz",
+    "files": 14,
+    "bytes_uncompressed": 244300,
+    "bytes": 46853,
+    "sha256": "cde69f07220a78e32bb0b02fe84381820be6106910e47c11129bd7b5ae0e2e9d"
+  },
+  "publication": {
+    "state": "pending"
+  },
+  "boundaries": [
+    "This corrects demonstrated full-history copying/serialization cost. The finite old-serializer versus actual delta witness is logical work evidence, not a throughput, latency, allocation or physical write-amplification benchmark.",
+    "Normal append syncs the journal, stages/syncs/renames CURRENT, then syncs its parent. The extra small metadata barrier is explicit. Periodic checkpoints retain full logical state and remain history-proportional work.",
+    "CURRENT is the sole committed frontier. Every committed frame validates; uncommitted suffixes are ignored read-only and retired only by a subsequent writer. No fallback to older state on committed damage.",
+    "Checkpoint restoration reconstructs derived caches before replay. Each replayed delta validates its changed trusted store/cache data. Final restore and weak-subjectivity freshness check precede exposure.",
+    "Initial state is staged and published as a whole directory under existing exclusive node ownership. Older bin/json files and incomplete native groups are preserved and rejected; no compatibility migration is provided.",
+    "All current anchors and period serving payloads remain. No arbitrary trust-history retention cap or aggregate network/query memory policy is introduced.",
+    "Only covered prior generation files are cleaned after durable publication; unknown entries and failed-publication generations may remain. Coherent filesystem rollback and unrelated concurrent local modification are outside integrity guarantees.",
+    "No live sync, production dataset, remote host or benchmark campaign. Broader networking/admission, query resources, dashboard, verified offline repair and integrated acceptance remain open."
+  ]
+}

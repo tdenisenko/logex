@@ -1521,13 +1521,20 @@ fn archive_consensus_state(
     reason: &str,
 ) -> Result<Option<PathBuf>, ConsensusStateError> {
     let path = consensus_state_path(data_dir);
-    match fs::symlink_metadata(&path) {
+    let state_directory = path.parent().expect("consensus CURRENT has a parent");
+    match fs::symlink_metadata(state_directory) {
         Ok(_) => {}
         Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(source) => return Err(ConsensusStateError::ReadState { path, source }),
     }
+    // A remaining directory without its committed frontier is unavailable state,
+    // not an absent store that checkpoint refresh may silently replace.
+    fs::symlink_metadata(&path).map_err(|source| ConsensusStateError::ReadState {
+        path: path.clone(),
+        source,
+    })?;
 
-    let parent = path.parent().unwrap_or(data_dir);
+    let parent = state_directory.parent().unwrap_or(data_dir);
     let archive = logex_fs::StagedDirectory::new_in(parent, &format!(".consensus-state-{reason}-"))
         .map_err(|source| ConsensusStateError::PersistState {
             path: parent.to_path_buf(),
@@ -1540,13 +1547,17 @@ fn archive_consensus_state(
             path: parent.to_path_buf(),
             source,
         })?;
-    let archive_path = archive.path().join(
-        path.file_name()
-            .expect("consensus state path has a filename"),
+    let archived_state = archive.path().join(
+        state_directory
+            .file_name()
+            .expect("consensus state directory has a name"),
     );
-    fs::rename(&path, &archive_path).map_err(|source| ConsensusStateError::PersistState {
-        path: archive_path.clone(),
-        source,
+    // The checkpoint, journal and CURRENT must move as one recoverable unit.
+    fs::rename(state_directory, &archived_state).map_err(|source| {
+        ConsensusStateError::PersistState {
+            path: archived_state.clone(),
+            source,
+        }
     })?;
     // Once moved, preserve the original even if a later durability barrier fails.
     let archive_dir = archive.keep();
@@ -1558,7 +1569,9 @@ fn archive_consensus_state(
                 source,
             })?;
     }
-    Ok(Some(archive_path))
+    Ok(Some(archived_state.join(
+        path.file_name().expect("consensus CURRENT has a filename"),
+    )))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2322,21 +2335,23 @@ mod tests {
 
     #[test]
     fn legacy_consensus_state_is_preserved_and_not_replaced() {
-        let temp = tempfile::tempdir().unwrap();
-        let storage = open_storage_at(temp.path());
-        fs::create_dir_all(temp.path().join("cl")).unwrap();
-        let legacy = temp.path().join("cl/consensus_state.json");
-        fs::write(&legacy, b"legacy evidence").unwrap();
-        assert!(consensus_state_exists(temp.path()).unwrap());
-        let checkpoint = checkpoint_at_slot(recent_checkpoint_slot(1));
-        for requested in [None, Some(checkpoint.as_str())] {
-            assert!(matches!(
-                open_required_consensus_store(&storage, requested),
-                Err(ConsensusStateError::ParseState { .. })
-            ));
+        for name in ["consensus_state.json", "consensus_state.bin"] {
+            let temp = tempfile::tempdir().unwrap();
+            let storage = open_storage_at(temp.path());
+            fs::create_dir_all(temp.path().join("cl")).unwrap();
+            let legacy = temp.path().join("cl").join(name);
+            fs::write(&legacy, b"legacy evidence").unwrap();
+            assert!(consensus_state_exists(temp.path()).unwrap());
+            let checkpoint = checkpoint_at_slot(recent_checkpoint_slot(1));
+            for requested in [None, Some(checkpoint.as_str())] {
+                assert!(matches!(
+                    open_required_consensus_store(&storage, requested),
+                    Err(ConsensusStateError::ParseState { .. })
+                ));
+            }
+            assert_eq!(fs::read(&legacy).unwrap(), b"legacy evidence");
+            assert!(!consensus_state_path(temp.path()).exists());
         }
-        assert_eq!(fs::read(&legacy).unwrap(), b"legacy evidence");
-        assert!(!consensus_state_path(temp.path()).exists());
     }
 
     #[test]
@@ -2357,16 +2372,19 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn dangling_consensus_state_is_not_missing() {
-        for legacy in [false, true] {
+        for legacy in [
+            None,
+            Some("consensus_state.json"),
+            Some("consensus_state.bin"),
+        ] {
             let temp = tempfile::tempdir().unwrap();
             let storage = open_storage_at(temp.path());
-            fs::create_dir_all(temp.path().join("cl")).unwrap();
             let native_path = consensus_state_path(temp.path());
-            let path = if legacy {
-                temp.path().join("cl/consensus_state.json")
-            } else {
-                native_path.clone()
-            };
+            let path = legacy.map_or_else(
+                || native_path.clone(),
+                |name| temp.path().join("cl").join(name),
+            );
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::os::unix::fs::symlink("missing-target", &path).unwrap();
             assert!(consensus_state_exists(temp.path()).unwrap());
             assert!(open_required_consensus_store(&storage, None).is_err());
@@ -2374,10 +2392,29 @@ mod tests {
                 fs::read_link(&path).unwrap(),
                 PathBuf::from("missing-target")
             );
-            if legacy {
+            if legacy.is_some() {
                 assert!(fs::symlink_metadata(native_path).is_err());
             }
         }
+    }
+
+    #[test]
+    fn incomplete_consensus_journal_is_preserved_before_refresh() {
+        let temp = tempfile::tempdir().unwrap();
+        let storage = open_storage_at(temp.path());
+        let current = consensus_state_path(temp.path());
+        let directory = current.parent().unwrap();
+        fs::create_dir_all(directory).unwrap();
+        let evidence = directory.join("retained-evidence");
+        fs::write(&evidence, b"preserve unavailable state").unwrap();
+        let checkpoint = checkpoint_at_slot(recent_checkpoint_slot(1));
+        assert!(consensus_state_exists(temp.path()).unwrap());
+        for requested in [None, Some(checkpoint.as_str())] {
+            assert!(open_required_consensus_store(&storage, requested).is_err());
+        }
+        assert!(archive_consensus_state(temp.path(), "test-incomplete").is_err());
+        assert_eq!(fs::read(evidence).unwrap(), b"preserve unavailable state");
+        assert!(!current.exists());
     }
 
     #[test]
@@ -2501,12 +2538,41 @@ mod tests {
         assert!(staleness.age_secs > staleness.max_age_secs);
     }
 
+    fn consensus_artifacts(directory: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+        fn collect(
+            root: &Path,
+            path: &Path,
+            output: &mut std::collections::BTreeMap<PathBuf, Vec<u8>>,
+        ) {
+            for entry in fs::read_dir(path).unwrap() {
+                let entry = entry.unwrap();
+                let path = entry.path();
+                if entry.file_type().unwrap().is_dir() {
+                    collect(root, &path, output);
+                } else {
+                    output.insert(
+                        path.strip_prefix(root).unwrap().to_owned(),
+                        fs::read(path).unwrap(),
+                    );
+                }
+            }
+        }
+        let mut output = std::collections::BTreeMap::new();
+        collect(directory, directory, &mut output);
+        output
+    }
+
     #[test]
     fn archived_consensus_state_allows_fresh_checkpoint_reopen() {
         let temp = tempfile::tempdir().unwrap();
         let old_checkpoint = checkpoint_at_slot(recent_checkpoint_slot(1));
-        let _old_store = ConsensusStore::open(temp.path(), Some(&old_checkpoint)).unwrap();
+        let old_store = ConsensusStore::open(temp.path(), Some(&old_checkpoint)).unwrap();
+        let old_anchor = anchor_record(25_000_000, recent_checkpoint_slot(1));
+        old_store.append_anchors(vec![old_anchor]).unwrap();
+        drop(old_store);
         let state_path = consensus_state_path(temp.path());
+        let original_artifacts = consensus_artifacts(state_path.parent().unwrap());
+        assert!(original_artifacts.len() >= 3);
 
         let original_bytes = fs::read(&state_path).unwrap();
         let archive_path = archive_consensus_state(temp.path(), "test-refresh")
@@ -2516,6 +2582,21 @@ mod tests {
         assert!(!state_path.exists());
         assert_eq!(fs::read(&archive_path).unwrap(), original_bytes);
         assert_eq!(archive_path.file_name(), state_path.file_name());
+        assert_eq!(
+            consensus_artifacts(archive_path.parent().unwrap()),
+            original_artifacts
+        );
+
+        let restored_directory = tempfile::tempdir().unwrap();
+        let restored_current = consensus_state_path(restored_directory.path());
+        fs::create_dir_all(restored_current.parent().unwrap().parent().unwrap()).unwrap();
+        fs::rename(
+            archive_path.parent().unwrap(),
+            restored_current.parent().unwrap(),
+        )
+        .unwrap();
+        let restored = ConsensusStore::open(restored_directory.path(), None).unwrap();
+        assert_eq!(restored.ordered_anchors(), vec![old_anchor]);
 
         let new_slot = recent_checkpoint_slot(0);
         let new_root = B256::repeat_byte(0x43);

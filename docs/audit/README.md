@@ -57,7 +57,15 @@ The approved implementation delivers removals after committed retirement and
 before replacement additions, with owned blocking work and source lifetime
 checks. Source `eaee66f8` passes focused and independent review plus all eleven
 local gates (2,031 tests / 24 existing ignores).
-Source and local gates are complete; exact-head CI and merge remain.
+PR #233 merged as `22fcd71d` after all six CI jobs and ten Linux controls.
+
+The [consensus history journal review](consensus-history-journal.md) addresses
+full-history copying and rewriting on ordinary trusted-state changes (B3-69).
+Source `1b751e5a` uses typed deltas, a checksummed committed frontier and periodic
+checkpoints while retaining required anchors and serving payloads. Focused
+consensus and node checks pass, alongside all eleven local gates (2,055 tests /
+24 existing ignores). Source and local gates are complete; exact-head CI and merge remain.
+This does not close aggregate networking admission or batch 3.
 
 | Batch | Review area | Status / acceptance |
 | --- | --- | --- |
