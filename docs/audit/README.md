@@ -49,6 +49,14 @@ field types, missing amount digits and exact Transfer topic shape (B8-17–19).
 Three finite original-source groups reproduce the defects. Source `cdb17543`
 passes 158 focused server tests, independent review and all eleven local gates
 (2,016 tests / 24 existing ignores). Stored chain logs and ingestion are unchanged.
+PR #232 merged as `c85df998` after all six CI jobs and ten Linux controls.
+
+The [canonical reorg subscription review](reorg-subscription-delivery.md) closes
+missing removal publication and retained-history reconciliation (B8-20–21).
+The approved implementation delivers removals after committed retirement and
+before replacement additions, with owned blocking work and source lifetime
+checks. Source `eaee66f8` passes focused and independent review plus all eleven
+local gates (2,031 tests / 24 existing ignores).
 Source and local gates are complete; exact-head CI and merge remain.
 
 | Batch | Review area | Status / acceptance |

@@ -2836,6 +2836,7 @@ function connectLiveTransfers(options) {
     saveLiveTransferState();
   };
   socket.onmessage = function(event) {
+    if (liveTransferSocket !== socket) return;
     handleLiveTransferMessage(event.data);
   };
   socket.onerror = function() {
@@ -2897,9 +2898,28 @@ function handleLiveTransferMessage(raw) {
     return item && (item.type === 'erc20Transfer' || item.notificationType === 'erc20Transfer');
   });
   if (!notifications.length) return;
-  liveTransferRows = notifications.concat(liveTransferRows).slice(0, LIVE_TRANSFER_LIMIT);
+  var byIdentity = new Map();
+  function identity(row) { return row.blockHash + ':' + row.logIndex; }
+  // Map insertion order is oldest first. Delete/reinsert moves an addition
+  // to the newest position without scanning the full history for every delta.
+  for (var index = liveTransferRows.length - 1; index >= 0; index--) {
+    byIdentity.set(identity(liveTransferRows[index]), liveTransferRows[index]);
+  }
+  var appliedUpdates = 0;
+  notifications.forEach(function(notification) {
+    var key = identity(notification);
+    var existed = byIdentity.delete(key);
+    if (!notification.removed) {
+      byIdentity.set(key, notification);
+      appliedUpdates++;
+    } else if (existed) {
+      appliedUpdates++;
+    }
+  });
+  if (!appliedUpdates) return;
+  liveTransferRows = Array.from(byIdentity.values()).reverse().slice(0, LIVE_TRANSFER_LIMIT);
   renderLiveTransfers();
-  setLiveTransferStatus('Received ' + fmt(notifications.length) + ' new transfer' + (notifications.length === 1 ? '.' : 's.'));
+  setLiveTransferStatus('Applied ' + fmt(appliedUpdates) + ' transfer update' + (appliedUpdates === 1 ? '.' : 's.'));
 }
 
 function formatLiveTransferAmount(row) {

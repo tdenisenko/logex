@@ -32,8 +32,15 @@ pub struct SubscriptionManager {
     inner: Arc<SubscriptionManagerInner>,
 }
 
+/// A transient canonical log change; stored rows remain independent of delivery state.
+#[derive(Debug)]
+pub struct LogNotificationBatch {
+    pub rows: Vec<LogRow>,
+    pub removed: bool,
+}
+
 struct SubscriptionManagerInner {
-    sender: broadcast::Sender<Arc<Vec<LogRow>>>,
+    sender: broadcast::Sender<Arc<LogNotificationBatch>>,
     live_transfers: Mutex<LiveTransferSessions>,
     next_session_id: AtomicU64,
 }
@@ -66,30 +73,61 @@ impl SubscriptionManager {
         }
     }
 
-    /// Notify all subscribers of new logs. Called by the ingestion pipeline.
+    /// Publish accepted live logs in chronological order.
     pub fn notify(&self, rows: &[LogRow]) {
-        if rows.is_empty() {
-            return;
-        }
-        // Ignore send errors — they just mean no active raw-log receivers.
-        if self.inner.sender.receiver_count() > 0 {
-            let _ = self.inner.sender.send(Arc::new(rows.to_vec()));
-        }
-        self.notify_live_transfer_sessions(rows);
+        self.publish(rows, false);
     }
 
-    /// Create a new receiver for the broadcast channel.
-    pub fn subscribe(&self) -> broadcast::Receiver<Arc<Vec<LogRow>>> {
+    /// Publish logs removed by a successful canonical change, before replacements.
+    /// Retained clients can receive removals for unknown identities and must ignore them.
+    pub fn notify_removed(&self, rows: &[LogRow]) {
+        self.publish(rows, true);
+    }
+
+    /// Create a receiver for transient canonical log changes.
+    pub fn subscribe(&self) -> broadcast::Receiver<Arc<LogNotificationBatch>> {
         self.inner.sender.subscribe()
     }
 
-    fn notify_live_transfer_sessions(&self, rows: &[LogRow]) {
-        let now = Instant::now();
+    fn publish(&self, rows: &[LogRow], removed: bool) {
+        if rows.is_empty() {
+            return;
+        }
+        // One publication boundary orders both channels and retained snapshots.
         let mut sessions = self.live_transfers();
-        sessions.sweep_expired(now);
-
+        sessions.sweep_expired(Instant::now());
+        if self.inner.sender.receiver_count() > 0 {
+            let _ = self.inner.sender.send(Arc::new(LogNotificationBatch {
+                rows: rows.to_vec(),
+                removed,
+            }));
+        }
+        if sessions.sessions.is_empty() {
+            return;
+        }
+        // Retractions cannot use the current filter: an in-place upsert may have
+        // changed it after an earlier delivery, even one already evicted from history.
+        if removed {
+            let removals: Vec<_> = rows
+                .iter()
+                .filter_map(Erc20TransferSubscription::unfiltered_notification_for)
+                .map(|mut notification| {
+                    notification.removed = true;
+                    notification
+                })
+                .collect();
+            if removals.is_empty() {
+                return;
+            }
+            let removals = Arc::new(removals);
+            for session in sessions.sessions.values_mut() {
+                session.push_notifications(&removals);
+                let _ = session.sender.send(Arc::clone(&removals));
+            }
+            return;
+        }
         for session in sessions.sessions.values_mut() {
-            let matching: Vec<Erc20TransferNotification> = rows
+            let matching: Vec<_> = rows
                 .iter()
                 .filter_map(|row| session.subscription.notification_for(row))
                 .collect();
@@ -374,7 +412,32 @@ impl LiveTransferSession {
     }
 
     fn push_notifications(&mut self, notifications: &[Erc20TransferNotification]) {
+        if notifications.is_empty() {
+            return;
+        }
+        // Publications have a single change kind. Batch removal avoids scanning
+        // the full retained history separately for every orphaned log.
+        if notifications
+            .iter()
+            .all(|notification| notification.removed)
+        {
+            let identities: HashSet<_> = notifications
+                .iter()
+                .map(|notification| (notification.block_hash.as_str(), notification.log_index))
+                .collect();
+            self.notifications.retain(|existing| {
+                !identities.contains(&(existing.block_hash.as_str(), existing.log_index))
+            });
+            return;
+        }
         for notification in notifications {
+            if notification.removed {
+                self.notifications.retain(|existing| {
+                    existing.block_hash != notification.block_hash
+                        || existing.log_index != notification.log_index
+                });
+                continue;
+            }
             self.notifications.push_front(notification.clone());
             while self.notifications.len() > LIVE_TRANSFER_HISTORY_LIMIT {
                 self.notifications.pop_back();
@@ -427,6 +490,16 @@ impl Erc20TransferSubscription {
             min_amount,
             max_amount,
         })
+    }
+
+    fn unfiltered_notification_for(row: &LogRow) -> Option<Erc20TransferNotification> {
+        Self {
+            wallet_topics: HashSet::new(),
+            token_addresses: HashSet::new(),
+            min_amount: None,
+            max_amount: None,
+        }
+        .notification_for(row)
     }
 
     fn notification_for(&self, row: &LogRow) -> Option<Erc20TransferNotification> {
@@ -636,7 +709,7 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>) {
             result = receiver.recv() => {
                 match result {
                     Ok(rows) => {
-                        let Some(json) = subscription.payload_for(&rows) else {
+                        let Some(json) = subscription.payload_for_change(&rows.rows, rows.removed) else {
                             continue;
                         };
 
@@ -787,13 +860,22 @@ impl Subscription {
         }
     }
 
+    #[cfg(test)]
     fn payload_for(&self, rows: &[LogRow]) -> Option<String> {
+        self.payload_for_change(rows, false)
+    }
+
+    fn payload_for_change(&self, rows: &[LogRow], removed: bool) -> Option<String> {
         match self {
             Self::Logs(filter) => {
                 let matching: Vec<RpcLog> = rows
                     .iter()
                     .filter(|row| logex_query::matches_native_filter(row, filter))
-                    .map(RpcLog::from)
+                    .map(|row| {
+                        let mut log = RpcLog::from(row);
+                        log.removed = removed;
+                        log
+                    })
                     .collect();
                 if matching.is_empty() {
                     return None;
@@ -804,6 +886,10 @@ impl Subscription {
                 let matching: Vec<Erc20TransferNotification> = rows
                     .iter()
                     .filter_map(|row| subscription.notification_for(row))
+                    .map(|mut notification| {
+                        notification.removed = removed;
+                        notification
+                    })
                     .collect();
                 if matching.is_empty() {
                     return None;
@@ -1944,6 +2030,172 @@ mod tests {
     }
 
     #[test]
+    fn reorg_raw_and_ephemeral_filters_preserve_change_kind() {
+        let manager = SubscriptionManager::new();
+        let mut receiver = manager.subscribe();
+        let wallet = Address::repeat_byte(1);
+        let token = Address::repeat_byte(2);
+        let old = make_transfer_log(token, wallet, Address::ZERO, 5, 10);
+        let other = make_transfer_log(Address::repeat_byte(3), wallet, Address::ZERO, 5, 10);
+        manager.notify(std::slice::from_ref(&old));
+        manager.notify_removed(&[old.clone(), other]);
+        let mut replacement = old.clone();
+        replacement.block_hash = B256::repeat_byte(4);
+        manager.notify(&[replacement.clone()]);
+        assert!(!receiver.try_recv().unwrap().removed);
+        let removed = receiver.try_recv().unwrap();
+        assert!(removed.removed);
+        let added = receiver.try_recv().unwrap();
+        assert!(!added.removed);
+        assert_eq!(added.rows[0].block_hash, replacement.block_hash);
+        let raw = Subscription::Logs(Box::new(
+            EthFilter {
+                address: crate::eth_filter::AddressFilter::Single(token),
+                ..Default::default()
+            }
+            .to_stream_filter()
+            .unwrap(),
+        ));
+        let transfer = Subscription::Erc20Transfers(
+            Erc20TransferSubscription::new(vec![], vec![token], None, None).unwrap(),
+        );
+        for subscription in [raw, transfer] {
+            let payload: serde_json::Value = serde_json::from_str(
+                &subscription
+                    .payload_for_change(&removed.rows, removed.removed)
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(payload.as_array().unwrap().len(), 1);
+            assert_eq!(payload[0]["removed"], true);
+            assert_eq!(
+                payload[0]["blockHash"],
+                format_hex(old.block_hash.as_slice())
+            );
+        }
+        manager.notify_removed(&[]);
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn reorg_retained_removes_across_filter_changes_and_eviction() {
+        let manager = SubscriptionManager::new();
+        let token = Address::repeat_byte(2);
+        let original = make_transfer_log(token, Address::repeat_byte(1), Address::ZERO, 5, 10);
+        let original_filter =
+            Erc20TransferSubscription::new(vec![], vec![token], None, None).unwrap();
+        let mut attachment = manager.upsert_live_transfer_session(
+            Some("changed".into()),
+            LiveSubscriptionScope::Service,
+            original_filter,
+            true,
+        );
+        manager.notify(std::slice::from_ref(&original));
+        assert!(!attachment.receiver.try_recv().unwrap()[0].removed);
+        let changed_filter =
+            Erc20TransferSubscription::new(vec![], vec![Address::repeat_byte(3)], None, None)
+                .unwrap();
+        manager.upsert_live_transfer_session(
+            Some("changed".into()),
+            LiveSubscriptionScope::Service,
+            changed_filter,
+            false,
+        );
+        manager.notify_removed(std::slice::from_ref(&original));
+        assert!(attachment.receiver.try_recv().unwrap()[0].removed);
+        assert!(
+            manager
+                .live_transfer_session("changed")
+                .unwrap()
+                .notifications
+                .is_empty()
+        );
+        // Model a past delivery no longer present in bounded history. Removal
+        // delivery must not depend on either history membership or today's filter.
+        manager.notify_removed(std::slice::from_ref(&original));
+        assert!(attachment.receiver.try_recv().unwrap()[0].removed);
+        let mut invalid = original.clone();
+        invalid.topic3 = Some(B256::ZERO);
+        manager.notify_removed(&[invalid]);
+        assert!(attachment.receiver.try_recv().is_err());
+        let snapshot = manager.live_transfer_session("changed").unwrap();
+        assert!(snapshot.notifications.is_empty());
+        assert_eq!(snapshot.dropped_notifications, 0);
+        manager.detach_live_transfer_session(&attachment.id, &attachment.identity);
+    }
+
+    #[test]
+    fn reorg_snapshots_reconcile_disconnected_and_attaching_sessions() {
+        for scope in [
+            LiveSubscriptionScope::Service,
+            LiveSubscriptionScope::Dashboard,
+        ] {
+            let manager = SubscriptionManager::new();
+            let token = Address::repeat_byte(2);
+            let subscription =
+                Erc20TransferSubscription::new(vec![], vec![token], None, None).unwrap();
+            let mut before = manager.upsert_live_transfer_session(
+                Some("restore".into()),
+                scope,
+                subscription.clone(),
+                true,
+            );
+            let old = make_transfer_log(token, Address::ZERO, Address::ZERO, 5, 10);
+            let mut replacement = old.clone();
+            replacement.block_hash = B256::repeat_byte(4);
+            manager.notify(std::slice::from_ref(&old));
+            before.receiver.try_recv().unwrap();
+            manager.detach_live_transfer_session(&before.id, &before.identity);
+            drop(before);
+            manager.notify_removed(&[old]);
+            manager.notify(&[replacement.clone()]);
+            let restored = manager.upsert_live_transfer_session(
+                Some("restore".into()),
+                scope,
+                subscription,
+                true,
+            );
+            assert_eq!(restored.snapshot.notifications.len(), 1);
+            assert_eq!(
+                restored.snapshot.notifications[0].block_hash,
+                format_hex(replacement.block_hash.as_slice())
+            );
+            assert!(!restored.snapshot.notifications[0].removed);
+            assert_eq!(restored.snapshot.dropped_notifications, 0);
+            let mut receiver = restored.receiver;
+            assert!(receiver.try_recv().is_err());
+            manager.notify_removed(&[replacement]);
+            assert!(receiver.try_recv().unwrap()[0].removed);
+            assert!(
+                manager
+                    .live_transfer_session("restore")
+                    .unwrap()
+                    .notifications
+                    .is_empty()
+            );
+            manager.detach_live_transfer_session(&restored.id, &restored.identity);
+        }
+    }
+
+    #[test]
+    fn reorg_history_removal_reconciles_without_tombstone() {
+        let subscription =
+            Erc20TransferSubscription::new(vec![Address::ZERO], vec![], None, None).unwrap();
+        let mut session = LiveTransferSession::new(subscription, LiveSubscriptionScope::Service);
+        let first = history_notification(1);
+        let mut replacement = first.clone();
+        replacement.block_hash = format!("{:#x}", B256::repeat_byte(2));
+        session.push_notifications(&[first.clone(), replacement.clone()]);
+        let mut removed = first;
+        removed.removed = true;
+        session.push_notifications(&[removed.clone(), removed]);
+        assert_eq!(session.notifications.len(), 1);
+        assert_eq!(session.notifications[0].block_hash, replacement.block_hash);
+        assert!(!session.notifications[0].removed);
+        assert_eq!(session.dropped_notifications, 0);
+    }
+
+    #[test]
     fn test_subscription_manager_no_receivers() {
         let mgr = SubscriptionManager::new();
         // Should not panic even with no receivers
@@ -1960,10 +2212,10 @@ mod tests {
         mgr.notify(&rows);
 
         let received1 = rx1.try_recv().unwrap();
-        assert_eq!(received1.len(), 2);
+        assert_eq!(received1.rows.len(), 2);
 
         let received2 = rx2.try_recv().unwrap();
-        assert_eq!(received2.len(), 2);
+        assert_eq!(received2.rows.len(), 2);
     }
 
     #[test]
@@ -2308,6 +2560,7 @@ mod tests {
 
         let batch = rx.recv().await.unwrap();
         let matching: Vec<RpcLog> = batch
+            .rows
             .iter()
             .filter(|row| {
                 logex_query::matches_native_filter(row, &filter.to_stream_filter().unwrap())

@@ -1,0 +1,345 @@
+{
+  "date": "2026-09-18",
+  "branch": "audit/reorg-subscription-delivery",
+  "base": "c85df998f7759d63f6e0701fabceb0ddb765edbb",
+  "source_commit": "eaee66f80f3ad18dc19d9fbe264906a5739e5abc",
+  "source_inventory": {
+    "base": "c85df998f7759d63f6e0701fabceb0ddb765edbb",
+    "source_commit": "eaee66f80f3ad18dc19d9fbe264906a5739e5abc",
+    "files": {
+      "crates/logex-server/src/ws.rs": {
+        "original": {
+          "bytes": 95007,
+          "sha256": "e910bde4edb50206ca9f1efda5aeaf1da05295117dca81e371d2c388d85ce88a"
+        },
+        "final": {
+          "bytes": 105537,
+          "sha256": "f0646741c018f9310e64b851cb9a317fc92d41800fe5b495457f98b335ac4245"
+        }
+      },
+      "crates/logex-server/src/web_ui.html": {
+        "original": {
+          "bytes": 150335,
+          "sha256": "a9c23177e847c588f9b8453b2e2f47bf2ca6d49ed63c3fea65e9f9bc60d6fa39"
+        },
+        "final": {
+          "bytes": 151133,
+          "sha256": "d3b5fbd1ff1f64d367b5fa11fa1927f9fd232b23547982694208514edb514b06"
+        }
+      },
+      "crates/logex-storage/src/segment_reader.rs": {
+        "original": {
+          "bytes": 104862,
+          "sha256": "eeeef5a4c3c6916b453729d77f5845aca927117f1e70b1d679a3fc3bd6a21595"
+        },
+        "final": {
+          "bytes": 117534,
+          "sha256": "8f438d3b531785960bb49ce267af4af4a1404b85e92f0ff477d0a26d078e4797"
+        }
+      },
+      "crates/logex-storage/src/native/reorg.rs": {
+        "original": {
+          "bytes": 5374,
+          "sha256": "4313d1d9c4cdc21e761a9c0dabcecfcd586b779f0175773bdc2283fa92cd4071"
+        },
+        "final": {
+          "bytes": 11845,
+          "sha256": "99d57c1056d3b2dfed69bcaa4972870f4205f43aceed5db2a06530560ccd9428"
+        }
+      },
+      "crates/logex-storage/src/native/storage.rs": {
+        "original": {
+          "bytes": 381708,
+          "sha256": "7a35843489df2e1af94065f5bf9875323188c177263a5410507afc5d67d8f08e"
+        },
+        "final": {
+          "bytes": 391056,
+          "sha256": "fd9b804842093b86f9bc9e847af9bfb4ae946b9d163522b016fa6aafd7abac84"
+        }
+      },
+      "crates/logex-sync/src/engine/anchored.rs": {
+        "original": {
+          "bytes": 352405,
+          "sha256": "46e7ff0cfd03b0c35d6504efe57b5edf5c1fd50aa325d2eb41b880bb3117f893"
+        },
+        "final": {
+          "bytes": 353878,
+          "sha256": "0656a226b142a5a3b59be709539c5a400f00dd73709935cc259b08cbae4c904f"
+        }
+      },
+      "crates/logex-sync/src/engine/anchored/cancellation_tests.rs": {
+        "original": {
+          "bytes": 27003,
+          "sha256": "8c8cffb28615ff46da70068607fe374af4edfae927290520d6fe0ace22b71e43"
+        },
+        "final": {
+          "bytes": 37948,
+          "sha256": "902d3dcace67fd40643b34b7f35d8c2de3e2a577e6199b53cda523cc3193600f"
+        }
+      }
+    }
+  },
+  "findings": [
+    "B8-20",
+    "B8-21"
+  ],
+  "gates": {
+    "commit": "eaee66f80f3ad18dc19d9fbe264906a5739e5abc",
+    "rustc": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+    "gates": [
+      {
+        "name": "vendor",
+        "command": [
+          "python3",
+          "tools/verify_datafusion_vendor.py"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T17:14:37.388781+00:00",
+        "finished": "2026-09-17T17:14:37.536921+00:00",
+        "sha256": "66c8356dd4a2753b376fc6b222ceda74bb495616f72e05bb062c7fb877a81bd1",
+        "log": "/private/tmp/logex-audit-reorg-delivery-20260917/gates/vendor.log"
+      },
+      {
+        "name": "format",
+        "command": [
+          "cargo",
+          "fmt",
+          "--all",
+          "--",
+          "--check"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T17:14:37.537238+00:00",
+        "finished": "2026-09-17T17:14:38.631620+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-audit-reorg-delivery-20260917/gates/format.log"
+      },
+      {
+        "name": "vendor-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2024",
+          "--config-path",
+          "vendor/reth-network/rustfmt.toml",
+          "--config",
+          "skip_children=true",
+          "vendor/reth-network/src/eth_requests.rs",
+          "vendor/reth-network/src/session/active.rs",
+          "vendor/reth-network/src/session/mod.rs",
+          "vendor/reth-network/src/session/types.rs",
+          "vendor/reth-network/src/session/range_update.rs",
+          "vendor/reth-discv5/src/lib.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T17:14:38.632061+00:00",
+        "finished": "2026-09-17T17:14:38.704889+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-audit-reorg-delivery-20260917/gates/vendor-format.log"
+      },
+      {
+        "name": "enr-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2021",
+          "--config",
+          "skip_children=true",
+          "vendor/enr/src/lib.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T17:14:38.705421+00:00",
+        "finished": "2026-09-17T17:14:38.762947+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-audit-reorg-delivery-20260917/gates/enr-format.log"
+      },
+      {
+        "name": "gossipsub-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2021",
+          "--config",
+          "skip_children=true",
+          "vendor/libp2p-gossipsub/src/time_cache.rs",
+          "vendor/libp2p-gossipsub/src/behaviour.rs",
+          "vendor/libp2p-gossipsub/src/behaviour/tests.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T17:14:38.763354+00:00",
+        "finished": "2026-09-17T17:14:38.867757+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-audit-reorg-delivery-20260917/gates/gossipsub-format.log"
+      },
+      {
+        "name": "aggregate-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2021",
+          "--config",
+          "max_width=90,skip_children=true",
+          "vendor/datafusion-functions-aggregate/src/sum.rs",
+          "vendor/datafusion-functions-aggregate/src/average.rs",
+          "vendor/datafusion-functions-aggregate-common/src/aggregate/sum_distinct/numeric.rs",
+          "vendor/datafusion-functions-aggregate-common/src/aggregate/avg_distinct/decimal.rs",
+          "vendor/datafusion-functions-aggregate-common/src/utils.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T17:14:38.868962+00:00",
+        "finished": "2026-09-17T17:14:38.935700+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-audit-reorg-delivery-20260917/gates/aggregate-format.log"
+      },
+      {
+        "name": "check",
+        "command": [
+          "cargo",
+          "check",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T17:14:38.936262+00:00",
+        "finished": "2026-09-17T17:14:53.660423+00:00",
+        "sha256": "280aa6fee66d86395b25aa4255e318d673b39abb7fae60fae765015ebf5e4532",
+        "log": "/private/tmp/logex-audit-reorg-delivery-20260917/gates/check.log"
+      },
+      {
+        "name": "clippy",
+        "command": [
+          "cargo",
+          "clippy",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T17:14:53.661321+00:00",
+        "finished": "2026-09-17T17:15:09.099281+00:00",
+        "sha256": "5972c05fdc6d5f89cb36aa4307ca6aa020aacc2759de98ee736bb010d382a5e8",
+        "log": "/private/tmp/logex-audit-reorg-delivery-20260917/gates/clippy.log"
+      },
+      {
+        "name": "test",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T17:15:09.100045+00:00",
+        "finished": "2026-09-17T17:22:10.433328+00:00",
+        "sha256": "a58187e1c051b9b24b1e0d2893ad98c2a6b73654421fbef915ca9b62c268eebc",
+        "log": "/private/tmp/logex-audit-reorg-delivery-20260917/gates/test.log"
+      },
+      {
+        "name": "doc",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--doc",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T17:22:10.436779+00:00",
+        "finished": "2026-09-17T17:22:28.412211+00:00",
+        "sha256": "b8f297ddbd2b06cdc4ab0e95ce216993daef6cbcf0a91e0a88f710945f0bf180",
+        "log": "/private/tmp/logex-audit-reorg-delivery-20260917/gates/doc.log"
+      },
+      {
+        "name": "release-build",
+        "command": [
+          "cargo",
+          "build",
+          "-p",
+          "logex-node",
+          "--release",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T17:22:28.413047+00:00",
+        "finished": "2026-09-17T17:24:31.142804+00:00",
+        "sha256": "080e0f032ee9af5d52a2a6f205c3d0a7f16a093b1cffcb09925e2b75d82f5292",
+        "log": "/private/tmp/logex-audit-reorg-delivery-20260917/gates/release-build.log"
+      }
+    ]
+  },
+  "workspace_tests": {
+    "passed": 2031,
+    "failed": 0,
+    "ignored": 24,
+    "targets": 37
+  },
+  "documentation_tests": {
+    "passed": 0,
+    "failed": 0,
+    "ignored": 0,
+    "targets": 8
+  },
+  "original_producer_control": {
+    "passed": 0,
+    "failed": 1,
+    "ignored": 0,
+    "targets": 1
+  },
+  "final_server_tests": {
+    "passed": 162,
+    "failed": 0,
+    "ignored": 2,
+    "targets": 6
+  },
+  "evidence": {
+    "path": "docs/audit/baselines/2026-09-18-reorg-subscription-delivery-evidence.json.gz",
+    "files": 55,
+    "bytes_uncompressed": 1990626,
+    "bytes": 332971,
+    "sha256": "b238278ffd34f2701a1381e3c8abfcba46e813d66dd6957b559c437cb5b5185a"
+  },
+  "validation": {
+    "path": "docs/audit/baselines/2026-09-18-reorg-subscription-delivery-validation.json.gz",
+    "files": 14,
+    "bytes_uncompressed": 244170,
+    "bytes": 46523,
+    "sha256": "c9ed428b402824b99402757cb8a6de474f0003784164813c1bf96e505366a4f0"
+  },
+  "publication": {
+    "state": "pending"
+  },
+  "boundaries": [
+    "One actual unchanged-producer control reproduces missing removal after committed canonical retirement. Compatible candidate consumer/reader context is archived; this is not an entirely unchanged-workspace run.",
+    "Five actual original browser controls fail and the snapshot control passes; all six final browser controls pass. The original retained-helper witness is a naive tombstone-append design control, not a claim that baseline emitted removals.",
+    "Retained streams receive valid ERC20 removal identities independently of current filters/history membership; clients ignore unknown identities. Snapshots retain only surviving previously admitted alerts and do not refill older evictions.",
+    "Exact newly retired row IDs are selected in the existing scan. Segment identity and ownership protect post-commit row/page-batched materialization; existing raw column buffers and selected metadata remain per-segment costs, without a fixed-byte or global RSS bound.",
+    "The initial worker rewrite was rejected by automatic approval review; the user subsequently explicitly approved the concrete local change and offline cancellation tests. Preserve both records and final independent lifecycle review.",
+    "Publication follows successful complete retirement. A later materialization failure can follow earlier committed removal batches and is terminal to the engine; no atomic network frame, exactly-once delivery or restart replay is promised.",
+    "Historical backfill remains silent; ordinary forward notification follows accepted visible ingestion with existing bounded recovery semantics, not a new per-batch fsync barrier.",
+    "No persisted format, dependency, SQL implementation, production dataset, live sync, remote-host work or benchmark change. Shared budgets, dashboard review, verified offline repair and integrated acceptance remain open."
+  ]
+}

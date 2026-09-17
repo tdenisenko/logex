@@ -1652,18 +1652,22 @@ impl NativeStorage {
         self.ensure_writable()?;
         self.checkpoint_durable()?;
         self.recovery_required = true;
-        let marked = self.apply_non_canonical_hashes(&BTreeSet::from([block_hash]))?;
+        let marked = self.apply_non_canonical_hashes(&BTreeSet::from([block_hash]), None)?;
         self.recovery_required = false;
         self.read_view.0.store(true, Ordering::SeqCst);
         Ok(marked)
     }
 
-    fn apply_non_canonical_hashes(&mut self, block_hashes: &BTreeSet<B256>) -> io::Result<u64> {
+    fn apply_non_canonical_hashes(
+        &mut self,
+        block_hashes: &BTreeSet<B256>,
+        mut selections: Option<&mut Vec<reorg::CanonicalReorgSelection>>,
+    ) -> io::Result<u64> {
         let mut total_marked = 0u64;
         let mut changed_bundles = Vec::new();
         let mut view_invalidated = false;
 
-        for descriptor in &mut self.catalog.segments {
+        for (catalog_index, descriptor) in self.catalog.segments.iter_mut().enumerate() {
             if descriptor.row_count == 0 {
                 continue;
             }
@@ -1713,9 +1717,18 @@ impl NativeStorage {
             let hashes = reader.read_b256("block_hash", None)?;
             let mut canonical = reader.read_canonical()?;
             let mut modified = false;
+            let mut selected = Vec::new();
 
             for (row_id, hash) in hashes.iter().enumerate() {
                 if block_hashes.contains(hash) && canonical.is_present(row_id as u64) {
+                    if selections.is_some() {
+                        selected.push(u32::try_from(row_id).map_err(|_| {
+                            io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "reorg row identity exceeds reader range",
+                            )
+                        })?);
+                    }
                     canonical.set(row_id as u64, false);
                     modified = true;
                     total_marked += 1;
@@ -1742,6 +1755,13 @@ impl NativeStorage {
                         &canonical,
                         raw_owner.as_ref().expect("raw source owner was acquired"),
                     )?;
+                }
+                if let Some(selections) = selections.as_mut() {
+                    selections.push(reorg::CanonicalReorgSelection {
+                        catalog_index,
+                        descriptor: descriptor.clone(),
+                        row_ids: selected,
+                    });
                 }
             }
         }
@@ -8979,6 +8999,217 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn reorg_notifications_select_only_newly_retired_rows_after_commit() {
+        let tmp = TempDir::new().unwrap();
+        let (mut storage, headers, _) = reorg_fixture(tmp.path());
+        // A previously retired physical copy of the same hash is not a new removal.
+        storage.mark_non_canonical(headers[1].hash_slow()).unwrap();
+        storage
+            .write_batch(&ingestion_rows(1, &headers[1]))
+            .unwrap();
+        storage.checkpoint_durable().unwrap();
+        let affected = storage
+            .catalog
+            .segments
+            .iter()
+            .filter(|s| s.row_count > 0)
+            .collect::<Vec<_>>();
+        assert_eq!(affected.len(), 2);
+        assert!(affected.iter().any(|s| s.column_bundle.is_none()));
+        assert!(affected.iter().any(|s| s.column_bundle.is_some()));
+        let config = storage.config.clone();
+        let hashes = headers[1..]
+            .iter()
+            .map(Header::hash_slow)
+            .collect::<Vec<_>>();
+        let mut delivered = Vec::new();
+        let count = storage
+            .begin_canonical_reorg(&hashes, &headers[..1], Some(reorg_anchor(&headers[0])))
+            .unwrap()
+            .finish_with_notifications(|rows| {
+                let (committed, _) = NativeStorageCatalog::open_or_create(&config).unwrap();
+                assert!(committed.state.canonical_reorg.is_none());
+                assert_eq!(committed.state.sync_head.unwrap().block_number, 100);
+                delivered.extend_from_slice(rows);
+            })
+            .unwrap();
+        assert_eq!(count, 2);
+        delivered.sort_by_key(|row| row.block_number);
+        assert_eq!(
+            delivered
+                .iter()
+                .map(|row| row.block_number)
+                .collect::<Vec<_>>(),
+            vec![101, 102]
+        );
+        assert_eq!(reorg_canonical_blocks(&storage), vec![100]);
+        // The empty tip contributed no fabricated removal.
+        assert!(!delivered.iter().any(|row| row.block_number == 103));
+    }
+
+    #[test]
+    fn reorg_notifications_never_publish_before_successful_finish() {
+        let mut phases = Vec::new();
+        for failure in std::iter::once(None).chain([Some(0), Some(1), Some(2)]) {
+            let tmp = TempDir::new().unwrap();
+            let (mut storage, headers, _) = reorg_fixture(tmp.path());
+            let config = storage.config.clone();
+            let hashes = headers[1..]
+                .iter()
+                .map(Header::hash_slow)
+                .collect::<Vec<_>>();
+            let index = failure.map_or(usize::MAX, |phase| phases[phase]);
+            let mut calls = 0;
+            durability::inject_failure(index);
+            let result = storage
+                .begin_canonical_reorg(&hashes, &headers[..1], Some(reorg_anchor(&headers[0])))
+                .and_then(|pending| pending.finish_with_notifications(|_| calls += 1));
+            let events = durability::take_events();
+            if failure.is_none() {
+                assert_eq!(result.unwrap(), 2);
+                assert!(calls > 0);
+                phases = events
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, (name, _))| {
+                        matches!(
+                            *name,
+                            "reorg_intent_published" | "reorg_rows_applied" | "reorg_completed"
+                        )
+                        .then_some(index)
+                    })
+                    .collect();
+                assert_eq!(phases.len(), 3);
+            } else {
+                assert!(result.is_err());
+                assert_eq!(calls, 0);
+                drop(storage);
+                let recovered = NativeStorage::open(config).unwrap();
+                assert_eq!(reorg_canonical_blocks(&recovered), vec![100]);
+            }
+        }
+    }
+
+    #[test]
+    fn reorg_notifications_reopen_raw_selection_after_compaction() {
+        let tmp = TempDir::new().unwrap();
+        let (mut storage, headers, _) = reorg_fixture(tmp.path());
+        storage.seal_hot_segment().unwrap();
+        storage.checkpoint_durable().unwrap();
+        let descriptor = storage
+            .catalog
+            .segments
+            .iter()
+            .find(|entry| entry.row_count > 0 && entry.column_bundle.is_none())
+            .unwrap()
+            .clone();
+        let dir = storage.paths.segment_dir(descriptor.id);
+        assert!(dir.join("address.col").exists());
+        let task = SegmentCompactionTask::new(
+            storage.paths.clone(),
+            descriptor,
+            Arc::clone(&storage.directory_lock),
+        );
+        reorg::AFTER_NOTIFICATION_COMMIT
+            .with_borrow_mut(|hook| *hook = Some(Box::new(move || task.compact().unwrap())));
+        let hashes = headers[1..]
+            .iter()
+            .map(Header::hash_slow)
+            .collect::<Vec<_>>();
+        let mut delivered = Vec::new();
+        let count = storage
+            .begin_canonical_reorg(&hashes, &headers[..1], Some(reorg_anchor(&headers[0])))
+            .unwrap()
+            .finish_with_notifications(|rows| delivered.extend_from_slice(rows))
+            .unwrap();
+        assert_eq!(count, 2);
+        assert!(!dir.join("address.col").exists());
+        delivered.sort_by_key(|row| row.block_number);
+        assert_eq!(
+            delivered
+                .iter()
+                .map(|row| row.block_number)
+                .collect::<Vec<_>>(),
+            vec![101, 102]
+        );
+        assert_eq!(delivered[0].block_hash, headers[1].hash_slow());
+        assert_eq!(reorg_canonical_blocks(&storage), vec![100]);
+    }
+
+    #[test]
+    fn reorg_notifications_partial_delivery_is_committed_before_later_read_failure() {
+        let tmp = TempDir::new().unwrap();
+        let (mut storage, headers, _) = reorg_fixture(tmp.path());
+        let config = storage.config.clone();
+        let bundled = storage
+            .catalog
+            .segments
+            .iter()
+            .find(|s| s.column_bundle.is_some())
+            .unwrap();
+        let bundle = crate::column_artifact::bundle_path(
+            &storage.paths.segment_dir(bundled.id),
+            bundled.generation,
+        );
+        reorg::AFTER_NOTIFICATION_COMMIT.with_borrow_mut(|hook| {
+            *hook = Some(Box::new(move || fs::write(bundle, []).unwrap()));
+        });
+        let hashes = headers[1..]
+            .iter()
+            .map(Header::hash_slow)
+            .collect::<Vec<_>>();
+        let mut delivered = Vec::new();
+        let result = storage
+            .begin_canonical_reorg(&hashes, &headers[..1], Some(reorg_anchor(&headers[0])))
+            .unwrap()
+            .finish_with_notifications(|rows| delivered.extend_from_slice(rows));
+        assert!(result.is_err());
+        assert_eq!(delivered.len(), 1);
+        assert_eq!(delivered[0].block_hash, headers[1].hash_slow());
+        let (catalog, _) = NativeStorageCatalog::open_or_create(&config).unwrap();
+        assert!(catalog.state.canonical_reorg.is_none());
+        assert_eq!(catalog.state.sync_head.unwrap().block_number, 100);
+    }
+
+    #[test]
+    fn reorg_notifications_report_post_commit_payload_failure() {
+        let tmp = TempDir::new().unwrap();
+        let (mut storage, headers, _) = reorg_fixture(tmp.path());
+        let raw = storage
+            .catalog
+            .segments
+            .iter()
+            .find(|entry| entry.row_count > 0 && entry.column_bundle.is_none())
+            .unwrap();
+        let payload = storage.paths.segment_dir(raw.id).join("data.col");
+        reorg::AFTER_NOTIFICATION_COMMIT.with_borrow_mut(|hook| {
+            *hook = Some(Box::new(move || fs::write(payload, []).unwrap()))
+        });
+        let hashes = headers[1..]
+            .iter()
+            .map(Header::hash_slow)
+            .collect::<Vec<_>>();
+        let mut calls = 0;
+        let result = storage
+            .begin_canonical_reorg(&hashes, &headers[..1], Some(reorg_anchor(&headers[0])))
+            .unwrap()
+            .finish_with_notifications(|_| calls += 1);
+        assert!(result.is_err());
+        assert_eq!(calls, 0);
+        assert!(storage.catalog.state.canonical_reorg.is_none());
+        assert_eq!(
+            storage
+                .catalog
+                .state
+                .sync_head
+                .as_ref()
+                .unwrap()
+                .block_number,
+            100
+        );
+    }
+
     fn reorg_compaction_fixture(
         path: &Path,
     ) -> (
