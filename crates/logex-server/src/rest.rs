@@ -207,18 +207,6 @@ pub async fn handle_status(State(state): State<Arc<AppState>>) -> Response {
     if let Some(reason) = state.storage_failure() {
         return storage_unavailable_response(reason);
     }
-    let sync = state.sync_status.lock().unwrap().clone();
-    let consensus_status_stale = consensus_status_is_stale(
-        sync.checkpoint.is_some(),
-        sync.consensus_status_updated_at_unix_ms,
-        unix_time_millis(),
-    );
-    let consensus_head_fresh = if consensus_status_stale {
-        Some(false)
-    } else {
-        sync.consensus_head_fresh
-    };
-    let live_head_available = consensus_head_fresh == Some(true);
     let (
         total_rows,
         sealed_partitions,
@@ -254,6 +242,21 @@ pub async fn handle_status(State(state): State<Arc<AppState>>) -> Response {
         reason = state.storage_unavailable() => return storage_unavailable_response(reason),
         metrics = storage_metrics::load_or_refresh(Arc::clone(&state.storage_metrics), data_dir) => metrics,
     };
+    // Await storage and cached metrics before sampling volatile sync state.
+    // A writer can keep this request queued while connectivity/freshness changes.
+    // No application guard is held across an await or while taking another lock.
+    let sync = state.sync_status.lock().unwrap().clone();
+    let consensus_status_stale = consensus_status_is_stale(
+        sync.checkpoint.is_some(),
+        sync.consensus_status_updated_at_unix_ms,
+        unix_time_millis(),
+    );
+    let consensus_head_fresh = if consensus_status_stale {
+        Some(false)
+    } else {
+        sync.consensus_head_fresh
+    };
+    let live_head_available = consensus_head_fresh == Some(true);
     let live_target_block =
         (live_head_available && sync.target_block > 0).then_some(sync.target_block);
     let progress_pct = if let Some(target_block) = live_target_block {
@@ -291,7 +294,9 @@ pub async fn handle_status(State(state): State<Arc<AppState>>) -> Response {
     } else {
         sync.node_state
     };
-    let reported_syncing = sync.syncing && !waiting_for_consensus && !consensus_status_stale;
+    let reported_syncing = sync.syncing
+        && !waiting_for_consensus
+        && (!consensus_status_stale || historical_incomplete);
     let logs_per_sec =
         effective_historical_rate(sync.logs_per_sec, sync.logs_rate_updated_at_unix_ms);
     let historical_blocks_per_sec = if historical_incomplete {
@@ -2191,5 +2196,131 @@ mod tests {
         assert!(status["canonical_top_block"].is_null());
         assert!(status["query_coverage"]["latest_block"].is_null());
         assert_eq!(status["head_block"], 100);
+    }
+    #[tokio::test]
+    async fn dashboard_status_observes_sync_changes_after_storage_wait() {
+        use std::task::Poll;
+        let (_tmp, storage) = setup_storage();
+        let state = Arc::new(AppState::new(
+            storage,
+            None,
+            SyncStatus {
+                node_state: NodeState::Synced,
+                consensus_head_fresh: Some(true),
+                consensus_status_updated_at_unix_ms: Some(unix_time_millis()),
+                checkpoint: Some(WeakSubjectivityCheckpoint {
+                    beacon_root: B256::repeat_byte(7),
+                    beacon_slot: Some(1000),
+                }),
+                current_block: 100,
+                target_block: 100,
+                ..Default::default()
+            },
+        ));
+        let writer = state.storage.write().await;
+        let mut response = Box::pin(handle_status(State(state.clone())));
+        assert!(
+            std::future::poll_fn(|cx| Poll::Ready(response.as_mut().poll(cx)))
+                .await
+                .is_pending()
+        );
+        {
+            let mut sync = state.sync_status.lock().unwrap();
+            sync.node_state = NodeState::Disconnected;
+            sync.consensus_head_fresh = Some(false);
+            sync.consensus_status_updated_at_unix_ms =
+                Some(unix_time_millis().saturating_sub(CONSENSUS_STATUS_STALE_AFTER_MS + 1));
+        }
+        drop(writer);
+        let body = axum::body::to_bytes(response.await.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let status: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            (
+                status["synced"].as_bool(),
+                status["consensus_head_fresh"].as_bool(),
+                status["consensus_status_stale"].as_bool()
+            ),
+            (Some(false), Some(false), Some(true))
+        );
+        for field in [
+            "target_block",
+            "progress_pct",
+            "eta_seconds",
+            "canonical_top_block",
+        ] {
+            assert!(status[field].is_null(), "{field}");
+        }
+        assert!(status["query_coverage"]["latest_block"].is_null());
+    }
+
+    #[tokio::test]
+    async fn dashboard_status_preserves_only_active_historical_sync_when_consensus_stale() {
+        let mut mismatches = Vec::new();
+        for (label, active, floor, disabled, expected) in [
+            ("active history", true, 100, false, true),
+            ("stopped history", false, 100, false, false),
+            ("completed history", true, 0, false, false),
+            ("disabled history", true, 100, true, false),
+        ] {
+            let (_tmp, storage) = setup_storage();
+            let state = Arc::new(AppState::new(
+                storage,
+                None,
+                SyncStatus {
+                    node_state: if active {
+                        NodeState::Syncing
+                    } else {
+                        NodeState::Disconnected
+                    },
+                    syncing: active,
+                    historical_sync_disabled: disabled,
+                    historical_execution_floor: Some(ExecutionBlockMarker {
+                        block_number: floor,
+                        block_hash: B256::repeat_byte(8),
+                        timestamp: 1_700_000_000,
+                    }),
+                    historical_target_block: 0,
+                    historical_blocks_per_sec: 10.0,
+                    historical_rate_updated_at_unix_ms: Some(unix_time_millis()),
+                    consensus_head_fresh: Some(true),
+                    consensus_status_updated_at_unix_ms: Some(
+                        unix_time_millis().saturating_sub(CONSENSUS_STATUS_STALE_AFTER_MS + 1),
+                    ),
+                    checkpoint: Some(WeakSubjectivityCheckpoint {
+                        beacon_root: B256::repeat_byte(7),
+                        beacon_slot: Some(1000),
+                    }),
+                    current_block: 100,
+                    target_block: 110,
+                    ..Default::default()
+                },
+            ));
+            let response = handle_status(State(state)).await;
+            let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .unwrap();
+            let status: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            if status["syncing"].as_bool() != Some(expected) {
+                mismatches.push(label);
+            }
+            assert_eq!(status["synced"], false, "{label}");
+            assert_eq!(status["consensus_status_stale"], true, "{label}");
+            assert_eq!(status["consensus_head_fresh"], false, "{label}");
+            for field in [
+                "target_block",
+                "progress_pct",
+                "eta_seconds",
+                "canonical_top_block",
+            ] {
+                assert!(status[field].is_null(), "{label}: {field}");
+            }
+            assert!(status["query_coverage"]["latest_block"].is_null());
+        }
+        assert!(
+            mismatches.is_empty(),
+            "incorrect activity for: {mismatches:?}"
+        );
     }
 }
