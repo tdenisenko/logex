@@ -13,6 +13,7 @@ use eyre::Result;
 use logex_types::LOGEX_CLIENT_VERSION;
 use reth_chainspec::{EthChainSpec, MAINNET};
 use reth_discv4::{Discv4Config, NatResolver};
+use reth_discv5::discv5::enr::{Enr, EnrKey};
 use reth_discv5::discv5::{Enr as Discv5Enr, ListenConfig};
 use reth_discv5::enr::EnrCombinedKeyWrapper;
 use reth_discv5::enr_to_discv4_id;
@@ -1408,11 +1409,11 @@ fn dual_endpoint_prefers_ipv6(peer_id: PeerId) -> bool {
     peer_id.as_slice().last().is_some_and(|byte| byte & 1 == 1)
 }
 
-fn ipv6_tcp_port<K: enr::EnrKey>(enr: &enr::Enr<K>) -> Option<u16> {
+fn ipv6_tcp_port<K: EnrKey>(enr: &Enr<K>) -> Option<u16> {
     enr.tcp6_socket().map(|socket| socket.port())
 }
 
-fn ipv6_udp_port<K: enr::EnrKey>(enr: &enr::Enr<K>) -> Option<u16> {
+fn ipv6_udp_port<K: EnrKey>(enr: &Enr<K>) -> Option<u16> {
     enr.udp6_socket().map(|socket| socket.port())
 }
 

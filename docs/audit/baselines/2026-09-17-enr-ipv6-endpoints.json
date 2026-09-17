@@ -80,6 +80,14 @@
     "focused-peer-manager.log": {
       "bytes": 35118,
       "sha256": "12f32a13b33ae94a8399dc8bddd7fa0a53d11be83f1dbe8135e74a9c3314b9ba"
+    },
+    "gates-initial-source/results.json": {
+      "bytes": 3222,
+      "sha256": "8c0dd4ff6a42b9924120407ad8ce4742ea88690759fd7c3179751ffe698bea0f"
+    },
+    "gates-initial-source/check.log": {
+      "bytes": 2019,
+      "sha256": "dee98e3760f3550eb6f447755ef1d72b3192318337819b3916862b74f8a8f62a"
     }
   },
   "focused_suites": {
@@ -93,5 +101,10 @@
       "failed": 0,
       "ignored": 0
     }
+  },
+  "initial_gate_failure": {
+    "source": "7c73126e",
+    "gate": "check",
+    "reason": "The generic helper referenced an ENR dev-dependency; focused test builds included it, normal production builds did not. Corrected to the existing production discv5 re-export."
   }
 }
