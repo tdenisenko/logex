@@ -62,7 +62,7 @@ stop; cleanup controls cover ownership through runtime destruction.
 
 Implementer review traced startup order, both monitor modes, callback lifetime,
 first failure retention and main-owned teardown. No independent review is claimed.
-All eight local gates pass on `2ffd2de4`: vendor verification, workspace and patched-vendor formatting, workspace check, strict Clippy, 1,828 workspace tests (24 ignored), documentation tests and release build. Exact-head Linux/macOS CI and PR merge remain pending.
+All eight local gates pass on `2ffd2de4`: vendor verification, workspace and patched-vendor formatting, workspace check, strict Clippy, 1,828 workspace tests (24 ignored), documentation tests and release build. All six CI jobs passed on `0c6c8923`, including Linux/macOS tests and ten Linux volume/template cases with verified cleanup. [PR #208](https://github.com/tdenisenko/logex/pull/208) merged as `17b044f9`.
 
 Ordinary monitoring adds an owned sleeping thread and uses the existing short-lived
 deadline observer for each periodic probe. It removes blocking-pool scheduling

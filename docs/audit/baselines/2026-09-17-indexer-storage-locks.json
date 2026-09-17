@@ -1,0 +1,47 @@
+{
+  "status": "Focused controls pass; final cleanup, workspace gates, CI and merge pending",
+  "base": "17b044f9959450b9d038f30c9a4273cb6acdf4de",
+  "findings": [
+    "B10-20"
+  ],
+  "evidence_root": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-indexer-locks-0ty2k44y",
+  "original_reproduction": {
+    "method": "Test-only observation at entry to actual freshness helper, unchanged selector/read-guard ownership, owned two-segment fixture",
+    "passed": 0,
+    "failed": 1,
+    "exit_code": 101
+  },
+  "focused_tests": {
+    "background": 19,
+    "node": 207,
+    "failed": 0,
+    "ignored": 0,
+    "scope": "Before final removal of unreachable active-sync limit helper"
+  },
+  "evidence": {
+    "original-background.rs": {
+      "sha256": "f2cd092b0657f7de67d76894554f07cf75ddc5049157ebe74dd3999f59dafa31",
+      "bytes": 31949
+    },
+    "original-instrumented.rs": {
+      "sha256": "915185b51ddfa96549ae8cc81ae1f2231994a94594f87912fc0bd08cbc35c76c",
+      "bytes": 33715
+    },
+    "original-control.log": {
+      "sha256": "7984755bac8123d6b723f6b9c14caaa0cf7b13de0ea021442daef1dcfbb3a964",
+      "bytes": 1594
+    },
+    "original-result.json": {
+      "sha256": "25169ed93a07ea2727bda66e24f14fc7ab6d81da63b78d5bb432c0e900c6224a",
+      "bytes": 73
+    },
+    "focused-background.log": {
+      "sha256": "30511e81b2bd2c775c73e9235178aba817e9717d204a88ec7563274f575daf31",
+      "bytes": 2663
+    },
+    "focused-node.log": {
+      "sha256": "ab4c2a3d6d911fff7d6ffb20c7cc1a42431a0106177a3d12653f381688fbf7b7",
+      "bytes": 18454
+    }
+  }
+}

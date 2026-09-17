@@ -1,6 +1,5 @@
 use std::io;
-use std::path::Path;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -16,9 +15,9 @@ const ACTIVE_SYNC_COMPACTION_HIGH_CATCH_UP_LIMIT: usize = 8;
 const ACTIVE_SYNC_COMPACTION_CATCH_UP_BACKLOG: usize = 1_024;
 const ACTIVE_SYNC_COMPACTION_HIGH_BACKLOG: usize = 4_096;
 const ACTIVE_SYNC_PROFILE_REWRITE_SEGMENT_LIMIT: usize = 2;
-const ACTIVE_SYNC_SEALED_INDEX_SEGMENT_LIMIT: usize = 0;
 const BACKGROUND_COMPACTION_SEGMENT_LIMIT: usize = 24;
 const BACKGROUND_SEALED_INDEX_SEGMENT_LIMIT: usize = 8;
+const INDEX_CANDIDATE_BATCH_SIZE: usize = 64;
 const BACKGROUND_COMPACTION_INTERVAL: Duration = Duration::from_secs(10);
 const ACTIVE_SYNC_BACKLOG_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
 const BYTES_PER_KIB: u64 = 1024;
@@ -38,7 +37,6 @@ pub async fn run_background_indexer(
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> io::Result<()> {
     let mut last_indexed: Option<HotIndexState> = None;
-    let mut sealed_index_scan_complete_for_max_id: Option<u64> = None;
     let mut last_active_backlog_refresh: Option<std::time::Instant> = None;
     let mut last_active_raw_backlog: Option<usize> = None;
     let mut ticker = tokio::time::interval(BACKGROUND_COMPACTION_INTERVAL);
@@ -237,49 +235,26 @@ pub async fn run_background_indexer(
         if should_defer_query_indexing(active_sync) {
             continue;
         }
-        let sealed_index_limit = sealed_index_segment_limit(active_sync);
-
-        let (sealed_max_id, sealed_targets) = {
-            let storage = state.storage.read().await;
-            sealed_query_index_targets(&storage, sealed_index_limit)
-        };
-        if sealed_index_scan_complete_for_max_id != sealed_max_id || !sealed_targets.is_empty() {
-            if sealed_targets.is_empty() {
-                sealed_index_scan_complete_for_max_id = sealed_max_id;
-            } else {
-                let target_count = sealed_targets.len();
-                let result = tokio::task::spawn_blocking(move || -> io::Result<usize> {
-                    let mut indexed = 0;
-                    for path in sealed_targets {
-                        IndexBuilder::build_missing_indexes(
-                            &path,
-                            IndexBuildProfile::Erc20Transfer,
-                        )?;
-                        indexed += 1;
-                    }
-                    Ok(indexed)
-                })
-                .await;
-
-                match result {
-                    Ok(Ok(indexed)) => {
-                        tracing::info!(
-                            indexed,
-                            target_count,
-                            "built missing query indexes for sealed segments"
-                        );
-                        sealed_index_scan_complete_for_max_id = None;
-                    }
-                    Ok(Err(e)) => {
-                        tracing::warn!(
-                            error = %e,
-                            "failed to build missing sealed query indexes"
-                        );
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "sealed query index task panicked");
-                    }
-                }
+        let storage = Arc::clone(&state.storage);
+        match tokio::task::spawn_blocking(move || {
+            build_sealed_query_indexes(
+                &storage,
+                BACKGROUND_SEALED_INDEX_SEGMENT_LIMIT,
+                query_indexes_missing,
+                |path| IndexBuilder::build_missing_indexes(path, IndexBuildProfile::Erc20Transfer),
+            )
+        })
+        .await
+        {
+            Ok(Ok(indexed)) if indexed > 0 => {
+                tracing::info!(indexed, "built missing query indexes for sealed segments");
+            }
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => {
+                tracing::warn!(%error, "failed to build missing sealed query indexes");
+            }
+            Err(error) => {
+                tracing::warn!(%error, "sealed query index task failed");
             }
         }
 
@@ -292,17 +267,17 @@ pub async fn run_background_indexer(
             }
         };
 
-        let index_status = (current.row_count > 0)
-            .then(|| query_indexes_missing(&current.path))
-            .flatten();
-        if index_status.is_some()
-            && (should_rebuild_hot_indexes(last_indexed.as_ref(), &current)
-                || index_status == Some(true))
-        {
+        if current.row_count > 0 {
+            let rebuild_for_rows = should_rebuild_hot_indexes(last_indexed.as_ref(), &current);
             let path = current.path.clone();
-            match tokio::task::spawn_blocking(move || IndexBuilder::build_all_indexes(&path)).await
+            // Opening source/checkpoint/index files is filesystem work too.
+            // Keep freshness checks on the same blocking worker as the build.
+            match tokio::task::spawn_blocking(move || {
+                rebuild_hot_query_indexes(&path, rebuild_for_rows)
+            })
+            .await
             {
-                Ok(Ok(())) => {
+                Ok(Ok(true)) => {
                     tracing::debug!(
                         partition_id = current.partition_id,
                         rows = current.row_count,
@@ -310,6 +285,7 @@ pub async fn run_background_indexer(
                     );
                     last_indexed = Some(current);
                 }
+                Ok(Ok(false)) => {}
                 Ok(Err(e)) => {
                     let latest = {
                         let storage = state.storage.read().await;
@@ -363,14 +339,6 @@ fn update_compaction_status(state: &AppState, report: CompactionReport) {
 
 fn should_defer_background_indexing(status: &SyncStatus) -> bool {
     status.historical_eta_seconds.is_some()
-}
-
-fn sealed_index_segment_limit(active_sync: bool) -> usize {
-    if active_sync {
-        ACTIVE_SYNC_SEALED_INDEX_SEGMENT_LIMIT
-    } else {
-        BACKGROUND_SEALED_INDEX_SEGMENT_LIMIT
-    }
 }
 
 fn should_defer_query_indexing(active_sync: bool) -> bool {
@@ -503,31 +471,70 @@ fn should_rebuild_hot_indexes(
     }
 }
 
-fn sealed_query_index_targets(
-    storage: &PartitionManager,
+/// Capture only bounded metadata under the storage lock; every filesystem
+/// freshness check and index build runs after the guard is released. The caller
+/// runs this synchronous helper on a blocking worker and retains storage ownership.
+fn build_sealed_query_indexes(
+    storage: &tokio::sync::RwLock<PartitionManager>,
     limit: usize,
-) -> (Option<u64>, Vec<PathBuf>) {
-    let max_segment_id = storage
-        .sealed_partitions()
-        .iter()
-        .map(|partition| partition.meta.id)
-        .max();
+    mut missing: impl FnMut(&Path) -> Option<bool>,
+    mut build: impl FnMut(&Path) -> io::Result<()>,
+) -> io::Result<usize> {
     if limit == 0 {
-        return (max_segment_id, Vec::new());
+        return Ok(0);
     }
+    // This is an advisory maintenance pass, not a query/coverage snapshot.
+    // Bound it to the initial list length so concurrent rotation cannot extend
+    // it forever. Changed positions/new segments are revisited on the next tick;
+    // each actual build independently validates its current source publication.
+    let end = storage.blocking_read().sealed_partitions().len();
+    let mut cursor = 0;
+    let mut indexed = 0;
+    while cursor < end {
+        let candidates = {
+            let storage = storage.blocking_read();
+            let next = cursor.saturating_add(INDEX_CANDIDATE_BATCH_SIZE).min(end);
+            let candidates = sealed_index_candidates(&storage, cursor..next);
+            cursor = next;
+            candidates
+        };
+        for path in candidates {
+            if missing(&path) == Some(true) {
+                build(&path)?;
+                indexed += 1;
+                if indexed == limit {
+                    return Ok(indexed);
+                }
+            }
+        }
+    }
+    Ok(indexed)
+}
 
+fn sealed_index_candidates(
+    storage: &PartitionManager,
+    range: std::ops::Range<usize>,
+) -> Vec<PathBuf> {
     let active_historical_segment = storage.active_historical_segment_id();
-    let targets = storage
+    storage
         .sealed_partitions()
         .iter()
+        .skip(range.start)
+        .take(range.len())
         .filter(|partition| partition.meta.row_count > 0)
         .filter(|partition| Some(partition.meta.id) != active_historical_segment)
-        .filter(|partition| query_indexes_missing(&partition.meta.path) == Some(true))
-        .take(limit)
         .map(|partition| partition.meta.path.clone())
-        .collect();
+        .collect()
+}
 
-    (max_segment_id, targets)
+fn rebuild_hot_query_indexes(path: &Path, rebuild_for_rows: bool) -> io::Result<bool> {
+    match query_indexes_missing(path) {
+        Some(missing) if missing || rebuild_for_rows => {
+            IndexBuilder::build_all_indexes(path)?;
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
 }
 
 fn query_indexes_missing(path: &Path) -> Option<bool> {
@@ -545,6 +552,144 @@ fn query_indexes_missing(path: &Path) -> Option<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn index_row(number: u64) -> logex_types::LogRow {
+        logex_types::LogRow {
+            block_number: number,
+            block_hash: alloy_primitives::B256::ZERO,
+            timestamp: number,
+            tx_hash: alloy_primitives::B256::ZERO,
+            tx_index: 0,
+            log_index: 0,
+            address: alloy_primitives::Address::ZERO,
+            topic0: None,
+            topic1: None,
+            topic2: None,
+            topic3: None,
+            data: alloy_primitives::Bytes::new(),
+            data_len: 0,
+            source: logex_types::Source::Receipt,
+        }
+    }
+
+    fn index_storage(path: &Path, segments: usize) -> PartitionManager {
+        let mut storage = PartitionManager::open(logex_storage::PartitionManagerConfig {
+            data_dir: path.to_owned(),
+            partition_target_rows: 1,
+            ..Default::default()
+        })
+        .unwrap();
+        storage
+            .write_batch(
+                &(0..segments)
+                    .map(|i| index_row(i as u64 + 1))
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+        assert_eq!(storage.sealed_partitions().len(), segments);
+        storage
+    }
+
+    #[test]
+    fn sealed_index_probe_and_build_release_the_ingestion_lock() {
+        let root = tempfile::tempdir().unwrap();
+        let storage = tokio::sync::RwLock::new(index_storage(root.path(), 3));
+        let indexed = build_sealed_query_indexes(
+            &storage,
+            2,
+            |path| {
+                assert!(
+                    storage.try_write().is_ok(),
+                    "freshness probe holds storage lock"
+                );
+                query_indexes_missing(path)
+            },
+            |path| {
+                assert!(
+                    storage.try_write().is_ok(),
+                    "index build holds storage lock"
+                );
+                IndexBuilder::build_missing_indexes(path, IndexBuildProfile::Erc20Transfer)
+            },
+        )
+        .unwrap();
+        assert_eq!(indexed, 2);
+        let paths = sealed_index_candidates(&storage.blocking_read(), 0..3);
+        assert_eq!(query_indexes_missing(&paths[0]), Some(false));
+        assert_eq!(query_indexes_missing(&paths[1]), Some(false));
+        assert_eq!(query_indexes_missing(&paths[2]), Some(true));
+    }
+
+    #[test]
+    fn sealed_index_scan_batches_metadata_and_defers_concurrent_growth() {
+        let root = tempfile::tempdir().unwrap();
+        let initial = INDEX_CANDIDATE_BATCH_SIZE + 1;
+        let storage = tokio::sync::RwLock::new(index_storage(root.path(), initial));
+        let batch =
+            sealed_index_candidates(&storage.blocking_read(), 0..INDEX_CANDIDATE_BATCH_SIZE);
+        assert_eq!(batch.len(), INDEX_CANDIDATE_BATCH_SIZE);
+        let mut checked = 0;
+        let indexed = build_sealed_query_indexes(
+            &storage,
+            8,
+            |_| {
+                checked += 1;
+                if checked == 1 {
+                    // Real append/rotation during freshness inspection. The pass
+                    // remains finite and the new candidate is seen on the next pass.
+                    storage
+                        .blocking_write()
+                        .write_batch(&[index_row(1_000)])
+                        .unwrap();
+                }
+                Some(false)
+            },
+            |_| panic!("current indexes must not rebuild"),
+        )
+        .unwrap();
+        assert_eq!(indexed, 0);
+        assert_eq!(checked, initial);
+        let mut revisited = 0;
+        build_sealed_query_indexes(
+            &storage,
+            8,
+            |_| {
+                revisited += 1;
+                None
+            },
+            |_| panic!("ineligible source must not build"),
+        )
+        .unwrap();
+        assert_eq!(revisited, initial + 1);
+    }
+
+    #[test]
+    fn disabled_sealed_indexing_does_not_lock_or_probe_storage() {
+        let root = tempfile::tempdir().unwrap();
+        let storage = tokio::sync::RwLock::new(index_storage(root.path(), 1));
+        let _writer = storage.blocking_write();
+        assert_eq!(
+            build_sealed_query_indexes(
+                &storage,
+                0,
+                |_| panic!("disabled indexing must not probe"),
+                |_| panic!("disabled indexing must not build")
+            )
+            .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn hot_index_freshness_keeps_existing_build_policy() {
+        let root = tempfile::tempdir().unwrap();
+        logex_storage::ColumnFile::write_batch(root.path(), &[index_row(1)]).unwrap();
+        assert!(rebuild_hot_query_indexes(root.path(), false).unwrap());
+        assert!(!IndexBuilder::indexes_missing(root.path(), IndexBuildProfile::All).unwrap());
+        assert!(!rebuild_hot_query_indexes(root.path(), false).unwrap());
+        assert!(rebuild_hot_query_indexes(root.path(), true).unwrap());
+        assert!(!rebuild_hot_query_indexes(root.path(), false).unwrap());
+    }
 
     #[tokio::test]
     async fn cleanup_deadline_does_not_await_started_blocking_work_again() {
@@ -717,11 +862,6 @@ mod tests {
 
     #[test]
     fn sealed_query_indexing_is_deferred_during_active_sync() {
-        assert_eq!(sealed_index_segment_limit(true), 0);
-        assert_eq!(
-            sealed_index_segment_limit(false),
-            BACKGROUND_SEALED_INDEX_SEGMENT_LIMIT
-        );
         assert!(should_defer_query_indexing(true));
         assert!(!should_defer_query_indexing(false));
     }
@@ -781,7 +921,7 @@ mod tests {
             .collect::<Vec<_>>();
         storage.write_historical_batch(&rows).unwrap();
 
-        let (_, targets) = sealed_query_index_targets(&storage, 8);
+        let targets = sealed_index_candidates(&storage, 0..INDEX_CANDIDATE_BATCH_SIZE);
 
         assert!(storage.active_historical_segment_id().is_some());
         assert!(targets.is_empty());
