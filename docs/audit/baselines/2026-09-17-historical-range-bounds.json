@@ -1,0 +1,277 @@
+{
+  "date": "2026-09-17",
+  "branch": "audit/historical-range-bounds",
+  "base": "4635cbda93c9a1f2b160ecba4e20856aeeab6099",
+  "source_commit": "75a73e4db084dc101f27d4902d411ea9fe80d0c0",
+  "source_inventory": {
+    "base": "4635cbda93c9a1f2b160ecba4e20856aeeab6099",
+    "source_commit": "75a73e4db084dc101f27d4902d411ea9fe80d0c0",
+    "files": [
+      {
+        "change": "A",
+        "path": "crates/logex-query/tests/historical_range_bounds.rs",
+        "bytes": 4559,
+        "sha256": "c8fb303a43aa89c33e534fdf70bfe0df49f991783dee1bad2e351385284b55e7"
+      },
+      {
+        "change": "M",
+        "path": "crates/logex-storage/src/commitment.rs",
+        "bytes": 17440,
+        "sha256": "a8e7a7a2be94ed1914817748bc62a4f1ad8d2b487c7f108c41a9badc2df3d2a4"
+      },
+      {
+        "change": "M",
+        "path": "crates/logex-storage/src/lib.rs",
+        "bytes": 667,
+        "sha256": "e017f54a3978dc8dc45f0619692a2f0b3cdd66ebac9077f9c54adff410b7317d"
+      },
+      {
+        "change": "M",
+        "path": "crates/logex-storage/src/native/segment.rs",
+        "bytes": 127653,
+        "sha256": "530ff06ae8f9cda3aa9c61dcabfba81026775b7bf46601f084fb5a7ab217d953"
+      },
+      {
+        "change": "M",
+        "path": "crates/logex-storage/src/native/storage.rs",
+        "bytes": 379889,
+        "sha256": "6050b76ff7777d8d2b7be952780d15e997714c1028ad72493b189cbad912c556"
+      },
+      {
+        "change": "M",
+        "path": "crates/logex-storage/src/partition.rs",
+        "bytes": 18049,
+        "sha256": "d3a2d2a43026f34b9b87cbaabaefcbb40aa2e413ecc284d45682b0b19916c8c0"
+      },
+      {
+        "change": "A",
+        "path": "crates/logex-storage/src/row_bounds.rs",
+        "bytes": 1327,
+        "sha256": "505240a4f1fd8cf0268cbd43d76e18f93f9ebf30e5bdc83fe2d5116a902e8962"
+      }
+    ]
+  },
+  "findings": [
+    "B2-27"
+  ],
+  "gates": {
+    "commit": "75a73e4db084dc101f27d4902d411ea9fe80d0c0",
+    "rustc": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+    "gates": [
+      {
+        "name": "vendor",
+        "command": [
+          "python3",
+          "tools/verify_datafusion_vendor.py"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T09:49:26.544740+00:00",
+        "finished": "2026-09-17T09:49:26.668896+00:00",
+        "sha256": "95ada9e22c512e8346f3d8d057e7fba429b52506f4e037dcf35657f57d7ec451",
+        "log": "/private/tmp/logex-audit-historical-range-20260917/gates/vendor.log"
+      },
+      {
+        "name": "format",
+        "command": [
+          "cargo",
+          "fmt",
+          "--all",
+          "--",
+          "--check"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T09:49:26.669269+00:00",
+        "finished": "2026-09-17T09:49:27.678597+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-audit-historical-range-20260917/gates/format.log"
+      },
+      {
+        "name": "vendor-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2024",
+          "--config-path",
+          "vendor/reth-network/rustfmt.toml",
+          "--config",
+          "skip_children=true",
+          "vendor/reth-network/src/eth_requests.rs",
+          "vendor/reth-network/src/session/active.rs",
+          "vendor/reth-network/src/session/mod.rs",
+          "vendor/reth-network/src/session/types.rs",
+          "vendor/reth-network/src/session/range_update.rs",
+          "vendor/reth-discv5/src/lib.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T09:49:27.679003+00:00",
+        "finished": "2026-09-17T09:49:27.747561+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-audit-historical-range-20260917/gates/vendor-format.log"
+      },
+      {
+        "name": "enr-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2021",
+          "--config",
+          "skip_children=true",
+          "vendor/enr/src/lib.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T09:49:27.747916+00:00",
+        "finished": "2026-09-17T09:49:27.799685+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-audit-historical-range-20260917/gates/enr-format.log"
+      },
+      {
+        "name": "aggregate-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2021",
+          "--config",
+          "max_width=90,skip_children=true",
+          "vendor/datafusion-functions-aggregate/src/sum.rs",
+          "vendor/datafusion-functions-aggregate/src/average.rs",
+          "vendor/datafusion-functions-aggregate-common/src/aggregate/sum_distinct/numeric.rs",
+          "vendor/datafusion-functions-aggregate-common/src/aggregate/avg_distinct/decimal.rs",
+          "vendor/datafusion-functions-aggregate-common/src/utils.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T09:49:27.800039+00:00",
+        "finished": "2026-09-17T09:49:27.865363+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-audit-historical-range-20260917/gates/aggregate-format.log"
+      },
+      {
+        "name": "check",
+        "command": [
+          "cargo",
+          "check",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T09:49:27.865719+00:00",
+        "finished": "2026-09-17T09:49:35.658145+00:00",
+        "sha256": "004ba2a5dde3ea4395644cba8beabcc028cd783d647c4ddf4421fcf13114bda9",
+        "log": "/private/tmp/logex-audit-historical-range-20260917/gates/check.log"
+      },
+      {
+        "name": "clippy",
+        "command": [
+          "cargo",
+          "clippy",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T09:49:35.658772+00:00",
+        "finished": "2026-09-17T09:49:49.525595+00:00",
+        "sha256": "5204b8a34a7d697618afdde42dea50b791d41a368c97bb910ad9f8ffca35b471",
+        "log": "/private/tmp/logex-audit-historical-range-20260917/gates/clippy.log"
+      },
+      {
+        "name": "test",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T09:49:49.526172+00:00",
+        "finished": "2026-09-17T09:55:56.665559+00:00",
+        "sha256": "f128e746c56c58ba28924ee541459b61ae9fd7b8901dbb01ab0052fde75b965e",
+        "log": "/private/tmp/logex-audit-historical-range-20260917/gates/test.log"
+      },
+      {
+        "name": "doc",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--doc",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T09:55:56.667700+00:00",
+        "finished": "2026-09-17T09:56:12.143032+00:00",
+        "sha256": "47b5f6119f1bbf12b25a09d4a82ac0d2f141944a3c16aee71ce5602c58191250",
+        "log": "/private/tmp/logex-audit-historical-range-20260917/gates/doc.log"
+      },
+      {
+        "name": "release-build",
+        "command": [
+          "cargo",
+          "build",
+          "-p",
+          "logex-node",
+          "--release",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T09:56:12.143699+00:00",
+        "finished": "2026-09-17T09:58:00.523409+00:00",
+        "sha256": "31a8755862395d94d31fd2f03897b3c5e72f1d81787570b071104ddd5300431e",
+        "log": "/private/tmp/logex-audit-historical-range-20260917/gates/release-build.log"
+      }
+    ]
+  },
+  "workspace_tests": {
+    "passed": 1940,
+    "failed": 0,
+    "ignored": 24,
+    "targets": 35
+  },
+  "evidence": {
+    "path": "docs/audit/baselines/2026-09-17-historical-range-bounds-evidence.json.gz",
+    "files": 23,
+    "bytes_uncompressed": 647132,
+    "bytes": 108488,
+    "sha256": "6141fb2b88f5d4c5a34bf346f914fcb76b66333264ca5d719808acb263f420c7"
+  },
+  "validation": {
+    "path": "docs/audit/baselines/2026-09-17-historical-range-bounds-validation.json.gz",
+    "files": 12,
+    "bytes_uncompressed": 226060,
+    "bytes": 41623,
+    "sha256": "a83650cfe0a15e0e78a098acbc9513a9f6a65da1a72d2b875fc1876f3e7beba3"
+  },
+  "publication": {
+    "state": "pending"
+  },
+  "boundaries": [
+    "Small synthetic fixtures in owned local temporary storage; no live sync, production data, remote host or external volume changes.",
+    "Original production accepts the unordered public API inputs. Normal historical sync collector sorts blocks before extracting rows; no ordinary production sync failure is claimed.",
+    "Original storage2 and nativequery6 controls fail at actual assertions; later assertions in failing tests were not reached.",
+    "New bounds cover newly calculated chunks and correctly bounded prefixes. Existing underestimated persisted descriptors are not automatically repaired. No migration or reorg range pruning.",
+    "Historical preflight/span loops collect metadata; live extrema use one loop instead of four. No additional I/O or format changes. Work-count properties are source review, not measured throughput.",
+    "Other audit batches and automatic offline repair remain open; live/staging acceptance is subsequent work."
+  ]
+}

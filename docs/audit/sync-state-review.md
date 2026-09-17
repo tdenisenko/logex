@@ -201,7 +201,7 @@ sources `3baecd32` and `118088ab` passed ten local gates (1,925 and 1,930 tests,
 respectively; 24 ignores each). The first published head `c6eec210` also passed
 six CI jobs and ten Linux controls. These results are retained separately and
 do not substitute for final-source validation.
-Final-source CI and merge remain pending.
+Final-source CI passed; the verified merge is recorded below.
 
 The six effective original test-only patches apply and reverse against their
 recorded baseline commits. The superseded fixture-setup patch is retained
@@ -216,3 +216,5 @@ The [machine-readable record](baselines/2026-09-17-sync-state-review.json) links
 compressed original/fixed evidence and complete validation logs. Local gates
 and publication status are updated there before closure. Batch 5 remains open
 for the specific remaining work described above.
+
+All six CI jobs passed on `89af308f`, including ten Linux volume/template cases with verified cleanup. [PR #220](https://github.com/tdenisenko/logex/pull/220) merged as `4635cbda`. The merge tree is identical to the tested head. The remaining batch-5 and storage-range items remain open.
