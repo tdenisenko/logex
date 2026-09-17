@@ -1210,7 +1210,7 @@ mod maintenance_failure_tests {
             let worker = tokio::task::spawn_blocking(|| -> io::Result<()> {
                 panic!("isolated monitored maintenance worker failure");
             });
-            join_background_worker("fixture maintenance", worker).await?;
+            let _operation = join_background_worker("fixture maintenance", worker).await?;
             // The original error-and-continue policy leaves the loop running.
             std::future::pending::<io::Result<()>>().await
         });

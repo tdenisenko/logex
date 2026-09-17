@@ -53,6 +53,19 @@
     "node-tests.log": {
       "sha256": "7a3c714645d3723a1199debf9b833678b80480db163d1feaa8d09e808bdabc36",
       "bytes": 19828
+    },
+    "gates-initial-source/results.json": {
+      "sha256": "d00e5c1881e7d6e28a4c196cfc6c08b89056cf7b5a2323ad4face8bd708618ba",
+      "bytes": 3827
+    },
+    "gates-initial-source/clippy.log": {
+      "sha256": "efef5e6f59aaa9ed5a24a8ea9de6fd90b74ab4fe5c0144048449294e657e5545",
+      "bytes": 885
     }
+  },
+  "initial_validation_failure": {
+    "source_commit": "ecf1a020",
+    "gate": "clippy",
+    "reason": "The monitor regression did not explicitly bind its inner operation result; production all-target check passed. The test now binds it while testing only outer join-failure propagation."
   }
 }
