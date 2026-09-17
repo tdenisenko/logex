@@ -1,0 +1,46 @@
+{
+  "status": "Focused controls pass; workspace gates, CI and merge pending",
+  "base": "43b4f1822a9ed71df8d15b623a03367e3067ae29",
+  "findings": [
+    "B10-19"
+  ],
+  "evidence_root": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-independent-health-w89hik3p",
+  "original_reproduction": {
+    "method": "Actual ordinary health future on unchanged production, bounded synchronous engine-shaped poll, owned temporary missing path",
+    "passed": 0,
+    "failed": 1,
+    "exit_code": 101
+  },
+  "focused_tests": {
+    "health": 12,
+    "node": 203,
+    "failed": 0,
+    "ignored": 0
+  },
+  "evidence": {
+    "original-tests.rs": {
+      "sha256": "d4e688c4e21454da9e8511079ec2a62690fe5ca78a478c0caa32379fd91551ff",
+      "bytes": 7969
+    },
+    "original-control.rs": {
+      "sha256": "d610b3928c45387a301a26bd0d76a5ae4fbb4ad278cbaa8cacf62da64d4b4b0a",
+      "bytes": 867
+    },
+    "original-control.log": {
+      "sha256": "699126417dd172d214fbcaf1f527f6a1f189f26436a384c03503db9fffe3e5d6",
+      "bytes": 1579
+    },
+    "original-result.json": {
+      "sha256": "4fe60570e0ae8fdcd4df2b37c729b6a9f237e300aa50c855da12e3de4fa99bc8",
+      "bytes": 73
+    },
+    "focused-health.log": {
+      "sha256": "b6ca27b37f338a3a15cc9a01237d3f1021633a3b07d4402061f60bca80db38c8",
+      "bytes": 2121
+    },
+    "focused-node.log": {
+      "sha256": "37f5273fbe3c9e961d317ee3b6fc639aee9927d3d8f94549ac9b2b98b26f38fb",
+      "bytes": 18106
+    }
+  }
+}

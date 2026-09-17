@@ -111,10 +111,11 @@ fn command_setup_child() {
     if ["runtime_blocked", "callback_blocked"].contains(&case.as_str()) {
         let (begin, allowed) = mpsc::channel();
         let (reported, failure) = mpsc::channel();
-        let monitor = VolumeMonitor::start_with(
+        let monitor = StorageMonitor::start_with(
             Duration::from_millis(1),
             Duration::from_secs(5),
             Duration::from_secs(1),
+            false,
             move || {
                 allowed.recv_timeout(Duration::from_secs(5)).unwrap();
                 Err(io::Error::other("owned runtime probe failure"))
@@ -162,7 +163,7 @@ fn command_setup_child() {
         panic!("volume failure became a successful command exit");
     }
     let idle = case == "idle_drop";
-    let guard = VolumeMonitor::start_with(
+    let guard = StorageMonitor::start_with(
         if idle {
             Duration::from_secs(30)
         } else {
@@ -170,6 +171,7 @@ fn command_setup_child() {
         },
         Duration::from_millis(50),
         Duration::from_secs(1),
+        false,
         move || match case.as_str() {
             "failure" => Err(io::Error::other("owned probe failure")),
             "blocked" => {

@@ -1,5 +1,5 @@
 {
-  "status": "All local Rust gates pass; Linux fixture device-manager synchronization updated; exact-head CI and merge pending",
+  "status": "Merged after eight corrected-source local gates, six exact-head CI jobs and real Linux/macOS lifecycle controls",
   "base": {
     "commit": "0b611c2df1899abf4d2a21ab8113285ee96a200e"
   },
@@ -137,7 +137,62 @@
     "evidence_archive_sha256": "da0a7c02736b7f4fec619c6c2451cb74a39edba9b179b648b707da0b515a7696",
     "scope": "Observed cleanup result from this task; no unrelated files, processes or physical external volume changed."
   },
-  "linux_mounts": "Pending exact-head CI",
+  "linux_mounts": {
+    "results": [
+      {
+        "case": "systemd template validation",
+        "passed": true,
+        "diagnostic": ""
+      },
+      {
+        "case": "missing mount",
+        "passed": true,
+        "diagnostic": "Error: Os { code: 2, kind: NotFound, message: \"No such file or directory\" }\n"
+      },
+      {
+        "case": "low space",
+        "passed": true,
+        "diagnostic": "Error: Custom { kind: Other, error: \"expected volume has 473272320 free bytes; at least 10737418240 are required\" }\n"
+      },
+      {
+        "case": "wrong UUID",
+        "passed": true,
+        "diagnostic": "Error: Custom { kind: InvalidInput, error: \"expected volume UUID abcd-1234 is not available in /dev/disk/by-uuid\" }\n"
+      },
+      {
+        "case": "real filesystem preflight and anchored write",
+        "passed": true
+      },
+      {
+        "case": "lazy detach retains underlay contents",
+        "passed": true,
+        "inflight_write": "ok"
+      },
+      {
+        "case": "unmounted path cannot initialize storage",
+        "passed": true,
+        "diagnostic": "Error: Custom { kind: InvalidInput, error: \"expected path is not the opened filesystem's current mount location\" }\n"
+      },
+      {
+        "case": "different volume at same path",
+        "passed": true,
+        "diagnostic": "Error: Custom { kind: InvalidInput, error: \"mounted filesystem at \\\"/tmp/logex-volume-mounts-z234uo88/mount\\\" does not match expected UUID 7a1e12b5-d032-424d-be5e-81167d2a327a\" }\n"
+      },
+      {
+        "case": "replacement volume receives no old-owner writes",
+        "passed": true
+      },
+      {
+        "case": "correct volume remount and restart",
+        "passed": true
+      }
+    ],
+    "errors": [],
+    "fixtures_detached": true,
+    "fixture_root_removed": true,
+    "fixture_root": "/tmp/logex-volume-mounts-z234uo88",
+    "binary_sha256": "f67eede630f8716febdd40a2b4796fe8c7b83f4696a9c9295128ecf9c5353288"
+  },
   "evidence_directory": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-expected-volume-cjc4xw2a",
   "evidence": {
     "design-research.md": {
@@ -271,6 +326,26 @@
     "linux-fixture-help.log": {
       "bytes": 479,
       "sha256": "12c2f290d14e6e7ca45185941c9a968cf95a0ea4e5f21fa5b12c57e6a8692573"
+    },
+    "premerge.json": {
+      "sha256": "b1215e96fc02c63ed3b7d5ee759ca069ad854219bdb059ec1f9f06568299383a",
+      "bytes": 1894
+    },
+    "merged.json": {
+      "sha256": "0b856a2d8d6c7bb41043d03b7d2e9aea78ec482bda844bd7d1f360c26c1f47c7",
+      "bytes": 240
+    },
+    "ci-watch-final.log": {
+      "sha256": "da541b5d472b367b1c9ff82e3ddc086f64bd89e1ef054525097b03d17c7bc097",
+      "bytes": 6345
+    },
+    "ci-linux/volume-mount-results.json": {
+      "sha256": "2576eef031c2b39452e92826bfd880691610596f51aaa5f8dfeb915f37fba68d",
+      "bytes": 1846
+    },
+    "publication-inventory.json": {
+      "sha256": "878561a553b3c363ed453393bcc412ceb9a75868b9b157d9d2afcce23f61e781",
+      "bytes": 8605
     }
   },
   "linux_fixture_sha256": "9118a70746ea5a3de47534afc9aa5fcf69ff6966bb51118bee1ad7ff99f947ae",
@@ -686,5 +761,57 @@
     "fixtures_detached": true,
     "fixture_root_removed": true
   },
-  "fixture_followup": "Delegate UUID links entirely to udev and wait for device events to settle; no manual creation/removal. Rust sources remain identical to the final local gate source de1a42f2. Python syntax and --help pass; actual lifecycle verification remains required in CI."
+  "fixture_followup": "Delegate UUID links entirely to udev and wait for device events to settle; no manual creation/removal. Rust sources remain identical to the final local gate source de1a42f2. Python syntax and --help pass; actual lifecycle verification remains required in CI.",
+  "pull_request": {
+    "headRefOid": "012d3c1e5c2ed5ac68ecd233faac14dd68906dc5",
+    "mergeCommit": {
+      "oid": "43b4f1822a9ed71df8d15b623a03367e3067ae29"
+    },
+    "mergedAt": "2026-09-17T00:04:46Z",
+    "number": 207,
+    "state": "MERGED",
+    "url": "https://github.com/tdenisenko/logex/pull/207"
+  },
+  "ci": {
+    "head": "012d3c1e5c2ed5ac68ecd233faac14dd68906dc5",
+    "run": 35164399926,
+    "checks": [
+      {
+        "name": "Check",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS",
+        "detailsUrl": "https://github.com/tdenisenko/logex/actions/runs/35164399926/job/105022118566"
+      },
+      {
+        "name": "Format",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS",
+        "detailsUrl": "https://github.com/tdenisenko/logex/actions/runs/35164399926/job/105022118383"
+      },
+      {
+        "name": "Clippy",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS",
+        "detailsUrl": "https://github.com/tdenisenko/logex/actions/runs/35164399926/job/105022118526"
+      },
+      {
+        "name": "Test",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS",
+        "detailsUrl": "https://github.com/tdenisenko/logex/actions/runs/35164399926/job/105022118614"
+      },
+      {
+        "name": "macOS Test",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS",
+        "detailsUrl": "https://github.com/tdenisenko/logex/actions/runs/35164399926/job/105022118535"
+      },
+      {
+        "name": "Release Build",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS",
+        "detailsUrl": "https://github.com/tdenisenko/logex/actions/runs/35164399926/job/105022118564"
+      }
+    ]
+  }
 }

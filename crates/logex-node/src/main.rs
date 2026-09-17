@@ -70,8 +70,8 @@ fn main() {
     if expected_volume.is_some() {
         data_dir = std::path::PathBuf::from(".");
     }
-    let mut volume_monitor = expected_volume.map(|volume| {
-        volume::VolumeMonitor::start(volume).unwrap_or_else(|error| {
+    let mut storage_monitor = expected_volume.map(|volume| {
+        volume::StorageMonitor::start_volume(volume).unwrap_or_else(|error| {
             eprintln!("Error: cannot supervise storage volume: {error}");
             std::process::exit(1);
         })
@@ -128,7 +128,7 @@ fn main() {
             let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
             let shutdown = rt.block_on(runtime::run_sync(runtime::RunSyncOptions {
                 pm_config,
-                volume_monitor: volume_monitor.as_ref().map(volume::VolumeMonitor::handle),
+                storage_monitor: &mut storage_monitor,
                 checkpoint,
                 checkpoint_sync_url,
                 http_host,
@@ -149,7 +149,7 @@ fn main() {
                 dashboard_password,
                 disable_historical_sync,
             }));
-            if runtime::finish_runtime_shutdown(rt, shutdown, || drop(volume_monitor.take()))
+            if runtime::finish_runtime_shutdown(rt, shutdown, || drop(storage_monitor.take()))
                 .is_err()
             {
                 std::process::exit(1);
@@ -185,7 +185,7 @@ fn main() {
         Command::Info => commands::run_info(pm_config),
     }
     // Offline commands also retain the monitor through all command-owned I/O.
-    drop(volume_monitor);
+    drop(storage_monitor);
 }
 
 fn normalize_info_log_filter(filter: String) -> String {

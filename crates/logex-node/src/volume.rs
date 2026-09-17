@@ -1,4 +1,4 @@
-//! Optional removable-volume protection for the standalone executable.
+//! Independent storage monitoring and optional removable-volume protection.
 //!
 //! Enter the verified directory before starting workers, and retain that working
 //! directory until process exit. All database paths then remain relative to the
@@ -80,7 +80,7 @@ impl ExpectedVolume {
 /// Retained by main through startup, runtime destruction and command completion.
 /// Its observer never depends on the engine or an async worker making progress.
 /// Interrupted writes retain the same recovery guarantees as process loss.
-pub(crate) struct VolumeMonitor {
+pub(crate) struct StorageMonitor {
     stop: Option<mpsc::Sender<()>>,
     worker: Option<std::thread::JoinHandle<()>>,
     handle: MonitorHandle,
@@ -92,7 +92,7 @@ type FailureCallback = Arc<dyn Fn(&str) + Send + Sync>;
 struct MonitorState {
     callback: Option<FailureCallback>,
     failure: Option<String>,
-    // Never disarm a terminal volume failure. This stays owned through main's
+    // Never disarm a terminal storage failure. This stays owned through main's
     // teardown; an early drop/unwind also expires it rather than losing failure.
     _terminal_deadline: Option<deadline::Deadline>,
 }
@@ -113,7 +113,7 @@ impl MonitorHandle {
             return Err(io::Error::other(reason.clone()));
         }
         if state.callback.is_some() {
-            return Err(invalid("volume failure handler is already registered"));
+            return Err(invalid("storage failure handler is already registered"));
         }
         state.callback = Some(Arc::new(callback));
         Ok(())
@@ -138,7 +138,7 @@ impl MonitorHandle {
         if let Some(callback) = callback {
             callback(&reason);
         } else {
-            eprintln!("Error: storage volume became unavailable: {reason}");
+            eprintln!("Error: storage became unavailable: {reason}");
             std::process::exit(1);
         }
     }
@@ -152,13 +152,28 @@ impl MonitorHandle {
     }
 }
 
-impl VolumeMonitor {
-    pub(crate) fn start(volume: Arc<ExpectedVolume>) -> io::Result<Self> {
+impl StorageMonitor {
+    pub(crate) fn start_volume(volume: Arc<ExpectedVolume>) -> io::Result<Self> {
         Self::start_with(
             Duration::from_secs(10),
             Duration::from_secs(10),
             Duration::from_secs(180),
+            false,
             move || volume.check(),
+        )
+    }
+
+    /// Ordinary storage has no volume preflight, so run its first probe now.
+    /// The caller must initialize the data directory before starting this.
+    pub(crate) fn start_storage(
+        check: impl FnMut() -> io::Result<()> + Send + 'static,
+    ) -> io::Result<Self> {
+        Self::start_with(
+            Duration::from_secs(10),
+            Duration::from_secs(10),
+            Duration::from_secs(180),
+            true,
+            check,
         )
     }
 
@@ -166,6 +181,7 @@ impl VolumeMonitor {
         interval: Duration,
         timeout: Duration,
         failure_grace: Duration,
+        check_immediately: bool,
         mut check: impl FnMut() -> io::Result<()> + Send + 'static,
     ) -> io::Result<Self> {
         let (stop, receiver) = mpsc::channel();
@@ -175,17 +191,23 @@ impl VolumeMonitor {
         };
         let reporting = handle.clone();
         let worker = std::thread::Builder::new()
-            .name("volume-monitor".into())
+            .name("storage-monitor".into())
             .spawn(move || {
+                let mut delay = if check_immediately {
+                    Duration::ZERO
+                } else {
+                    interval
+                };
                 loop {
-                    match receiver.recv_timeout(interval) {
+                    match receiver.recv_timeout(delay) {
                         Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => return,
                         Err(mpsc::RecvTimeoutError::Timeout) => {}
                     }
+                    delay = interval;
                     let expired = reporting.clone();
                     let deadline = deadline::Deadline::start_with(timeout, move || {
                         expired
-                            .report("volume probe timed out or stopped before completion".into());
+                            .report("storage probe timed out or stopped before completion".into());
                     })
                     .unwrap_or_else(|_| std::process::exit(1));
                     let result = check();
@@ -207,7 +229,7 @@ impl VolumeMonitor {
     }
 }
 
-impl Drop for VolumeMonitor {
+impl Drop for StorageMonitor {
     fn drop(&mut self) {
         // Dropping the sender wakes an idle monitor immediately. An in-flight
         // probe is bounded by its independent deadline before this join starts.

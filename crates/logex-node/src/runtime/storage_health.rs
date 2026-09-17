@@ -1,13 +1,7 @@
+use crate::volume::{MIN_FREE_BYTES, MonitorHandle, StorageMonitor};
 use std::collections::BTreeSet;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
-
-use tokio::task::JoinSet;
-
-const POLL_INTERVAL: Duration = Duration::from_secs(10);
-const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
-use crate::volume::MIN_FREE_BYTES;
 
 #[derive(Debug, thiserror::Error)]
 pub(super) enum StorageHealthFailure {
@@ -27,81 +21,40 @@ pub(super) enum StorageHealthFailure {
     },
 }
 
+/// Called after PartitionManager has initialized both writable roots. Expected
+/// volume supervision, when configured, already owns the stronger probe.
+pub(super) fn monitor_initialized_storage(
+    owner: &mut Option<StorageMonitor>,
+    path: &Path,
+) -> io::Result<MonitorHandle> {
+    let monitor = match owner {
+        Some(monitor) => monitor,
+        None => {
+            let path = path.to_owned();
+            owner.insert(StorageMonitor::start_storage(move || {
+                check_paths(&path, MIN_FREE_BYTES, free_space_bytes).map_err(io::Error::other)
+            })?)
+        }
+    };
+    Ok(monitor.handle())
+}
+
 pub(super) async fn wait_for_failure(
     path: PathBuf,
-    volume: Option<tokio::sync::watch::Receiver<Option<String>>>,
+    mut failure: tokio::sync::watch::Receiver<Option<String>>,
 ) -> StorageHealthFailure {
-    if let Some(mut volume) = volume {
-        let reason = loop {
-            if let Some(reason) = volume.borrow_and_update().clone() {
-                break reason;
-            }
-            if volume.changed().await.is_err() {
-                break "volume monitor notification channel closed".into();
-            }
-        };
-        return StorageHealthFailure::Probe {
-            path,
-            source: io::Error::other(reason),
-        };
-    }
-    let mut interval = tokio::time::interval(POLL_INTERVAL);
-    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    loop {
-        interval.tick().await;
-        if let Err(failure) = run_probe(path.clone(), PROBE_TIMEOUT, |path| {
-            check_paths(path, MIN_FREE_BYTES, free_space_bytes)
-        })
-        .await
-        {
-            return failure;
+    let reason = loop {
+        if let Some(reason) = failure.borrow_and_update().clone() {
+            break reason;
         }
-    }
-}
-
-pub(super) async fn run_probe(
-    path: PathBuf,
-    timeout: Duration,
-    probe: impl FnOnce(&Path) -> Result<(), StorageHealthFailure> + Send + 'static,
-) -> Result<(), StorageHealthFailure> {
-    let deadline = tokio::time::Instant::now()
-        .checked_add(timeout)
-        .ok_or_else(|| StorageHealthFailure::Probe {
-            path: path.clone(),
-            source: io::Error::new(io::ErrorKind::InvalidInput, "probe timeout is too large"),
-        })?;
-    // Canonicalization and statvfs can both block on an unavailable filesystem.
-    // Keep them off the supervisor's async worker, with only one probe in flight.
-    let mut work = JoinSet::new();
-    let probe_path = path.clone();
-    work.spawn_blocking(move || {
-        let result = probe(&probe_path);
-        (tokio::time::Instant::now(), result)
-    });
-    await_probe(path, timeout, deadline, work).await
-}
-
-async fn await_probe(
-    path: PathBuf,
-    timeout: Duration,
-    deadline: tokio::time::Instant,
-    mut work: JoinSet<(tokio::time::Instant, Result<(), StorageHealthFailure>)>,
-) -> Result<(), StorageHealthFailure> {
-    let source = match tokio::time::timeout_at(deadline, work.join_next()).await {
-        // Timeout polls a ready join before its timer. Check when the worker
-        // actually completed so delayed polling cannot accept late success.
-        Ok(Some(Ok((completed, result)))) if completed <= deadline => return result,
-        Ok(Some(Err(error))) => io::Error::other(error),
-        Ok(None) => unreachable!("the health guard owns one probe"),
-        Ok(Some(Ok(_))) | Err(_) => io::Error::new(
-            io::ErrorKind::TimedOut,
-            format!("filesystem probe exceeded {timeout:?}"),
-        ),
+        if failure.changed().await.is_err() {
+            break "storage monitor notification channel closed".into();
+        }
     };
-    // JoinSet cancels queued work on drop. A started blocking syscall cannot be
-    // interrupted: return failure without retrying and let bounded node/runtime
-    // shutdown cover it. Do not await the timed-out job a second time.
-    Err(StorageHealthFailure::Probe { path, source })
+    StorageHealthFailure::Probe {
+        path,
+        source: io::Error::other(reason),
+    }
 }
 
 fn check_paths(

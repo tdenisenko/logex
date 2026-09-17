@@ -18,6 +18,13 @@ call could prevent that selector from observing other ready events. This is a
 blocking-call ownership finding, not a measured throughput regression or a claim
 that a real filesystem stalled in the test environment.
 
+## Follow-up scope correction
+
+[Independent ordinary-storage monitoring](independent-storage-health.md) documents
+B10-19: an engine poll containing synchronous I/O could still postpone this async
+health loop. The follow-up replaces the loop with a main-owned monitor shared
+with expected-volume mode. The implementation below describes PR #202 historically.
+
 ## Implementation
 
 The private storage-health module owns the probe loop, path selection and error

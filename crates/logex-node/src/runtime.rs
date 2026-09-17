@@ -140,9 +140,9 @@ impl LocalP2pAddressCandidates {
     }
 }
 
-pub struct RunSyncOptions {
+pub struct RunSyncOptions<'a> {
     pub pm_config: PartitionManagerConfig,
-    pub volume_monitor: Option<crate::volume::MonitorHandle>,
+    pub storage_monitor: &'a mut Option<crate::volume::StorageMonitor>,
     pub checkpoint: Option<String>,
     pub checkpoint_sync_url: Option<String>,
     pub http_host: IpAddr,
@@ -164,10 +164,10 @@ pub struct RunSyncOptions {
     pub disable_historical_sync: bool,
 }
 
-pub async fn run_sync(options: RunSyncOptions) -> cleanup::RuntimeShutdown {
+pub async fn run_sync(options: RunSyncOptions<'_>) -> cleanup::RuntimeShutdown {
     let RunSyncOptions {
         pm_config,
-        volume_monitor,
+        storage_monitor,
         checkpoint,
         checkpoint_sync_url,
         http_host,
@@ -255,6 +255,15 @@ pub async fn run_sync(options: RunSyncOptions) -> cleanup::RuntimeShutdown {
             std::process::exit(1);
         }
     };
+
+    // Ordinary paths exist only after storage initialization. Main retains the
+    // monitor through runtime destruction; never replace an expected-volume
+    // monitor or put its ownership inside the engine's future.
+    let storage_monitor = storage_health::monitor_initialized_storage(storage_monitor, &data_dir)
+        .unwrap_or_else(|error| {
+            tracing::error!(%error, "failed to start storage health monitor");
+            std::process::exit(1);
+        });
 
     let sync_head = storage.sync_head();
     let historical_sync_mode = match resolve_historical_sync_mode(
@@ -469,10 +478,10 @@ pub async fn run_sync(options: RunSyncOptions) -> cleanup::RuntimeShutdown {
         Some(SubscriptionManager::new()),
         sync_status,
     ));
-    let volume_failure = volume_monitor.map(|monitor| {
+    let storage_failure = {
         let (failure, receiver) = tokio::sync::watch::channel(None);
         let state = Arc::downgrade(&state);
-        monitor
+        storage_monitor
             .set_failure_handler(move |reason| {
                 // The monitor arms its independent process deadline first. Notify
                 // the supervisor and close admission even while engine I/O blocks.
@@ -483,7 +492,7 @@ pub async fn run_sync(options: RunSyncOptions) -> cleanup::RuntimeShutdown {
             })
             .unwrap_or_else(|_| std::process::exit(1));
         receiver
-    });
+    };
 
     let secret_key = match load_or_create_secret_key(&discovery_secret_file) {
         Ok(secret) => secret,
@@ -663,7 +672,7 @@ pub async fn run_sync(options: RunSyncOptions) -> cleanup::RuntimeShutdown {
     .run(
         engine.run(),
         wait_for_shutdown_signal(),
-        storage_health::wait_for_failure(data_dir.clone(), volume_failure),
+        storage_health::wait_for_failure(data_dir.clone(), storage_failure),
         |reason| state.mark_storage_unavailable(reason),
     )
     .await;

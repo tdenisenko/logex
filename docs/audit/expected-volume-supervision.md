@@ -139,12 +139,13 @@ the whole process lifetime, instead of handing it to that async future. Owned
 controls demonstrate notification while a current-thread runtime is blocked,
 first-reason retention, a blocked callback's terminal deadline and nonzero exit
 even if teardown begins first. A cleanup regression covers remaining owner teardown
-inside the existing watchdog. The ordinary unconfigured health path still uses
-its existing async timer; that broader runtime finding remains on the roadmap.
+inside the existing watchdog. Ordinary unconfigured storage was still affected at
+this milestone; [B10-19](independent-storage-health.md) is the separate follow-up.
 All eight local Rust gates pass on corrected source `de1a42f2`: vendor verification,
 workspace/patched-vendor formatting, check, strict Clippy, 1,829 workspace tests
-(24 ignored), documentation tests and release build. Only the Linux fixture controller changed afterward; its syntax/help controls
-pass, and new exact-head CI and merge remain pending.
+(24 ignored), documentation tests and release build. All six CI jobs passed on `012d3c1e`; all ten Linux mount/template cases passed,
+with both images detached and the owned fixture root removed.
+[PR #207](https://github.com/tdenisenko/logex/pull/207) merged as `43b4f182`.
 
 The launchd plist passed syntax validation and its fields were checked against
 the installed platform manual. Both templates restart with backoff and logs outside
