@@ -60,7 +60,7 @@ passes after durable checkpointing and reopening are exercised.
 
 Implementer review traced the mode checks, lock lifetimes, bounded allocations,
 source verification and background call sites. No independent review is claimed.
-Full workspace gates, exact-head Linux/macOS CI and merge remain pending.
+All eight local gates pass on `948bece4`: vendor verification, workspace/patched-vendor formatting, check, strict Clippy, 1,836 workspace tests (24 ignored), documentation tests and release build. Exact-head Linux/macOS CI and merge remain pending.
 
 This removes filesystem I/O from the affected ingestion read guards. It makes no
 numerical throughput or latency claim and starts no benchmark campaign. Scans
