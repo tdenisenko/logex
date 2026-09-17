@@ -42,6 +42,13 @@ gaps terminal and releases copied acknowledgement history before socket awaits
 (B8-15–16). Original raw/retained loopback controls reproduce silent continuation;
 source `71ef3cc0` passes 149 focused server tests, five browser callback controls,
 independent review and all eleven local gates (2,007 tests / 24 existing ignores).
+PR #231 merged as `334ec9ef` after all six CI jobs and ten Linux controls.
+
+The [ERC20 subscription review](erc20-subscription-inputs.md) addresses literal
+field types, missing amount digits and exact Transfer topic shape (B8-17–19).
+Three finite original-source groups reproduce the defects. Source `cdb17543`
+passes 158 focused server tests, independent review and all eleven local gates
+(2,016 tests / 24 existing ignores). Stored chain logs and ingestion are unchanged.
 Source and local gates are complete; exact-head CI and merge remain.
 
 | Batch | Review area | Status / acceptance |
