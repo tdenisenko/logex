@@ -56,5 +56,5 @@ offline-command ownership were inspected; their broader validation/disposition
 remains separate. This milestone does not close the complete runtime batch,
 offline repair, integrated acceptance or release readiness.
 
-All nine local gates pass on `d10d2683`: vendor integrity, workspace/Reth/ENR formatting, all-target compilation, strict Clippy, 1,848 workspace tests (24 ignored), documentation tests and release build. Exact-head Linux/macOS CI and merge remain pending.
+All nine local gates pass on `d10d2683`: vendor integrity, workspace/Reth/ENR formatting, all-target compilation, strict Clippy, 1,848 workspace tests (24 ignored), documentation tests and release build. All six CI jobs passed on `a8f428b1`, including ten Linux volume/template cases with verified cleanup. [PR #212](https://github.com/tdenisenko/logex/pull/212) merged as `4b0b1437`.
 Machine-readable evidence: [baseline](baselines/2026-09-17-maintenance-worker-supervision.json).

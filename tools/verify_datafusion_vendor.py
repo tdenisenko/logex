@@ -35,6 +35,25 @@ class Package:
 
 PACKAGES = (
     Package(
+        name="datafusion-functions-nested",
+        inventory_checksum="ce4d4d617631f9af7c84f64f4d320d8c0a32ddbc5034aa0b62fc904f4b9617cb",
+        modified={
+            PurePosixPath("src/array_has.rs"): "04a62dede5e6ef776ff06563afa48a8e2bfa9df7407fa5940a5c4e0aa487b059",
+        },
+        patch_checksum="457a9bb118e03dfa812f34af5d1feca77cf6031e49f0488d93a4a05ebfe7d1ce",
+    ),
+    Package(
+        name="datafusion-functions",
+        inventory_checksum="1f987c6d9a89c270e6c17922200469c51627998c9f0768368442fb0431d1d7de",
+        modified={
+            PurePosixPath("src/math/log.rs"): "b3d76a25320c6dc314aedf61384da5d16b6b353b9bfa582263eeac81b329216b",
+            PurePosixPath("src/math/power.rs"): "4fc54d4122bc364dd18bfa69e3e004f2b5835201dba1893c59adc4cdb8f56180",
+        },
+        patch_checksum="ade213cbee5eb6d236b0f66e702d6b09040d11c253e9c96fc21b28500fd18241",
+    ),
+
+
+    Package(
         name="enr",
         inventory_checksum="ae2056c9fe60b5e2f07e2d6a9ed545a45291bdf2e99d80510823591d63863693",
         modified={
@@ -63,10 +82,11 @@ PACKAGES = (
         name="datafusion-optimizer",
         inventory_checksum="7b3b5eb3eba4fcb00d4173f7603cf4661a485930ac909071b822a8c3e718d1c2",
         modified={
-            PurePosixPath("src/simplify_expressions/expr_simplifier.rs"): "5d28080f7acf944b63bfbfc6bb48ffddd7764df675dac3a4bdf7028998a9edb2",
             PurePosixPath("src/eliminate_filter.rs"): "6a50ecd0bd22c65fcc15ffa73dc722d7946c89f3ee858ae7361b027c0ad8890d",
+            PurePosixPath("src/simplify_expressions/expr_simplifier.rs"): "4ae50f11e2ab1bd0b7ddb5d247765c8c1658d4fbc42c785bfcdb4955e820be2f",
+            PurePosixPath("src/simplify_expressions/utils.rs"): "f2e01ae33f7324072dc31c96dfa085ea30aa9ad7744f2c76bcef93a262a793f3",
         },
-        patch_checksum="2e4fd87500b2d1f8e6984f3ffc50bf0dca478799e3b5a88b420e1f80c6311729",
+        patch_checksum="f9de5b1ce224b5ee17f629cb2278a5bcb71556675904774a7ebcafcc2a3c6340",
     ),
     Package(
         name="reth-network",
