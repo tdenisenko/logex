@@ -269,10 +269,153 @@
   },
   "review": "Native API scans release ingestion read locks after snapshot capture, execute on gated blocking workers, retain capacity until actual disposal and validate snapshot after conversion before cancellation.",
   "limits": "Execution gate only. Queued requests, complete response bytes and global query memory/admission policy remain separate. Existing SQL fan-out and dependency graph unchanged. No benchmark or hard RSS bound claimed.",
-  "publication": "pending exact-head CI and merge",
+  "publication": "Merged after ten local gates and six exact-head CI jobs",
   "gate_logs": {
     "path": "docs/audit/baselines/2026-09-17-native-query-workers-validation.json.gz",
     "sha256": "6545c7499a41f5cbbb6e0d909220dba37c4d5cb9f881afff320af46026e240d3",
     "bytes": 39409
+  },
+  "pull_request": {
+    "headRefOid": "12b52a17e20ad4b9842a5c3a4644a8527d031154",
+    "mergeCommit": {
+      "oid": "e76fd8cce440041fc84038660d9e5959855aae61"
+    },
+    "mergedAt": "2026-09-17T07:18:48Z",
+    "number": 218,
+    "state": "MERGED",
+    "url": "https://github.com/tdenisenko/logex/pull/218"
+  },
+  "linux_volume_controls": {
+    "results": [
+      {
+        "case": "systemd template validation",
+        "passed": true,
+        "diagnostic": ""
+      },
+      {
+        "case": "missing mount",
+        "passed": true,
+        "diagnostic": "Error: Os { code: 2, kind: NotFound, message: \"No such file or directory\" }\n"
+      },
+      {
+        "case": "low space",
+        "passed": true,
+        "diagnostic": "Error: Custom { kind: Other, error: \"expected volume has 473272320 free bytes; at least 10737418240 are required\" }\n"
+      },
+      {
+        "case": "wrong UUID",
+        "passed": true,
+        "diagnostic": "Error: Custom { kind: InvalidInput, error: \"expected volume UUID abcd-1234 is not available in /dev/disk/by-uuid\" }\n"
+      },
+      {
+        "case": "real filesystem preflight and anchored write",
+        "passed": true
+      },
+      {
+        "case": "lazy detach retains underlay contents",
+        "passed": true,
+        "inflight_write": "ok"
+      },
+      {
+        "case": "unmounted path cannot initialize storage",
+        "passed": true,
+        "diagnostic": "Error: Custom { kind: InvalidInput, error: \"expected path is not the opened filesystem's current mount location\" }\n"
+      },
+      {
+        "case": "different volume at same path",
+        "passed": true,
+        "diagnostic": "Error: Custom { kind: InvalidInput, error: \"mounted filesystem at \\\"/tmp/logex-volume-mounts-d9lgmk3d/mount\\\" does not match expected UUID d9610a85-11f9-4cc0-aad1-bccabd2eb0f6\" }\n"
+      },
+      {
+        "case": "replacement volume receives no old-owner writes",
+        "passed": true
+      },
+      {
+        "case": "correct volume remount and restart",
+        "passed": true
+      }
+    ],
+    "errors": [],
+    "fixtures_detached": true,
+    "fixture_root_removed": true,
+    "fixture_root": "/tmp/logex-volume-mounts-d9lgmk3d",
+    "binary_sha256": "6995849b49b2209cf46c95a4da302c9e723c6586fb1657e1a2a2bb95f7b9d685"
+  },
+  "ci": {
+    "head": "12b52a17e20ad4b9842a5c3a4644a8527d031154",
+    "checks": [
+      {
+        "name": "Check",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS",
+        "detailsUrl": "https://github.com/tdenisenko/logex/actions/runs/35193040086/job/105109715897"
+      },
+      {
+        "name": "Format",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS",
+        "detailsUrl": "https://github.com/tdenisenko/logex/actions/runs/35193040086/job/105109715598"
+      },
+      {
+        "name": "Clippy",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS",
+        "detailsUrl": "https://github.com/tdenisenko/logex/actions/runs/35193040086/job/105109715652"
+      },
+      {
+        "name": "Test",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS",
+        "detailsUrl": "https://github.com/tdenisenko/logex/actions/runs/35193040086/job/105109715647"
+      },
+      {
+        "name": "macOS Test",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS",
+        "detailsUrl": "https://github.com/tdenisenko/logex/actions/runs/35193040086/job/105109715408"
+      },
+      {
+        "name": "Release Build",
+        "status": "COMPLETED",
+        "conclusion": "SUCCESS",
+        "detailsUrl": "https://github.com/tdenisenko/logex/actions/runs/35193040086/job/105109715761"
+      }
+    ]
+  },
+  "merge_tree_review": {
+    "head": "12b52a17e20ad4b9842a5c3a4644a8527d031154",
+    "merge": "e76fd8cce440041fc84038660d9e5959855aae61",
+    "tree": "7a2a9c3d24d33020d100e5e8d5c0053917c63763",
+    "identical": true
+  },
+  "publication_evidence": {
+    "premerge.json": {
+      "sha256": "052061108e6c1229238f351ddd21afdbb2c951e40669f2b1b5b1137cd430af86",
+      "bytes": 1894
+    },
+    "merged.json": {
+      "sha256": "3cbceba45a3fb3a6866be186b69b4212e0c06a690560bbcf5d19865c7c8f48e1",
+      "bytes": 240
+    },
+    "ci-watch.log": {
+      "sha256": "a4f1ede5493df277fe35ae81be641215dc51bd51c48692af26cae663f62ed687",
+      "bytes": 18645
+    },
+    "ci-linux/volume-mount-results.json": {
+      "sha256": "fb414ffbe6e3215ff2194c831bd46623e808c9d536b61a53ff921c0df7651520",
+      "bytes": 1846
+    },
+    "publication-inventory.json": {
+      "sha256": "b3851a3e19ff1f22e819e996d02e5dd935338a8af69178629e1d132556f414e7",
+      "bytes": 2721
+    },
+    "merge-tree-review.json": {
+      "sha256": "e10ff0d39fd7e75c24cb5fab4defd05e1edf68caf2548167162e1d99957dbdb1",
+      "bytes": 187
+    },
+    "publication-source-review.json": {
+      "sha256": "8c8e5b44024fde2981b1ece6b5abf3a804e763f1cea742c85f3b1075c51fa0e1",
+      "bytes": 605
+    }
   }
 }
