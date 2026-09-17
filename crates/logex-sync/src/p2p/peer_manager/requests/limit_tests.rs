@@ -354,3 +354,101 @@ async fn limited_bulk_partial_prefix_continues_on_the_same_peer_bodies() {
 async fn limited_bulk_partial_prefix_continues_on_the_same_peer_receipts() {
     limited_bulk_partial_prefix_continues_on_the_same_peer(PeerRequestKind::Receipts).await;
 }
+
+#[tokio::test(start_paused = true)]
+async fn limited_reverse_headers_preserve_hash_direction_and_partial_response() {
+    let mut fixture = Fixture::new().await;
+    let start = BlockHashOrNumber::Hash(B256::repeat_byte(17));
+    let mut future = Box::pin(fixture.manager.get_headers_reverse_with_limits(
+        start,
+        3,
+        Duration::from_secs(2),
+        2,
+    ));
+    assert!(futures_util::poll!(&mut future).is_pending());
+    let mut requests = take_requests(&mut fixture.receivers);
+    assert_eq!(requests.len(), 1);
+    let (peer_index, PeerRequest::GetBlockHeaders { request, response }) = requests.pop().unwrap()
+    else {
+        panic!("expected one local header request");
+    };
+    assert_eq!(request.start_block, start);
+    assert_eq!(request.limit, 3);
+    assert_eq!(request.skip, 0);
+    assert_eq!(request.direction, reth_eth_wire::HeadersDirection::Falling);
+    let headers = vec![alloy_consensus::Header {
+        number: 12,
+        ..Default::default()
+    }];
+    response.send(Ok(BlockHeaders(headers.clone()))).unwrap();
+    let (peer, actual) = future.await.unwrap();
+    assert_eq!(peer, PeerId::repeat_byte((peer_index + 1) as u8));
+    assert_eq!(actual, headers);
+}
+
+#[tokio::test(start_paused = true)]
+async fn limited_reverse_headers_apply_exchange_timeout_and_peer_limit() {
+    let mut fixture = Fixture::new().await;
+    let mut future = Box::pin(fixture.manager.get_headers_reverse_with_limits(
+        BlockHashOrNumber::Number(1),
+        1,
+        Duration::from_secs(2),
+        2,
+    ));
+    let mut selected = HashSet::new();
+    for _ in 0..2 {
+        assert!(futures_util::poll!(&mut future).is_pending());
+        let mut requests = take_requests(&mut fixture.receivers);
+        assert_eq!(requests.len(), 1);
+        let (peer, PeerRequest::GetBlockHeaders { response, .. }) = requests.pop().unwrap() else {
+            panic!("expected one local header request");
+        };
+        assert!(selected.insert(peer));
+        tokio::time::advance(Duration::from_secs(2)).await;
+        // Polling the next iteration starts the next bounded attempt. The
+        // response receiver must close when its own deadline is observed.
+        let outcome = futures_util::poll!(&mut future);
+        assert!(response.is_closed());
+        if selected.len() == 2 {
+            assert!(matches!(outcome, Poll::Ready(Err(_))));
+        } else {
+            assert!(outcome.is_pending());
+        }
+    }
+    assert!(take_requests(&mut fixture.receivers).is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn canceled_limited_reverse_headers_allow_a_later_independent_request() {
+    let mut fixture = Fixture::new().await;
+    let mut future = Box::pin(fixture.manager.get_headers_reverse_with_limits(
+        BlockHashOrNumber::Number(1),
+        1,
+        Duration::from_secs(2),
+        1,
+    ));
+    assert!(futures_util::poll!(&mut future).is_pending());
+    let (_, PeerRequest::GetBlockHeaders { response, .. }) =
+        take_requests(&mut fixture.receivers).pop().unwrap()
+    else {
+        panic!("expected one local header request");
+    };
+    drop(future);
+    assert!(response.is_closed());
+    let mut next = Box::pin(fixture.manager.get_headers_reverse_with_limits(
+        BlockHashOrNumber::Number(1),
+        1,
+        Duration::from_secs(2),
+        1,
+    ));
+    assert!(futures_util::poll!(&mut next).is_pending());
+    let (_, PeerRequest::GetBlockHeaders { response, .. }) =
+        take_requests(&mut fixture.receivers).pop().unwrap()
+    else {
+        panic!("expected the independent local header request");
+    };
+    response
+        .send(Ok(BlockHeaders(vec![alloy_consensus::Header::default()])))
+        .unwrap();
+    assert_eq!(next.await.unwrap().1.len(), 1);
+}

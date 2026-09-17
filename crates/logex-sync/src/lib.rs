@@ -4,6 +4,7 @@ pub mod head_tracker;
 pub mod p2p;
 pub mod primitives;
 pub mod progress;
+pub mod repair;
 pub mod tasks;
 pub mod validation;
 

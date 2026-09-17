@@ -809,6 +809,32 @@ impl PeerManager {
             .await
     }
 
+    /// Request a reverse header page with a per-exchange timeout and a
+    /// peer-selection limit (at least one). Callers must separately bound the
+    /// complete operation and validate partial pages against their trusted child.
+    pub async fn get_headers_reverse_with_limits(
+        &mut self,
+        start: BlockHashOrNumber,
+        count: u64,
+        request_timeout: Duration,
+        max_attempts: usize,
+    ) -> Result<(
+        PeerId,
+        Vec<<LogexNetworkPrimitives as NetworkPrimitives>::BlockHeader>,
+    )> {
+        let required_block = match start {
+            BlockHashOrNumber::Number(block) => Some(block),
+            BlockHashOrNumber::Hash(_) => None,
+        };
+        self.get_headers_from_peers(
+            HeadersRequest::falling(start, count),
+            required_block,
+            Some(request_timeout),
+            Some(max_attempts),
+        )
+        .await
+    }
+
     pub(crate) async fn prepare_reverse_header_pages_request(
         &mut self,
         child_block: u64,
