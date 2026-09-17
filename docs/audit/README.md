@@ -38,8 +38,17 @@ tests / 24 existing ignores). PR #230 merged as `a4eafd46` after all six CI jobs
 The [offline repair inspection milestone](offline-repair-inspection.md) adds
 exclusive nonmutating primary-data inspection beside normal startup recovery.
 Source `9d454ff9` passes independent review and all twelve local gates
-(2,103 Rust tests / 24 existing ignores); exact-head CI and merge remain. Authenticated fetching, complete-block replacement, quarantine,
+(2,103 Rust tests / 24 existing ignores). PR #239 merged as `b141f1a0`
+after all six CI jobs and ten Linux controls. Authenticated fetching, complete-block replacement, quarantine,
 CLI/status integration and automatic repair remain open in batch 11.
+
+The [finite repair fetching milestone](verified-repair-fetch.md) adds an explicit
+caller-anchored descending block cursor with separate complete-range evidence,
+bounded work and terminal cancellation. Source `cbae4942` passes eleven focused
+cursor controls, three transport controls, independent review and all twelve
+local gates (2,117 Rust tests / 24 existing ignores). Exact-head CI and merge
+remain. Replacement planning, staging/quarantine/publication and CLI/status/runtime
+integration remain open in batch 11.
 
 ## Batch ledger
 

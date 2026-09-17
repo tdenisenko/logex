@@ -76,8 +76,8 @@ for dry-run. No volume or service lifecycle change is part of this milestone.
 
 Source `9d454ff9da3d957f1c1d012d6ad6ac300557ef11` on
 `audit/offline-segment-repair`, based on PR #238 merge `77d03349`, passes 24
-focused controls and independent review. All twelve local gates pass; exact-head
-Linux/macOS CI and merge remain. No live
+focused controls and independent review. All twelve local gates pass; PR #239
+merged as `b141f1a0` after all six exact-head CI jobs. No live
 sync, production data, remote host or new benchmarking campaign is used.
 
 ## Frozen-source validation
@@ -99,6 +99,8 @@ from original-repository behavior: two draft code gaps were corrected, and a
 fixture that accidentally created an identified source was fixed without relaxing
 production identity checks.
 
-Exact-head CI, including both platforms and ten disposable Linux volume/template
-controls with cleanup, remains required before merge. Automatic repair remains
+Exact-head CI passed on both platforms; ten disposable Linux volume/template
+controls passed with cleanup before merge. Automatic repair remains
 unimplemented; this milestone does not establish release readiness.
+
+All six CI jobs passed on `a90e379a` and ten Linux volume/template controls passed with verified cleanup. [PR #239](https://github.com/tdenisenko/logex/pull/239) merged as `b141f1a0`; the merge tree matches the tested head. The primary-data inspection prerequisite is complete. Authenticated finite fetching, complete-block reconstruction, index handling, resumable quarantine/publication and CLI/status integration remain in batch 11. This is not completion of offline repair or release acceptance.
