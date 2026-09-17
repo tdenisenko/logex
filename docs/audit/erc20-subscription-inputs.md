@@ -1,7 +1,7 @@
 # ERC20 subscription inputs and event classification
 
 Base: PR #231 merge `334ec9ef985773341572b00969b7c8d48be47dbe`.
-Branch: `audit/erc20-subscription-inputs`. Implementation and eleven local gates are complete; exact-head CI and merge remain.
+Branch: `audit/erc20-subscription-inputs`. Implementation and eleven local gates are complete; PR #232 merged as `c85df998` after all six CI jobs.
 
 ## Findings and scope
 
@@ -66,4 +66,6 @@ The [validation record](baselines/2026-09-17-erc20-subscription-inputs.json)
 retains exact original/final source hashes, the three original failures, focused
 checks, design/final reviews and complete gate logs. The source and validation
 archives were decoded and checked byte-for-byte against the recorded files.
-Exact-head CI and merge remain.
+Exact-head CI and merge passed; verified closure follows.
+
+All six CI jobs passed on `8957bb7d` and ten Linux volume/template controls passed with verified cleanup. [PR #232](https://github.com/tdenisenko/logex/pull/232) merged as `c85df998`. The merge tree is identical to the tested head. B8-17–19 are closed within literal ERC20 input decoding, amount syntax and exact event classification scope. Reorg notifications, shared query budgets, dashboard, verified repair and integrated acceptance remain open.

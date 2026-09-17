@@ -544,6 +544,16 @@ Other valid chain logs remain available through raw log subscriptions and querie
 backfill remains queryable through SQL and JSON-RPC rather than replayed as
 alerts. Legacy raw log subscriptions still work by sending `{ "filter": { ... } }`.
 
+When a canonical reorg retires logs, subscriptions receive `removed: true`
+notifications before replacement logs. Identify a log by `blockHash` and
+`logIndex`; replacement logs can reuse the same transaction hash. Retained
+transfer snapshots remove orphaned entries without adding removal records or
+refilling previously evicted history. Retained-session streams can receive
+removals outside their current filter, covering earlier deliveries before a
+filter change; clients should ignore identities they have not seen. A reorg may
+span several notification batches. Delivery is transient and does not provide
+replay across a process restart.
+
 If a live subscriber falls behind the broadcast buffer, the server ends that
 stream instead of silently skipping batches. It attempts close code `1013` with
 a reconnect-and-reconcile reason, then releases the connection. The reason may
