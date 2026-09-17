@@ -1,6 +1,6 @@
 [workspace]
 members = ["crates/logex-types", "crates/logex-fs", "crates/logex-cl", "crates/logex-storage", "crates/logex-index", "crates/logex-query", "crates/logex-server", "crates/logex-node", "crates/logex-sync"]
-exclude = ["vendor/enr", "vendor/reth-discv5", "vendor/datafusion-optimizer", "vendor/datafusion-sql", "vendor/reth-network"]
+exclude = ["vendor/datafusion-functions", "vendor/datafusion-functions-nested", "vendor/enr", "vendor/reth-discv5", "vendor/datafusion-optimizer", "vendor/datafusion-sql", "vendor/reth-network"]
 resolver = "2"
 
 [workspace.package]
@@ -79,6 +79,8 @@ logex-sync = { path = "crates/logex-sync" }
 logex-node = { path = "crates/logex-node" }
 
 [patch.crates-io]
+datafusion-functions = { path = "vendor/datafusion-functions" }
+datafusion-functions-nested = { path = "vendor/datafusion-functions-nested" }
 enr = { path = "vendor/enr" }
 datafusion-optimizer = { path = "vendor/datafusion-optimizer" }
 datafusion-sql = { path = "vendor/datafusion-sql" }

@@ -1,0 +1,92 @@
+--- a/src/array_has.rs
++++ b/src/array_has.rs
+@@ -122,10 +122,11 @@
+         Ok(DataType::Boolean)
+     }
+ 
++    // LogEx: backport upstream #24258 NULL-safe membership simplification.
+     fn simplify(
+         &self,
+         mut args: Vec<Expr>,
+-        _info: &dyn datafusion_expr::simplify::SimplifyInfo,
++        info: &dyn datafusion_expr::simplify::SimplifyInfo,
+     ) -> Result<ExprSimplifyResult> {
+         let [haystack, needle] = take_function_args(self.name(), &mut args)?;
+ 
+@@ -147,11 +148,23 @@
+                     ScalarValue::convert_array_to_scalar_vec(&scalar.to_array()?)
+                 {
+                     assert_eq!(scalar_values.len(), 1);
+-                    let list = scalar_values
++                    let values = scalar_values
+                         .into_iter()
+                         .flatten()
+                         .flatten()
+-                        .map(|v| Expr::Literal(v, None))
++                        .collect::<Vec<_>>();
++
++                    // LogEx: IN () is false for NULL, but array_has([], NULL)
++                    // is NULL. Preserve the original nullable-needle evaluation.
++                    if values.iter().any(ScalarValue::is_null)
++                        || (values.is_empty() && info.nullable(needle)?)
++                    {
++                        return Ok(ExprSimplifyResult::Original(args));
++                    }
++
++                    let list = values
++                        .into_iter()
++                        .map(|value| Expr::Literal(value, None))
+                         .collect();
+ 
+                     return Ok(ExprSimplifyResult::Simplified(in_list(
+@@ -164,12 +177,28 @@
+             Expr::ScalarFunction(ScalarFunction { func, args })
+                 if func == &make_array_udf() =>
+             {
+-                // make_array has a static set of arguments, so we can pull the arguments out from it
+-                return Ok(ExprSimplifyResult::Simplified(in_list(
+-                    std::mem::take(needle),
+-                    std::mem::take(args),
+-                    false,
+-                )));
++                let mut has_unsafe_nullable_element =
++                    args.is_empty() && info.nullable(needle)?;
++                for arg in args.iter() {
++                    // `needle IN (needle)` preserves NULL semantics. A different
++                    // nullable element does not: array_has([NULL], value) is false,
++                    // while value IN (NULL) is NULL. Volatile expressions are
++                    // evaluated separately, so syntactic equality is insufficient.
++                    let safe_same_expr = arg == &*needle && !arg.is_volatile();
++                    if info.nullable(arg)? && !safe_same_expr {
++                        has_unsafe_nullable_element = true;
++                        break;
++                    }
++                }
++
++                if !has_unsafe_nullable_element {
++                    // make_array has a static set of arguments, so we can pull the arguments out from it
++                    return Ok(ExprSimplifyResult::Simplified(in_list(
++                        std::mem::take(needle),
++                        std::mem::take(args),
++                        false,
++                    )));
++                }
+             }
+             _ => {}
+         };
+@@ -725,7 +754,14 @@
+         let needle = col("c");
+ 
+         let props = ExecutionProps::new();
+-        let context = datafusion_expr::simplify::SimplifyContext::new(&props);
++        // LogEx: nullable-element checks require the expression's schema.
++        use arrow::datatypes::Schema;
++        use datafusion_common::ToDFSchema;
++        let schema = Schema::new(vec![Field::new("c", DataType::Int32, true)])
++            .to_dfschema_ref()
++            .unwrap();
++        let context = datafusion_expr::simplify::SimplifyContext::new(&props)
++            .with_schema(schema);
+ 
+         let Ok(ExprSimplifyResult::Simplified(Expr::InList(in_list))) =
+             ArrayHas::new().simplify(vec![haystack, needle.clone()], &context)

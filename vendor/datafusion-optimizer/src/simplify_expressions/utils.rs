@@ -83,60 +83,8 @@ pub fn expr_contains(expr: &Expr, needle: &Expr, search_op: Operator) -> bool {
     expr_contains_inner(expr, needle, search_op) && !needle.is_volatile()
 }
 
-/// Deletes all 'needles' or remains one 'needle' that are found in a chain of xor
-/// expressions. Such as: A ^ (A ^ (B ^ A))
-pub fn delete_xor_in_complex_expr(expr: &Expr, needle: &Expr, is_left: bool) -> Expr {
-    /// Deletes recursively 'needles' in a chain of xor expressions
-    fn recursive_delete_xor_in_expr(
-        expr: &Expr,
-        needle: &Expr,
-        xor_counter: &mut i32,
-    ) -> Expr {
-        match expr {
-            Expr::BinaryExpr(BinaryExpr { left, op, right })
-                if *op == Operator::BitwiseXor =>
-            {
-                let left_expr = recursive_delete_xor_in_expr(left, needle, xor_counter);
-                let right_expr = recursive_delete_xor_in_expr(right, needle, xor_counter);
-                if left_expr == *needle {
-                    *xor_counter += 1;
-                    return right_expr;
-                } else if right_expr == *needle {
-                    *xor_counter += 1;
-                    return left_expr;
-                }
-
-                Expr::BinaryExpr(BinaryExpr::new(
-                    Box::new(left_expr),
-                    *op,
-                    Box::new(right_expr),
-                ))
-            }
-            _ => expr.clone(),
-        }
-    }
-
-    let mut xor_counter: i32 = 0;
-    let result_expr = recursive_delete_xor_in_expr(expr, needle, &mut xor_counter);
-    if result_expr == *needle {
-        return needle.clone();
-    } else if xor_counter % 2 == 0 {
-        if is_left {
-            return Expr::BinaryExpr(BinaryExpr::new(
-                Box::new(needle.clone()),
-                Operator::BitwiseXor,
-                Box::new(result_expr),
-            ));
-        } else {
-            return Expr::BinaryExpr(BinaryExpr::new(
-                Box::new(result_expr),
-                Operator::BitwiseXor,
-                Box::new(needle.clone()),
-            ));
-        }
-    }
-    result_expr
-}
+// LogEx: removed the XOR cancellation helper; runtime operands must retain
+// NULL propagation and evaluation even after expression hoisting.
 
 pub fn is_zero(s: &Expr) -> bool {
     match s {

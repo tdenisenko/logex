@@ -1,0 +1,201 @@
+--- a/src/math/log.rs
++++ b/src/math/log.rs
+@@ -19,8 +19,6 @@
+ 
+ use std::any::Any;
+ 
+-use super::power::PowerFunc;
+-
+ use crate::utils::{calculate_binary_math, decimal128_to_i128};
+ use arrow::array::{Array, ArrayRef};
+ use arrow::compute::kernels::cast;
+@@ -31,13 +29,12 @@
+ use arrow_buffer::i256;
+ use datafusion_common::types::NativeType;
+ use datafusion_common::{
+-    exec_err, internal_err, plan_datafusion_err, plan_err, Result, ScalarValue,
++    exec_err, plan_datafusion_err, plan_err, Result, ScalarValue,
+ };
+-use datafusion_expr::expr::ScalarFunction;
+ use datafusion_expr::simplify::{ExprSimplifyResult, SimplifyInfo};
+ use datafusion_expr::sort_properties::{ExprProperties, SortProperties};
+ use datafusion_expr::{
+-    lit, Coercion, ColumnarValue, Documentation, Expr, ScalarFunctionArgs, ScalarUDF,
++    lit, Coercion, ColumnarValue, Documentation, Expr, ScalarFunctionArgs,
+     TypeSignature, TypeSignatureClass,
+ };
+ use datafusion_expr::{ScalarUDFImpl, Signature, Volatility};
+@@ -260,16 +257,14 @@
+         self.doc()
+     }
+ 
+-    /// Simplify the `log` function by the relevant rules:
+-    /// 1. Log(a, 1) ===> 0
+-    /// 2. Log(a, Power(a, b)) ===> b
+-    /// 3. Log(a, a) ===> 1
++    /// Propagate NULL types while retaining runtime domain and evaluation behavior.
++    /// Constant calls are handled by the optimizer's ordinary constant evaluator.
+     fn simplify(
+         &self,
+-        mut args: Vec<Expr>,
++        args: Vec<Expr>,
+         info: &dyn SimplifyInfo,
+     ) -> Result<ExprSimplifyResult> {
+-        let mut arg_types = args
++        let arg_types = args
+             .iter()
+             .map(|arg| info.get_data_type(arg))
+             .collect::<Result<Vec<_>>>()?;
+@@ -282,61 +277,19 @@
+             )));
+         }
+ 
+-        // Args are either
+-        // log(number)
+-        // log(base, number)
+-        let num_args = args.len();
+-        if num_args != 1 && num_args != 2 {
+-            return plan_err!("Expected log to have 1 or 2 arguments, got {num_args}");
+-        }
+-        let number = args.pop().unwrap();
+-        let number_datatype = arg_types.pop().unwrap();
+-        // default to base 10
+-        let base = if let Some(base) = args.pop() {
+-            base
+-        } else {
+-            lit(ScalarValue::new_ten(&number_datatype)?)
+-        };
+-
+-        match number {
+-            Expr::Literal(value, _)
+-                if value == ScalarValue::new_one(&number_datatype)? =>
+-            {
+-                Ok(ExprSimplifyResult::Simplified(lit(ScalarValue::new_zero(
+-                    &info.get_data_type(&base)?,
+-                )?)))
+-            }
+-            Expr::ScalarFunction(ScalarFunction { func, mut args })
+-                if is_pow(&func) && args.len() == 2 && base == args[0] =>
+-            {
+-                let b = args.pop().unwrap(); // length checked above
+-                Ok(ExprSimplifyResult::Simplified(b))
+-            }
+-            number => {
+-                if number == base {
+-                    Ok(ExprSimplifyResult::Simplified(lit(ScalarValue::new_one(
+-                        &number_datatype,
+-                    )?)))
+-                } else {
+-                    let args = match num_args {
+-                        1 => vec![number],
+-                        2 => vec![base, number],
+-                        _ => {
+-                            return internal_err!(
+-                                "Unexpected number of arguments in log::simplify"
+-                            )
+-                        }
+-                    };
+-                    Ok(ExprSimplifyResult::Original(args))
+-                }
+-            }
+-        }
+-    }
+-}
+-
+-/// Returns true if the function is `PowerFunc`
+-fn is_pow(func: &ScalarUDF) -> bool {
+-    func.inner().as_any().downcast_ref::<PowerFunc>().is_some()
++        // LogEx: #24247 identifies NULL-unsafe algebraic rewrites. Keep the
++        // kernel for these identities as well: nonnullable inputs can be zero,
++        // one, negative, non-finite, fallible, or volatile. Inverse log/power
++        // expressions can also overflow or round, so cancellation is unsound.
++        // The optimizer's ordinary constant evaluator still folds literal calls.
++        if args.len() != 1 && args.len() != 2 {
++            return plan_err!(
++                "Expected log to have 1 or 2 arguments, got {}",
++                args.len()
++            );
++        }
++        Ok(ExprSimplifyResult::Original(args))
++    }
+ }
+ 
+ #[cfg(test)]
+--- a/src/math/power.rs
++++ b/src/math/power.rs
+@@ -19,18 +19,15 @@
+ use std::any::Any;
+ use std::sync::Arc;
+ 
+-use super::log::LogFunc;
+-
+ use arrow::array::{ArrayRef, AsArray, Int64Array};
+ use arrow::datatypes::{ArrowNativeTypeOp, DataType, Float64Type};
+ use datafusion_common::{
+     arrow_datafusion_err, exec_datafusion_err, exec_err, plan_datafusion_err,
+     DataFusionError, Result, ScalarValue,
+ };
+-use datafusion_expr::expr::ScalarFunction;
+ use datafusion_expr::simplify::{ExprSimplifyResult, SimplifyInfo};
+ use datafusion_expr::{
+-    ColumnarValue, Documentation, Expr, ScalarFunctionArgs, ScalarUDF, TypeSignature,
++    ColumnarValue, Documentation, Expr, ScalarFunctionArgs, TypeSignature,
+ };
+ use datafusion_expr::{ScalarUDFImpl, Signature, Volatility};
+ use datafusion_macros::user_doc;
+@@ -146,10 +143,8 @@
+         Ok(ColumnarValue::Array(arr))
+     }
+ 
+-    /// Simplify the `power` function by the relevant rules:
+-    /// 1. Power(a, 0) ===> 0
+-    /// 2. Power(a, 1) ===> a
+-    /// 3. Power(a, Log(a, b)) ===> b
++    /// Preserve the exponent-one identity and fold exponent zero only when
++    /// the non-NULL base is a literal whose evaluation can safely be omitted.
+     fn simplify(
+         &self,
+         mut args: Vec<Expr>,
+@@ -163,9 +158,16 @@
+         })?;
+ 
+         let exponent_type = info.get_data_type(&exponent)?;
++        // LogEx: backport upstream #24247 NULL-preserving identity guards.
++        let base_nullable = info.nullable(&base)?;
++        // LogEx: do not cancel power(base, log(base, value)); nonnullable
++        // bases still have domain limits, and the intermediate can round.
+         match exponent {
+             Expr::Literal(value, _)
+-                if value == ScalarValue::new_zero(&exponent_type)? =>
++                // LogEx: dropping runtime bases can hide errors or volatile calls.
++                if value == ScalarValue::new_zero(&exponent_type)?
++                    && !base_nullable
++                    && matches!(base, Expr::Literal(..)) =>
+             {
+                 Ok(ExprSimplifyResult::Simplified(Expr::Literal(
+                     ScalarValue::new_one(&info.get_data_type(&base)?)?,
+@@ -175,12 +177,6 @@
+             Expr::Literal(value, _) if value == ScalarValue::new_one(&exponent_type)? => {
+                 Ok(ExprSimplifyResult::Simplified(base))
+             }
+-            Expr::ScalarFunction(ScalarFunction { func, mut args })
+-                if is_log(&func) && args.len() == 2 && base == args[0] =>
+-            {
+-                let b = args.pop().unwrap(); // length checked above
+-                Ok(ExprSimplifyResult::Simplified(b))
+-            }
+             _ => Ok(ExprSimplifyResult::Original(vec![base, exponent])),
+         }
+     }
+@@ -188,11 +184,6 @@
+     fn documentation(&self) -> Option<&Documentation> {
+         self.doc()
+     }
+-}
+-
+-/// Return true if this function call is a call to `Log`
+-fn is_log(func: &ScalarUDF) -> bool {
+-    func.inner().as_any().downcast_ref::<LogFunc>().is_some()
+ }
+ 
+ #[cfg(test)]

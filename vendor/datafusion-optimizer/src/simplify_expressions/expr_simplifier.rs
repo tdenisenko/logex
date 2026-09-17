@@ -1317,39 +1317,10 @@ impl<S: SimplifyInfo> TreeNodeRewriter for Simplifier<'_, S> {
                 ))
             }
 
-            // (..A..) ^ A --> (the expression without A, if number of A is odd, otherwise one A)
-            Expr::BinaryExpr(BinaryExpr {
-                left,
-                op: BitwiseXor,
-                right,
-            }) if expr_contains(&left, &right, BitwiseXor) => {
-                let expr = delete_xor_in_complex_expr(&left, &right, false);
-                Transformed::yes(if expr == *right {
-                    Expr::Literal(
-                        ScalarValue::new_zero(&info.get_data_type(&right)?)?,
-                        None,
-                    )
-                } else {
-                    expr
-                })
-            }
-
-            // A ^ (..A..) --> (the expression without A, if number of A is odd, otherwise one A)
-            Expr::BinaryExpr(BinaryExpr {
-                left,
-                op: BitwiseXor,
-                right,
-            }) if expr_contains(&right, &left, BitwiseXor) => {
-                let expr = delete_xor_in_complex_expr(&right, &left, true);
-                Transformed::yes(if expr == *left {
-                    Expr::Literal(
-                        ScalarValue::new_zero(&info.get_data_type(&left)?)?,
-                        None,
-                    )
-                } else {
-                    expr
-                })
-            }
+            // LogEx: #24248 demonstrates NULL loss from XOR cancellation.
+            // Preserve runtime cancellation operands even when nonnullable:
+            // a column can be a hoisted fallible expression whose evaluation
+            // would disappear after projection pruning. Constants still fold.
 
             //
             // Rules for BitwiseShiftRight
@@ -2888,84 +2859,21 @@ mod tests {
     }
 
     #[test]
-    fn test_simplify_composed_bitwise_xor() {
-        // with an even number of the column "c2"
-        // c2 ^ ((c2 ^ (c2 | c1)) ^ (c1 & c2)) --> (c2 | c1) ^ (c1 & c2)
-
-        let expr = bitwise_xor(
-            col("c2"),
-            bitwise_xor(
-                bitwise_xor(col("c2"), bitwise_or(col("c2"), col("c1"))),
-                bitwise_and(col("c1"), col("c2")),
-            ),
-        );
-
-        let expected = bitwise_xor(
-            bitwise_or(col("c2"), col("c1")),
-            bitwise_and(col("c1"), col("c2")),
-        );
-
-        assert_eq!(simplify(expr), expected);
-
-        // with an odd number of the column "c2"
-        // c2 ^ (c2 ^ (c2 | c1)) ^ ((c1 & c2) ^ c2) --> c2 ^ ((c2 | c1) ^ (c1 & c2))
-
-        let expr = bitwise_xor(
-            col("c2"),
-            bitwise_xor(
-                bitwise_xor(col("c2"), bitwise_or(col("c2"), col("c1"))),
-                bitwise_xor(bitwise_and(col("c1"), col("c2")), col("c2")),
-            ),
-        );
-
-        let expected = bitwise_xor(
-            col("c2"),
-            bitwise_xor(
-                bitwise_or(col("c2"), col("c1")),
-                bitwise_and(col("c1"), col("c2")),
-            ),
-        );
-
-        assert_eq!(simplify(expr), expected);
-
-        // with an even number of the column "c2"
-        // ((c2 ^ (c2 | c1)) ^ (c1 & c2)) ^ c2 --> (c2 | c1) ^ (c1 & c2)
-
-        let expr = bitwise_xor(
-            bitwise_xor(
-                bitwise_xor(col("c2"), bitwise_or(col("c2"), col("c1"))),
-                bitwise_and(col("c1"), col("c2")),
-            ),
-            col("c2"),
-        );
-
-        let expected = bitwise_xor(
-            bitwise_or(col("c2"), col("c1")),
-            bitwise_and(col("c1"), col("c2")),
-        );
-
-        assert_eq!(simplify(expr), expected);
-
-        // with an odd number of the column "c2"
-        // (c2 ^ (c2 | c1)) ^ ((c1 & c2) ^ c2) ^ c2 --> ((c2 | c1) ^ (c1 & c2)) ^ c2
-
-        let expr = bitwise_xor(
-            bitwise_xor(
-                bitwise_xor(col("c2"), bitwise_or(col("c2"), col("c1"))),
-                bitwise_xor(bitwise_and(col("c1"), col("c2")), col("c2")),
-            ),
-            col("c2"),
-        );
-
-        let expected = bitwise_xor(
-            bitwise_xor(
-                bitwise_or(col("c2"), col("c1")),
-                bitwise_and(col("c1"), col("c2")),
-            ),
-            col("c2"),
-        );
-
-        assert_eq!(simplify(expr), expected);
+    fn test_preserve_composed_bitwise_xor_evaluation() {
+        for column in ["c3", "c3_non_null"] {
+            let repeated = col(column);
+            let other = col("c3_non_null");
+            for expr in [
+                bitwise_xor(repeated.clone(), repeated.clone()),
+                bitwise_xor(
+                    bitwise_xor(repeated.clone(), other.clone()),
+                    repeated.clone(),
+                ),
+                bitwise_xor(repeated.clone(), bitwise_xor(other, repeated)),
+            ] {
+                assert_eq!(simplify(expr.clone()), expr);
+            }
+        }
     }
 
     #[test]
@@ -3091,17 +2999,12 @@ mod tests {
 
     #[test]
     fn test_simplify_simple_bitwise_xor() {
-        // c4 ^ c4 -> 0
-        let expr = (col("c4")).bitxor(col("c4"));
-        let expected = lit(0u32);
-
-        assert_eq!(simplify(expr), expected);
-
-        // c3 ^ c3 -> 0
-        let expr = col("c3").bitxor(col("c3"));
-        let expected = lit(0i64);
-
-        assert_eq!(simplify(expr), expected);
+        // LogEx: constants still fold, but runtime columns retain evaluation.
+        assert_eq!(simplify(lit(7_u32).bitxor(lit(7_u32))), lit(0_u32));
+        for column in ["c4_non_null", "c3_non_null"] {
+            let expr = col(column).bitxor(col(column));
+            assert_eq!(simplify(expr.clone()), expr);
+        }
     }
 
     #[test]
