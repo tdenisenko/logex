@@ -58,17 +58,17 @@ pub async fn run_background_indexer(
         // Keep filesystem work off async workers and run before compaction/index
         // selection so newly durable sealed segments become eligible together.
         let storage = Arc::clone(&state.storage);
-        tokio::task::spawn_blocking(move || storage.blocking_write().checkpoint_if_due())
-            .await
-            .map_err(|error| {
-                io::Error::other(format!("storage checkpoint worker failed: {error}"))
-            })?
-            .map_err(|error| {
-                io::Error::new(
-                    error.kind(),
-                    format!("storage checkpoint failed; writes require recovery: {error}"),
-                )
-            })?;
+        join_background_worker(
+            "storage checkpoint",
+            tokio::task::spawn_blocking(move || storage.blocking_write().checkpoint_if_due()),
+        )
+        .await?
+        .map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("storage checkpoint failed; writes require recovery: {error}"),
+            )
+        })?;
 
         {
             let active_sync_status = sync_is_active(&state);
@@ -84,26 +84,23 @@ pub async fn run_background_indexer(
                 && let Some(available_memory_bytes) = active_sync_compaction_memory_pressure()
             {
                 let storage = Arc::clone(&state.storage);
-                match tokio::task::spawn_blocking(move || -> io::Result<CompactionReport> {
-                    Ok(CompactionReport {
-                        compacted: 0,
-                        raw_backlog: Some(compaction_backlog(&storage, CompactionMode::RawOnly)?),
-                        profile_rewrite_backlog: None,
-                    })
-                })
-                .await
-                {
-                    Ok(Ok(report)) => update_compaction_status(&state, report),
-                    Ok(Err(error)) => {
-                        tracing::warn!(
-                            %error,
-                            "failed to refresh compaction backlog under memory pressure"
-                        );
-                    }
+                let worker =
+                    tokio::task::spawn_blocking(move || -> io::Result<CompactionReport> {
+                        Ok(CompactionReport {
+                            compacted: 0,
+                            raw_backlog: Some(compaction_backlog(
+                                &storage,
+                                CompactionMode::RawOnly,
+                            )?),
+                            profile_rewrite_backlog: None,
+                        })
+                    });
+                match join_background_worker("compaction backlog refresh", worker).await? {
+                    Ok(report) => update_compaction_status(&state, report),
                     Err(error) => {
                         tracing::warn!(
                             %error,
-                            "compaction backlog refresh task failed under memory pressure"
+                            "failed to refresh compaction backlog under memory pressure"
                         );
                     }
                 }
@@ -128,7 +125,7 @@ pub async fn run_background_indexer(
                 None
             };
             let storage = Arc::clone(&state.storage);
-            match tokio::task::spawn_blocking(move || -> io::Result<CompactionReport> {
+            let worker = tokio::task::spawn_blocking(move || -> io::Result<CompactionReport> {
                 if active_sync {
                     let (
                         raw_plan,
@@ -213,10 +210,9 @@ pub async fn run_background_indexer(
                     raw_backlog: Some(raw_backlog),
                     profile_rewrite_backlog: Some(total_backlog.saturating_sub(raw_backlog)),
                 })
-            })
-            .await
-            {
-                Ok(Ok(report)) => {
+            });
+            match join_background_worker("storage compaction", worker).await? {
+                Ok(report) => {
                     let refreshed_active_backlog = active_sync && report.raw_backlog.is_some();
                     update_compaction_status(&state, report);
                     if active_sync {
@@ -238,11 +234,8 @@ pub async fn run_background_indexer(
                         );
                     }
                 }
-                Ok(Err(e)) => {
-                    tracing::warn!(error = %e, "failed to compact eligible sealed segments");
-                }
                 Err(e) => {
-                    tracing::warn!(error = %e, "background compaction task failed");
+                    tracing::warn!(error = %e, "failed to compact eligible sealed segments");
                 }
             }
         }
@@ -252,25 +245,21 @@ pub async fn run_background_indexer(
             continue;
         }
         let storage = Arc::clone(&state.storage);
-        match tokio::task::spawn_blocking(move || {
+        let worker = tokio::task::spawn_blocking(move || {
             build_sealed_query_indexes(
                 &storage,
                 BACKGROUND_SEALED_INDEX_SEGMENT_LIMIT,
                 query_indexes_missing,
                 |path| IndexBuilder::build_missing_indexes(path, IndexBuildProfile::Erc20Transfer),
             )
-        })
-        .await
-        {
-            Ok(Ok(indexed)) if indexed > 0 => {
+        });
+        match join_background_worker("sealed query index", worker).await? {
+            Ok(indexed) if indexed > 0 => {
                 tracing::info!(indexed, "built missing query indexes for sealed segments");
             }
-            Ok(Ok(_)) => {}
-            Ok(Err(error)) => {
-                tracing::warn!(%error, "failed to build missing sealed query indexes");
-            }
+            Ok(_) => {}
             Err(error) => {
-                tracing::warn!(%error, "sealed query index task failed");
+                tracing::warn!(%error, "failed to build missing sealed query indexes");
             }
         }
 
@@ -288,12 +277,11 @@ pub async fn run_background_indexer(
             let path = current.path.clone();
             // Opening source/checkpoint/index files is filesystem work too.
             // Keep freshness checks on the same blocking worker as the build.
-            match tokio::task::spawn_blocking(move || {
+            let worker = tokio::task::spawn_blocking(move || {
                 rebuild_hot_query_indexes(&path, rebuild_for_rows)
-            })
-            .await
-            {
-                Ok(Ok(true)) => {
+            });
+            match join_background_worker("hot query index", worker).await? {
+                Ok(true) => {
                     tracing::debug!(
                         partition_id = current.partition_id,
                         rows = current.row_count,
@@ -301,8 +289,8 @@ pub async fn run_background_indexer(
                     );
                     last_indexed = Some(current);
                 }
-                Ok(Ok(false)) => {}
-                Ok(Err(e)) => {
+                Ok(false) => {}
+                Err(e) => {
                     let latest = {
                         let storage = state.storage.read().await;
                         HotIndexState {
@@ -323,13 +311,22 @@ pub async fn run_background_indexer(
                         tracing::warn!(error = %e, "failed to build indexes");
                     }
                 }
-                Err(e) => {
-                    tracing::warn!(error = %e, "index build task panicked");
-                }
             }
         }
     }
     Ok(())
+}
+
+/// A failed blocking worker terminates the owning indexer and reaches its node
+/// supervisor. Keep the operation's own result separate: optional maintenance
+/// I/O errors retain their existing retry/logging policy at each caller.
+async fn join_background_worker<T>(
+    name: &str,
+    handle: tokio::task::JoinHandle<T>,
+) -> io::Result<T> {
+    handle
+        .await
+        .map_err(|error| io::Error::other(format!("{name} worker failed: {error}")))
 }
 
 /// Visit a bounded metadata batch at a time without retaining the ingestion
@@ -1186,6 +1183,80 @@ mod tests {
                 ACTIVE_SYNC_COMPACTION_SEGMENT_LIMIT
             ),
             (ACTIVE_SYNC_COMPACTION_HIGH_CATCH_UP_LIMIT, 0)
+        );
+    }
+}
+
+#[cfg(test)]
+mod maintenance_failure_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn blocking_maintenance_worker_failure_is_fatal() {
+        let worker = tokio::task::spawn_blocking(|| -> io::Result<()> {
+            panic!("isolated maintenance worker failure");
+        });
+        let error = join_background_worker("fixture maintenance", worker)
+            .await
+            .expect_err("a failed worker must leave the maintenance loop");
+        assert!(error.to_string().contains("fixture maintenance"));
+    }
+
+    #[tokio::test]
+    async fn blocking_maintenance_failure_reaches_node_monitor() {
+        let monitor = logex_sync::tasks::TaskMonitor::default();
+        let mut failure = monitor.subscribe();
+        let task = monitor.spawn_result("background indexer", async {
+            let worker = tokio::task::spawn_blocking(|| -> io::Result<()> {
+                panic!("isolated monitored maintenance worker failure");
+            });
+            let _operation = join_background_worker("fixture maintenance", worker).await?;
+            // The original error-and-continue policy leaves the loop running.
+            std::future::pending::<io::Result<()>>().await
+        });
+        let observed = tokio::time::timeout(Duration::from_secs(2), failure.changed()).await;
+        monitor.begin_shutdown();
+        task.abort();
+        let _ = task.await;
+        observed
+            .expect("worker failure must notify the supervisor")
+            .unwrap();
+        let message = failure.borrow().clone().unwrap();
+        assert!(message.contains("background indexer"));
+        assert!(message.contains("fixture maintenance"));
+    }
+
+    #[tokio::test]
+    async fn completed_maintenance_preserves_value_and_operation_error() {
+        let value =
+            join_background_worker("fixture maintenance", tokio::task::spawn_blocking(|| 7))
+                .await
+                .unwrap();
+        assert_eq!(value, 7);
+        let operation = join_background_worker(
+            "fixture maintenance",
+            tokio::task::spawn_blocking(|| {
+                Err::<(), _>(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "fixture source changed",
+                ))
+            }),
+        )
+        .await
+        .unwrap();
+        let error = operation.unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        assert_eq!(error.to_string(), "fixture source changed");
+    }
+
+    #[tokio::test]
+    async fn canceled_maintenance_worker_is_not_a_successful_operation() {
+        let handle = tokio::spawn(std::future::pending::<io::Result<()>>());
+        handle.abort();
+        assert!(
+            join_background_worker("fixture maintenance", handle)
+                .await
+                .is_err()
         );
     }
 }
