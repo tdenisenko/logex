@@ -19,12 +19,26 @@ fn json_error(error: serde_json::Error) -> io::Error {
     )
 }
 
-pub(super) fn read(file: File) -> io::Result<ConsensusSnapshot> {
-    let length = file.metadata()?.len();
-    read_from(file, length)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Integrity {
+    pub(super) encoded_len: u64,
+    pub(super) payload_digest: [u8; 32],
 }
 
-fn read_from(mut source: impl Read, file_length: u64) -> io::Result<ConsensusSnapshot> {
+pub(super) fn read_with_integrity(file: File) -> io::Result<(ConsensusSnapshot, Integrity)> {
+    let length = file.metadata()?.len();
+    read_from_with_integrity(file, length)
+}
+
+#[cfg(test)]
+fn read_from(source: impl Read, file_length: u64) -> io::Result<ConsensusSnapshot> {
+    read_from_with_integrity(source, file_length).map(|(snapshot, _)| snapshot)
+}
+
+fn read_from_with_integrity(
+    mut source: impl Read,
+    file_length: u64,
+) -> io::Result<(ConsensusSnapshot, Integrity)> {
     if file_length < HEADER_LEN as u64 {
         return Err(invalid("consensus snapshot header is truncated"));
     }
@@ -61,7 +75,15 @@ fn read_from(mut source: impl Read, file_length: u64) -> io::Result<ConsensusSna
     let mut trailing = [0];
     loop {
         match source.read(&mut trailing) {
-            Ok(0) => return Ok(snapshot),
+            Ok(0) => {
+                return Ok((
+                    snapshot,
+                    Integrity {
+                        encoded_len: file_length,
+                        payload_digest: header[16..48].try_into().expect("fixed checksum width"),
+                    },
+                ));
+            }
             Ok(_) => return Err(invalid("consensus snapshot has trailing bytes")),
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
             Err(error) => return Err(error),
@@ -71,7 +93,15 @@ fn read_from(mut source: impl Read, file_length: u64) -> io::Result<ConsensusSna
 
 /// Write to a new, empty staging file. The caller owns synchronization and
 /// atomic publication; no incomplete header is ever a published snapshot.
-pub(super) fn write(mut target: impl Write + Seek, snapshot: &ConsensusSnapshot) -> io::Result<()> {
+#[cfg(test)]
+pub(super) fn write(target: impl Write + Seek, snapshot: &ConsensusSnapshot) -> io::Result<()> {
+    write_with_integrity(target, snapshot).map(|_| ())
+}
+
+pub(super) fn write_with_integrity(
+    mut target: impl Write + Seek,
+    snapshot: &ConsensusSnapshot,
+) -> io::Result<Integrity> {
     target.write_all(&[0; HEADER_LEN])?;
     let (length, checksum) = {
         let mut writer = BufWriter::new(HashWriter {
@@ -90,7 +120,13 @@ pub(super) fn write(mut target: impl Write + Seek, snapshot: &ConsensusSnapshot)
     header[16..].copy_from_slice(&checksum);
     target.seek(SeekFrom::Start(0))?;
     target.write_all(&header)?;
-    target.flush()
+    target.flush()?;
+    Ok(Integrity {
+        encoded_len: length
+            .checked_add(HEADER_LEN as u64)
+            .ok_or_else(|| invalid("consensus snapshot total length exceeds u64"))?,
+        payload_digest: checksum.into(),
+    })
 }
 
 struct HashReader<R> {
