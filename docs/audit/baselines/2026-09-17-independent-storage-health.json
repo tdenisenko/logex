@@ -1,0 +1,211 @@
+{
+  "status": "All eight source-commit local gates pass; exact-head CI and merge pending",
+  "base": "43b4f1822a9ed71df8d15b623a03367e3067ae29",
+  "findings": [
+    "B10-19"
+  ],
+  "evidence_root": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-independent-health-w89hik3p",
+  "original_reproduction": {
+    "method": "Actual ordinary health future on unchanged production, bounded synchronous engine-shaped poll, owned temporary missing path",
+    "passed": 0,
+    "failed": 1,
+    "exit_code": 101
+  },
+  "focused_tests": {
+    "health": 12,
+    "node": 203,
+    "failed": 0,
+    "ignored": 0
+  },
+  "evidence": {
+    "original-tests.rs": {
+      "sha256": "d4e688c4e21454da9e8511079ec2a62690fe5ca78a478c0caa32379fd91551ff",
+      "bytes": 7969
+    },
+    "original-control.rs": {
+      "sha256": "d610b3928c45387a301a26bd0d76a5ae4fbb4ad278cbaa8cacf62da64d4b4b0a",
+      "bytes": 867
+    },
+    "original-control.log": {
+      "sha256": "699126417dd172d214fbcaf1f527f6a1f189f26436a384c03503db9fffe3e5d6",
+      "bytes": 1579
+    },
+    "original-result.json": {
+      "sha256": "4fe60570e0ae8fdcd4df2b37c729b6a9f237e300aa50c855da12e3de4fa99bc8",
+      "bytes": 73
+    },
+    "focused-health.log": {
+      "sha256": "b6ca27b37f338a3a15cc9a01237d3f1021633a3b07d4402061f60bca80db38c8",
+      "bytes": 2121
+    },
+    "focused-node.log": {
+      "sha256": "37f5273fbe3c9e961d317ee3b6fc639aee9927d3d8f94549ac9b2b98b26f38fb",
+      "bytes": 18106
+    },
+    "gates/results.json": {
+      "sha256": "8dd669507e5390f2ca0d516159cc2410b21f5065a70adcb78b578ca073ea3823",
+      "bytes": 4861
+    },
+    "gates/test-summary.json": {
+      "sha256": "60d0b64b618747005458e361f2cbd25affc1639f5a60bc28386c8d8aec9deb19",
+      "bytes": 69
+    }
+  },
+  "source_commit": "2ffd2de4ac8cc39c9346407db6e6f69a76c0bde6",
+  "validation": {
+    "commit": "2ffd2de4ac8cc39c9346407db6e6f69a76c0bde6",
+    "rustc": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+    "gates": [
+      {
+        "name": "vendor",
+        "command": [
+          "python3",
+          "tools/verify_datafusion_vendor.py"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T00:13:38.214301+00:00",
+        "finished": "2026-09-17T00:13:38.282709+00:00",
+        "sha256": "5de30a03a2c21d0dd165f1d3f30b23ef080e06616866e0a02f37198cff7f3a16",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-independent-health-w89hik3p/gates/vendor.log"
+      },
+      {
+        "name": "format",
+        "command": [
+          "cargo",
+          "fmt",
+          "--all",
+          "--",
+          "--check"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T00:13:38.283106+00:00",
+        "finished": "2026-09-17T00:13:39.242123+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-independent-health-w89hik3p/gates/format.log"
+      },
+      {
+        "name": "vendor-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2024",
+          "--config-path",
+          "vendor/reth-network/rustfmt.toml",
+          "--config",
+          "skip_children=true",
+          "vendor/reth-network/src/eth_requests.rs",
+          "vendor/reth-network/src/session/active.rs",
+          "vendor/reth-network/src/session/mod.rs",
+          "vendor/reth-network/src/session/types.rs",
+          "vendor/reth-network/src/session/range_update.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T00:13:39.242652+00:00",
+        "finished": "2026-09-17T00:13:39.308294+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-independent-health-w89hik3p/gates/vendor-format.log"
+      },
+      {
+        "name": "check",
+        "command": [
+          "cargo",
+          "check",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T00:13:39.308687+00:00",
+        "finished": "2026-09-17T00:13:42.539327+00:00",
+        "sha256": "9152513ac6130a574838368841c1450468f9a722a970dfd323e9b17c32335cd9",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-independent-health-w89hik3p/gates/check.log"
+      },
+      {
+        "name": "clippy",
+        "command": [
+          "cargo",
+          "clippy",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T00:13:42.539827+00:00",
+        "finished": "2026-09-17T00:13:44.813873+00:00",
+        "sha256": "cc8c46f17ad4e2e1cf6f217d22170a303495e30d738d2f346c9af230ea10a5e0",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-independent-health-w89hik3p/gates/clippy.log"
+      },
+      {
+        "name": "test",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T00:13:44.814415+00:00",
+        "finished": "2026-09-17T00:16:46.543688+00:00",
+        "sha256": "72a89df346622db9e0b71252cc488606af858c4f523e339dd6d18ee1e2ee2eb4",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-independent-health-w89hik3p/gates/test.log"
+      },
+      {
+        "name": "doc",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--doc",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T00:16:46.547385+00:00",
+        "finished": "2026-09-17T00:16:50.778204+00:00",
+        "sha256": "5ae78e6b4654a1ba308086448a3c1b9b0dfa69561a7c78a9df0253054473f2f2",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-independent-health-w89hik3p/gates/doc.log"
+      },
+      {
+        "name": "release-build",
+        "command": [
+          "cargo",
+          "build",
+          "-p",
+          "logex-node",
+          "--release",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T00:16:50.778824+00:00",
+        "finished": "2026-09-17T00:17:33.924688+00:00",
+        "sha256": "e5c667d29c6f2fac92ab864c67a6810b2e7156dc79e00b9c7e4f59bc9e3408e6",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-independent-health-w89hik3p/gates/release-build.log"
+      }
+    ]
+  },
+  "workspace_tests": {
+    "passed": 1828,
+    "failed": 0,
+    "ignored": 24,
+    "groups": 27
+  }
+}

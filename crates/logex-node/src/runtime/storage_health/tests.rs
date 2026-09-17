@@ -1,19 +1,16 @@
 use super::*;
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-    mpsc,
-};
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 #[tokio::test]
-async fn independent_volume_failure_is_retained_without_another_filesystem_probe() {
+async fn independent_failure_is_retained_without_another_filesystem_probe() {
     for closed in [false, true] {
         let (sender, receiver) = tokio::sync::watch::channel(None);
         if !closed {
             sender.send_replace(Some("owned volume unavailable".to_owned()));
         }
         drop(sender);
-        let failure = wait_for_failure(PathBuf::from("unused-volume-path"), Some(receiver)).await;
+        let failure = wait_for_failure(PathBuf::from("unused-volume-path"), receiver).await;
         let text = failure.to_string();
         assert!(text.contains(if closed {
             "notification channel closed"
@@ -21,50 +18,6 @@ async fn independent_volume_failure_is_retained_without_another_filesystem_probe
             "owned volume unavailable"
         }));
     }
-}
-
-#[tokio::test]
-async fn queued_completion_after_deadline_is_not_healthy() {
-    let deadline = tokio::time::Instant::now() - Duration::from_secs(1);
-    let mut work = JoinSet::new();
-    let task = work.spawn(async { (tokio::time::Instant::now(), Ok(())) });
-    while !task.is_finished() {
-        tokio::task::yield_now().await;
-    }
-    let result = await_probe(
-        PathBuf::from("owned-probe-control"),
-        Duration::ZERO,
-        deadline,
-        work,
-    )
-    .await;
-    assert!(
-        matches!(result, Err(StorageHealthFailure::Probe { source, .. })
-        if source.kind() == io::ErrorKind::TimedOut)
-    );
-}
-
-#[tokio::test]
-async fn queued_timely_completion_survives_delayed_polling() {
-    let (finished, observed) = tokio::sync::oneshot::channel();
-    let mut work = JoinSet::new();
-    let task = work.spawn(async move {
-        let completed = tokio::time::Instant::now();
-        finished.send(completed).unwrap();
-        (completed, Ok(()))
-    });
-    let deadline = observed.await.unwrap();
-    while !task.is_finished() {
-        tokio::task::yield_now().await;
-    }
-    await_probe(
-        PathBuf::from("owned-probe-control"),
-        Duration::ZERO,
-        deadline,
-        work,
-    )
-    .await
-    .unwrap();
 }
 
 #[test]
@@ -91,18 +44,11 @@ fn disk_space_probe_paths_track_writable_roots_not_sealed_targets() {
 }
 
 #[cfg(unix)]
-#[tokio::test]
-async fn missing_storage_path_stops_the_health_guard() {
+#[test]
+fn missing_storage_path_preserves_the_probe_error() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("unavailable");
-    assert_eq!(
-        free_space_bytes(&path).unwrap_err().kind(),
-        io::ErrorKind::NotFound
-    );
-    let failure =
-        tokio::time::timeout(Duration::from_secs(5), wait_for_failure(path.clone(), None))
-            .await
-            .expect("storage probe error was ignored");
+    let failure = check_paths(&path, 0, free_space_bytes).unwrap_err();
     assert!(
         matches!(failure, StorageHealthFailure::Probe { path: failed, source }
         if failed == path && source.kind() == io::ErrorKind::NotFound)
@@ -146,97 +92,17 @@ fn low_space_on_the_segments_root_preserves_the_measurement() {
 }
 
 #[cfg(unix)]
-#[tokio::test]
-async fn healthy_existing_roots_complete_the_probe() {
-    let temp = tempfile::tempdir().unwrap();
-    std::fs::create_dir(temp.path().join("segments")).unwrap();
-    run_probe(temp.path().to_path_buf(), Duration::from_secs(5), |path| {
-        check_paths(path, 0, free_space_bytes)
-    })
-    .await
-    .unwrap();
-}
-
-#[tokio::test]
-async fn worker_unwind_is_an_actionable_probe_failure() {
-    let path = PathBuf::from("owned-probe-control");
-    let result = run_probe(path.clone(), Duration::from_secs(5), |_| {
-        panic!("isolated filesystem probe completion control");
-    })
-    .await;
-    let Err(StorageHealthFailure::Probe {
-        path: failed,
-        source,
-    }) = result
-    else {
-        panic!("probe failure was lost");
-    };
-    assert_eq!(failed, path);
-    assert!(
-        source
-            .get_ref()
-            .unwrap()
-            .downcast_ref::<tokio::task::JoinError>()
-            .unwrap()
-            .is_panic()
-    );
-}
-
-#[tokio::test]
-async fn started_probe_timeout_does_not_wait_for_blocking_work_again() {
-    let (release, blocked) = mpsc::channel::<()>();
-    let (started, observed) = tokio::sync::oneshot::channel();
-    let task = tokio::spawn(run_probe(
-        PathBuf::from("owned-probe-control"),
-        Duration::from_secs(1),
-        move |_| {
-            let _ = started.send(());
-            let _ = blocked.recv();
-            Ok(())
-        },
-    ));
-    let began = tokio::time::timeout(Duration::from_secs(5), observed).await;
-    let result = tokio::time::timeout(Duration::from_secs(5), task).await;
-    // Release this test's worker before checking any observation.
-    drop(release);
-    began.unwrap().unwrap();
-    assert!(
-        matches!(result.unwrap().unwrap(), Err(StorageHealthFailure::Probe { source, .. })
-        if source.kind() == io::ErrorKind::TimedOut)
-    );
-}
-
 #[test]
-fn expired_queued_probe_is_canceled_before_it_can_start() {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_time()
-        .max_blocking_threads(1)
-        .build()
-        .unwrap();
-    let (release, blocked) = mpsc::channel::<()>();
-    let (started, observed) = mpsc::channel();
-    runtime.spawn_blocking(move || {
-        let _ = started.send(());
-        let _ = blocked.recv();
-    });
-    observed.recv_timeout(Duration::from_secs(5)).unwrap();
-    let ran = Arc::new(AtomicBool::new(false));
-    let worker_ran = Arc::clone(&ran);
-    let result = runtime.block_on(run_probe(
-        PathBuf::from("queued-probe-control"),
-        Duration::ZERO,
-        move |_| {
-            worker_ran.store(true, Ordering::SeqCst);
-            Ok(())
-        },
-    ));
-    drop(release);
-    drop(runtime);
-    assert!(
-        matches!(result, Err(StorageHealthFailure::Probe { source, .. })
-        if source.kind() == io::ErrorKind::TimedOut)
-    );
-    assert!(!ran.load(Ordering::SeqCst));
+fn initialized_storage_has_both_roots_for_the_first_probe() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("fresh");
+    assert!(!path.exists());
+    let _storage = logex_storage::PartitionManager::open(logex_storage::PartitionManagerConfig {
+        data_dir: path.clone(),
+        ..Default::default()
+    })
+    .unwrap();
+    check_paths(&path, 0, free_space_bytes).unwrap();
 }
 
 #[cfg(unix)]
@@ -248,4 +114,137 @@ fn invalid_path_is_rejected_before_the_filesystem_call() {
         free_space_bytes(path).unwrap_err().kind(),
         io::ErrorKind::InvalidInput
     );
+}
+
+#[test]
+fn ordinary_monitor_probes_immediately_without_async_polling() {
+    let (checked, observed) = mpsc::channel();
+    let monitor = StorageMonitor::start_storage(move || {
+        checked.send(()).unwrap();
+        Ok(())
+    })
+    .unwrap();
+    observed.recv_timeout(Duration::from_secs(5)).unwrap();
+    drop(monitor);
+    assert_eq!(observed.try_recv(), Err(mpsc::TryRecvError::Disconnected));
+}
+
+#[test]
+fn initialized_storage_keeps_the_existing_volume_monitor() {
+    let (checked, observed) = mpsc::channel();
+    let mut owner = Some(
+        StorageMonitor::start_storage(move || {
+            checked.send(()).unwrap();
+            Ok(())
+        })
+        .unwrap(),
+    );
+    observed.recv_timeout(Duration::from_secs(5)).unwrap();
+    let root = tempfile::tempdir().unwrap();
+    // A substituted ordinary probe would fail on this missing path. Reusing
+    // the existing handle also preserves its single callback registration.
+    let first = owner.as_ref().unwrap().handle();
+    first.set_failure_handler(|_| {}).unwrap();
+    let retained = monitor_initialized_storage(&mut owner, &root.path().join("unused")).unwrap();
+    assert!(retained.set_failure_handler(|_| {}).is_err());
+    drop(owner);
+}
+
+#[cfg(unix)]
+#[test]
+fn ordinary_monitor_failure_cases_run_in_owned_children() {
+    for case in ["missing_start", "runtime_blocked"] {
+        let directory = tempfile::tempdir().unwrap();
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "runtime::storage_health::tests::ordinary_monitor_child",
+                "--nocapture",
+            ])
+            .env("LOGEX_ORDINARY_MONITOR_CASE", case)
+            .current_dir(directory.path())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while child.try_wait().unwrap().is_none() {
+            if Instant::now() >= deadline {
+                child.kill().unwrap();
+                let output = child.wait_with_output().unwrap();
+                panic!("owned {case} child did not complete: {output:?}");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let output = child.wait_with_output().unwrap();
+        assert_eq!(output.status.code(), Some(1), "{case}: {output:?}");
+        assert!(!directory.path().join("unavailable").exists());
+        if case == "runtime_blocked" {
+            assert_eq!(
+                std::fs::read(directory.path().join("verified")).unwrap(),
+                b"ordinary failure observed without async progress"
+            );
+        } else {
+            assert!(String::from_utf8_lossy(&output.stderr).contains("unavailable"));
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn ordinary_monitor_child() {
+    let Ok(case) = std::env::var("LOGEX_ORDINARY_MONITOR_CASE") else {
+        return;
+    };
+    if case == "missing_start" {
+        let mut owner = None;
+        // The real production constructor must report this path, not create it
+        // or silently use an existing ancestor with healthy free space.
+        monitor_initialized_storage(&mut owner, Path::new("unavailable")).unwrap();
+        std::thread::sleep(Duration::from_secs(5));
+        panic!("missing storage did not fail startup");
+    }
+    assert_eq!(case, "runtime_blocked");
+    let (begin, allowed) = mpsc::channel();
+    let monitor = StorageMonitor::start_storage(move || {
+        allowed.recv_timeout(Duration::from_secs(5)).unwrap();
+        check_paths(Path::new("unavailable"), 0, free_space_bytes).map_err(io::Error::other)
+    })
+    .unwrap();
+    let (failure, receiver) = tokio::sync::watch::channel(None);
+    let (reported, observed) = mpsc::channel();
+    monitor
+        .handle()
+        .set_failure_handler(move |reason| {
+            failure.send_replace(Some(reason.to_owned()));
+            reported.send(reason.to_owned()).unwrap();
+        })
+        .unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let engine = async {
+            begin.send(()).unwrap();
+            // Model a bounded synchronous engine call. Its sibling health
+            // future never gets polled, yet the monitor must report failure.
+            let reason = observed.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert!(reason.contains("unavailable"));
+        };
+        tokio::select! { biased;
+            _ = engine => {},
+            _ = wait_for_failure(PathBuf::from("unavailable"), receiver) =>
+                panic!("engine control unexpectedly yielded"),
+        }
+    });
+    drop(runtime);
+    std::fs::write(
+        "verified",
+        b"ordinary failure observed without async progress",
+    )
+    .unwrap();
+    // Teardown must retain the failure even if the engine exits before the
+    // async supervisor observes the notification.
+    drop(monitor);
+    panic!("ordinary storage failure became successful shutdown");
 }

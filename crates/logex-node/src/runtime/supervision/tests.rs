@@ -98,19 +98,26 @@ async fn shutdown_signal_remains_responsive_during_a_storage_probe() {
     let engine = engine_after_shutdown(fixture.shutdown.subscribe(), Ok(()));
     let (release, blocked) = std::sync::mpsc::channel::<()>();
     let (started, observed) = tokio::sync::oneshot::channel();
-    let probe = async {
-        super::super::storage_health::run_probe(
-            PathBuf::from("owned-probe-control"),
-            Duration::from_secs(60),
-            move |_| {
-                let _ = started.send(());
-                let _ = blocked.recv();
-                Ok(())
-            },
-        )
-        .await
-        .unwrap_err()
-    };
+    let mut started = Some(started);
+    let monitor = crate::volume::StorageMonitor::start_storage(move || {
+        if let Some(started) = started.take() {
+            let _ = started.send(());
+        }
+        let _ = blocked.recv_timeout(Duration::from_secs(5));
+        Ok(())
+    })
+    .unwrap();
+    let (failure, receiver) = watch::channel(None);
+    monitor
+        .handle()
+        .set_failure_handler(move |reason| {
+            failure.send_replace(Some(reason.to_owned()));
+        })
+        .unwrap();
+    let probe = super::super::storage_health::wait_for_failure(
+        PathBuf::from("owned-probe-control"),
+        receiver,
+    );
     let signal = async {
         observed.await.unwrap();
         "local stop control"
@@ -121,6 +128,7 @@ async fn shutdown_signal_remains_responsive_during_a_storage_probe() {
     )
     .await;
     drop(release);
+    drop(monitor);
     assert_eq!(result.unwrap(), ExitCode::SUCCESS);
     assert!(fixture.workers.subscribe().borrow().is_none());
 }
