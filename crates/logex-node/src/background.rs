@@ -6,6 +6,7 @@ use std::time::Duration;
 use logex_index::{IndexBuildProfile, IndexBuilder};
 use logex_server::AppState;
 use logex_storage::PartitionManager;
+use logex_storage::native::{CompactionMode, SegmentCompactionTask};
 use logex_types::{EXECUTION_HISTORY_TARGET_BLOCK, SyncStatus};
 
 const TASK_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(60);
@@ -18,6 +19,7 @@ const ACTIVE_SYNC_PROFILE_REWRITE_SEGMENT_LIMIT: usize = 2;
 const BACKGROUND_COMPACTION_SEGMENT_LIMIT: usize = 24;
 const BACKGROUND_SEALED_INDEX_SEGMENT_LIMIT: usize = 8;
 const INDEX_CANDIDATE_BATCH_SIZE: usize = 64;
+const COMPACTION_CANDIDATE_BATCH_SIZE: usize = 64;
 const BACKGROUND_COMPACTION_INTERVAL: Duration = Duration::from_secs(10);
 const ACTIVE_SYNC_BACKLOG_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
 const BYTES_PER_KIB: u64 = 1024;
@@ -83,10 +85,9 @@ pub async fn run_background_indexer(
             {
                 let storage = Arc::clone(&state.storage);
                 match tokio::task::spawn_blocking(move || -> io::Result<CompactionReport> {
-                    let storage = storage.blocking_read();
                     Ok(CompactionReport {
                         compacted: 0,
-                        raw_backlog: Some(storage.raw_compaction_backlog_count()?),
+                        raw_backlog: Some(compaction_backlog(&storage, CompactionMode::RawOnly)?),
                         profile_rewrite_backlog: None,
                     })
                 })
@@ -136,14 +137,16 @@ pub async fn run_background_indexer(
                         profile_rewrite_backlog,
                         compaction_limit,
                     ) = {
-                        let storage = storage.blocking_read();
                         let raw_backlog_before = if refresh_active_backlog {
-                            Some(storage.raw_compaction_backlog_count()?)
+                            Some(compaction_backlog(&storage, CompactionMode::RawOnly)?)
                         } else {
                             None
                         };
                         let profile_rewrite_backlog = if refresh_active_backlog {
-                            Some(storage.profile_rewrite_backlog_count()?)
+                            Some(compaction_backlog(
+                                &storage,
+                                CompactionMode::ProfileRewrite,
+                            )?)
                         } else {
                             None
                         };
@@ -152,8 +155,18 @@ pub async fn run_background_indexer(
                         let (compaction_limit, profile_rewrite_limit) =
                             active_sync_compaction_limits(raw_backlog_for_limits, compaction_limit);
                         (
-                            storage.recent_raw_segment_compaction_plan(compaction_limit)?,
-                            storage.profile_rewrite_compaction_plan(profile_rewrite_limit)?,
+                            compaction_plan(
+                                &storage,
+                                compaction_limit,
+                                CompactionMode::RawOnly,
+                                true,
+                            )?,
+                            compaction_plan(
+                                &storage,
+                                profile_rewrite_limit,
+                                CompactionMode::ProfileRewrite,
+                                false,
+                            )?,
                             raw_backlog_before,
                             profile_rewrite_backlog,
                             compaction_limit,
@@ -162,7 +175,7 @@ pub async fn run_background_indexer(
 
                     debug_assert!(raw_plan.len() <= compaction_limit);
                     let raw_plan_len = raw_plan.len();
-                    let compacted = raw_plan.compact()? + profile_plan.compact()?;
+                    let compacted = compact_tasks(&raw_plan)? + compact_tasks(&profile_plan)?;
                     let raw_backlog = raw_backlog_before
                         .or(active_raw_backlog_hint)
                         .map(|backlog| backlog.saturating_sub(raw_plan_len));
@@ -174,24 +187,27 @@ pub async fn run_background_indexer(
                 }
 
                 let (plan, compaction_limit) = {
-                    let storage = storage.blocking_read();
-                    let backlog = storage.compaction_backlog_count()?;
+                    let backlog = compaction_backlog(&storage, CompactionMode::CurrentProfile)?;
                     let compaction_limit = if backlog >= ACTIVE_SYNC_COMPACTION_CATCH_UP_BACKLOG {
                         ACTIVE_SYNC_COMPACTION_CATCH_UP_LIMIT
                     } else {
                         compaction_limit
                     };
                     (
-                        storage.segment_compaction_plan(compaction_limit)?,
+                        compaction_plan(
+                            &storage,
+                            compaction_limit,
+                            CompactionMode::CurrentProfile,
+                            false,
+                        )?,
                         compaction_limit,
                     )
                 };
 
                 debug_assert!(plan.len() <= compaction_limit);
-                let compacted = plan.compact()?;
-                let storage = storage.blocking_read();
-                let raw_backlog = storage.raw_compaction_backlog_count()?;
-                let total_backlog = storage.compaction_backlog_count()?;
+                let compacted = compact_tasks(&plan)?;
+                let raw_backlog = compaction_backlog(&storage, CompactionMode::RawOnly)?;
+                let total_backlog = compaction_backlog(&storage, CompactionMode::CurrentProfile)?;
                 Ok(CompactionReport {
                     compacted,
                     raw_backlog: Some(raw_backlog),
@@ -314,6 +330,82 @@ pub async fn run_background_indexer(
         }
     }
     Ok(())
+}
+
+/// Visit a bounded metadata batch at a time without retaining the ingestion
+/// lock during filesystem work. Catalog positions keep their original order;
+/// additions after the initial length are left to the next maintenance pass.
+fn visit_compaction_candidates(
+    storage: &tokio::sync::RwLock<PartitionManager>,
+    newest_first: bool,
+    mut visit: impl FnMut(SegmentCompactionTask) -> io::Result<bool>,
+) -> io::Result<()> {
+    let end = storage.blocking_read().compaction_candidate_count();
+    let mut cursor = if newest_first { end } else { 0 };
+    while if newest_first {
+        cursor > 0
+    } else {
+        cursor < end
+    } {
+        let range = if newest_first {
+            cursor.saturating_sub(COMPACTION_CANDIDATE_BATCH_SIZE)..cursor
+        } else {
+            cursor
+                ..cursor
+                    .saturating_add(COMPACTION_CANDIDATE_BATCH_SIZE)
+                    .min(end)
+        };
+        cursor = if newest_first { range.start } else { range.end };
+        let mut candidates = storage.blocking_read().compaction_candidates(range)?;
+        if newest_first {
+            candidates.reverse();
+        }
+        for candidate in candidates {
+            if !visit(candidate)? {
+                return Ok(());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn compaction_backlog(
+    storage: &tokio::sync::RwLock<PartitionManager>,
+    mode: CompactionMode,
+) -> io::Result<usize> {
+    let mut count = 0;
+    visit_compaction_candidates(storage, false, |candidate| {
+        if candidate.needs_compaction(mode)? {
+            count += 1;
+        }
+        Ok(true)
+    })?;
+    Ok(count)
+}
+
+fn compaction_plan(
+    storage: &tokio::sync::RwLock<PartitionManager>,
+    limit: usize,
+    mode: CompactionMode,
+    newest_first: bool,
+) -> io::Result<Vec<SegmentCompactionTask>> {
+    let mut plan = Vec::new();
+    if limit != 0 {
+        visit_compaction_candidates(storage, newest_first, |candidate| {
+            if candidate.needs_compaction(mode)? {
+                plan.push(candidate);
+            }
+            Ok(plan.len() < limit)
+        })?;
+    }
+    Ok(plan)
+}
+
+fn compact_tasks(tasks: &[SegmentCompactionTask]) -> io::Result<usize> {
+    for task in tasks {
+        task.compact()?;
+    }
+    Ok(tasks.len())
 }
 
 fn sync_is_active(state: &AppState) -> bool {
@@ -588,6 +680,132 @@ mod tests {
             .unwrap();
         assert_eq!(storage.sealed_partitions().len(), segments);
         storage
+    }
+
+    fn compaction_storage(path: &Path, segments: usize) -> PartitionManager {
+        let mut storage = index_storage(path, segments);
+        storage
+            .record_sync_head(10_000, alloy_primitives::B256::ZERO, 10_000)
+            .unwrap();
+        storage.checkpoint_durable().unwrap();
+        storage
+    }
+
+    #[test]
+    fn compaction_inspection_and_execution_release_the_ingestion_lock() {
+        let root = tempfile::tempdir().unwrap();
+        let storage = tokio::sync::RwLock::new(compaction_storage(root.path(), 3));
+        let mut compacted = 0;
+        visit_compaction_candidates(&storage, false, |candidate| {
+            // Keep the writer throughout the actual filesystem operations, so
+            // this checks both the visit boundary and the task's independence.
+            let _writer = storage
+                .try_write()
+                .expect("candidate retained storage guard");
+            assert!(candidate.needs_compaction(CompactionMode::RawOnly)?);
+            candidate.compact()?;
+            compacted += 1;
+            assert!(!candidate.needs_compaction(CompactionMode::CurrentProfile)?);
+            Ok(true)
+        })
+        .unwrap();
+        assert_eq!(compacted, 3);
+        assert_eq!(
+            compaction_backlog(&storage, CompactionMode::RawOnly).unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn compaction_selection_preserves_order_modes_and_limits() {
+        let root = tempfile::tempdir().unwrap();
+        let storage = tokio::sync::RwLock::new(compaction_storage(root.path(), 4));
+        let expected = storage
+            .blocking_read()
+            .sealed_partitions()
+            .iter()
+            .map(|partition| partition.meta.id)
+            .collect::<Vec<_>>();
+        let oldest = compaction_plan(&storage, 2, CompactionMode::RawOnly, false).unwrap();
+        assert_eq!(
+            oldest
+                .iter()
+                .map(|task| task.segment_id())
+                .collect::<Vec<_>>(),
+            expected[..2]
+        );
+        let newest = compaction_plan(&storage, 2, CompactionMode::RawOnly, true).unwrap();
+        assert_eq!(
+            newest
+                .iter()
+                .map(|task| task.segment_id())
+                .collect::<Vec<_>>(),
+            expected[2..].iter().rev().copied().collect::<Vec<_>>()
+        );
+        assert!(
+            compaction_plan(&storage, 8, CompactionMode::ProfileRewrite, false)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(compact_tasks(&oldest).unwrap(), 2);
+        for mode in [CompactionMode::RawOnly, CompactionMode::CurrentProfile] {
+            assert_eq!(compaction_backlog(&storage, mode).unwrap(), 2);
+            let tasks = compaction_plan(&storage, 8, mode, false).unwrap();
+            assert_eq!(
+                tasks
+                    .iter()
+                    .map(|task| task.segment_id())
+                    .collect::<Vec<_>>(),
+                expected[2..]
+            );
+        }
+        assert_eq!(
+            compaction_backlog(&storage, CompactionMode::ProfileRewrite).unwrap(),
+            0
+        );
+        let _writer = storage.blocking_write();
+        assert!(
+            compaction_plan(&storage, 0, CompactionMode::RawOnly, false)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn compaction_scan_batches_metadata_and_bounds_concurrent_growth() {
+        let root = tempfile::tempdir().unwrap();
+        let initial = COMPACTION_CANDIDATE_BATCH_SIZE + 1;
+        let storage = tokio::sync::RwLock::new(compaction_storage(root.path(), initial));
+        let mut visited = Vec::new();
+        visit_compaction_candidates(&storage, true, |candidate| {
+            if visited.is_empty() {
+                let mut writer = storage.try_write().unwrap();
+                writer.write_batch(&[index_row(1_000)])?;
+                writer.checkpoint_durable()?;
+            }
+            assert!(candidate.needs_compaction(CompactionMode::RawOnly)?);
+            visited.push(candidate.segment_id());
+            Ok(true)
+        })
+        .unwrap();
+        let expected = storage
+            .blocking_read()
+            .sealed_partitions()
+            .iter()
+            .map(|partition| partition.meta.id)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            visited,
+            expected[..initial]
+                .iter()
+                .rev()
+                .copied()
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            compaction_backlog(&storage, CompactionMode::RawOnly).unwrap(),
+            initial + 1
+        );
     }
 
     #[test]

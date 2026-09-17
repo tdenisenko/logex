@@ -1,0 +1,216 @@
+{
+  "status": "All eight final-source local gates pass; CI and merge pending",
+  "base": "d6e7172269c949d3cf201c6183509a60d5762dd4",
+  "findings": [
+    "B10-21",
+    "B10-22"
+  ],
+  "evidence_root": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-compaction-locks-8r46vib3",
+  "original_reproduction": {
+    "method": "Existing published-ingestion test on original source, asserting raw backlog matches the empty raw plan",
+    "passed": 0,
+    "failed": 1,
+    "exit_code": 101
+  },
+  "focused_tests": {
+    "storage_compaction": 7,
+    "background": 22,
+    "failed": 0,
+    "ignored": 0
+  },
+  "evidence": {
+    "original-storage.rs": {
+      "sha256": "cac6c6e94274b2525b91923d884f8419c18eeac5e5364f25ffcbc678d0cda7c9",
+      "bytes": 347559
+    },
+    "original-backlog-control.rs": {
+      "sha256": "310f1cef085d2f1a173beff2c3b0c4351dc1a19abcc9cce78eeaeb12451a99b4",
+      "bytes": 2394
+    },
+    "original-backlog.log": {
+      "sha256": "dd075a65bbc4a6b47d1efe3a172d5cf0d60649e569f1577ea354098ca1e3a347",
+      "bytes": 1364
+    },
+    "original-backlog-result.json": {
+      "sha256": "a44fa40057b601b2cd0cca97b31b5522c0e4b2c937b5e346ee6d4b9f8fa8d819",
+      "bytes": 73
+    },
+    "fixed-backlog.log": {
+      "sha256": "279589b825a521c1fce8af8762a20d5d71f80f2fc96da3b278782f00255ce1e8",
+      "bytes": 1258
+    },
+    "focused-storage.log": {
+      "sha256": "d16da2c327156cf19ac76d73c4dce2ba463f40466538355e50aaae607d088c3f",
+      "bytes": 1815
+    },
+    "focused-background.log": {
+      "sha256": "fa0d17b90789321f2115ff97030f711da9ed24e9a680f506bdd1e68a0de11bf0",
+      "bytes": 2935
+    },
+    "gates/results.json": {
+      "sha256": "f07641a906ba84310abb46f7562b8a40973c108ecdb4364de31ee256e7dd7648",
+      "bytes": 4845
+    },
+    "gates/test-summary.json": {
+      "sha256": "39bad6ce3b091ccfd7f12d99e6de06c7234b940cbbf01f70ac5aaeb2947382ef",
+      "bytes": 69
+    }
+  },
+  "source_commit": "948bece49214e8efda60ca51d18cab88955f6b25",
+  "validation": {
+    "commit": "948bece49214e8efda60ca51d18cab88955f6b25",
+    "rustc": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+    "gates": [
+      {
+        "name": "vendor",
+        "command": [
+          "python3",
+          "tools/verify_datafusion_vendor.py"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T01:07:12.579207+00:00",
+        "finished": "2026-09-17T01:07:12.645448+00:00",
+        "sha256": "5de30a03a2c21d0dd165f1d3f30b23ef080e06616866e0a02f37198cff7f3a16",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-compaction-locks-8r46vib3/gates/vendor.log"
+      },
+      {
+        "name": "format",
+        "command": [
+          "cargo",
+          "fmt",
+          "--all",
+          "--",
+          "--check"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T01:07:12.645811+00:00",
+        "finished": "2026-09-17T01:07:13.614179+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-compaction-locks-8r46vib3/gates/format.log"
+      },
+      {
+        "name": "vendor-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2024",
+          "--config-path",
+          "vendor/reth-network/rustfmt.toml",
+          "--config",
+          "skip_children=true",
+          "vendor/reth-network/src/eth_requests.rs",
+          "vendor/reth-network/src/session/active.rs",
+          "vendor/reth-network/src/session/mod.rs",
+          "vendor/reth-network/src/session/types.rs",
+          "vendor/reth-network/src/session/range_update.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T01:07:13.614688+00:00",
+        "finished": "2026-09-17T01:07:13.677776+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-compaction-locks-8r46vib3/gates/vendor-format.log"
+      },
+      {
+        "name": "check",
+        "command": [
+          "cargo",
+          "check",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T01:07:13.678148+00:00",
+        "finished": "2026-09-17T01:07:21.078885+00:00",
+        "sha256": "74f613a51da9b63492a22846c17f2a8f6dbc72db2be1b1c413a1edce9bc89b9a",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-compaction-locks-8r46vib3/gates/check.log"
+      },
+      {
+        "name": "clippy",
+        "command": [
+          "cargo",
+          "clippy",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T01:07:21.079364+00:00",
+        "finished": "2026-09-17T01:07:29.113432+00:00",
+        "sha256": "bcf18530a0b98b8881aa86844894b502d888df0e338219f6495e718c540b255b",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-compaction-locks-8r46vib3/gates/clippy.log"
+      },
+      {
+        "name": "test",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T01:07:29.113960+00:00",
+        "finished": "2026-09-17T01:12:22.206784+00:00",
+        "sha256": "f134448b48eae71cc8986288a0ef776943d8fe9a63ea00d79ced2e4a18397b88",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-compaction-locks-8r46vib3/gates/test.log"
+      },
+      {
+        "name": "doc",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--doc",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T01:12:22.209233+00:00",
+        "finished": "2026-09-17T01:12:32.894123+00:00",
+        "sha256": "1b4fa496256810e3f8e243cf38178b5958663e239d17538983f4a101fab27096",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-compaction-locks-8r46vib3/gates/doc.log"
+      },
+      {
+        "name": "release-build",
+        "command": [
+          "cargo",
+          "build",
+          "-p",
+          "logex-node",
+          "--release",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T01:12:32.894689+00:00",
+        "finished": "2026-09-17T01:14:19.188963+00:00",
+        "sha256": "3cc29cb8cdf5e28756a1fbb6778d38735a614b1690653b391f9fccf5f0fc5bf3",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-compaction-locks-8r46vib3/gates/release-build.log"
+      }
+    ]
+  },
+  "workspace_tests": {
+    "passed": 1836,
+    "failed": 0,
+    "ignored": 24,
+    "groups": 27
+  }
+}

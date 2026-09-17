@@ -49,8 +49,9 @@ fn legacy_prefix_recovery_hook(before_manifest: bool) {
 
 const HISTORICAL_STAGING_MAX_BLOCK_SPAN: u64 = 65_536;
 
+/// Filesystem state to select after capturing eligible segment metadata.
 #[derive(Debug, Clone, Copy)]
-enum CompactionMode {
+pub enum CompactionMode {
     RawOnly,
     ProfileRewrite,
     CurrentProfile,
@@ -106,8 +107,26 @@ pub struct SegmentCompactionTask {
 }
 
 impl SegmentCompactionTask {
+    fn new(
+        paths: StorageCatalogPaths,
+        descriptor: SegmentDescriptor,
+        directory_lock: Arc<DataDirectoryLock>,
+    ) -> Self {
+        Self {
+            _directory_lock: directory_lock,
+            paths,
+            descriptor,
+        }
+    }
+
     pub fn segment_id(&self) -> u64 {
         self.descriptor.id
+    }
+
+    /// Inspect the current manifest outside the storage lock. This is only a
+    /// scheduling hint; compact() independently verifies source identity.
+    pub fn needs_compaction(&self, mode: CompactionMode) -> io::Result<bool> {
+        compaction_mode_matches(&self.paths, self.descriptor.id, mode)
     }
 
     pub fn compact(&self) -> std::io::Result<()> {
@@ -143,10 +162,8 @@ impl SegmentCompactionPlan {
     ) -> Self {
         let tasks = descriptors
             .into_iter()
-            .map(|descriptor| SegmentCompactionTask {
-                _directory_lock: Arc::clone(&directory_lock),
-                paths: paths.clone(),
-                descriptor,
+            .map(|descriptor| {
+                SegmentCompactionTask::new(paths.clone(), descriptor, Arc::clone(&directory_lock))
             })
             .collect();
         Self { tasks }
@@ -165,6 +182,23 @@ impl SegmentCompactionPlan {
             task.compact()?;
         }
         Ok(self.tasks.len())
+    }
+}
+
+fn compaction_mode_matches(
+    paths: &StorageCatalogPaths,
+    segment_id: u64,
+    mode: CompactionMode,
+) -> io::Result<bool> {
+    match mode {
+        CompactionMode::RawOnly => Ok(!super::segment::segment_is_compacted(paths, segment_id)?),
+        CompactionMode::ProfileRewrite => {
+            Ok(super::segment::segment_is_compacted(paths, segment_id)?
+                && !segment_uses_current_compaction_profile(paths, segment_id)?)
+        }
+        CompactionMode::CurrentProfile => {
+            Ok(!segment_uses_current_compaction_profile(paths, segment_id)?)
+        }
     }
 }
 
@@ -1510,11 +1544,39 @@ impl NativeStorage {
         ))
     }
 
-    fn segment_matches_compaction_mode(
+    /// Number of catalog positions available for bounded maintenance capture.
+    /// Capture this once to keep a scan finite while new segments are appended.
+    pub fn compaction_candidate_count(&self) -> usize {
+        self.catalog.segments.len()
+    }
+
+    /// Copy eligible metadata from a bounded catalog range without filesystem
+    /// I/O. Candidates retain directory ownership; inspect their manifests and
+    /// run compaction after releasing the outer storage guard.
+    pub fn compaction_candidates(
         &self,
-        segment: &SegmentDescriptor,
-        mode: CompactionMode,
-    ) -> std::io::Result<bool> {
+        range: std::ops::Range<usize>,
+    ) -> io::Result<Vec<SegmentCompactionTask>> {
+        self.ensure_writable()?;
+        Ok(self
+            .catalog
+            .segments
+            .iter()
+            .skip(range.start)
+            .take(range.len())
+            .filter(|segment| self.segment_is_compaction_candidate(segment))
+            .cloned()
+            .map(|descriptor| {
+                SegmentCompactionTask::new(
+                    self.paths.clone(),
+                    descriptor,
+                    Arc::clone(&self.directory_lock),
+                )
+            })
+            .collect())
+    }
+
+    fn segment_is_compaction_candidate(&self, segment: &SegmentDescriptor) -> bool {
         if Some(segment.id) == self.catalog.active_historical_segment
             || self
                 .pending_ingestion
@@ -1529,49 +1591,38 @@ impl NativeStorage {
                     || segment.id >= pending.journal.next_segment_id
             })
         {
+            return false;
+        }
+        self.should_compact_segment(segment)
+    }
+
+    fn segment_matches_compaction_mode(
+        &self,
+        segment: &SegmentDescriptor,
+        mode: CompactionMode,
+    ) -> io::Result<bool> {
+        if !self.segment_is_compaction_candidate(segment) {
             return Ok(false);
         }
-
-        match mode {
-            CompactionMode::RawOnly => self.segment_needs_raw_compaction(segment),
-            CompactionMode::ProfileRewrite => self.segment_needs_profile_rewrite(segment),
-            CompactionMode::CurrentProfile => self.segment_needs_compaction(segment),
-        }
+        compaction_mode_matches(&self.paths, segment.id, mode)
     }
 
-    pub fn raw_compaction_backlog_count(&self) -> std::io::Result<usize> {
-        let mut count = 0usize;
-        for segment in &self.catalog.segments {
-            if Some(segment.id) == self.catalog.active_historical_segment {
-                continue;
-            }
-            if self.segment_needs_raw_compaction(segment)? {
-                count += 1;
-            }
-        }
-        Ok(count)
+    pub fn raw_compaction_backlog_count(&self) -> io::Result<usize> {
+        self.compaction_backlog_for_mode(CompactionMode::RawOnly)
     }
 
-    pub fn compaction_backlog_count(&self) -> std::io::Result<usize> {
-        let mut count = 0usize;
-        for segment in &self.catalog.segments {
-            if Some(segment.id) == self.catalog.active_historical_segment {
-                continue;
-            }
-            if self.segment_needs_compaction(segment)? {
-                count += 1;
-            }
-        }
-        Ok(count)
+    pub fn compaction_backlog_count(&self) -> io::Result<usize> {
+        self.compaction_backlog_for_mode(CompactionMode::CurrentProfile)
     }
 
-    pub fn profile_rewrite_backlog_count(&self) -> std::io::Result<usize> {
-        let mut count = 0usize;
+    pub fn profile_rewrite_backlog_count(&self) -> io::Result<usize> {
+        self.compaction_backlog_for_mode(CompactionMode::ProfileRewrite)
+    }
+
+    fn compaction_backlog_for_mode(&self, mode: CompactionMode) -> io::Result<usize> {
+        let mut count = 0;
         for segment in &self.catalog.segments {
-            if Some(segment.id) == self.catalog.active_historical_segment {
-                continue;
-            }
-            if self.segment_needs_profile_rewrite(segment)? {
+            if self.segment_matches_compaction_mode(segment, mode)? {
                 count += 1;
             }
         }
@@ -2561,48 +2612,6 @@ impl NativeStorage {
             return false;
         };
         max_block.saturating_add(self.config.compaction_safety_margin_blocks) <= head_block
-    }
-
-    fn segment_needs_compaction(&self, descriptor: &SegmentDescriptor) -> std::io::Result<bool> {
-        if !self.should_compact_segment(descriptor) {
-            return Ok(false);
-        }
-
-        Ok(!segment_uses_current_compaction_profile(
-            &self.paths,
-            descriptor.id,
-        )?)
-    }
-
-    fn segment_needs_raw_compaction(
-        &self,
-        descriptor: &SegmentDescriptor,
-    ) -> std::io::Result<bool> {
-        if !self.should_compact_segment(descriptor) {
-            return Ok(false);
-        }
-
-        Ok(!super::segment::segment_is_compacted(
-            &self.paths,
-            descriptor.id,
-        )?)
-    }
-
-    fn segment_needs_profile_rewrite(
-        &self,
-        descriptor: &SegmentDescriptor,
-    ) -> std::io::Result<bool> {
-        if !self.should_compact_segment(descriptor) {
-            return Ok(false);
-        }
-        if !super::segment::segment_is_compacted(&self.paths, descriptor.id)? {
-            return Ok(false);
-        }
-
-        Ok(!segment_uses_current_compaction_profile(
-            &self.paths,
-            descriptor.id,
-        )?)
     }
 
     fn verify_integrity(&self) -> io::Result<()> {
@@ -4017,6 +4026,14 @@ mod tests {
             .unwrap();
             storage.checkpoint().unwrap();
             assert!(storage.raw_segment_compaction_plan(8).unwrap().is_empty());
+            assert_eq!(storage.raw_compaction_backlog_count().unwrap(), 0);
+            assert_eq!(storage.compaction_backlog_count().unwrap(), 0);
+            assert!(
+                storage
+                    .compaction_candidates(0..storage.compaction_candidate_count())
+                    .unwrap()
+                    .is_empty()
+            );
             let next = ingestion_header(101, header.hash_slow());
             ingest_test_batch(
                 &mut storage,
@@ -4028,6 +4045,14 @@ mod tests {
             .unwrap();
             storage.checkpoint().unwrap();
             assert!(storage.raw_segment_compaction_plan(8).unwrap().is_empty());
+            assert_eq!(storage.raw_compaction_backlog_count().unwrap(), 0);
+            assert_eq!(storage.compaction_backlog_count().unwrap(), 0);
+            assert!(
+                storage
+                    .compaction_candidates(0..storage.compaction_candidate_count())
+                    .unwrap()
+                    .is_empty()
+            );
             durability::inject_failure(usize::MAX);
             if reopen {
                 drop(storage);
@@ -4043,6 +4068,14 @@ mod tests {
             );
             assert!(storage.published_ingestion.is_none());
             assert!(!storage.raw_segment_compaction_plan(8).unwrap().is_empty());
+            let candidates = storage
+                .compaction_candidates(0..storage.compaction_candidate_count())
+                .unwrap();
+            assert!(
+                candidates
+                    .iter()
+                    .any(|task| task.needs_compaction(CompactionMode::RawOnly).unwrap())
+            );
         }
     }
 
@@ -6174,13 +6207,70 @@ mod tests {
         storage.checkpoint().unwrap();
         let plan = storage.raw_segment_compaction_plan(1).unwrap();
         assert!(!plan.is_empty());
+        let candidates = storage.compaction_candidates(0..1).unwrap();
+        assert_eq!(candidates.len(), 1);
         drop(storage);
         assert_eq!(
             NativeStorage::open(config.clone()).err().unwrap().kind(),
             io::ErrorKind::WouldBlock
         );
         drop(plan);
-        NativeStorage::open(config).expect("directory lock released after compaction plan drops");
+        assert_eq!(
+            NativeStorage::open(config.clone()).err().unwrap().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        drop(candidates);
+        NativeStorage::open(config)
+            .expect("directory lock released after all compaction owners drop");
+    }
+
+    #[test]
+    fn compaction_capture_is_metadata_only_and_preserves_catalog_positions() {
+        let tmp = TempDir::new().unwrap();
+        let mut storage = NativeStorage::open(NativeStorageConfig {
+            data_dir: tmp.path().to_owned(),
+            hot_target_rows: 1,
+            compaction_safety_margin_blocks: 0,
+        })
+        .unwrap();
+        storage.write_batch(&make_rows(4, 100)).unwrap();
+        // An uncheckpointed epoch must not become a maintenance candidate.
+        assert!(
+            storage
+                .compaction_candidates(0..storage.compaction_candidate_count())
+                .unwrap()
+                .is_empty()
+        );
+        storage.checkpoint_durable().unwrap();
+        storage.catalog.segments.swap(0, 2);
+        let expected = storage.catalog.segments[1..3]
+            .iter()
+            .map(|segment| segment.id)
+            .collect::<Vec<_>>();
+        let original = storage.segment_path(expected[0]);
+        let saved = tmp.path().join("saved-owned-segment");
+        fs::rename(&original, &saved).unwrap();
+        let captured = storage.compaction_candidates(1..3);
+        fs::rename(&saved, &original).unwrap();
+        let captured = captured.unwrap();
+        assert_eq!(
+            captured
+                .iter()
+                .map(|task| task.segment_id())
+                .collect::<Vec<_>>(),
+            expected
+        );
+        assert!(
+            storage
+                .compaction_candidates(usize::MAX..usize::MAX)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            captured
+                .iter()
+                .all(|task| task.needs_compaction(CompactionMode::RawOnly).unwrap())
+        );
     }
 
     #[test]
