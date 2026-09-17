@@ -9,7 +9,7 @@ use logex_server::grpc::LogExGrpcService;
 use logex_server::grpc::pb::GetLogsRequest;
 use logex_server::grpc::pb::log_ex_service_server::LogExService;
 use logex_server::handler::handle_jsonrpc;
-use logex_server::{AppState, jsonrpc::JsonRpcRequest};
+use logex_server::{AppState, jsonrpc::JsonRpcDocument};
 use logex_storage::{PartitionManager, PartitionManagerConfig};
 use logex_types::{LogRow, Source, SyncStatus};
 use tokio_stream::StreamExt;
@@ -43,17 +43,26 @@ fn row(block: u64) -> LogRow {
 async fn query(state: Arc<AppState>, protocol: Protocol) -> Result<Vec<u64>, String> {
     match protocol {
         Protocol::JsonRpc => {
-            let request: JsonRpcRequest = serde_json::from_value(serde_json::json!({
-                "jsonrpc": "2.0", "method": "eth_getLogs", "params": [{}], "id": 1,
-            }))
+            let request: JsonRpcDocument = serde_json::from_str(
+                &serde_json::json!({
+                    "jsonrpc": "2.0", "method": "eth_getLogs", "params": [{}], "id": 1,
+                })
+                .to_string(),
+            )
             .unwrap();
-            let Json(response) = handle_jsonrpc(State(state), Json(request)).await;
-            if let Some(error) = response.error {
-                return Err(error.message);
+            let response = handle_jsonrpc(State(state), Ok(Json(request))).await;
+            let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .unwrap();
+            let response: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            if let Some(error) = response.get("error") {
+                assert_eq!(
+                    error["code"], -32603,
+                    "native execution failure changed class"
+                );
+                return Err(error["message"].as_str().unwrap().to_owned());
             }
-            Ok(response
-                .result
-                .unwrap()
+            Ok(response["result"]
                 .as_array()
                 .unwrap()
                 .iter()

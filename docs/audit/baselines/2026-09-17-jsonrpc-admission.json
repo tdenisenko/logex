@@ -1,0 +1,327 @@
+{
+  "date": "2026-09-17",
+  "branch": "audit/jsonrpc-admission",
+  "base": "910a74aea39b7b358d397651450691acb90192cd",
+  "source_commit": "333fcf409b1fe11beeac8a6e858775a11248dd3b",
+  "source_inventory": {
+    "base": "910a74aea39b7b358d397651450691acb90192cd",
+    "source_commit": "333fcf409b1fe11beeac8a6e858775a11248dd3b",
+    "files": {
+      "crates/logex-server/Cargo.toml": {
+        "original": {
+          "bytes": 697,
+          "sha256": "78b5c42af076a1abdf14be1a4149523298f5b52d3946f4d2bfe4a50622c534f6"
+        },
+        "final": {
+          "bytes": 723,
+          "sha256": "d6345a058b86905930ac7f5e8816236acdc052d21780e6e074594838a400f692"
+        }
+      },
+      "crates/logex-server/src/jsonrpc.rs": {
+        "original": {
+          "bytes": 1550,
+          "sha256": "23486befd867b3569ba81c2e173d2fc214b67888d1ead555bdbf6996ee53f172"
+        },
+        "final": {
+          "bytes": 10983,
+          "sha256": "df9af4d94e393b15d465d4539c5e500045173fe71954f29a627eb471eec3cc65"
+        }
+      },
+      "crates/logex-server/src/handler.rs": {
+        "original": {
+          "bytes": 35943,
+          "sha256": "ca7a7588755220be58f6756673134fab3f3642c1410aa36d2adb87b1ae99f79c"
+        },
+        "final": {
+          "bytes": 41152,
+          "sha256": "53cfd7f8f9bf823e60b6583b9accaddbd107b3f919747c9f5760e69b25a76b3f"
+        }
+      },
+      "crates/logex-server/tests/native_query_workers.rs": {
+        "original": {
+          "bytes": 6065,
+          "sha256": "ea223619612deb1f0a8ca17b1f2b0e8143df66afe6123ff4477dcec74247f911"
+        },
+        "final": {
+          "bytes": 6497,
+          "sha256": "ee6a02f74a102d605c7564f98a2813a9cdce5ddc40972adfacb917be99bda63d"
+        }
+      },
+      "crates/logex-server/tests/jsonrpc_admission.rs": {
+        "final": {
+          "bytes": 14811,
+          "sha256": "8804d86a269e54b45e36b0ef9c53d7b0452b5faacd7f9015c690f223f308c44c"
+        }
+      }
+    }
+  },
+  "findings": [
+    "B8-09",
+    "B8-10",
+    "B8-11"
+  ],
+  "gates": {
+    "commit": "333fcf409b1fe11beeac8a6e858775a11248dd3b",
+    "rustc": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+    "gates": [
+      {
+        "name": "vendor",
+        "command": [
+          "python3",
+          "tools/verify_datafusion_vendor.py"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T14:35:29.629186+00:00",
+        "finished": "2026-09-17T14:35:29.835210+00:00",
+        "sha256": "66c8356dd4a2753b376fc6b222ceda74bb495616f72e05bb062c7fb877a81bd1",
+        "log": "/private/tmp/logex-audit-jsonrpc-admission-20260917/gates/vendor.log"
+      },
+      {
+        "name": "format",
+        "command": [
+          "cargo",
+          "fmt",
+          "--all",
+          "--",
+          "--check"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T14:35:29.835613+00:00",
+        "finished": "2026-09-17T14:35:30.884564+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-audit-jsonrpc-admission-20260917/gates/format.log"
+      },
+      {
+        "name": "vendor-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2024",
+          "--config-path",
+          "vendor/reth-network/rustfmt.toml",
+          "--config",
+          "skip_children=true",
+          "vendor/reth-network/src/eth_requests.rs",
+          "vendor/reth-network/src/session/active.rs",
+          "vendor/reth-network/src/session/mod.rs",
+          "vendor/reth-network/src/session/types.rs",
+          "vendor/reth-network/src/session/range_update.rs",
+          "vendor/reth-discv5/src/lib.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T14:35:30.884925+00:00",
+        "finished": "2026-09-17T14:35:30.951236+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-audit-jsonrpc-admission-20260917/gates/vendor-format.log"
+      },
+      {
+        "name": "enr-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2021",
+          "--config",
+          "skip_children=true",
+          "vendor/enr/src/lib.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T14:35:30.951555+00:00",
+        "finished": "2026-09-17T14:35:31.002591+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-audit-jsonrpc-admission-20260917/gates/enr-format.log"
+      },
+      {
+        "name": "gossipsub-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2021",
+          "--config",
+          "skip_children=true",
+          "vendor/libp2p-gossipsub/src/time_cache.rs",
+          "vendor/libp2p-gossipsub/src/behaviour.rs",
+          "vendor/libp2p-gossipsub/src/behaviour/tests.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T14:35:31.005898+00:00",
+        "finished": "2026-09-17T14:35:31.101920+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-audit-jsonrpc-admission-20260917/gates/gossipsub-format.log"
+      },
+      {
+        "name": "aggregate-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2021",
+          "--config",
+          "max_width=90,skip_children=true",
+          "vendor/datafusion-functions-aggregate/src/sum.rs",
+          "vendor/datafusion-functions-aggregate/src/average.rs",
+          "vendor/datafusion-functions-aggregate-common/src/aggregate/sum_distinct/numeric.rs",
+          "vendor/datafusion-functions-aggregate-common/src/aggregate/avg_distinct/decimal.rs",
+          "vendor/datafusion-functions-aggregate-common/src/utils.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T14:35:31.102274+00:00",
+        "finished": "2026-09-17T14:35:31.164680+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-audit-jsonrpc-admission-20260917/gates/aggregate-format.log"
+      },
+      {
+        "name": "check",
+        "command": [
+          "cargo",
+          "check",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T14:35:31.165060+00:00",
+        "finished": "2026-09-17T14:35:39.267787+00:00",
+        "sha256": "638ffcc5df2c20e7c9cdaf5d68d9286db18292ca9565232ca683d809d26e618e",
+        "log": "/private/tmp/logex-audit-jsonrpc-admission-20260917/gates/check.log"
+      },
+      {
+        "name": "clippy",
+        "command": [
+          "cargo",
+          "clippy",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T14:35:39.268593+00:00",
+        "finished": "2026-09-17T14:35:47.134759+00:00",
+        "sha256": "9b8bf88b0c8581157491b7cf9e5ea900033efc3cd2e775766aec3784aff7fd7e",
+        "log": "/private/tmp/logex-audit-jsonrpc-admission-20260917/gates/clippy.log"
+      },
+      {
+        "name": "test",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T14:38:05.629433+00:00",
+        "finished": "2026-09-17T14:41:26.402655+00:00",
+        "sha256": "bddd079c2a25c5d01508f7af4dca855a1bd471d711c4636bda7da585dea3fb99",
+        "log": "/private/tmp/logex-audit-jsonrpc-admission-20260917/gates/test.log"
+      },
+      {
+        "name": "doc",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--doc",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T14:41:26.404345+00:00",
+        "finished": "2026-09-17T14:41:37.826835+00:00",
+        "sha256": "3df59010b8f7617500703c38270353d98eb6ce09163f0277ceddd8c80e033c45",
+        "log": "/private/tmp/logex-audit-jsonrpc-admission-20260917/gates/doc.log"
+      },
+      {
+        "name": "release-build",
+        "command": [
+          "cargo",
+          "build",
+          "-p",
+          "logex-node",
+          "--release",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T14:41:37.827422+00:00",
+        "finished": "2026-09-17T14:42:56.152834+00:00",
+        "sha256": "7dab0770e008044a9830a2aa0ec538abe3a3f6e7c36f938364173ac6a406c542",
+        "log": "/private/tmp/logex-audit-jsonrpc-admission-20260917/gates/release-build.log"
+      }
+    ]
+  },
+  "workspace_tests": {
+    "passed": 1987,
+    "failed": 0,
+    "ignored": 24,
+    "targets": 36
+  },
+  "documentation_tests": {
+    "passed": 0,
+    "failed": 0,
+    "ignored": 0,
+    "targets": 8
+  },
+  "original_admission_controls": {
+    "passed": 1,
+    "failed": 4,
+    "ignored": 0,
+    "targets": 1
+  },
+  "original_numeric_control": {
+    "passed": 0,
+    "failed": 1,
+    "ignored": 0,
+    "targets": 1
+  },
+  "final_server_tests": {
+    "passed": 130,
+    "failed": 0,
+    "ignored": 2,
+    "targets": 5
+  },
+  "evidence": {
+    "path": "docs/audit/baselines/2026-09-17-jsonrpc-admission-evidence.json.gz",
+    "files": 38,
+    "bytes_uncompressed": 380421,
+    "bytes": 75178,
+    "sha256": "d90dcb4b4d00954df52738add32af5b063272e935255b6c12028e633c64f4ed1"
+  },
+  "validation": {
+    "path": "docs/audit/baselines/2026-09-17-jsonrpc-admission-validation.json.gz",
+    "files": 15,
+    "bytes_uncompressed": 242498,
+    "bytes": 45564,
+    "sha256": "de4023c9cc18d2c02dcf9dcc0354792ac7b2d81e70c3d496a25f0abbb465f387"
+  },
+  "publication": {
+    "state": "pending"
+  },
+  "boundaries": [
+    "Original production source is byte-identical to base; five initial controls yield one pass/four expected failures, followed by one expected numeric ID failure. Test-only source and logs retained.",
+    "Candidate-only wire-type and syntax-precedence regressions are separately preserved; they are not claimed as original-source findings.",
+    "Only string, numeric and null IDs are echoed; raw ID serialization preserves token precision. Existing Axum feature already selected raw_value; no dependency version, lock or arbitrary_precision change.",
+    "Argument admission precedes query/storage/worker acquisition. Notifications await owned execution and then return HTTP 204, preserving cancellation and snapshot checks.",
+    "Nonempty JSON-RPC batch execution remains unsupported HTTP 422; empty batches are invalid requests. No new process-wide admission or response-memory bound.",
+    "Detailed Ethereum filter semantics, retained WS snapshots, lag/reorg notifications, dashboard behavior, shared query resource policy and verified repair remain separate.",
+    "No ingestion metadata writes, storage changes, SQL implementation, remote/production-data change, live sync or benchmark. No throughput claim."
+  ]
+}

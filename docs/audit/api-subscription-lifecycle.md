@@ -2,7 +2,7 @@
 
 Base: PR #227 merge `50c1194ff5f9c56581587a84eb46a408cd62b1e7`.
 Branch: `audit/api-subscription-lifecycle`.
-This is the first batch-8 subscription milestone. Implementation and eleven local gates are complete; exact-head CI and merge remain.
+This is the first batch-8 subscription milestone. Implementation and eleven local gates are complete; PR #228 merged as `910a74ae` after all six CI jobs.
 
 ## Findings and corrections
 
@@ -83,4 +83,6 @@ Source is `dbd5b48a9767bbd35ca26f7c68f340312323188e`. The [validation record](ba
 retains full gate logs, source hashes, original failures and review evidence.
 All 108 server library controls pass; independent source review passes.
 Vendor sources are unchanged from PR #226; current CI still runs its separate
-expiry regressions on Linux/macOS. Exact-head CI and merge remain.
+expiry regressions on Linux/macOS. Exact-head CI and merge passed; verified closure follows.
+
+All six CI jobs passed on `ec0ac417` and ten Linux volume/template controls passed with verified cleanup. [PR #228](https://github.com/tdenisenko/logex/pull/228) merged as `910a74ae`. The merge tree is identical to the tested head. B8-06–08 are closed. JSON-RPC/filter semantics, slow-consumer gaps, reorg notifications, dashboard ordering and integrated acceptance remain open.
