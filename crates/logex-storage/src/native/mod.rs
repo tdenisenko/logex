@@ -1,5 +1,7 @@
 mod catalog;
+mod directory_lock;
 mod filter;
+mod inspection;
 mod recovery;
 mod segment;
 mod storage;
@@ -18,4 +20,9 @@ pub(crate) use segment::{
 pub use storage::{
     CompactionMode, NativeStorage, PendingCanonicalReorg, ReadViewToken, SegmentCompactionPlan,
     SegmentCompactionTask,
+};
+
+pub use inspection::{
+    InspectedSegmentRole, InspectionLimits, PrimaryDataDisposition, PrimaryDataInspection,
+    SegmentInspection, inspect_primary_data,
 };

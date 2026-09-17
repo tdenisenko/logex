@@ -5,7 +5,7 @@ use alloy_primitives::{Address, B256, Bytes};
 use logex_types::{LogRow, Source};
 
 use crate::column_artifact::ColumnArtifacts;
-use crate::native::{ColumnDescriptor, SegmentManifest};
+use crate::native::{ColumnDescriptor, CompressionCodec, SegmentManifest};
 use crate::page::{
     PageIndexEntry, decode_fixed_width_page, decode_u8_page, decode_u32_page, decode_u64_page,
     decode_var_bytes_page_bounded, read_page_index,
@@ -30,6 +30,41 @@ pub struct SegmentReader {
     source_namespace: Option<[u8; 16]>,
     captured_rows: Option<u64>,
     canonical_metadata: Option<crate::column::RawCanonicalMetadata>,
+}
+
+#[derive(Debug)]
+pub(crate) enum InspectionPreflightError {
+    LimitExceeded {
+        resource: &'static str,
+        required: u64,
+        limit: u64,
+    },
+    Io(io::Error),
+}
+
+impl From<io::Error> for InspectionPreflightError {
+    fn from(error: io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
+fn inspection_charge(
+    total: &mut u64,
+    additional: u64,
+    limit: u64,
+    resource: &'static str,
+) -> Result<(), InspectionPreflightError> {
+    match total.checked_add(additional) {
+        Some(required) if required <= limit => {
+            *total = required;
+            Ok(())
+        }
+        required => Err(InspectionPreflightError::LimitExceeded {
+            resource,
+            required: required.unwrap_or(u64::MAX),
+            limit,
+        }),
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -278,6 +313,12 @@ impl SegmentReader {
     pub(crate) fn bundle_reference(&self) -> Option<&crate::bundle::BundleReference> {
         self.artifacts.bundle().map(|bundle| bundle.reference())
     }
+
+    pub(crate) fn captured_manifest_identity(&self) -> Option<(u64, crate::native::SegmentKind)> {
+        self.manifest
+            .as_ref()
+            .map(|manifest| (manifest.segment_id, manifest.kind))
+    }
     /// Captured publication's logical-prefix commitment, checked against its
     /// canonical envelope for identified raw storage. Query capture validates
     /// metadata, not every row's content; recovery recomputes the saved prefix.
@@ -304,6 +345,19 @@ impl SegmentReader {
 
     pub fn open(dir: &Path) -> io::Result<Self> {
         Self::open_inner(dir, None)
+    }
+
+    /// Capture an offline source without opening symlinks or special artifacts.
+    /// The caller must hold the offline directory lock for the complete read.
+    pub(crate) fn open_for_inspection(dir: &Path) -> io::Result<Self> {
+        for relative in ["segment.json", crate::column::SOURCE_MARKER_FILE] {
+            match crate::column_artifact::require_regular_artifact(dir, Path::new(relative)) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Self::open_manifest_checked(dir, None, load_manifest(dir)?, true)
     }
 
     /// Capture only the columns needed by a query, plus canonicality and row-count
@@ -358,7 +412,16 @@ impl SegmentReader {
     fn open_manifest(
         dir: &Path,
         projection: Option<&[&str]>,
+        manifest: Option<SegmentManifest>,
+    ) -> io::Result<Self> {
+        Self::open_manifest_checked(dir, projection, manifest, false)
+    }
+
+    fn open_manifest_checked(
+        dir: &Path,
+        projection: Option<&[&str]>,
         mut manifest: Option<SegmentManifest>,
+        inspection: bool,
     ) -> io::Result<Self> {
         for _ in 0..3 {
             if let Some(manifest) = &manifest {
@@ -400,7 +463,12 @@ impl SegmentReader {
                     "raw source namespace differs from the manifest",
                 ));
             }
-            match ColumnArtifacts::open_projected(dir, manifest.as_ref(), projection) {
+            let captured = if inspection {
+                ColumnArtifacts::open_for_inspection(dir, manifest.as_ref())
+            } else {
+                ColumnArtifacts::open_projected(dir, manifest.as_ref(), projection)
+            };
+            match captured {
                 Ok(artifacts) => {
                     #[cfg(test)]
                     if let Some(hook) = AFTER_ARTIFACT_CAPTURE.with_borrow_mut(Option::take) {
@@ -744,6 +812,236 @@ impl SegmentReader {
 
     pub fn read_log_rows(&self, row_ids: Option<&[u32]>) -> io::Result<Vec<LogRow>> {
         self.materialize_log_rows(row_ids, None)
+    }
+
+    /// Screen a locked offline inspection before row IDs, retained raw buffers,
+    /// or data payloads are materialized. These caller-supplied allowances are
+    /// not query limits or a total RSS bound. Decoded bytes include page framing.
+    pub(crate) fn inspection_preflight(
+        &mut self,
+        max_retained_artifact_bytes: u64,
+        max_decoded_payload_bytes: u64,
+    ) -> Result<(), InspectionPreflightError> {
+        let mut artifact_bytes = 0;
+        for length in self.artifacts.inspection_artifact_lengths()? {
+            inspection_charge(
+                &mut artifact_bytes,
+                length,
+                max_retained_artifact_bytes,
+                "retained_artifact_bytes",
+            )?;
+        }
+        let rows = self.read_row_count()?;
+        self.inspection_validate_raw_shapes(rows)?;
+        if rows == 0 {
+            if let Some(manifest) = &self.manifest {
+                for descriptor in &manifest.columns {
+                    let Some(index_path) = &descriptor.page_index_path else {
+                        continue;
+                    };
+                    if !read_page_index(&self.artifacts.read(index_path)?)?.is_empty()
+                        || self.artifacts.len(&descriptor.data_path)? != 0
+                    {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "empty segment has nonempty paged artifacts",
+                        )
+                        .into());
+                    }
+                    if let Some(path) = &descriptor.null_bitmap_path {
+                        let bytes = self.artifacts.read(path)?;
+                        if bytes != [0; 8] {
+                            return Err(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "empty segment has invalid null bitmap",
+                            )
+                            .into());
+                        }
+                    }
+                }
+            }
+            return Ok(());
+        }
+        let mut lengths = match self.compacted_column("data_len") {
+            Some(descriptor) => BatchLengths::Paged {
+                descriptor,
+                entries: self.read_compacted_page_index(descriptor, None)?,
+                cached: None,
+            },
+            None => BatchLengths::Raw(self.raw_fixed::<4>("data_len.col", None)?),
+        };
+        let mut decoded = 0;
+        // Every companion length is checked before even looking at a data
+        // payload's codec tag. Length pages have fixed, format-bound decoding.
+        for row in 0..rows {
+            inspection_charge(
+                &mut decoded,
+                u64::from(lengths.row(self, row)?),
+                max_decoded_payload_bytes,
+                "decoded_payload_bytes",
+            )?;
+        }
+        if let Some(descriptor) = self.compacted_column("data") {
+            let entries = self.read_compacted_page_index(descriptor, None)?;
+            let stream_len = self.artifacts.len(&descriptor.data_path)?;
+            for entry in entries {
+                let end = entry
+                    .offset
+                    .checked_add(u64::from(entry.encoded_len))
+                    .ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::InvalidData, "inspection page range overflow")
+                    })?;
+                if end > stream_len {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "inspection data page exceeds its artifact",
+                    )
+                    .into());
+                }
+                let offset_width = match descriptor.codec {
+                    CompressionCodec::None | CompressionCodec::Zstd | CompressionCodec::Lz4 => 8,
+                    CompressionCodec::AdaptiveBytes => {
+                        // This format byte selects the persisted offset width;
+                        // never trust a compression frame's claimed decoded size.
+                        let tag = self
+                            .artifacts
+                            .read_range(&descriptor.data_path, entry.offset..entry.offset + 1)?;
+                        match tag.as_slice() {
+                            [0] => 8,
+                            [1] => 4,
+                            _ => {
+                                return Err(io::Error::new(
+                                    io::ErrorKind::InvalidData,
+                                    "invalid adaptive bytes tag",
+                                )
+                                .into());
+                            }
+                        }
+                    }
+                    _ => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "invalid inspection data codec",
+                        )
+                        .into());
+                    }
+                };
+                let framing = (u64::from(entry.row_count) + 1) * offset_width + 4;
+                inspection_charge(
+                    &mut decoded,
+                    framing,
+                    max_decoded_payload_bytes,
+                    "decoded_payload_bytes",
+                )?;
+            }
+        } else {
+            let expected = rows
+                .checked_add(1)
+                .and_then(|count| count.checked_mul(8))
+                .and_then(|offsets| offsets.checked_add(ColumnFileHeader::SIZE as u64))
+                .and_then(|metadata| metadata.checked_add(decoded))
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "raw data length overflow")
+                })?;
+            if self.artifacts.len("data.col")? != expected {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "raw data bytes differ from companion lengths",
+                )
+                .into());
+            }
+        }
+        Ok(())
+    }
+
+    fn inspection_validate_raw_shapes(&self, rows: u64) -> io::Result<()> {
+        if self.artifacts.bundle().is_some() {
+            return Ok(());
+        }
+        for (name, width) in [
+            ("address", 20),
+            ("block_number", 8),
+            ("block_hash", 32),
+            ("timestamp", 8),
+            ("tx_hash", 32),
+            ("tx_index", 4),
+            ("log_index", 4),
+            ("data_len", 4),
+            ("source", 1),
+            ("topic0", 32),
+            ("topic1", 32),
+            ("topic2", 32),
+            ("topic3", 32),
+            ("data", 0),
+        ] {
+            if self.compacted_column(name).is_some() {
+                continue;
+            }
+            let path = format!("{name}.col");
+            let len = match self.artifacts.len(&path) {
+                Ok(len) => len,
+                Err(error) if rows == 0 && error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error),
+            };
+            let bytes = self
+                .artifacts
+                .read_range(&path, 0..ColumnFileHeader::SIZE as u64)?;
+            let header = ColumnFileHeader::read_from(&bytes).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "invalid inspection raw header")
+            })?;
+            if header.version != crate::column::COLUMN_VERSION
+                || header.compression != 0
+                || header.row_count != rows
+                || (width != 0 && len != ColumnFileHeader::SIZE as u64 + rows * width)
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "raw artifact differs from captured row count",
+                ));
+            }
+            if name == "data" && rows == 0 {
+                let start = ColumnFileHeader::SIZE as u64;
+                if len != start + 8 || self.artifacts.read_range(&path, start..start + 8)? != [0; 8]
+                {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "invalid empty raw data offsets",
+                    ));
+                }
+            }
+        }
+        for topic in 0..4 {
+            let name = format!("topic{topic}");
+            if self.compacted_column(&name).is_some() {
+                continue;
+            }
+            let path = format!("{name}.null");
+            let len = match self.artifacts.len(&path) {
+                Ok(len) => len,
+                Err(error) if rows == 0 && error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error),
+            };
+            let header = self.artifacts.read_range(&path, 0..8)?;
+            if len != 8 + rows.div_ceil(8) || header.as_slice() != rows.to_le_bytes() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "raw null bitmap differs from captured rows",
+                ));
+            }
+        }
+        match self
+            .artifacts
+            .raw_canonical_metadata(self.canonical_relative_path())
+        {
+            Ok(metadata) => {
+                metadata
+                    .validate_committed(None, rows)?
+                    .validate_exact_len(self.artifacts.len(self.canonical_relative_path())?)?;
+            }
+            Err(error) if rows == 0 && error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        Ok(())
     }
 
     /// Prepare selected fixed metadata once and materialize one payload page or
@@ -1515,6 +1813,161 @@ mod tests {
         SegmentDescriptor, SegmentKind, StorageCatalogPaths, compact_segment,
         persist_initial_raw_manifest_for_test, persist_segment_manifest,
     };
+
+    #[test]
+    fn inspection_preflight_raw_allowances_preserve_complete_rows() {
+        let tmp = TempDir::new().unwrap();
+        let rows = make_rows();
+        ColumnFile::write_batch(tmp.path(), &rows).unwrap();
+        let mut reader = SegmentReader::open_for_inspection(tmp.path()).unwrap();
+        let artifact_bytes: u64 = reader
+            .artifacts
+            .inspection_artifact_lengths()
+            .unwrap()
+            .into_iter()
+            .sum();
+        let decoded: u64 = rows.iter().map(|row| u64::from(row.data_len)).sum();
+        assert!(matches!(
+            reader.inspection_preflight(artifact_bytes - 1, decoded),
+            Err(InspectionPreflightError::LimitExceeded {
+                resource: "retained_artifact_bytes",
+                ..
+            })
+        ));
+        assert!(matches!(
+            reader.inspection_preflight(artifact_bytes, decoded - 1),
+            Err(InspectionPreflightError::LimitExceeded {
+                resource: "decoded_payload_bytes",
+                ..
+            })
+        ));
+        reader
+            .inspection_preflight(artifact_bytes, decoded)
+            .unwrap();
+        assert_eq!(reader.read_log_rows(None).unwrap(), rows);
+    }
+
+    #[test]
+    fn inspection_preflight_limits_precede_corrupt_payload_decoding() {
+        let (_tmp, dir) = compacted_fixture();
+        let manifest = load_manifest(&dir).unwrap().unwrap();
+        let descriptor = manifest
+            .columns
+            .iter()
+            .find(|column| column.name == "data")
+            .unwrap();
+        let path = dir.join(&descriptor.data_path);
+        let len = fs::metadata(&path).unwrap().len() as usize;
+        fs::write(&path, vec![0; len]).unwrap();
+        let mut reader = SegmentReader::open_for_inspection(&dir).unwrap();
+        BATCH_PAGE_READS.with_borrow_mut(|reads| *reads = Some(Vec::new()));
+        let result = reader.inspection_preflight(u64::MAX, 0);
+        let reads = BATCH_PAGE_READS.with_borrow_mut(Option::take).unwrap();
+        assert!(matches!(
+            result,
+            Err(InspectionPreflightError::LimitExceeded {
+                resource: "decoded_payload_bytes",
+                ..
+            })
+        ));
+        assert!(reads.iter().all(|(name, _)| name != "data"));
+    }
+
+    #[test]
+    fn inspection_artifact_limit_precedes_malformed_raw_metadata() {
+        let tmp = TempDir::new().unwrap();
+        ColumnFile::write_batch(tmp.path(), &make_rows()).unwrap();
+        fs::write(tmp.path().join("data_len.col"), [0; ColumnFileHeader::SIZE]).unwrap();
+        let mut reader = SegmentReader::open_for_inspection(tmp.path()).unwrap();
+        assert!(matches!(
+            reader.inspection_preflight(0, u64::MAX),
+            Err(InspectionPreflightError::LimitExceeded {
+                resource: "retained_artifact_bytes",
+                ..
+            })
+        ));
+        assert!(
+            matches!(reader.inspection_preflight(u64::MAX, u64::MAX), Err(InspectionPreflightError::Io(error)) if error.kind() == io::ErrorKind::InvalidData)
+        );
+    }
+
+    #[test]
+    fn inspection_rejects_raw_tail_and_post_preflight_growth() {
+        let tmp = TempDir::new().unwrap();
+        let rows = make_rows();
+        ColumnFile::write_batch(tmp.path(), &rows).unwrap();
+        let mut reader = SegmentReader::open_for_inspection(tmp.path()).unwrap();
+        reader.inspection_preflight(u64::MAX, u64::MAX).unwrap();
+        let path = tmp.path().join("data_len.col");
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(&[0])
+            .unwrap();
+        assert_eq!(
+            reader.read_u32("data_len", None).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        let mut reopened = SegmentReader::open_for_inspection(tmp.path()).unwrap();
+        assert!(
+            matches!(reopened.inspection_preflight(u64::MAX, u64::MAX), Err(InspectionPreflightError::Io(error)) if error.kind() == io::ErrorKind::InvalidData)
+        );
+        // The offline-only bound must not change ordinary captured-prefix reads.
+        assert_eq!(
+            SegmentReader::open(tmp.path())
+                .unwrap()
+                .read_u32("data_len", None)
+                .unwrap()
+                .len(),
+            rows.len()
+        );
+    }
+
+    #[test]
+    fn inspection_capture_rejects_nonregular_sources_before_open() {
+        for name in [
+            "segment.json",
+            crate::column::SOURCE_MARKER_FILE,
+            "data.col",
+        ] {
+            let tmp = TempDir::new().unwrap();
+            ColumnFile::write_batch(tmp.path(), &make_rows()).unwrap();
+            let path = tmp.path().join(name);
+            if path.exists() {
+                fs::remove_file(&path).unwrap();
+            }
+            fs::create_dir(&path).unwrap();
+            assert_eq!(
+                SegmentReader::open_for_inspection(tmp.path())
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::Unsupported
+            );
+        }
+    }
+
+    #[test]
+    fn inspection_charge_overflow_is_an_explicit_limit_outcome() {
+        let mut bytes = u64::MAX;
+        assert!(matches!(
+            inspection_charge(&mut bytes, 1, u64::MAX, "retained_artifact_bytes"),
+            Err(InspectionPreflightError::LimitExceeded {
+                required: u64::MAX,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn inspection_empty_paged_source_cannot_ignore_present_rows() {
+        let (_tmp, dir) = compacted_fixture();
+        let mut reader = SegmentReader::open_for_inspection(&dir).unwrap();
+        reader.manifest.as_mut().unwrap().row_count = 0;
+        assert!(
+            matches!(reader.inspection_preflight(u64::MAX, u64::MAX), Err(InspectionPreflightError::Io(error)) if error.kind() == io::ErrorKind::InvalidData)
+        );
+    }
 
     fn make_rows() -> Vec<LogRow> {
         (0..20)

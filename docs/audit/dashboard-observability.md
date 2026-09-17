@@ -6,7 +6,7 @@ Branch: `audit/dashboard-observability`.
 This milestone reviews the embedded dashboard, its status projection, browser
 state, query builder, result display/export, and keyboard/mobile behavior.
 Source `d375e95b` is committed. Focused controls and independent review pass;
-all twelve local gates pass. Exact-head CI and merge remain.
+all twelve local gates pass. PR #238 merged as `77d03349` after all six CI jobs.
 
 ## Findings and corrections
 
@@ -103,7 +103,7 @@ disabled. Chrome uses a dedicated temporary profile. Geometry, keyboard input
 and reduced-motion computed styles are checked; this is not a full browser
 network end-to-end test.
 
-Frozen-source workspace results are recorded below; exact-head CI must pass before merge.
+Frozen-source workspace and exact-head CI results are recorded below.
 The broader offline audit, verified repair, integrated acceptance, later live
 sync and the staging soak remain separate. This milestone is not release
 acceptance.
@@ -127,4 +127,6 @@ the retained automated controls. The dedicated browser profile was removed.
 
 These are correctness records, not throughput/RSS benchmarks. The source does
 not modify ingestion, storage encodings or query execution. Linux/macOS CI and
-the existing ten Linux volume/template controls remain required before merge.
+the existing ten Linux volume/template controls passed before merge.
+
+All six CI jobs passed on `8489929d` and ten Linux volume/template controls passed with verified cleanup. [PR #238](https://github.com/tdenisenko/logex/pull/238) merged as `77d03349`. The merge tree is identical to the tested head. B9-01–13 and the scoped offline dashboard review are closed. Gossip admission, priority queues, shared query resources, verified repair and integrated acceptance remain open. Repair-state presentation follows the repair coordinator; live/staging acceptance remains separate.
