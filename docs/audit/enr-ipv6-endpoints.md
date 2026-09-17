@@ -73,7 +73,7 @@ per-test runtime owns its services. Its absent-TCP case verifies the existing
 heuristic; it does not endorse a new port inference policy.
 
 The full consensus suite passes 360 tests with 1 existing ignored test; all 318 peer-manager tests pass.
-Full workspace gates, exact-head Linux/macOS CI and merge remain pending.
+All nine local gates pass on `3b1f9cd3`: vendor integrity, workspace/Reth/ENR formatting, all-target compilation, strict Clippy, 1,844 workspace tests (24 ignored), documentation tests and release build. Exact-head Linux/macOS CI and merge remain pending.
 
 Implementer review followed CL admission/retention/dial conversion, discv5 socket
 selection/contact and observed-address verification, execution DNS/configured
