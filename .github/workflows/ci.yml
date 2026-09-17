@@ -52,6 +52,13 @@ jobs:
       - name: Check patched ENR formatting
         run: rustfmt --check --edition 2021 --config skip_children=true vendor/enr/src/lib.rs
 
+      - name: Check patched gossipsub formatting
+        run: >-
+          rustfmt --check --edition 2021 --config skip_children=true
+          vendor/libp2p-gossipsub/src/time_cache.rs
+          vendor/libp2p-gossipsub/src/behaviour.rs
+          vendor/libp2p-gossipsub/src/behaviour/tests.rs
+
       - name: Check patched aggregate formatting
         run: >-
           rustfmt --check --edition 2021
@@ -91,6 +98,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --all-targets --locked
       - run: cargo test --workspace --doc --locked
+      - name: Check pinned gossipsub expiry regressions
+        env:
+          CARGO_TARGET_DIR: target/gossipsub-regressions
+        run: cargo test --manifest-path vendor/libp2p-gossipsub/Cargo.toml --lib logex_expiry --locked
 
       - name: Verify external-volume lifecycle with disposable Linux images
         run: |
@@ -119,6 +130,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --all-targets --locked
       - run: cargo test --workspace --doc --locked
+      - name: Check pinned gossipsub expiry regressions
+        env:
+          CARGO_TARGET_DIR: target/gossipsub-regressions
+        run: cargo test --manifest-path vendor/libp2p-gossipsub/Cargo.toml --lib logex_expiry --locked
 
   release:
     name: Release Build

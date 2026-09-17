@@ -35,6 +35,18 @@ class Package:
 
 PACKAGES = (
     Package(
+        name="libp2p-gossipsub",
+        inventory_checksum="795183902927a7de54e1f7927d0038f0758420d365f92f357908b3d62fe47289",
+        modified={
+            PurePosixPath("Cargo.lock"): "9c251863c193ed1c83b1e63ccc6765b553fc3cf4687464377e1b4bbc8d3cf1eb",
+            PurePosixPath("Cargo.toml"): "0e8db4bae3efe861d432bb895baefb868a7fba6f0d4f7dc5ee65bde05bbe4d61",
+            PurePosixPath("src/behaviour/tests.rs"): "91bcca73037e152f868ae79ea4b16b1924db7173dcb9261997124dc38f083ff8",
+            PurePosixPath("src/behaviour.rs"): "8310bb396e324a837bd7f073fd8ffb5c34a199087f8ee0e15e19b827ba826c6f",
+            PurePosixPath("src/time_cache.rs"): "454fa2013bb25585a31170e0f7a36ac91caccf57ee6531fc1f489ea13a0719a2",
+        },
+        patch_checksum="e25f34ffe5f3ea42cc480a78322b72ea805a6156797623e1e3de2fbb9ada2f29",
+    ),
+    Package(
         name="datafusion-functions-aggregate",
         inventory_checksum="ffa15a2b3a48646a9276999ab6afc77b3a20b0917b788137262d386be1b6ce69",
         modified={
