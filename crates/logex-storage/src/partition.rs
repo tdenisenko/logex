@@ -315,17 +315,19 @@ impl PartitionManager {
         self.inner.record_chain_anchors(anchors)
     }
 
-    /// Rewind the persisted canonical head after a consensus-driven reorg.
-    pub fn rewind_canonical_state(
+    /// Retire a canonical suffix and its progress through one recoverable publication.
+    pub fn apply_canonical_reorg(
         &mut self,
-        recent_headers: &[Header],
+        reverted_hashes: &[B256],
+        retained_headers: &[Header],
         indexed_head: Option<ExecutionAnchor>,
-    ) -> std::io::Result<()> {
+    ) -> std::io::Result<u64> {
         self.inner
-            .rewind_canonical_state(recent_headers, indexed_head)
+            .apply_canonical_reorg(reverted_hashes, retained_headers, indexed_head)
     }
 
-    /// Mark rows in a given block as non-canonical during a reorg.
+    /// Change one block's row flags without changing chain progress.
+    /// Canonical chain reorgs must use `apply_canonical_reorg` to recover rows and progress together.
     pub fn mark_non_canonical(&mut self, block_hash: B256) -> std::io::Result<u64> {
         self.inner.mark_non_canonical(block_hash)
     }

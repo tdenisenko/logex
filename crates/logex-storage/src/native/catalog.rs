@@ -8,7 +8,7 @@ use alloy_rlp::Decodable;
 use std::path::{Path, PathBuf};
 
 use crate::durability;
-use logex_types::ChainAnchors;
+use logex_types::{ChainAnchors, ExecutionAnchor};
 use serde::{Deserialize, Serialize};
 
 pub const STORAGE_FORMAT_VERSION: u32 = 11;
@@ -244,10 +244,61 @@ pub struct ColumnDescriptor {
     pub page_index_path: Option<String>,
 }
 
+/// A bounded rollback target into the original catalog header window.
+/// Keeping the original window until completion also retains every reverted hash.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct CanonicalReorgIntent {
+    pub(super) retained_header_count: usize,
+    pub(super) indexed_head: Option<ExecutionAnchor>,
+}
+
+impl CanonicalReorgIntent {
+    pub(super) fn validate(&self, state: &StorageState) -> io::Result<()> {
+        let headers = &state.recent_headers;
+        validate_cached_headers(headers)?;
+        if self.retained_header_count == 0 || self.retained_header_count >= headers.len() {
+            return Err(invalid_catalog(
+                "canonical reorg must retain a nonempty strict header prefix",
+            ));
+        }
+        let retained_tip = headers[..self.retained_header_count].last();
+        if self.indexed_head.is_some_and(|anchor| {
+            retained_tip.is_none_or(|header| {
+                anchor.block_number != header.number
+                    || anchor.block_hash != header.hash_slow()
+                    || anchor.receipts_root != header.receipts_root
+            })
+        }) {
+            return Err(invalid_catalog(
+                "canonical reorg anchor differs from its retained tip",
+            ));
+        }
+        let tip = headers
+            .last()
+            .expect("strict prefix requires a nonempty header window");
+        if state.sync_head.is_none_or(|head| {
+            head.block_number != tip.number
+                || head.block_hash != tip.hash_slow()
+                || head.timestamp != tip.timestamp
+        }) || headers.windows(2).any(|pair| {
+            pair[0].number.checked_add(1) != Some(pair[1].number)
+                || pair[1].parent_hash != pair[0].hash_slow()
+        }) {
+            return Err(invalid_catalog(
+                "canonical reorg source window is inconsistent",
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Canonical progress committed atomically with its segment positions.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StorageState {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) canonical_reorg: Option<CanonicalReorgIntent>,
     pub sync_head: Option<SyncHead>,
     // Encoded as a bounded canonical RLP list after the catalog metadata.
     #[serde(skip)]
@@ -434,6 +485,9 @@ impl NativeStorageCatalog {
             ));
         }
         validate_cached_headers(&self.state.recent_headers)?;
+        if let Some(intent) = &self.state.canonical_reorg {
+            intent.validate(&self.state)?;
+        }
         for header in [
             self.state.historical_floor_header.as_ref(),
             self.state.historical_anchor_header.as_ref(),
@@ -949,5 +1003,118 @@ mod tests {
         assert_eq!(catalog, before);
         assert!(catalog.register_segment(SegmentKind::Hot).is_err());
         assert_eq!(catalog, before);
+    }
+
+    #[test]
+    fn canonical_reorg_catalog_rejects_malformed_intent() {
+        let tmp = TempDir::new().unwrap();
+        let (mut catalog, _) = NativeStorageCatalog::open_or_create(&NativeStorageConfig {
+            data_dir: tmp.path().to_owned(),
+            ..Default::default()
+        })
+        .unwrap();
+        let first = Header {
+            number: 100,
+            ..Default::default()
+        };
+        let second = Header {
+            number: 101,
+            parent_hash: first.hash_slow(),
+            ..Default::default()
+        };
+        catalog.state.recent_headers = vec![first.clone(), second.clone()];
+        catalog.state.sync_head = Some(SyncHead {
+            block_number: second.number,
+            block_hash: second.hash_slow(),
+            timestamp: second.timestamp,
+        });
+        let intent = CanonicalReorgIntent {
+            retained_header_count: 1,
+            indexed_head: Some(ExecutionAnchor {
+                beacon_root: FixedBytes::ZERO,
+                beacon_slot: 1,
+                block_number: first.number,
+                block_hash: first.hash_slow(),
+                receipts_root: first.receipts_root,
+            }),
+        };
+        catalog.state.canonical_reorg = Some(intent);
+        assert_eq!(
+            NativeStorageCatalog::decode(&catalog.encode().unwrap()).unwrap(),
+            catalog
+        );
+        for damage in 0..7 {
+            let mut invalid = catalog.clone();
+            match damage {
+                0 => {
+                    invalid
+                        .state
+                        .canonical_reorg
+                        .as_mut()
+                        .unwrap()
+                        .retained_header_count = 0
+                }
+                1 => {
+                    invalid
+                        .state
+                        .canonical_reorg
+                        .as_mut()
+                        .unwrap()
+                        .retained_header_count = 2
+                }
+                2 => {
+                    invalid
+                        .state
+                        .canonical_reorg
+                        .as_mut()
+                        .unwrap()
+                        .retained_header_count = usize::MAX
+                }
+                3 => {
+                    invalid
+                        .state
+                        .canonical_reorg
+                        .as_mut()
+                        .unwrap()
+                        .indexed_head
+                        .as_mut()
+                        .unwrap()
+                        .block_hash = FixedBytes::ZERO
+                }
+                4 => {
+                    invalid
+                        .state
+                        .canonical_reorg
+                        .as_mut()
+                        .unwrap()
+                        .indexed_head
+                        .as_mut()
+                        .unwrap()
+                        .receipts_root = FixedBytes::repeat_byte(1)
+                }
+                5 => invalid.state.sync_head = None,
+                6 => invalid.state.recent_headers[1].parent_hash = FixedBytes::ZERO,
+                _ => unreachable!(),
+            }
+            assert!(invalid.encode().is_err(), "damage {damage}");
+            // A valid outer checksum cannot make malformed authority usable.
+            let metadata = serde_json::to_vec(&invalid).unwrap();
+            let bytes = encode_frame(&metadata, &invalid.state.recent_headers).unwrap();
+            assert!(
+                NativeStorageCatalog::decode(&bytes).is_err(),
+                "damage {damage}"
+            );
+            let catalog_path = tmp.path().join(CATALOG_FILE);
+            fs::write(&catalog_path, &bytes).unwrap();
+            assert!(
+                crate::native::NativeStorage::open(NativeStorageConfig {
+                    data_dir: tmp.path().to_owned(),
+                    ..Default::default()
+                })
+                .is_err(),
+                "damage {damage}"
+            );
+            assert_eq!(fs::read(&catalog_path).unwrap(), bytes, "damage {damage}");
+        }
     }
 }
