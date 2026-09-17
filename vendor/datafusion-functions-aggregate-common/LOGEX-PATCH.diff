@@ -1,0 +1,60 @@
+--- a/src/aggregate/sum_distinct/numeric.rs
++++ b/src/aggregate/sum_distinct/numeric.rs
+@@ -30,8 +30,8 @@
+ use arrow::datatypes::ArrowNativeType;
+ use arrow::datatypes::DataType;
+ 
+-use datafusion_common::Result;
+ use datafusion_common::ScalarValue;
++use datafusion_common::{exec_datafusion_err, Result};
+ use datafusion_expr_common::accumulator::Accumulator;
+ 
+ use crate::utils::Hashable;
+@@ -40,6 +40,8 @@
+ pub struct DistinctSumAccumulator<T: ArrowPrimitiveType> {
+     values: HashSet<Hashable<T::Native>, RandomState>,
+     data_type: DataType,
++    // LogEx: SUM opts into checked arithmetic; AVG retains its existing path.
++    validate: Option<fn(T::Native, &DataType) -> Result<()>>,
+ }
+ 
+ impl<T: ArrowPrimitiveType> Debug for DistinctSumAccumulator<T> {
+@@ -53,6 +55,18 @@
+         Self {
+             values: HashSet::default(),
+             data_type: data_type.clone(),
++            validate: None,
++        }
++    }
++
++    /// Checked SUM preserves the return type and rejects out-of-range subtotals.
++    pub fn new_checked(
++        data_type: &DataType,
++        validate: fn(T::Native, &DataType) -> Result<()>,
++    ) -> Self {
++        Self {
++            validate: Some(validate),
++            ..Self::new(data_type)
+         }
+     }
+ 
+@@ -110,8 +124,17 @@
+ 
+     fn evaluate(&mut self) -> Result<ScalarValue> {
+         let mut acc = T::Native::usize_as(0);
+-        for distinct_value in self.values.iter() {
+-            acc = acc.add_wrapping(distinct_value.0)
++        if let Some(validate) = self.validate {
++            for distinct_value in &self.values {
++                acc = acc
++                    .add_checked(distinct_value.0)
++                    .map_err(|error| exec_datafusion_err!("SUM overflow: {error}"))?;
++                validate(acc, &self.data_type)?;
++            }
++        } else {
++            for distinct_value in &self.values {
++                acc = acc.add_wrapping(distinct_value.0);
++            }
+         }
+         let v = (!self.values.is_empty()).then_some(acc);
+         ScalarValue::new_primitive::<T>(v, &self.data_type)

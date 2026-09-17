@@ -35,6 +35,22 @@ class Package:
 
 PACKAGES = (
     Package(
+        name="datafusion-functions-aggregate",
+        inventory_checksum="ffa15a2b3a48646a9276999ab6afc77b3a20b0917b788137262d386be1b6ce69",
+        modified={
+            PurePosixPath("src/sum.rs"): "e5730897fe81fad573755a216904effc392caf59075fcd223d7e6c6ba3f134dc",
+        },
+        patch_checksum="53348c02bfa0a09382b3fd37e24e8275e556b5c64caf0ea23b22a0b38dbee9ce",
+    ),
+    Package(
+        name="datafusion-functions-aggregate-common",
+        inventory_checksum="44ecc4490539baefaafe85c44058a761aa1afb343bb38aad4c4fe24197fa142a",
+        modified={
+            PurePosixPath("src/aggregate/sum_distinct/numeric.rs"): "200e613a0e19b80d5dfa3404ce5c5a405dc905cd8b66608ae4f0de244b5cf124",
+        },
+        patch_checksum="b0ef11b60394384d09168661f7afc2f4193108ada1952030af3b962dc172bea1",
+    ),
+    Package(
         name="datafusion-functions-nested",
         inventory_checksum="ce4d4d617631f9af7c84f64f4d320d8c0a32ddbc5034aa0b62fc904f4b9617cb",
         modified={
