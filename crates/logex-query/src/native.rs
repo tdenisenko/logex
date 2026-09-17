@@ -42,7 +42,11 @@ impl StorageSnapshot {
         }
     }
 
-    fn validate(&self) -> io::Result<()> {
+    /// Check whether reorg or storage-close invalidation changed this view.
+    /// Returns `WouldBlock` when callers must retry with a fresh snapshot.
+    /// Call again after response conversion, including failed execution, to
+    /// prevent an invalidated view from becoming a successful response.
+    pub fn validate(&self) -> io::Result<()> {
         if self
             .validity
             .as_ref()
@@ -85,19 +89,43 @@ pub fn execute_log_filter_with_cancel(
     filter: &NativeLogFilter,
     cancel: Option<&crate::QueryCancelCheck>,
 ) -> std::io::Result<Vec<LogRow>> {
+    let snapshot = StorageSnapshot::from_storage(storage);
+    execute_log_filter_on_snapshot_with_cancel(&snapshot, filter, cancel)
+}
+
+/// Execute a captured view without borrowing the live storage manager.
+///
+/// Callers may release their storage lock after capturing the snapshot. Appends
+/// stay outside the captured row boundaries; reorg or close invalidation is
+/// checked before execution and after both successful and failed execution.
+/// Even an empty requested page must refer to a valid view.
+pub fn execute_log_filter_on_snapshot_with_cancel(
+    snapshot: &StorageSnapshot,
+    filter: &NativeLogFilter,
+    cancel: Option<&crate::QueryCancelCheck>,
+) -> std::io::Result<Vec<LogRow>> {
+    snapshot.validate()?;
+    let result = execute_log_filter_snapshot_inner(snapshot, filter, cancel);
+    snapshot.validate()?;
+    result
+}
+
+fn execute_log_filter_snapshot_inner(
+    snapshot: &StorageSnapshot,
+    filter: &NativeLogFilter,
+    cancel: Option<&crate::QueryCancelCheck>,
+) -> std::io::Result<Vec<LogRow>> {
     let check = || {
         if cancel.is_some_and(|check| check()) {
             Err(io::Error::new(io::ErrorKind::Interrupted, "query canceled"))
         } else {
-            Ok(())
+            snapshot.validate()
         }
     };
     check()?;
     if filter.limit == Some(0) {
         return Ok(Vec::new());
     }
-    let snapshot = StorageSnapshot::from_storage(storage);
-    snapshot.validate()?;
     let mut rows = Vec::new();
     let scan_limit = filter
         .limit
@@ -142,7 +170,6 @@ pub fn execute_log_filter_with_cancel(
     }
 
     check()?;
-    snapshot.validate()?;
     Ok(rows)
 }
 

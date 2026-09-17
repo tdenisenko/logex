@@ -10,7 +10,7 @@ use logex_query::{self, DEFAULT_QUERY_PAGE_SIZE, SqlQueryError, SqlQueryPage};
 use logex_storage::native::{LogOrder, NativeLogFilter, TopicConstraint};
 use logex_types::LogRow;
 
-use crate::handler::{AppState, MAX_LOG_FILTER_LIMIT};
+use crate::handler::{ActiveQueryGuard, AppState, MAX_LOG_FILTER_LIMIT};
 
 pub mod pb {
     #![allow(clippy::result_large_err)]
@@ -34,6 +34,33 @@ pub struct LogExGrpcService {
 impl LogExGrpcService {
     pub fn new(state: Arc<AppState>) -> Self {
         Self { state }
+    }
+
+    async fn read_logs(
+        &self,
+        query: &ActiveQueryGuard,
+        filter: NativeLogFilter,
+    ) -> Result<Vec<LogEntry>, BoxStatus> {
+        self.state
+            .run_blocking_query(query, move |snapshot, _head, cancel| {
+                let rows = logex_query::execute_log_filter_on_snapshot_with_cancel(
+                    snapshot,
+                    &filter,
+                    Some(&cancel),
+                )?;
+                Ok(rows.into_iter().map(log_row_to_proto).collect())
+            })
+            .await
+            .map_err(|error| {
+                Box::new(match self.state.storage_failure() {
+                    Some(reason) => Status::unavailable(reason),
+                    None => match error.kind() {
+                        std::io::ErrorKind::WouldBlock => Status::aborted(error.to_string()),
+                        std::io::ErrorKind::Interrupted => Status::cancelled(error.to_string()),
+                        _ => Status::internal(format!("execution error: {error}")),
+                    },
+                })
+            })
     }
 }
 
@@ -151,25 +178,14 @@ impl LogExService for LogExGrpcService {
             .map_err(Status::unavailable)?;
         let filter = proto_filter_to_native_filter(request.get_ref()).map_err(|status| *status)?;
 
-        let storage = self
-            .state
-            .read_storage()
+        let logs = self
+            .read_logs(&query, filter)
             .await
-            .map_err(Status::unavailable)?;
-        let rows = logex_query::execute_log_filter_with_cancel(
-            &storage,
-            &filter,
-            Some(&query.cancel_check()),
-        )
-        .map_err(|err| match self.state.storage_failure() {
-            Some(reason) => Status::unavailable(reason),
-            None => Status::internal(format!("execution error: {err}")),
-        })?;
+            .map_err(|status| *status)?;
         if let Some(reason) = self.state.storage_failure() {
             return Err(Status::unavailable(reason));
         }
-        let row_count = rows.len() as u64;
-        let logs = rows.into_iter().map(log_row_to_proto).collect();
+        let row_count = logs.len() as u64;
 
         Ok(Response::new(GetLogsResponse { logs, row_count }))
     }
@@ -185,25 +201,10 @@ impl LogExService for LogExGrpcService {
             .map_err(Status::unavailable)?;
         let filter = proto_filter_to_native_filter(request.get_ref()).map_err(|status| *status)?;
 
-        let storage = self
-            .state
-            .read_storage()
+        let entries = self
+            .read_logs(&query, filter)
             .await
-            .map_err(Status::unavailable)?;
-        let rows = logex_query::execute_log_filter_with_cancel(
-            &storage,
-            &filter,
-            Some(&query.cancel_check()),
-        )
-        .map_err(|err| match self.state.storage_failure() {
-            Some(reason) => Status::unavailable(reason),
-            None => Status::internal(format!("execution error: {err}")),
-        })?;
-        let entries: Vec<Result<LogEntry, Status>> = rows
-            .into_iter()
-            .map(log_row_to_proto)
-            .map(Ok::<_, Status>)
-            .collect();
+            .map_err(|status| *status)?;
         let state = Arc::clone(&self.state);
         // Tonic requires an unboxed Status as the stream item's error type.
         #[allow(clippy::result_large_err)]
@@ -212,7 +213,7 @@ impl LogExService for LogExGrpcService {
             let _query = &query;
             match state.storage_failure() {
                 Some(reason) => Err(Status::unavailable(reason)),
-                None => entry,
+                None => Ok(entry),
             }
         });
 

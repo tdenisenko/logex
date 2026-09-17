@@ -1,10 +1,11 @@
+use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use axum::extract::State;
 use axum::response::Json;
 
-use logex_query::{self, DEFAULT_QUERY_PAGE_SIZE};
+use logex_query::{self, DEFAULT_QUERY_PAGE_SIZE, NativeStorageSnapshot, QueryCancelCheck};
 use logex_storage::PartitionManager;
 use logex_types::{LOGEX_CLIENT_VERSION, SyncStatus};
 
@@ -25,6 +26,7 @@ pub struct AppState {
     pub sync_status: Arc<std::sync::Mutex<SyncStatus>>,
     pub(crate) storage_metrics: Arc<tokio::sync::Mutex<CachedStorageMetrics>>,
     pub(crate) query_control: Arc<QueryControl>,
+    native_query_workers: OnceLock<Arc<tokio::sync::Semaphore>>,
 }
 
 impl AppState {
@@ -39,6 +41,7 @@ impl AppState {
             sync_status: Arc::new(std::sync::Mutex::new(sync_status)),
             storage_metrics: Arc::new(tokio::sync::Mutex::new(CachedStorageMetrics::default())),
             query_control: Arc::new(QueryControl::default()),
+            native_query_workers: OnceLock::new(),
         }
     }
 
@@ -78,6 +81,81 @@ impl AppState {
                 }
             }
         }
+    }
+
+    /// Capture the query view under the ingestion lock, then perform filesystem
+    /// reads and response conversion on a blocking worker. The request owns the
+    /// cancellation guard; dropping it permanently cancels any started work.
+    pub(crate) async fn run_blocking_query<T, F>(
+        &self,
+        query: &ActiveQueryGuard,
+        execute: F,
+    ) -> io::Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(&NativeStorageSnapshot, u64, QueryCancelCheck) -> io::Result<T> + Send + 'static,
+    {
+        // Native scans previously occupied an async runtime worker. Size their
+        // blocking gate from the serving runtime, even when AppState was built
+        // outside it, rather than adopting the much larger blocking-pool limit.
+        let workers = self.native_query_workers.get_or_init(|| {
+            Arc::new(tokio::sync::Semaphore::new(
+                tokio::runtime::Handle::current().metrics().num_workers(),
+            ))
+        });
+        let permit = tokio::select! {
+            biased;
+            reason = self.storage_unavailable() => return Err(io::Error::other(reason)),
+            permit = Arc::clone(workers).acquire_owned() => {
+                permit.map_err(|_| io::Error::other("native query workers are unavailable"))?
+            }
+        };
+        let (snapshot, head) = {
+            let storage = self.read_storage().await.map_err(io::Error::other)?;
+            (
+                NativeStorageSnapshot::from_storage(&storage),
+                storage.head_block().unwrap_or(0),
+            )
+        };
+        let cancel = query.cancel_check();
+        let mut worker = BlockingQueryWorker(tokio::task::spawn_blocking(move || {
+            // A dropped HTTP/gRPC future cannot free this capacity while its
+            // already-started filesystem operation still owns the snapshot.
+            let _permit = permit;
+            let result = check_native_query_canceled(&cancel)
+                .and_then(|()| execute(&snapshot, head, Arc::clone(&cancel)));
+            // A reorg during scan or conversion invalidates the entire result,
+            // including an error result, before cancellation is interpreted.
+            snapshot.validate()?;
+            // Cancellation during protocol conversion must not return success.
+            check_native_query_canceled(&cancel)?;
+            result
+        }));
+        tokio::select! {
+            biased;
+            reason = self.storage_unavailable() => Err(io::Error::other(reason)),
+            result = &mut worker.0 => {
+                result.map_err(|error| io::Error::other(format!("query worker failed: {error}")))?
+            }
+        }
+    }
+}
+
+struct BlockingQueryWorker<T>(tokio::task::JoinHandle<io::Result<T>>);
+
+impl<T> Drop for BlockingQueryWorker<T> {
+    fn drop(&mut self) {
+        // Abort work that has not started. Running filesystem work cannot be
+        // forcibly interrupted and observes the request's cancellation token.
+        self.0.abort();
+    }
+}
+
+fn check_native_query_canceled(cancel: &QueryCancelCheck) -> io::Result<()> {
+    if cancel() {
+        Err(io::Error::new(io::ErrorKind::Interrupted, "query canceled"))
+    } else {
+        Ok(())
     }
 }
 
@@ -213,14 +291,20 @@ pub async fn handle_jsonrpc(
         Ok(query) => query,
         Err(reason) => return Json(JsonRpcResponse::internal_error(id, reason)),
     };
-    let storage = match state.read_storage().await {
-        Ok(storage) => storage,
-        Err(reason) => return Json(JsonRpcResponse::internal_error(id, reason)),
-    };
-
     let response = match request.method.as_str() {
-        "eth_getLogs" => handle_eth_get_logs(&storage, &request, &query.cancel_check()),
-        "eth_blockNumber" => handle_eth_block_number(&storage, &request),
+        "eth_getLogs" => state
+            .run_blocking_query(&query, move |snapshot, head, cancel| {
+                handle_eth_get_logs(snapshot, head, &request, &cancel).map_err(io::Error::other)
+            })
+            .await
+            .map_err(|error| error.to_string()),
+        "eth_blockNumber" => {
+            let storage = match state.read_storage().await {
+                Ok(storage) => storage,
+                Err(reason) => return Json(JsonRpcResponse::internal_error(id, reason)),
+            };
+            handle_eth_block_number(&storage, &request)
+        }
         _ => Ok(JsonRpcResponse::method_not_found(id.clone())),
     };
 
@@ -231,7 +315,8 @@ pub async fn handle_jsonrpc(
 }
 
 fn handle_eth_get_logs(
-    storage: &PartitionManager,
+    snapshot: &NativeStorageSnapshot,
+    head_block: u64,
     req: &JsonRpcRequest,
     cancel: &logex_query::QueryCancelCheck,
 ) -> Result<JsonRpcResponse, String> {
@@ -262,7 +347,7 @@ fn handle_eth_get_logs(
         return Err(format!("offset must be less than {MAX_LOG_FILTER_LIMIT}"));
     }
 
-    let mut native_filter = filter.to_native_filter(storage.head_block().unwrap_or(0));
+    let mut native_filter = filter.to_native_filter(head_block);
     native_filter.limit = Some(
         filter
             .limit
@@ -270,8 +355,12 @@ fn handle_eth_get_logs(
             .min(MAX_LOG_FILTER_LIMIT - filter.offset),
     );
     native_filter.offset = filter.offset;
-    let rows = logex_query::execute_log_filter_with_cancel(storage, &native_filter, Some(cancel))
-        .map_err(|error| error.to_string())?;
+    let rows = logex_query::execute_log_filter_on_snapshot_with_cancel(
+        snapshot,
+        &native_filter,
+        Some(cancel),
+    )
+    .map_err(|error| error.to_string())?;
     let logs: Vec<RpcLog> = rows.iter().map(RpcLog::from).collect();
 
     let json = serde_json::to_value(&logs).map_err(|e| e.to_string())?;
@@ -539,6 +628,241 @@ mod tests {
         IndexBuilder::build_all_indexes(&mgr.hot_partition().meta.path).unwrap();
         mgr.checkpoint().unwrap();
         (tmp, mgr)
+    }
+
+    #[tokio::test]
+    async fn dropping_native_request_cancels_started_worker() {
+        let (_tmp, storage) = setup_storage();
+        let state = Arc::new(AppState::new(storage, None, SyncStatus::default()));
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+        let (finished_tx, finished_rx) = tokio::sync::oneshot::channel();
+        let request_state = Arc::clone(&state);
+        let request = tokio::spawn(async move {
+            let query = request_state.query_control.start_concurrent().unwrap();
+            request_state
+                .run_blocking_query(&query, move |snapshot, _head, cancel| {
+                    let _ = started_tx.send(Arc::clone(&cancel));
+                    resume_rx.recv().map_err(io::Error::other)?;
+                    let result = logex_query::execute_log_filter_on_snapshot_with_cancel(
+                        snapshot,
+                        &Default::default(),
+                        Some(&cancel),
+                    );
+                    let _ = finished_tx.send(result.as_ref().err().map(io::Error::kind));
+                    result
+                })
+                .await
+        });
+        let cancel = started_rx.await.unwrap();
+        assert!(!cancel());
+        let workers = state.native_query_workers.get().unwrap();
+        assert_eq!(workers.available_permits(), 0);
+        assert!(state.storage.try_write().is_ok());
+        request.abort();
+        assert!(request.await.unwrap_err().is_cancelled());
+        assert!(cancel(), "the abandoned worker keeps its canceled token");
+        assert!(workers.try_acquire().is_err());
+        resume_tx.send(()).unwrap();
+        assert_eq!(finished_rx.await.unwrap(), Some(io::ErrorKind::Interrupted));
+        let _returned_capacity = workers.acquire().await.unwrap();
+        let fresh = state.query_control.start_concurrent().unwrap();
+        assert!(!fresh.was_canceled());
+    }
+
+    #[tokio::test]
+    async fn native_worker_completion_checks_cancellation_after_conversion() {
+        let (_tmp, storage) = setup_storage();
+        let state = Arc::new(AppState::new(storage, None, SyncStatus::default()));
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+        let request_state = Arc::clone(&state);
+        let request = tokio::spawn(async move {
+            let query = request_state.query_control.start().unwrap();
+            request_state
+                .run_blocking_query(&query, move |_snapshot, _head, _cancel| {
+                    let _ = started_tx.send(());
+                    resume_rx.recv().map_err(io::Error::other)?;
+                    // Represents a successful response conversion that finished
+                    // after cancellation; the worker must discard its result.
+                    Ok(7)
+                })
+                .await
+        });
+        started_rx.await.unwrap();
+        assert!(state.query_control.cancel_active());
+        resume_tx.send(()).unwrap();
+        assert_eq!(
+            request.await.unwrap().unwrap_err().kind(),
+            io::ErrorKind::Interrupted
+        );
+    }
+
+    #[tokio::test]
+    async fn native_worker_revalidates_after_conversion_and_prioritizes_reorg() {
+        for cancel_after_conversion in [false, true] {
+            let (_tmp, storage) = setup_storage();
+            let state = Arc::new(AppState::new(storage, None, SyncStatus::default()));
+            let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+            let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+            let request_state = Arc::clone(&state);
+            let request = tokio::spawn(async move {
+                let query = request_state.query_control.start().unwrap();
+                request_state
+                    .run_blocking_query(&query, move |snapshot, _head, cancel| {
+                        let rows = logex_query::execute_log_filter_on_snapshot_with_cancel(
+                            snapshot,
+                            &Default::default(),
+                            Some(&cancel),
+                        )?;
+                        let _ = started_tx.send(());
+                        resume_rx.recv().map_err(io::Error::other)?;
+                        // The read was valid, but a concurrent reorg can occur
+                        // before conversion of these rows finishes.
+                        Ok(rows.len())
+                    })
+                    .await
+            });
+            started_rx.await.unwrap();
+            assert_eq!(
+                state
+                    .storage
+                    .write()
+                    .await
+                    .mark_non_canonical(B256::repeat_byte(2))
+                    .unwrap(),
+                1
+            );
+            if cancel_after_conversion {
+                assert!(state.query_control.cancel_active());
+            }
+            resume_tx.send(()).unwrap();
+            assert_eq!(
+                request.await.unwrap().unwrap_err().kind(),
+                io::ErrorKind::WouldBlock
+            );
+        }
+    }
+
+    #[test]
+    fn queued_native_request_never_executes_abandoned_operation() {
+        use std::future::Future;
+        use std::task::Poll;
+
+        let (_tmp, storage) = setup_storage();
+        let state = Arc::new(AppState::new(storage, None, SyncStatus::default()));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+            let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+            let occupied = tokio::task::spawn_blocking(move || {
+                let _ = started_tx.send(());
+                let _ = resume_rx.recv();
+            });
+            started_rx.await.unwrap();
+            let ran = Arc::new(AtomicBool::new(false));
+            let worker_ran = Arc::clone(&ran);
+            let (operation_tx, operation_rx) = tokio::sync::oneshot::channel();
+            let mut request = Box::pin(async {
+                let query = state.query_control.start_concurrent().unwrap();
+                state
+                    .run_blocking_query(&query, move |_snapshot, _head, _cancel| {
+                        worker_ran.store(true, Ordering::Release);
+                        let _ = operation_tx.send(());
+                        Ok(())
+                    })
+                    .await
+            });
+            assert!(
+                std::future::poll_fn(|cx| Poll::Ready(request.as_mut().poll(cx)))
+                    .await
+                    .is_pending()
+            );
+            drop(request);
+            resume_tx.send(()).unwrap();
+            occupied.await.unwrap();
+            // Observe disposal of the captured operation, independent of pool
+            // queue ordering. It must be dropped without being invoked.
+            assert!(operation_rx.await.is_err());
+            assert!(!ran.load(Ordering::Acquire));
+        });
+    }
+
+    #[tokio::test]
+    async fn native_worker_propagates_operation_errors() {
+        let (_tmp, storage) = setup_storage();
+        let state = AppState::new(storage, None, SyncStatus::default());
+        let query = state.query_control.start_concurrent().unwrap();
+        let error = state
+            .run_blocking_query(&query, |_snapshot, _head, _cancel| {
+                Err::<(), _>(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "fixture read failed",
+                ))
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(error.to_string(), "fixture read failed");
+    }
+
+    #[tokio::test]
+    async fn storage_failure_wakes_native_capacity_waiters_and_started_requests() {
+        use std::future::Future;
+        use std::task::Poll;
+
+        let (_tmp, storage) = setup_storage();
+        let state = Arc::new(AppState::new(storage, None, SyncStatus::default()));
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+        let request_state = Arc::clone(&state);
+        let started = tokio::spawn(async move {
+            let query = request_state.query_control.start_concurrent().unwrap();
+            request_state
+                .run_blocking_query(&query, move |_snapshot, _head, _cancel| {
+                    let _ = started_tx.send(());
+                    resume_rx.recv().map_err(io::Error::other)
+                })
+                .await
+        });
+        started_rx.await.unwrap();
+        let workers = state.native_query_workers.get().unwrap();
+        assert_eq!(workers.available_permits(), 0);
+        let writer = state.storage.try_write().unwrap();
+        let waiting_query = state.query_control.start_concurrent().unwrap();
+        let ran = Arc::new(AtomicBool::new(false));
+        let worker_ran = Arc::clone(&ran);
+        let mut waiting = Box::pin(state.run_blocking_query(
+            &waiting_query,
+            move |_snapshot, _head, _cancel| {
+                worker_ran.store(true, Ordering::Release);
+                Ok(())
+            },
+        ));
+        assert!(
+            std::future::poll_fn(|cx| Poll::Ready(waiting.as_mut().poll(cx)))
+                .await
+                .is_pending()
+        );
+        state.mark_storage_unavailable("fixture storage unavailable");
+        assert_eq!(
+            waiting.await.unwrap_err().to_string(),
+            "fixture storage unavailable"
+        );
+        assert_eq!(
+            started.await.unwrap().unwrap_err().to_string(),
+            "fixture storage unavailable"
+        );
+        assert!(waiting_query.was_canceled());
+        assert!(!ran.load(Ordering::Acquire));
+        assert_eq!(workers.available_permits(), 0);
+        drop(writer);
+        resume_tx.send(()).unwrap();
+        let _returned_capacity = workers.acquire().await.unwrap();
     }
 
     #[test]

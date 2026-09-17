@@ -638,3 +638,193 @@ async fn old_snapshot_uses_current_source_with_stale_checkpoint() {
         );
     }
 }
+
+// New API conformance controls: the original API could not execute a retained
+// snapshot after releasing its borrow of the live storage manager.
+#[test]
+fn native_snapshot_pages_exclude_appends_and_preserve_order() {
+    use logex_query::{execute_log_filter, execute_log_filter_on_snapshot_with_cancel};
+    use logex_storage::native::{LogOrder, NativeLogFilter};
+    for bundled in [false, true] {
+        let (_tmp, mut storage, first) = fixture(bundled);
+        let snapshot = NativeStorageSnapshot::from_storage(&storage);
+        let next = header(101, first.hash_slow());
+        write(&mut storage, bundled, &next, &[row(&next, 0)]);
+        for (order, expected_index) in [(LogOrder::Ascending, 1), (LogOrder::Descending, 0)] {
+            let filter = NativeLogFilter {
+                order,
+                limit: Some(1),
+                offset: 1,
+                ..Default::default()
+            };
+            let rows =
+                execute_log_filter_on_snapshot_with_cancel(&snapshot, &filter, None).unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(
+                (rows[0].block_number, rows[0].log_index),
+                (100, expected_index)
+            );
+        }
+        let filter = NativeLogFilter::default();
+        std::thread::scope(|scope| {
+            let one = scope
+                .spawn(|| execute_log_filter_on_snapshot_with_cancel(&snapshot, &filter, None));
+            let two = scope
+                .spawn(|| execute_log_filter_on_snapshot_with_cancel(&snapshot, &filter, None));
+            for rows in [one.join().unwrap().unwrap(), two.join().unwrap().unwrap()] {
+                assert_eq!(
+                    rows.iter()
+                        .map(|row| (row.block_number, row.log_index))
+                        .collect::<Vec<_>>(),
+                    vec![(100, 0), (100, 1)]
+                );
+            }
+        });
+        assert_eq!(execute_log_filter(&storage, &filter).unwrap().len(), 3);
+    }
+}
+
+#[test]
+fn native_snapshot_survives_raw_compaction() {
+    use logex_query::execute_log_filter_on_snapshot_with_cancel;
+    let tmp = TempDir::new().unwrap();
+    let mut storage = PartitionManager::open(PartitionManagerConfig {
+        data_dir: tmp.path().to_owned(),
+        partition_target_rows: 2,
+        compaction_safety_margin_blocks: 0,
+    })
+    .unwrap();
+    let first = header(100, B256::ZERO);
+    write(
+        &mut storage,
+        false,
+        &first,
+        &[row(&first, 0), row(&first, 1)],
+    );
+    let snapshot = NativeStorageSnapshot::from_storage(&storage);
+    assert_eq!(storage.compact_eligible_segments().unwrap(), 1);
+    let rows =
+        execute_log_filter_on_snapshot_with_cancel(&snapshot, &Default::default(), None).unwrap();
+    assert_eq!(
+        rows.iter().map(|row| row.log_index).collect::<Vec<_>>(),
+        vec![0, 1]
+    );
+}
+
+#[test]
+fn native_snapshot_checks_cancellation_and_invalidation_at_each_checkpoint() {
+    use logex_query::{QueryCancelCheck, execute_log_filter_on_snapshot_with_cancel};
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
+    for bundled in [false, true] {
+        let (_tmp, storage, _) = fixture(bundled);
+        let snapshot = NativeStorageSnapshot::from_storage(&storage);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let count = calls.clone();
+        let check: QueryCancelCheck = Arc::new(move || {
+            count.fetch_add(1, Ordering::SeqCst);
+            false
+        });
+        execute_log_filter_on_snapshot_with_cancel(&snapshot, &Default::default(), Some(&check))
+            .unwrap();
+        let checkpoints = calls.load(Ordering::SeqCst);
+        assert!(checkpoints >= 3);
+        for checkpoint in 0..checkpoints {
+            for invalidate in [false, true] {
+                let (_tmp, storage, first) = fixture(bundled);
+                let snapshot = NativeStorageSnapshot::from_storage(&storage);
+                let storage = Arc::new(Mutex::new(storage));
+                let owner = storage.clone();
+                let calls = AtomicUsize::new(0);
+                let check: QueryCancelCheck = Arc::new(move || {
+                    if calls.fetch_add(1, Ordering::SeqCst) == checkpoint {
+                        if invalidate {
+                            owner
+                                .lock()
+                                .unwrap()
+                                .mark_non_canonical(first.hash_slow())
+                                .unwrap();
+                        }
+                        // Invalid views take precedence even on an error exit.
+                        true
+                    } else {
+                        false
+                    }
+                });
+                let error = execute_log_filter_on_snapshot_with_cancel(
+                    &snapshot,
+                    &Default::default(),
+                    Some(&check),
+                )
+                .unwrap_err();
+                assert_eq!(
+                    error.kind(),
+                    if invalidate {
+                        std::io::ErrorKind::WouldBlock
+                    } else {
+                        std::io::ErrorKind::Interrupted
+                    },
+                    "bundled={bundled}, checkpoint={checkpoint}"
+                );
+                if !invalidate {
+                    assert_eq!(
+                        execute_log_filter_on_snapshot_with_cancel(
+                            &snapshot,
+                            &Default::default(),
+                            None
+                        )
+                        .unwrap()
+                        .len(),
+                        2
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn native_snapshot_rejects_closed_or_invalid_views_even_for_zero_limit() {
+    use logex_query::{QueryCancelCheck, execute_log_filter_on_snapshot_with_cancel};
+    use logex_storage::native::NativeLogFilter;
+    use std::sync::Arc;
+    for bundled in [false, true] {
+        let (_tmp, mut storage, first) = fixture(bundled);
+        let snapshot = NativeStorageSnapshot::from_storage(&storage);
+        let empty = NativeLogFilter {
+            limit: Some(0),
+            ..Default::default()
+        };
+        assert!(
+            execute_log_filter_on_snapshot_with_cancel(&snapshot, &empty, None)
+                .unwrap()
+                .is_empty()
+        );
+        let cancel: QueryCancelCheck = Arc::new(|| true);
+        assert_eq!(
+            execute_log_filter_on_snapshot_with_cancel(&snapshot, &empty, Some(&cancel))
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::Interrupted
+        );
+        storage.mark_non_canonical(first.hash_slow()).unwrap();
+        assert_eq!(
+            execute_log_filter_on_snapshot_with_cancel(&snapshot, &empty, None)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        let snapshot = NativeStorageSnapshot::from_storage(&storage);
+        drop(storage);
+        for filter in [empty, NativeLogFilter::default()] {
+            assert_eq!(
+                execute_log_filter_on_snapshot_with_cancel(&snapshot, &filter, None)
+                    .unwrap_err()
+                    .kind(),
+                std::io::ErrorKind::WouldBlock
+            );
+        }
+    }
+}
