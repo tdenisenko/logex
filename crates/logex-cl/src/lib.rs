@@ -113,6 +113,18 @@ pub struct AnchorCoverage {
     pub gap_count: usize,
 }
 
+/// Evidence for a reorg decision captured under a single consensus lock.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReorgAnchorSnapshot {
+    /// The tracked tip matches consensus; no range allocation is needed.
+    MatchingTip,
+    Window {
+        anchors: Vec<ExecutionAnchor>,
+        first_anchor_block: Option<u64>,
+        last_anchor_block: Option<u64>,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConsensusSnapshot {
     pub checkpoint: WeakSubjectivityCheckpoint,
@@ -258,6 +270,42 @@ impl ConsensusStore {
         let start = anchors.partition_point(|record| record.anchor.block_number <= block_number);
         let count = limit.min(anchors.len() - start);
         anchors[start..start + count].to_vec()
+    }
+
+    /// Check the tracked tip without allocating, otherwise copy a bounded
+    /// inclusive anchor range and coverage under the same lock. Invalid or
+    /// oversized windows are refused instead of truncating reorg evidence.
+    pub fn reorg_anchor_snapshot(
+        &self,
+        first_block: u64,
+        last_block: u64,
+        tip_hash: B256,
+        max_records: usize,
+    ) -> Option<ReorgAnchorSnapshot> {
+        if first_block > last_block {
+            return None;
+        }
+        let snapshot = self.inner.lock().unwrap();
+        let anchors = &snapshot.ordered_anchors;
+        if let Ok(index) =
+            anchors.binary_search_by_key(&last_block, |record| record.anchor.block_number)
+            && anchors[index].anchor.block_hash == tip_hash
+        {
+            return Some(ReorgAnchorSnapshot::MatchingTip);
+        }
+        let start = anchors.partition_point(|record| record.anchor.block_number < first_block);
+        let end = anchors.partition_point(|record| record.anchor.block_number <= last_block);
+        if end - start > max_records {
+            return None;
+        }
+        Some(ReorgAnchorSnapshot::Window {
+            anchors: anchors[start..end]
+                .iter()
+                .map(|record| record.anchor)
+                .collect(),
+            first_anchor_block: anchors.first().map(|record| record.anchor.block_number),
+            last_anchor_block: anchors.last().map(|record| record.anchor.block_number),
+        })
     }
 
     pub fn anchor_coverage(&self) -> AnchorCoverage {
@@ -1505,6 +1553,59 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn reorg_anchor_snapshot_bounds_windows_and_keeps_matching_tip_allocation_free() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ConsensusStore::open(
+            temp.path(),
+            Some("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        )
+        .unwrap();
+        let mismatch = B256::repeat_byte(0xee);
+        assert!(store.reorg_anchor_snapshot(1, 0, mismatch, 10).is_none());
+        let window = |first, last, limit| match store
+            .reorg_anchor_snapshot(first, last, mismatch, limit)
+            .unwrap()
+        {
+            ReorgAnchorSnapshot::Window {
+                anchors,
+                first_anchor_block,
+                last_anchor_block,
+            } => (anchors, first_anchor_block, last_anchor_block),
+            ReorgAnchorSnapshot::MatchingTip => panic!("unexpected matching tip"),
+        };
+        assert!(window(0, u64::MAX, 0).0.is_empty());
+        let anchors = vec![
+            test_anchor(0),
+            test_anchor(3),
+            test_anchor(8),
+            test_anchor(u64::MAX),
+        ];
+        store.replace_anchors(anchors.clone()).unwrap();
+        // Zero window capacity still returns the allocation-free variant when
+        // the tip matches. No range data is copied or retained in that variant.
+        assert_eq!(
+            store.reorg_anchor_snapshot(0, u64::MAX, anchors[3].anchor.block_hash, 0),
+            Some(ReorgAnchorSnapshot::MatchingTip)
+        );
+        assert!(
+            store
+                .reorg_anchor_snapshot(0, u64::MAX, mismatch, 3)
+                .is_none()
+        );
+        assert!(store.reorg_anchor_snapshot(3, 8, mismatch, 1).is_none());
+        let (copied, first, last) = window(3, 8, 2);
+        assert_eq!(copied, vec![anchors[1].anchor, anchors[2].anchor]);
+        assert_eq!(first, Some(0));
+        assert_eq!(last, Some(u64::MAX));
+        assert_eq!(window(u64::MAX, u64::MAX, 1).0, vec![anchors[3].anchor]);
+        assert!(window(4, 7, 0).0.is_empty());
+        store.replace_anchors(vec![test_anchor(10)]).unwrap();
+        assert_eq!(first, Some(0));
+        assert_eq!(last, Some(u64::MAX));
+        assert_eq!(copied, vec![anchors[1].anchor, anchors[2].anchor]);
     }
 
     #[test]

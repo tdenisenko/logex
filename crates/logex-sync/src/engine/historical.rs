@@ -3,6 +3,14 @@ use super::*;
 impl SyncEngine {
     /// Restore the local header window and run consensus-anchored synchronization.
     pub async fn run(&mut self) -> Result<()> {
+        eyre::ensure!(
+            self.config.header_batch_size > 0,
+            "sync header_batch_size must be greater than zero"
+        );
+        eyre::ensure!(
+            self.config.fetch_batch_size > 0,
+            "sync fetch_batch_size must be greater than zero"
+        );
         let (start_block, recent_headers) = {
             let storage = self.storage.read().await;
             (

@@ -17,7 +17,7 @@ use logex_storage::PartitionManager;
 use logex_types::{NodeState, SyncStatus};
 
 use crate::SyncConfig;
-use crate::head_tracker::{HeadTracker, ReorgInfo};
+use crate::head_tracker::HeadTracker;
 use crate::p2p::peer_manager::{
     BodyReceiptRequestAccounting, BodyReceiptRequestOutcome, BodyReceiptRequestPlan, PeerManager,
     ReverseHeaderPagesRequestOutcome, ReverseHeaderPagesRequestPlan, SourcedBodyReceipts,

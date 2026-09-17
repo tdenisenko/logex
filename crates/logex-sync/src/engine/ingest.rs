@@ -249,27 +249,23 @@ impl SyncEngine {
         outcome.row_count
     }
 
-    /// Handle a detected reorg: mark reverted blocks non-canonical.
-    pub(super) async fn handle_reorg(&mut self, reorg: ReorgInfo) -> Result<()> {
-        if reorg.reverted_hashes.is_empty() {
-            return Ok(());
+    /// Advance only along the verified forward chain. Canonical reorgs must be
+    /// reconciled against consensus through the durable storage transaction.
+    pub(super) fn track_forward_header(&mut self, header: Header) -> Result<()> {
+        if let Some((number, hash)) = self.head_tracker.tip() {
+            eyre::ensure!(
+                number.checked_add(1) == Some(header.number()) && hash == header.parent_hash(),
+                "verified forward header {} does not extend tracked canonical tip {}",
+                header.number(),
+                number,
+            );
         }
-
-        self.peers.remove_cached_blocks(&reorg.reverted_hashes);
-
-        let mut storage = self.storage.write().await;
-        let mut total_reverted = 0u64;
-        for hash in &reorg.reverted_hashes {
-            total_reverted += storage
-                .mark_non_canonical(*hash)
-                .map_err(|e| eyre::eyre!("reorg error: {e}"))?;
-        }
-
-        tracing::info!(
-            fork_block = reorg.fork_block,
-            reverted_blocks = reorg.reverted_hashes.len(),
-            reverted_rows = total_reverted,
-            "handled reorg"
+        // An empty tracker allows the initial authenticated checkpoint jump.
+        // A populated tracker, including genesis, must always extend its tip.
+        let reorg = self.head_tracker.track(header);
+        debug_assert!(
+            reorg.is_none(),
+            "forward continuity was checked before tracking"
         );
         Ok(())
     }

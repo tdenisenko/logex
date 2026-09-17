@@ -2880,9 +2880,7 @@ impl SyncEngine {
                 &body,
                 &receipts,
             )?;
-            if let Some(reorg) = self.head_tracker.track(header.clone()) {
-                self.handle_reorg(reorg).await?;
-            }
+            self.track_forward_header(header.clone())?;
 
             self.peers.cache_canonical_block(&header, &body, &receipts);
             self.note_serving_peer(header_peer, &mut newly_serving_peers);
@@ -3228,9 +3226,7 @@ impl SyncEngine {
                 }
 
                 let txs = assemble_txs(body, block_receipts);
-                if let Some(reorg) = self.head_tracker.track(header.clone()) {
-                    self.handle_reorg(reorg).await?;
-                }
+                self.track_forward_header(header.clone())?;
 
                 let recent_headers = self.head_tracker.snapshot();
                 self.peers
@@ -6694,22 +6690,18 @@ impl SyncEngine {
             return Ok(false);
         };
 
-        self.peers.remove_cached_blocks(&reorg.reverted_hashes);
-
         let reverted_rows = {
             let mut storage = self.storage.write().await;
-            let mut total_reverted = 0u64;
-            for hash in &reorg.reverted_hashes {
-                total_reverted += storage
-                    .mark_non_canonical(*hash)
-                    .map_err(|error| eyre::eyre!("consensus reorg error: {error}"))?;
-            }
             storage
-                .rewind_canonical_state(&reorg.retained_headers, reorg.indexed_head)
-                .map_err(|error| eyre::eyre!("consensus reorg state rewind error: {error}"))?;
-            total_reverted
+                .apply_canonical_reorg(
+                    &reorg.reverted_hashes,
+                    &reorg.retained_headers,
+                    reorg.indexed_head,
+                )
+                .map_err(|error| eyre::eyre!("consensus reorg transaction error: {error}"))?
         };
 
+        self.peers.remove_cached_blocks(&reorg.reverted_hashes);
         self.head_tracker.restore(reorg.retained_headers.clone());
         self.progress
             .rewind_to(reorg.indexed_head.map_or(0, |anchor| anchor.block_number));
@@ -6771,20 +6763,49 @@ fn locate_consensus_reorg(
         return Ok(None);
     };
 
-    let tip_hash = tip.hash_slow();
-    if consensus
-        .anchor_at(tip.number())
-        .is_some_and(|anchor| anchor.block_hash == tip_hash)
-    {
+    let first_block = recent_headers[0].number();
+    let tip_number = tip.number();
+    let snapshot = consensus
+        .reorg_anchor_snapshot(
+            first_block,
+            tip_number,
+            tip.hash_slow(),
+            recent_headers.len(),
+        )
+        .ok_or_else(|| eyre::eyre!("invalid or oversized consensus reorg anchor window"))?;
+    let logex_cl::ReorgAnchorSnapshot::Window {
+        anchors,
+        first_anchor_block,
+        last_anchor_block,
+    } = snapshot
+    else {
         return Ok(None);
-    }
-
+    };
+    let mut anchors = anchors.iter().rev().peekable();
+    let mut conflicting_anchor = false;
     for index in (0..recent_headers.len()).rev() {
         let header = &recent_headers[index];
-        let header_hash = header.hash_slow();
-        if let Some(anchor) = consensus.anchor_at(header.number())
-            && anchor.block_hash == header_hash
+        while anchors
+            .peek()
+            .is_some_and(|anchor| anchor.block_number > header.number())
         {
+            anchors.next();
+        }
+        let Some(anchor) = anchors
+            .peek()
+            .filter(|anchor| anchor.block_number == header.number())
+            .copied()
+            .copied()
+        else {
+            continue;
+        };
+        anchors.next();
+        if anchor.block_hash == header.hash_slow() {
+            // Missing intermediate anchors are not evidence of a reorg. A
+            // checkpoint-authenticated gap may have only partially ingested.
+            if !conflicting_anchor {
+                return Ok(None);
+            }
             return Ok(Some(ConsensusReorg {
                 retained_headers: recent_headers[..=index].to_vec(),
                 indexed_head: Some(anchor),
@@ -6794,14 +6815,12 @@ fn locate_consensus_reorg(
                     .collect(),
             }));
         }
+        conflicting_anchor = true;
     }
 
-    let tip_number = tip.number();
-    let has_anchor_at_or_before_tip = consensus
-        .anchor_coverage()
-        .floor
-        .is_some_and(|anchor| anchor.block_number <= tip_number);
-    if !has_anchor_at_or_before_tip && consensus.next_anchor_after(tip_number).is_some() {
+    let has_anchor_at_or_before_tip = first_anchor_block.is_some_and(|block| block <= tip_number);
+    let has_future_anchor = last_anchor_block.is_some_and(|block| block > tip_number);
+    if !has_anchor_at_or_before_tip && has_future_anchor {
         tracing::debug!(
             tip_block = tip_number,
             "consensus anchors are ahead of the persisted header window; treating as a restart gap"
@@ -6809,16 +6828,8 @@ fn locate_consensus_reorg(
         return Ok(None);
     }
 
-    let first_block = recent_headers
-        .first()
-        .map(Header::number)
-        .unwrap_or_default();
-    let last_block = recent_headers
-        .last()
-        .map(Header::number)
-        .unwrap_or_default();
     Err(eyre::eyre!(
-        "consensus anchor reorg exceeded the persisted recent-header window ({first_block}..{last_block}); a fresh checkpointed resync is required"
+        "consensus anchor reorg exceeded the persisted recent-header window ({first_block}..{tip_number}); a fresh checkpointed resync is required"
     ))
 }
 
@@ -9050,6 +9061,65 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn locate_consensus_reorg_preserves_partial_gap_with_matching_ancestor() {
+        let temp = TempDir::new().unwrap();
+        let first = header(100, B256::ZERO, 0x01);
+        let second = header(101, first.hash_slow(), 0x02);
+        let terminal = header(102, second.hash_slow(), 0x03);
+        let store = ConsensusStore::open(
+            temp.path(),
+            Some("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        )
+        .unwrap();
+        store
+            .append_anchors(vec![anchor_for(&first, 1), anchor_for(&terminal, 3)])
+            .unwrap();
+        // The contiguous gap through terminal was authenticated before its first
+        // chunk was published. The intermediate tip has no materialized anchor.
+        assert!(
+            locate_consensus_reorg(&store, &[first, second])
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn locate_consensus_reorg_requires_a_conflicting_overlap_before_rewind() {
+        let temp = TempDir::new().unwrap();
+        let first = header(100, B256::ZERO, 0x01);
+        let second = header(101, first.hash_slow(), 0x02);
+        let tip = header(102, second.hash_slow(), 0x03);
+        let conflicting_second = header(101, first.hash_slow(), 0x12);
+        let store = ConsensusStore::open(
+            temp.path(),
+            Some("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        )
+        .unwrap();
+        store.replace_anchors(vec![anchor_for(&first, 1)]).unwrap();
+        assert!(
+            locate_consensus_reorg(&store, &[first.clone(), second.clone(), tip.clone()])
+                .unwrap()
+                .is_none()
+        );
+        store
+            .append_anchors(vec![anchor_for(&conflicting_second, 2)])
+            .unwrap();
+        let reorg = locate_consensus_reorg(&store, &[first.clone(), second.clone(), tip.clone()])
+            .unwrap()
+            .unwrap();
+        assert_eq!(reorg.retained_headers, vec![first.clone()]);
+        assert_eq!(
+            reorg.reverted_hashes,
+            vec![second.hash_slow(), tip.hash_slow()]
+        );
+        // No overlap with only older coverage still lacks a supported ancestor.
+        store
+            .replace_anchors(vec![anchor_for(&header(90, B256::ZERO, 0x19), 1)])
+            .unwrap();
+        assert!(locate_consensus_reorg(&store, &[first, second, tip]).is_err());
     }
 
     #[test]
