@@ -71,9 +71,18 @@ The [consensus network admission review](consensus-network-admission.md) fixes
 silently reduced large configured peer limits (B3-70). Checked startup arithmetic
 preserves ordinary and zero semantics and rejects unrepresentable values before
 consensus identity/transport setup. Source `2cc8bba7` passes independent review
-and all eleven local gates (2,058 tests / 24 existing ignores). Exact-head CI and
-merge remain. Protected metadata and gossip cache/topic/control ownership are
+and all eleven local gates (2,058 tests / 24 existing ignores). PR #235
+merged as `66512764` after all six CI jobs and ten Linux controls. Protected metadata and gossip cache/topic/control ownership are
 recorded as separate open findings; this change adds no ingestion work.
+
+The [gossip topic ownership review](gossip-topic-ownership.md) closes unsupported
+topic retention and late type-size admission (B3-71–72). Static CL eligibility is
+enforced before message caches, GRAFT peer topics and PRUNE backoffs; supported
+fork lifecycle and message IDs are unchanged. Source `9778b322` passes independent
+review, 162 standalone vendor tests and all eleven local gates (2,060 workspace
+tests / 24 existing ignores). Source and local validation are complete;
+exact-head CI and merge remain. Eligible-cache capacity, priority controls and
+protected metadata are separate open ownership work.
 
 | Batch | Review area | Status / acceptance |
 | --- | --- | --- |

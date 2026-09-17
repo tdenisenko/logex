@@ -4,8 +4,8 @@ Base: PR #234 merge `115ac55431be4b7df60f45ce1a6c8f4582ec33a5`.
 Branch: `audit/consensus-network-admission`. This discrete milestone fixes
 peer-count arithmetic (B3-70) and records the remaining resource owners.
 Source `2cc8bba7acc3d8948305751b16a61ef6fd390612` passes focused consensus
-checks, independent review and all eleven local gates. Exact-head CI and merge
-remain.
+checks, independent review and all eleven local gates. PR #235 merged
+as `66512764` after all six CI jobs.
 
 ## B3-70: silently reduced configured connection limits
 
@@ -98,3 +98,5 @@ progress. No unconditional head-liveness guarantee under overload is inferred.
 No live traffic, stress allocation, remote-host work or benchmarking was used in
 these reviews. Shared query resources, dashboard review, automatic verified
 segment repair and integrated acceptance remain separate audit work.
+
+All six CI jobs passed on `d61534b7` and ten Linux volume/template controls passed with verified cleanup. [PR #235](https://github.com/tdenisenko/logex/pull/235) merged as `66512764`. The merge tree is identical to the tested head. B3-70 is closed. Protected metadata, gossip admission, shared query resources, dashboard review, verified repair and integrated acceptance remain open.
