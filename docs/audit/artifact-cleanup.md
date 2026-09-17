@@ -99,3 +99,27 @@ This is a before/after free-space observation, not a sum of file references; APF
 sharing and concurrent machine activity affect the exact physical gain. The
 per-directory receipt is retained with the
 [sync-state review evidence](sync-state-review.md).
+
+## September 17 obsolete test compilation units
+
+After the historical bounds source passed all ten local gates, Cargo was idle.
+The cleanup removed 451 older generated test compilation units under this
+repository's `target/debug/build/logex-*` directories, including each selected
+unit's own fingerprint and outputs. Normal library/build-script units and
+dependency caches were excluded. The inventory retained all 38 units referenced
+by current audit logs, at least two newest cached and runnable variants per test
+target, and 108 units in total.
+
+Every selected path had a known generated test fingerprint and output naming
+pattern. The cleanup checked all path/file metadata again before removal, rejected
+links/unknown structures, checked compiler idleness, and verified retained paths
+and content metadata afterward. All 451 candidates were removed; none changed
+and required skipping. Sources, release binaries, current test binaries, evidence
+and unrelated files remain. No remote host was accessed.
+
+Available filesystem space increased by approximately **64.9 GiB**, from 44.1 GiB
+to 109.0 GiB. This is an observed before/after change, not a sum of hardlinked
+file sizes. Reusing an old removed test configuration may require recompilation;
+its complete freshness state was removed with its generated outputs. The
+[tracked receipt](baselines/2026-09-17-test-build-cleanup.json) records exact removed
+paths, retained counts, policy and full local inventory/script hashes.
