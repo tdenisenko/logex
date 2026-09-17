@@ -2,7 +2,7 @@
 
 Base: PR #228 merge `910a74aea39b7b358d397651450691acb90192cd`.
 Branch: `audit/jsonrpc-admission`.
-Implementation and eleven local gates are complete; exact-head CI and merge remain.
+Implementation and eleven local gates are complete; PR #229 merged as `61f2506b` after all six CI jobs.
 
 ## Findings
 
@@ -88,4 +88,6 @@ Source is `333fcf409b1fe11beeac8a6e858775a11248dd3b`. The [validation record](ba
 retains source hashes, original and candidate regressions, independent review and
 full gate logs. All 130 final server tests pass with 2 existing benchmark ignores.
 Vendor sources are unchanged; CI retains pinned expiry and volume regressions.
-Exact-head CI and merge remain.
+Exact-head CI and merge passed; verified closure follows.
+
+All six CI jobs passed on `bd556e0b` and ten Linux volume/template controls passed with verified cleanup. [PR #229](https://github.com/tdenisenko/logex/pull/229) merged as `61f2506b`. The merge tree is identical to the tested head. B8-09–11 are closed within single-request admission and correlation scope. Batch dispatch, detailed filters, subscriptions, shared query budgets and integrated acceptance remain open.

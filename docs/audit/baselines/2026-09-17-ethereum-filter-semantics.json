@@ -1,0 +1,375 @@
+{
+  "date": "2026-09-17",
+  "branch": "audit/ethereum-filter-semantics",
+  "base": "61f2506b32031f2e9c9bb895077513b3e7f4b1ad",
+  "source_commit": "76667e69a6f95725b46ae2332f925ee4cdddfa88",
+  "source_inventory": {
+    "base": "61f2506b32031f2e9c9bb895077513b3e7f4b1ad",
+    "source_commit": "76667e69a6f95725b46ae2332f925ee4cdddfa88",
+    "files": {
+      "crates/logex-query/src/lib.rs": {
+        "original": {
+          "bytes": 415,
+          "sha256": "ecacf7311b1ad0d9707ba3303d3ff493071207b91ffa93b367d81baefdc9035d"
+        },
+        "final": {
+          "bytes": 442,
+          "sha256": "a69a09c8ac7f3dc23d1010638e1179517331cf61f2b3315aa770f9f54c7e1c52"
+        }
+      },
+      "crates/logex-query/src/native.rs": {
+        "original": {
+          "bytes": 51013,
+          "sha256": "c0ffdc2efde097327f518b40707cd3ece4ba07d58f14ea8892a66d7d106d2707"
+        },
+        "final": {
+          "bytes": 54953,
+          "sha256": "bd7857ea9d224fb3dd4b15b7d9e96ce6b812add62a773576a3be2f81fc3b3b92"
+        }
+      },
+      "crates/logex-server/src/eth_filter.rs": {
+        "original": {
+          "bytes": 14313,
+          "sha256": "c0b345325cfec09b91aa844b7557c1c969e474c434bb0aba2e6444668a77962d"
+        },
+        "final": {
+          "bytes": 17775,
+          "sha256": "b85b8d4416ed46c012f6f5f3cd243d053c42809104fbb5b97c31f779ce8025e0"
+        }
+      },
+      "crates/logex-server/src/grpc.rs": {
+        "original": {
+          "bytes": 30060,
+          "sha256": "3ffc159be662894af088d69ca489d61d06754590c5f48c7f8fe48fe1599a6097"
+        },
+        "final": {
+          "bytes": 30111,
+          "sha256": "96de5b1fcbe44c7f60ecf83f83f74b972e3b36ff0bf93e5ac6a4a0c34c73c583"
+        }
+      },
+      "crates/logex-server/src/handler.rs": {
+        "original": {
+          "bytes": 41152,
+          "sha256": "53cfd7f8f9bf823e60b6583b9accaddbd107b3f919747c9f5760e69b25a76b3f"
+        },
+        "final": {
+          "bytes": 40926,
+          "sha256": "3bde097ceef3b058b05a4062eaf06323a6073289927d3c216c8f2651b0ad87ed"
+        }
+      },
+      "crates/logex-server/src/jsonrpc.rs": {
+        "original": {
+          "bytes": 10983,
+          "sha256": "df9af4d94e393b15d465d4539c5e500045173fe71954f29a627eb471eec3cc65"
+        },
+        "final": {
+          "bytes": 13665,
+          "sha256": "2999380b0f33fbff0798863878e8c173611f5b64604896974925cc29817ff1b7"
+        }
+      },
+      "crates/logex-server/src/ws.rs": {
+        "original": {
+          "bytes": 55591,
+          "sha256": "a0dcd4613deb82911611181fbbeb61cab8858499b97962e71a0086afa781022f"
+        },
+        "final": {
+          "bytes": 60644,
+          "sha256": "bc0d4b1988f6f848250874ad944586fa591c14522694134d1e24abfa59179c28"
+        }
+      },
+      "crates/logex-server/tests/ethereum_filters.rs": {
+        "final": {
+          "bytes": 18280,
+          "sha256": "dca7f3fa5d73605a3e93a2d3969c1ea52af881659c400953c7bf11f9a396e416"
+        }
+      },
+      "crates/logex-storage/src/native/filter.rs": {
+        "original": {
+          "bytes": 3476,
+          "sha256": "597c668be531e099bbd6fa9612fa4e74746553b77c63d67f386748551bcc9c9c"
+        },
+        "final": {
+          "bytes": 3665,
+          "sha256": "cae47142b58ca96ce08f99206f975f37ea878e85d9c1eebbc29a2e97ee72cf60"
+        }
+      }
+    }
+  },
+  "findings": [
+    "B8-12",
+    "B8-13",
+    "B8-14"
+  ],
+  "gates": {
+    "commit": "76667e69a6f95725b46ae2332f925ee4cdddfa88",
+    "rustc": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+    "gates": [
+      {
+        "name": "vendor",
+        "command": [
+          "python3",
+          "tools/verify_datafusion_vendor.py"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T15:19:24.853843+00:00",
+        "finished": "2026-09-17T15:19:24.984818+00:00",
+        "sha256": "66c8356dd4a2753b376fc6b222ceda74bb495616f72e05bb062c7fb877a81bd1",
+        "log": "/private/tmp/logex-audit-ethereum-filters-20260917/gates/vendor.log"
+      },
+      {
+        "name": "format",
+        "command": [
+          "cargo",
+          "fmt",
+          "--all",
+          "--",
+          "--check"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T15:19:24.985305+00:00",
+        "finished": "2026-09-17T15:19:26.029897+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-audit-ethereum-filters-20260917/gates/format.log"
+      },
+      {
+        "name": "vendor-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2024",
+          "--config-path",
+          "vendor/reth-network/rustfmt.toml",
+          "--config",
+          "skip_children=true",
+          "vendor/reth-network/src/eth_requests.rs",
+          "vendor/reth-network/src/session/active.rs",
+          "vendor/reth-network/src/session/mod.rs",
+          "vendor/reth-network/src/session/types.rs",
+          "vendor/reth-network/src/session/range_update.rs",
+          "vendor/reth-discv5/src/lib.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T15:19:26.030281+00:00",
+        "finished": "2026-09-17T15:19:26.097098+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-audit-ethereum-filters-20260917/gates/vendor-format.log"
+      },
+      {
+        "name": "enr-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2021",
+          "--config",
+          "skip_children=true",
+          "vendor/enr/src/lib.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T15:19:26.097446+00:00",
+        "finished": "2026-09-17T15:19:26.148894+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-audit-ethereum-filters-20260917/gates/enr-format.log"
+      },
+      {
+        "name": "gossipsub-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2021",
+          "--config",
+          "skip_children=true",
+          "vendor/libp2p-gossipsub/src/time_cache.rs",
+          "vendor/libp2p-gossipsub/src/behaviour.rs",
+          "vendor/libp2p-gossipsub/src/behaviour/tests.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T15:19:26.149284+00:00",
+        "finished": "2026-09-17T15:19:26.245288+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-audit-ethereum-filters-20260917/gates/gossipsub-format.log"
+      },
+      {
+        "name": "aggregate-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2021",
+          "--config",
+          "max_width=90,skip_children=true",
+          "vendor/datafusion-functions-aggregate/src/sum.rs",
+          "vendor/datafusion-functions-aggregate/src/average.rs",
+          "vendor/datafusion-functions-aggregate-common/src/aggregate/sum_distinct/numeric.rs",
+          "vendor/datafusion-functions-aggregate-common/src/aggregate/avg_distinct/decimal.rs",
+          "vendor/datafusion-functions-aggregate-common/src/utils.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T15:19:26.245705+00:00",
+        "finished": "2026-09-17T15:19:26.308096+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-audit-ethereum-filters-20260917/gates/aggregate-format.log"
+      },
+      {
+        "name": "check",
+        "command": [
+          "cargo",
+          "check",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T15:19:26.308503+00:00",
+        "finished": "2026-09-17T15:19:37.643923+00:00",
+        "sha256": "669e936bfe22f96c811e9ee68ac33ecf5b141afb40b5db2c027254dd716af7ab",
+        "log": "/private/tmp/logex-audit-ethereum-filters-20260917/gates/check.log"
+      },
+      {
+        "name": "clippy",
+        "command": [
+          "cargo",
+          "clippy",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T15:19:37.644831+00:00",
+        "finished": "2026-09-17T15:19:49.163133+00:00",
+        "sha256": "d0ad5505cf256e7efe6161c2b420fc2eace185fcceac4d2e74ff8d2e4b71346c",
+        "log": "/private/tmp/logex-audit-ethereum-filters-20260917/gates/clippy.log"
+      },
+      {
+        "name": "test",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T15:19:49.163700+00:00",
+        "finished": "2026-09-17T15:26:18.305018+00:00",
+        "sha256": "885c8bb9b23dcbdda0248c33e7c27e5d06143ac56d7cfc3813838c4c11e1bb95",
+        "log": "/private/tmp/logex-audit-ethereum-filters-20260917/gates/test.log"
+      },
+      {
+        "name": "doc",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--doc",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T15:26:18.307571+00:00",
+        "finished": "2026-09-17T15:26:32.510792+00:00",
+        "sha256": "7ce25baa3b27cf1c3fb3058fab5acfa1c16e23fbb0254b390b9fa691588df99d",
+        "log": "/private/tmp/logex-audit-ethereum-filters-20260917/gates/doc.log"
+      },
+      {
+        "name": "release-build",
+        "command": [
+          "cargo",
+          "build",
+          "-p",
+          "logex-node",
+          "--release",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T15:26:32.511335+00:00",
+        "finished": "2026-09-17T15:28:21.300392+00:00",
+        "sha256": "31a8755862395d94d31fd2f03897b3c5e72f1d81787570b071104ddd5300431e",
+        "log": "/private/tmp/logex-audit-ethereum-filters-20260917/gates/release-build.log"
+      }
+    ]
+  },
+  "workspace_tests": {
+    "passed": 2000,
+    "failed": 0,
+    "ignored": 24,
+    "targets": 37
+  },
+  "documentation_tests": {
+    "passed": 0,
+    "failed": 0,
+    "ignored": 0,
+    "targets": 8
+  },
+  "original_filter_groups": {
+    "passed": 0,
+    "failed": 4,
+    "ignored": 0,
+    "targets": 1
+  },
+  "original_ws_groups": {
+    "passed": 0,
+    "failed": 2,
+    "ignored": 0,
+    "targets": 1
+  },
+  "final_server_tests": {
+    "passed": 142,
+    "failed": 0,
+    "ignored": 2,
+    "targets": 6
+  },
+  "final_native_tests": {
+    "passed": 15,
+    "failed": 0,
+    "ignored": 0,
+    "targets": 1
+  },
+  "evidence": {
+    "path": "docs/audit/baselines/2026-09-17-ethereum-filter-semantics-evidence.json.gz",
+    "files": 37,
+    "bytes_uncompressed": 404092,
+    "bytes": 73058,
+    "sha256": "9d06ff13927998376e8aac5003ea240385c743ff5690fe93afffad54d121b4ae"
+  },
+  "validation": {
+    "path": "docs/audit/baselines/2026-09-17-ethereum-filter-semantics-validation.json.gz",
+    "files": 14,
+    "bytes_uncompressed": 240565,
+    "bytes": 45555,
+    "sha256": "a0688114a0eeb49de29cb6b2328c8e1d0883b010805c75da52f964512ac4fb0d"
+  },
+  "publication": {
+    "state": "pending"
+  },
+  "boundaries": [
+    "Exact-base source snapshots and expanded before-fix controls are retained; initial tests stopped at earlier assertions and are not counted as complete case tables.",
+    "Literal recursive parameters do not reinterpret private object keys. Raw request IDs, notification ownership and worker snapshot resolution remain unchanged.",
+    "Independent oracle compares small hot/unindexed, hot/indexed and sealed/indexed fixtures. Indexed fixtures assert a usable source checkpoint and topic artifact.",
+    "Required topic positions are checked independently in row matching and existing column refinement before pagination, including noncontiguous nullable rows. Native default arity zero and AnyOf([]) match-none are preserved.",
+    "Raw WebSocket filters convert once at admission and use the shared native row predicate. Query page fields do not truncate live notifications.",
+    "Unsupported safe/finalized/pending tags fail explicitly; raw WebSocket latest bounds are unsupported. HTTP latest still uses the captured query head.",
+    "Existing typed blockHash byte-array input is retained as an extension; no global dependency decoder or compatibility change is inferred.",
+    "No ingestion writes, persisted schema/index format changes, SQL implementation, live sync, remote host access, production data or benchmark. No throughput claim.",
+    "Subscription lag/reorg notification behavior, shared query resource policy, dashboard, verified repair and integrated acceptance remain separate."
+  ]
+}
