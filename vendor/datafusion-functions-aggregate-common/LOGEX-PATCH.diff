@@ -58,3 +58,327 @@
          }
          let v = (!self.values.is_empty()).then_some(acc);
          ScalarValue::new_primitive::<T>(v, &self.data_type)
+--- a/src/aggregate/avg_distinct/decimal.rs
++++ b/src/aggregate/avg_distinct/decimal.rs
+@@ -18,7 +18,7 @@
+ use arrow::{
+     array::{ArrayRef, ArrowNumericType},
+     datatypes::{
+-        i256, Decimal128Type, Decimal256Type, Decimal32Type, Decimal64Type, DecimalType,
++        Decimal128Type, Decimal256Type, Decimal32Type, Decimal64Type, DecimalType,
+     },
+ };
+ use datafusion_common::{Result, ScalarValue};
+@@ -48,7 +48,9 @@
+         let data_type = T::TYPE_CONSTRUCTOR(T::MAX_PRECISION, sum_scale);
+ 
+         Self {
+-            sum_accumulator: DistinctSumAccumulator::new(&data_type),
++            sum_accumulator: DistinctSumAccumulator::new_checked(&data_type, |_, _| {
++                Ok(())
++            }),
+             sum_scale,
+             target_precision,
+             target_scale,
+@@ -79,7 +81,11 @@
+             );
+         }
+ 
+-        let sum_scalar = self.sum_accumulator.evaluate()?;
++        let count = u64::try_from(self.sum_accumulator.distinct_count())
++            .map_err(|_| datafusion_common::exec_datafusion_err!("AVG count overflow"))?;
++        let sum_scalar = self.sum_accumulator.evaluate().map_err(|error| {
++            datafusion_common::exec_datafusion_err!("AVG DISTINCT overflow: {error}")
++        })?;
+ 
+         match sum_scalar {
+             ScalarValue::Decimal32(Some(sum), _, _) => {
+@@ -88,8 +94,7 @@
+                     self.target_precision,
+                     self.target_scale,
+                 )?;
+-                let avg = decimal_averager
+-                    .avg(sum, self.sum_accumulator.distinct_count() as i32)?;
++                let avg = decimal_averager.avg_with_count(sum, count)?;
+                 Ok(ScalarValue::Decimal32(
+                     Some(avg),
+                     self.target_precision,
+@@ -102,8 +107,7 @@
+                     self.target_precision,
+                     self.target_scale,
+                 )?;
+-                let avg = decimal_averager
+-                    .avg(sum, self.sum_accumulator.distinct_count() as i64)?;
++                let avg = decimal_averager.avg_with_count(sum, count)?;
+                 Ok(ScalarValue::Decimal64(
+                     Some(avg),
+                     self.target_precision,
+@@ -116,8 +120,7 @@
+                     self.target_precision,
+                     self.target_scale,
+                 )?;
+-                let avg = decimal_averager
+-                    .avg(sum, self.sum_accumulator.distinct_count() as i128)?;
++                let avg = decimal_averager.avg_with_count(sum, count)?;
+                 Ok(ScalarValue::Decimal128(
+                     Some(avg),
+                     self.target_precision,
+@@ -130,11 +133,7 @@
+                     self.target_precision,
+                     self.target_scale,
+                 )?;
+-                // `distinct_count` returns `u64`, but `avg` expects `i256`
+-                // first convert `u64` to `i128`, then convert `i128` to `i256` to avoid overflow
+-                let distinct_cnt: i128 = self.sum_accumulator.distinct_count() as i128;
+-                let count: i256 = i256::from_i128(distinct_cnt);
+-                let avg = decimal_averager.avg(sum, count)?;
++                let avg = decimal_averager.avg_with_count(sum, count)?;
+                 Ok(ScalarValue::Decimal256(
+                     Some(avg),
+                     self.target_precision,
+@@ -160,6 +159,7 @@
+     use arrow::array::{
+         Decimal128Array, Decimal256Array, Decimal32Array, Decimal64Array,
+     };
++    use arrow::datatypes::i256;
+     use std::sync::Arc;
+ 
+     #[test]
+@@ -280,3 +280,64 @@
+         Ok(())
+     }
+ }
++
++#[cfg(test)]
++mod logex_decimal_distinct_tests {
++    use super::*;
++    use arrow::array::{
++        Decimal128Array, Decimal256Array, Decimal32Array, Decimal64Array,
++    };
++    use arrow::datatypes::i256;
++    use std::sync::Arc;
++
++    #[test]
++    fn checked_distinct_decimal_storage_widths() -> Result<()> {
++        macro_rules! check {
++            ($type:ty, $array:ty, $value:expr, $one:expr, $precision:expr) => {{
++                let mut acc = DecimalDistinctAvgAccumulator::<$type>::with_decimal_params(
++                    0, $precision, 0,
++                );
++                // Direct malformed/state bounds use tiny backing arrays, not huge fixtures.
++                let values: ArrayRef = Arc::new(<$array>::from(vec![$value, $one]));
++                acc.update_batch(&[values])?;
++                assert!(acc.evaluate().unwrap_err().to_string().contains("AVG"));
++            }};
++        }
++        check!(Decimal32Type, Decimal32Array, i32::MAX, 1, 9);
++        check!(Decimal64Type, Decimal64Array, i64::MAX, 1, 18);
++        check!(Decimal128Type, Decimal128Array, i128::MAX, 1, 38);
++        check!(Decimal256Type, Decimal256Array, i256::MAX, i256::ONE, 76);
++        Ok(())
++    }
++
++    #[test]
++    fn distinct_decimal_state_merges_duplicates_and_nulls() -> Result<()> {
++        let mut acc =
++            DecimalDistinctAvgAccumulator::<Decimal128Type>::with_decimal_params(
++                0, 10, 4,
++            );
++        let values: ArrayRef = Arc::new(Decimal128Array::from(vec![
++            Some(90),
++            Some(90),
++            Some(30),
++            None,
++        ]));
++        acc.update_batch(&[values])?;
++        let state = acc.state()?;
++        let mut merged =
++            DecimalDistinctAvgAccumulator::<Decimal128Type>::with_decimal_params(
++                0, 10, 4,
++            );
++        let state = state
++            .iter()
++            .map(|value| value.to_array_of_size(1))
++            .collect::<Result<Vec<_>>>()?;
++        merged.merge_batch(&state)?;
++        merged.merge_batch(&state)?;
++        assert_eq!(
++            merged.evaluate()?,
++            ScalarValue::Decimal128(Some(600000), 10, 4)
++        );
++        Ok(())
++    }
++}
+--- a/src/utils.rs
++++ b/src/utils.rs
+@@ -20,7 +20,7 @@
+ use arrow::datatypes::{
+     ArrowNativeType, DataType, DecimalType, Field, FieldRef, ToByteSlice,
+ };
+-use datafusion_common::{exec_err, internal_datafusion_err, Result};
++use datafusion_common::{exec_err, Result};
+ use datafusion_expr_common::accumulator::Accumulator;
+ use datafusion_physical_expr_common::sort_expr::{LexOrdering, PhysicalSortExpr};
+ use std::sync::Arc;
+@@ -80,19 +80,17 @@
+ 
+ impl<T: ArrowNativeTypeOp> Eq for Hashable<T> {}
+ 
+-/// Computes averages for `Decimal128`/`Decimal256` values, checking for overflow
++/// Computes averages for all Arrow decimal storage widths, checking for overflow
+ ///
+-/// This is needed because different precisions for Decimal128/Decimal256 can
++/// This is needed because different decimal precisions can
+ /// store different ranges of values and thus sum/count may not fit in
+ /// the target type.
+ ///
+ /// For example, the precision is 3, the max of value is `999` and the min
+ /// value is `-999`
+ pub struct DecimalAverager<T: DecimalType> {
+-    /// scale factor for sum values (10^sum_scale)
+-    sum_mul: T::Native,
+-    /// scale factor for target (10^target_scale)
+-    target_mul: T::Native,
++    /// Relative scale factor, also valid for negative decimal scales.
++    scale_mul: T::Native,
+     /// the output precision
+     target_precision: u8,
+     /// the output scale
+@@ -112,43 +110,50 @@
+         target_precision: u8,
+         target_scale: i8,
+     ) -> Result<Self> {
+-        let sum_mul = T::Native::from_usize(10_usize)
+-            .map(|b| b.pow_wrapping(sum_scale as u32))
++        let delta = i16::from(target_scale) - i16::from(sum_scale);
++        let exponent = u32::try_from(delta).map_err(|_| {
++            datafusion_common::exec_datafusion_err!("AVG scale cannot decrease")
++        })?;
++        // Ten is representable in every Arrow decimal native storage type.
++        let ten = T::Native::from_usize(10).unwrap();
++        let scale_mul = ten
++            .pow_checked(exponent)
++            .map_err(|_| datafusion_common::exec_datafusion_err!("AVG scale overflow"))?;
++        Ok(Self {
++            scale_mul,
++            target_precision,
++            target_scale,
++        })
++    }
++
++    /// Convert the accumulator's count without narrowing or panicking.
++    pub fn avg_with_count(&self, sum: T::Native, count: u64) -> Result<T::Native> {
++        let count = usize::try_from(count)
++            .ok()
++            .and_then(T::Native::from_usize)
+             .ok_or_else(|| {
+-                internal_datafusion_err!("Failed to compute sum_mul in DecimalAverager")
++                datafusion_common::exec_datafusion_err!("AVG count overflow")
+             })?;
+-
+-        let target_mul = T::Native::from_usize(10_usize)
+-            .map(|b| b.pow_wrapping(target_scale as u32))
+-            .ok_or_else(|| {
+-                internal_datafusion_err!(
+-                    "Failed to compute target_mul in DecimalAverager"
++        self.avg(sum, count)
++    }
++
++    /// Returns `sum`/`count` in the decimal native storage type with
++    /// target_scale and target_precision and reporting overflow.
++    ///
++    /// * sum: The total sum in native storage with sum_scale
++    ///   (passed to `Self::try_new`)
++    /// * count: positive integer count, stored in the native type (not scaled)
++    #[inline(always)]
++    pub fn avg(&self, sum: T::Native, count: T::Native) -> Result<T::Native> {
++        if count <= T::Native::default() {
++            return exec_err!("AVG count must be positive");
++        }
++        if let Ok(value) = sum.mul_checked(self.scale_mul) {
++            let new_value = value.div_checked(count).map_err(|_| {
++                datafusion_common::exec_datafusion_err!(
++                    "AVG invalid count or division overflow"
+                 )
+             })?;
+-
+-        if target_mul >= sum_mul {
+-            Ok(Self {
+-                sum_mul,
+-                target_mul,
+-                target_precision,
+-                target_scale,
+-            })
+-        } else {
+-            // can't convert the lit decimal to the returned data type
+-            exec_err!("Arithmetic Overflow in AvgAccumulator")
+-        }
+-    }
+-
+-    /// Returns the `sum`/`count` as a i128/i256 Decimal128/Decimal256 with
+-    /// target_scale and target_precision and reporting overflow.
+-    ///
+-    /// * sum: The total sum value stored as Decimal128 with sum_scale
+-    ///   (passed to `Self::try_new`)
+-    /// * count: total count, stored as a i128/i256 (*NOT* a Decimal128/Decimal256 value)
+-    #[inline(always)]
+-    pub fn avg(&self, sum: T::Native, count: T::Native) -> Result<T::Native> {
+-        if let Ok(value) = sum.mul_checked(self.target_mul.div_wrapping(self.sum_mul)) {
+-            let new_value = value.div_wrapping(count);
+ 
+             let validate = T::validate_decimal_precision(
+                 new_value,
+@@ -159,11 +164,51 @@
+             if validate.is_ok() {
+                 Ok(new_value)
+             } else {
+-                exec_err!("Arithmetic Overflow in AvgAccumulator")
++                exec_err!("AVG arithmetic overflow")
+             }
+         } else {
+             // can't convert the lit decimal to the returned data type
+-            exec_err!("Arithmetic Overflow in AvgAccumulator")
++            exec_err!("AVG arithmetic overflow")
+         }
+     }
+ }
++
++#[cfg(test)]
++mod logex_decimal_average_tests {
++    use super::*;
++    use arrow::datatypes::{
++        i256, Decimal128Type, Decimal256Type, Decimal32Type, Decimal64Type,
++    };
++
++    #[test]
++    fn decimal_average_scales_counts_and_output_bounds() -> Result<()> {
++        let avg = DecimalAverager::<Decimal128Type>::try_new(-2, 14, 2)?;
++        assert_eq!(avg.avg_with_count(3, 2)?, 15000);
++        assert_eq!(avg.avg_with_count(-3, 2)?, -15000);
++        assert!(avg.avg_with_count(3, 0).is_err());
++        assert!(avg.avg(3, -1).is_err());
++        assert!(DecimalAverager::<Decimal128Type>::try_new(2, 10, 1).is_err());
++        assert!(DecimalAverager::<Decimal32Type>::try_new(-128, 9, 127).is_err());
++        assert!(DecimalAverager::<Decimal128Type>::try_new(0, 2, 0)?
++            .avg_with_count(100, 1)
++            .is_err());
++        assert!(DecimalAverager::<Decimal32Type>::try_new(0, 9, 0)?
++            .avg_with_count(1, i32::MAX as u64 + 1)
++            .is_err());
++        assert!(DecimalAverager::<Decimal64Type>::try_new(0, 18, 0)?
++            .avg_with_count(1, u64::MAX)
++            .is_err());
++        assert_eq!(
++            DecimalAverager::<Decimal256Type>::try_new(0, 76, 0)?
++                .avg_with_count(i256::from_i128(6), 3)?,
++            i256::from_i128(2)
++        );
++        // Truncation is toward zero, with the existing target-scale contract.
++        assert_eq!(
++            DecimalAverager::<Decimal128Type>::try_new(0, 10, 4)?
++                .avg_with_count(-1, 3)?,
++            -3333
++        );
++        Ok(())
++    }
++}

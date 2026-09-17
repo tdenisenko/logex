@@ -18,7 +18,7 @@
 use arrow::{
     array::{ArrayRef, ArrowNumericType},
     datatypes::{
-        i256, Decimal128Type, Decimal256Type, Decimal32Type, Decimal64Type, DecimalType,
+        Decimal128Type, Decimal256Type, Decimal32Type, Decimal64Type, DecimalType,
     },
 };
 use datafusion_common::{Result, ScalarValue};
@@ -48,7 +48,9 @@ impl<T: DecimalType + Debug> DecimalDistinctAvgAccumulator<T> {
         let data_type = T::TYPE_CONSTRUCTOR(T::MAX_PRECISION, sum_scale);
 
         Self {
-            sum_accumulator: DistinctSumAccumulator::new(&data_type),
+            sum_accumulator: DistinctSumAccumulator::new_checked(&data_type, |_, _| {
+                Ok(())
+            }),
             sum_scale,
             target_precision,
             target_scale,
@@ -79,7 +81,11 @@ impl<T: DecimalType + ArrowNumericType + Debug> Accumulator
             );
         }
 
-        let sum_scalar = self.sum_accumulator.evaluate()?;
+        let count = u64::try_from(self.sum_accumulator.distinct_count())
+            .map_err(|_| datafusion_common::exec_datafusion_err!("AVG count overflow"))?;
+        let sum_scalar = self.sum_accumulator.evaluate().map_err(|error| {
+            datafusion_common::exec_datafusion_err!("AVG DISTINCT overflow: {error}")
+        })?;
 
         match sum_scalar {
             ScalarValue::Decimal32(Some(sum), _, _) => {
@@ -88,8 +94,7 @@ impl<T: DecimalType + ArrowNumericType + Debug> Accumulator
                     self.target_precision,
                     self.target_scale,
                 )?;
-                let avg = decimal_averager
-                    .avg(sum, self.sum_accumulator.distinct_count() as i32)?;
+                let avg = decimal_averager.avg_with_count(sum, count)?;
                 Ok(ScalarValue::Decimal32(
                     Some(avg),
                     self.target_precision,
@@ -102,8 +107,7 @@ impl<T: DecimalType + ArrowNumericType + Debug> Accumulator
                     self.target_precision,
                     self.target_scale,
                 )?;
-                let avg = decimal_averager
-                    .avg(sum, self.sum_accumulator.distinct_count() as i64)?;
+                let avg = decimal_averager.avg_with_count(sum, count)?;
                 Ok(ScalarValue::Decimal64(
                     Some(avg),
                     self.target_precision,
@@ -116,8 +120,7 @@ impl<T: DecimalType + ArrowNumericType + Debug> Accumulator
                     self.target_precision,
                     self.target_scale,
                 )?;
-                let avg = decimal_averager
-                    .avg(sum, self.sum_accumulator.distinct_count() as i128)?;
+                let avg = decimal_averager.avg_with_count(sum, count)?;
                 Ok(ScalarValue::Decimal128(
                     Some(avg),
                     self.target_precision,
@@ -130,11 +133,7 @@ impl<T: DecimalType + ArrowNumericType + Debug> Accumulator
                     self.target_precision,
                     self.target_scale,
                 )?;
-                // `distinct_count` returns `u64`, but `avg` expects `i256`
-                // first convert `u64` to `i128`, then convert `i128` to `i256` to avoid overflow
-                let distinct_cnt: i128 = self.sum_accumulator.distinct_count() as i128;
-                let count: i256 = i256::from_i128(distinct_cnt);
-                let avg = decimal_averager.avg(sum, count)?;
+                let avg = decimal_averager.avg_with_count(sum, count)?;
                 Ok(ScalarValue::Decimal256(
                     Some(avg),
                     self.target_precision,
@@ -160,6 +159,7 @@ mod tests {
     use arrow::array::{
         Decimal128Array, Decimal256Array, Decimal32Array, Decimal64Array,
     };
+    use arrow::datatypes::i256;
     use std::sync::Arc;
 
     #[test]
@@ -277,6 +277,67 @@ mod tests {
             ScalarValue::Decimal256(Some(i256::from_i128(180_000000)), 54, 6);
         assert_eq!(result, expected_result);
 
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod logex_decimal_distinct_tests {
+    use super::*;
+    use arrow::array::{
+        Decimal128Array, Decimal256Array, Decimal32Array, Decimal64Array,
+    };
+    use arrow::datatypes::i256;
+    use std::sync::Arc;
+
+    #[test]
+    fn checked_distinct_decimal_storage_widths() -> Result<()> {
+        macro_rules! check {
+            ($type:ty, $array:ty, $value:expr, $one:expr, $precision:expr) => {{
+                let mut acc = DecimalDistinctAvgAccumulator::<$type>::with_decimal_params(
+                    0, $precision, 0,
+                );
+                // Direct malformed/state bounds use tiny backing arrays, not huge fixtures.
+                let values: ArrayRef = Arc::new(<$array>::from(vec![$value, $one]));
+                acc.update_batch(&[values])?;
+                assert!(acc.evaluate().unwrap_err().to_string().contains("AVG"));
+            }};
+        }
+        check!(Decimal32Type, Decimal32Array, i32::MAX, 1, 9);
+        check!(Decimal64Type, Decimal64Array, i64::MAX, 1, 18);
+        check!(Decimal128Type, Decimal128Array, i128::MAX, 1, 38);
+        check!(Decimal256Type, Decimal256Array, i256::MAX, i256::ONE, 76);
+        Ok(())
+    }
+
+    #[test]
+    fn distinct_decimal_state_merges_duplicates_and_nulls() -> Result<()> {
+        let mut acc =
+            DecimalDistinctAvgAccumulator::<Decimal128Type>::with_decimal_params(
+                0, 10, 4,
+            );
+        let values: ArrayRef = Arc::new(Decimal128Array::from(vec![
+            Some(90),
+            Some(90),
+            Some(30),
+            None,
+        ]));
+        acc.update_batch(&[values])?;
+        let state = acc.state()?;
+        let mut merged =
+            DecimalDistinctAvgAccumulator::<Decimal128Type>::with_decimal_params(
+                0, 10, 4,
+            );
+        let state = state
+            .iter()
+            .map(|value| value.to_array_of_size(1))
+            .collect::<Result<Vec<_>>>()?;
+        merged.merge_batch(&state)?;
+        merged.merge_batch(&state)?;
+        assert_eq!(
+            merged.evaluate()?,
+            ScalarValue::Decimal128(Some(600000), 10, 4)
+        );
         Ok(())
     }
 }

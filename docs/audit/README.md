@@ -37,9 +37,16 @@ SUM overflow finding (B7-32) is covered by the following scoped correction.
 The [ordinary sum review](query-sum-overflow.md) addresses the confirmed fixed-width
 and decimal-precision failures plus distinct-window null/state defects (B7-32–35).
 Source `52ce3bfd` passes 33 focused tests, 99 isolated package tests and all ten
-workspace gates (1,875 tests / 24 ignored). CI and merge remain. Its checked-subtotal contract
+workspace gates (1,875 tests / 24 ignored). Six CI jobs passed before PR #216 merged as `929a3639`. Its checked-subtotal contract
 preserves existing result types and explicitly reports overflow, including
 transient window states. Decimal-average helper behavior remains separate.
+
+The [average arithmetic and window review](query-decimal-average.md) has bounded public
+reproductions for wrapped decimal means, incorrect empty average windows and negative
+scale factors (B7-36–38), a direct grouped-memory undercount (B7-39), and
+duration subtotal overflow (B7-40).
+Source `51fed125` passes 44 focused application tests, 108 isolated package tests
+and all ten local gates (1,886 workspace tests / 24 ignored). CI and merge remain pending.
 
 ## Offline completion boundary
 

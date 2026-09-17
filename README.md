@@ -563,6 +563,10 @@ execution order and partitioning can affect such boundary cases. Sliding windows
 also check temporary totals while moving between frames, so they can reject a
 transition even when each final frame total fits. Floating-point sums retain the
 engine's existing rounding and non-finite behavior.
+Decimal and duration averages reject overflowing running subtotals, even when
+the mathematical mean would fit the result type. Decimal averages also reject
+overflowing scale conversions. Their intermediate sums may exceed input
+precision; final result precision remains enforced.
 Exact data aggregation supports sums, addition/subtraction of sums, conditional
 inputs and optional grouping by address. Other aggregate shapes use the general
 SQL engine, where data remains hexadecimal text; they may reject it as nonnumeric.

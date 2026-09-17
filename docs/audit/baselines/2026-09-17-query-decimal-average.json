@@ -1,0 +1,383 @@
+{
+  "base_commit": "929a36397fbff6f37fea61ae06fa8caf5a896a11",
+  "source_commit": "51fed1259ab1c950624a6f8f6660ed480aaf9ada",
+  "findings_fixed": [
+    "B7-36",
+    "B7-37",
+    "B7-38",
+    "B7-39",
+    "B7-40"
+  ],
+  "validation": {
+    "commit": "51fed1259ab1c950624a6f8f6660ed480aaf9ada",
+    "rustc": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+    "gates": [
+      {
+        "name": "vendor",
+        "command": [
+          "python3",
+          "tools/verify_datafusion_vendor.py"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T06:08:53.874851+00:00",
+        "finished": "2026-09-17T06:08:53.999824+00:00",
+        "sha256": "95ada9e22c512e8346f3d8d057e7fba429b52506f4e037dcf35657f57d7ec451",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-query-decimal-average-i4e3b4x7/gates/vendor.log"
+      },
+      {
+        "name": "format",
+        "command": [
+          "cargo",
+          "fmt",
+          "--all",
+          "--",
+          "--check"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T06:08:54.000234+00:00",
+        "finished": "2026-09-17T06:08:54.995338+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-query-decimal-average-i4e3b4x7/gates/format.log"
+      },
+      {
+        "name": "vendor-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2024",
+          "--config-path",
+          "vendor/reth-network/rustfmt.toml",
+          "--config",
+          "skip_children=true",
+          "vendor/reth-network/src/eth_requests.rs",
+          "vendor/reth-network/src/session/active.rs",
+          "vendor/reth-network/src/session/mod.rs",
+          "vendor/reth-network/src/session/types.rs",
+          "vendor/reth-network/src/session/range_update.rs",
+          "vendor/reth-discv5/src/lib.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T06:08:54.995773+00:00",
+        "finished": "2026-09-17T06:08:55.068081+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-query-decimal-average-i4e3b4x7/gates/vendor-format.log"
+      },
+      {
+        "name": "enr-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2021",
+          "--config",
+          "skip_children=true",
+          "vendor/enr/src/lib.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T06:08:55.068528+00:00",
+        "finished": "2026-09-17T06:08:55.124203+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-query-decimal-average-i4e3b4x7/gates/enr-format.log"
+      },
+      {
+        "name": "aggregate-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2021",
+          "--config",
+          "max_width=90,skip_children=true",
+          "vendor/datafusion-functions-aggregate/src/sum.rs",
+          "vendor/datafusion-functions-aggregate/src/average.rs",
+          "vendor/datafusion-functions-aggregate-common/src/aggregate/sum_distinct/numeric.rs",
+          "vendor/datafusion-functions-aggregate-common/src/aggregate/avg_distinct/decimal.rs",
+          "vendor/datafusion-functions-aggregate-common/src/utils.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T06:08:55.124882+00:00",
+        "finished": "2026-09-17T06:08:55.189175+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-query-decimal-average-i4e3b4x7/gates/aggregate-format.log"
+      },
+      {
+        "name": "check",
+        "command": [
+          "cargo",
+          "check",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T06:08:55.189582+00:00",
+        "finished": "2026-09-17T06:09:03.679776+00:00",
+        "sha256": "888d01f053b4e2029b6985a24d8bbe82c986762ea2145125488e7a0241559649",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-query-decimal-average-i4e3b4x7/gates/check.log"
+      },
+      {
+        "name": "clippy",
+        "command": [
+          "cargo",
+          "clippy",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T06:09:03.680651+00:00",
+        "finished": "2026-09-17T06:09:14.075108+00:00",
+        "sha256": "c547b83d6686783c9b79acd3aa13fd397068d3f11683fe2a4c3a255141ef6a0e",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-query-decimal-average-i4e3b4x7/gates/clippy.log"
+      },
+      {
+        "name": "test",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T06:09:14.075825+00:00",
+        "finished": "2026-09-17T06:15:28.743669+00:00",
+        "sha256": "cd5c393ba8f18ceeb529b40ec1e6670a4d963f84338c28662aafa7a4457a151e",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-query-decimal-average-i4e3b4x7/gates/test.log"
+      },
+      {
+        "name": "doc",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--doc",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T06:15:28.745712+00:00",
+        "finished": "2026-09-17T06:15:41.853751+00:00",
+        "sha256": "25d16ce4f3f3773a6116f7be56ac88a86a3ded48635e08f3d27b59820ab7134e",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-query-decimal-average-i4e3b4x7/gates/doc.log"
+      },
+      {
+        "name": "release-build",
+        "command": [
+          "cargo",
+          "build",
+          "-p",
+          "logex-node",
+          "--release",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T06:15:41.854209+00:00",
+        "finished": "2026-09-17T06:23:32.916667+00:00",
+        "sha256": "daab7b612a7d466d62cafcf50954814e80681dfb8777e331779058506c48d655",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-query-decimal-average-i4e3b4x7/gates/release-build.log"
+      }
+    ]
+  },
+  "workspace_tests": {
+    "passed": 1886,
+    "failed": 0,
+    "ignored": 24,
+    "groups": 32
+  },
+  "retained_investigation": {
+    "path": "docs/audit/baselines/2026-09-17-query-decimal-average-evidence.json.gz",
+    "sha256": "2f521990d0b1f00046c2d6a24fee5ab63862fc2cd71b831d595c0162bedc5d39",
+    "compressed_bytes": 266598,
+    "decoded_bytes": 1477188,
+    "files": 121,
+    "final_source_hashes": {
+      ".github/workflows/ci.yml": "fbf741e1df8b0e67bc86eda7c6adbc507b1ccf4362b61c89d074150133343d1b",
+      "tools/verify_datafusion_vendor.py": "a88af664e7f41d5ec3c68bd217354563c9326388a8d7b7a387cbd126b7c51a76",
+      "crates/logex-query/tests/sql_decimal_average.rs": "3764ea0140eeca195f24ce0c79258fb1c6a30de9d511ca0db22167a19634bc36",
+      "vendor/datafusion-functions-aggregate/src/average.rs": "1c7593be41592cc411a14a9c7ac0a3edc0b056b4220bd67fdb03218f1456279f",
+      "vendor/datafusion-functions-aggregate-common/src/utils.rs": "8d2d1a38a2a0cbeff691d4f3196573500f77780131741d3e263d7a9ecbf532ff",
+      "vendor/datafusion-functions-aggregate-common/src/aggregate/avg_distinct/decimal.rs": "18737d6fdcedf1e2fce4f86497425e73d96c7d3fcbfe34c2adb7736fe8002742",
+      "vendor/datafusion-functions-aggregate/LOGEX-PATCH.md": "fe8f97d8982fdd49b3f8be05c08d89071bed25a2f898c48c754c39b8481c8911",
+      "vendor/datafusion-functions-aggregate/LOGEX-PATCH.diff": "ec4f88b7df5c8ca9292c3e7d3074cc0006be03b9bf73352354752c730ef38324",
+      "vendor/datafusion-functions-aggregate-common/LOGEX-PATCH.md": "58a89cc8f51091d01e527f2d76fa738856a6e19e882cc95c819b5a2e80c4246b",
+      "vendor/datafusion-functions-aggregate-common/LOGEX-PATCH.diff": "a2fd4f7c06aef7502a244fa254246b26a08c5319cdc2204c9525a7165283ac5a"
+    },
+    "checks": {
+      "21-formatted-focused.log": {
+        "passed": 44,
+        "failed": 0,
+        "ignored": 2,
+        "groups": 5
+      },
+      "17-package.log": {
+        "passed": 87,
+        "failed": 0,
+        "ignored": 0,
+        "groups": 1
+      },
+      "18-common-package.log": {
+        "passed": 21,
+        "failed": 0,
+        "ignored": 0,
+        "groups": 1
+      }
+    },
+    "isolated_files_matching_vendor": 70,
+    "isolated_locks_preserve_resolved_versions": true,
+    "isolated_manifest_only_adds_sibling_common_override": true,
+    "baseline_sources_match_base_revision": true,
+    "original_memory_source_verified": true,
+    "probe12_float_and_duration_implementations_match_base": true,
+    "probe14_duration_update_and_merge_match_base": true,
+    "root_graph_and_previous_sum_sources_unchanged": true,
+    "package_review": {
+      "packages": [
+        {
+          "name": "datafusion-functions-aggregate",
+          "original_archive_matches_lock": true,
+          "original_files": 41,
+          "complete_inventory_matches_archive": true,
+          "modified": [
+            "src/average.rs",
+            "src/sum.rs"
+          ],
+          "forward_matches": true,
+          "reverse_matches": true,
+          "patch_sha256": "ec4f88b7df5c8ca9292c3e7d3074cc0006be03b9bf73352354752c730ef38324",
+          "final_source_hashes": {
+            "src/average.rs": "1c7593be41592cc411a14a9c7ac0a3edc0b056b4220bd67fdb03218f1456279f",
+            "src/sum.rs": "7e32b0693d0cc0f3f87ea06f8d1eec24c1a7867fc0075e739d61336dabae4f80"
+          },
+          "fixture_removed": true
+        },
+        {
+          "name": "datafusion-functions-aggregate-common",
+          "original_archive_matches_lock": true,
+          "original_files": 31,
+          "complete_inventory_matches_archive": true,
+          "modified": [
+            "src/aggregate/avg_distinct/decimal.rs",
+            "src/aggregate/sum_distinct/numeric.rs",
+            "src/utils.rs"
+          ],
+          "forward_matches": true,
+          "reverse_matches": true,
+          "patch_sha256": "a2fd4f7c06aef7502a244fa254246b26a08c5319cdc2204c9525a7165283ac5a",
+          "final_source_hashes": {
+            "src/aggregate/avg_distinct/decimal.rs": "18737d6fdcedf1e2fce4f86497425e73d96c7d3fcbfe34c2adb7736fe8002742",
+            "src/aggregate/sum_distinct/numeric.rs": "200e613a0e19b80d5dfa3404ce5c5a405dc905cd8b66608ae4f0de244b5cf124",
+            "src/utils.rs": "8d2d1a38a2a0cbeff691d4f3196573500f77780131741d3e263d7a9ecbf532ff"
+          },
+          "fixture_removed": true
+        }
+      ],
+      "root_lock_unchanged": true
+    },
+    "handoff": {
+      "branch": "audit/query-decimal-average",
+      "base_merge": "929a36397fbff6f37fea61ae06fa8caf5a896a11",
+      "commit": "51fed1259ab1c950624a6f8f6660ed480aaf9ada",
+      "owned_paths": [
+        ".github/workflows/ci.yml",
+        "tools/verify_datafusion_vendor.py",
+        "crates/logex-query/tests/sql_decimal_average.rs",
+        "vendor/datafusion-functions-aggregate/src/average.rs",
+        "vendor/datafusion-functions-aggregate-common/src/utils.rs",
+        "vendor/datafusion-functions-aggregate-common/src/aggregate/avg_distinct/decimal.rs",
+        "vendor/datafusion-functions-aggregate/LOGEX-PATCH.md",
+        "vendor/datafusion-functions-aggregate/LOGEX-PATCH.diff",
+        "vendor/datafusion-functions-aggregate-common/LOGEX-PATCH.md",
+        "vendor/datafusion-functions-aggregate-common/LOGEX-PATCH.diff"
+      ],
+      "source_frozen": true,
+      "cargo_free": true,
+      "findings": {
+        "B7-36": "Public DECIMAL(38,38) scalar/grouped/sliding AVG of three0.9 values returns negative means; DISTINCT0.7/0.8/0.9 returns negative instead of0.8. Checked native sums/counts now reject unsupported backing subtotals. Direct tests cover32/64/128/256 storage, merge/retract/count bounds and failure state.",
+        "B7-37": "Public decimal and duration windows panic after last nonnull exits; Float64 returns nonnullNaN (IS NULL false). Correct empty sum/count invariant returns SQL NULL and resets sum; floating populated-frame arithmetic unchanged. Direct Float infinity-empty-finite reentry control passes.",
+        "B7-38": "Public numeric CAST to DECIMAL(10,-2) reaches AVG and divides by zero from absolute wrapped scale powers. Relative checked scale delta now returns150.00 for100/200; final output precision/count/division checked. String-to-negative-scale cast was rejected before AVG and is not labeled a finding.",
+        "B7-39": "Exact original grouped accumulator size reports32 bytes where primitive vector/null buffers require at least160. Estimate now includes native sum elements/counts/struct/NullState heap/error allocation; no global memory cap claim.",
+        "B7-40": "Public Duration(Second) MAX,MAX scalar/grouped means wrap to-1; window panics in update addition. Duration arithmetic/counts are now checked/staged with i64 state and original units; all4 units covered by public successes and direct state/failure tests."
+      },
+      "contract": "Checked backing running states and rescaling, not final-only means. Order/partition/DISTINCT hash iteration and window entering-before-retraction can reject a mathematically representable mean/frame. Exact baseline07 shows individually fitting0.9 single-row frames succeed originally, while final test deliberately expects AVG subtotal error. No widened/deferred state. Decimal subtotal beyond INPUT precision remains allowed (90+90 in DECIMAL(2,0)); original internal partial-state metadata retained and consumed directly, final output still precision-validated. Float64 populated arithmetic/rounding and native LogEx exact SUM preserved.",
+      "checks": {
+        "19-final-focused.log": "44 passed,2 explicit benchmark ignores: decimal_average11 + sum_overflow5 + contracts9 + aggregates6 + grouping13",
+        "17-package.log": "87 aggregate library tests passed,81 prior +6 new; exact final production/test source matches isolated copy",
+        "18-common-package.log": "21 common library tests passed,18 prior +3 new; exact final source matches isolated copy",
+        "20-final-clippy.log": "cargo clippy --locked --offline -j2 -p logex-query --test sql_decimal_average -- -D warnings passed",
+        "19-final-verifier.log": "449 upstream original files across9 packages verified; original inventories unchanged, exact reviewed source/patch hashes refreshed",
+        "19-final-format.log": "rustfmt --check --edition2021 --config max_width=90,skip_children=true on sum.rs, average.rs, sum_distinct/numeric.rs, avg_distinct/decimal.rs, utils.rs passed; CI uses same file list",
+        "19-final-whitespace.log": "scoped changed source/docs whitespace check passed, exact reversible diff artifacts excluded from diff-of-diff whitespace check",
+        "dependency_graph": "Root Cargo.toml and Cargo.lock unchanged; no new package or dependency edge",
+        "cleanup": "temporary probe integration files removed after retained assertion sources; obsolete ArrowNativeType import removed; no debug prints/new TODO markers in touched Rust",
+        "21-workspace-format.log": "cargo fmt --all -- --check passed using workspace Rust2024 edition; production/vendor/package sources unchanged",
+        "21-formatted-focused.log": "44 passed,2 explicit benchmark ignores on final formatted test source"
+      },
+      "attempts": {
+        "01": "Exact base production + public assertions:1 success control,1 failure with4 wrong AVG query results. Sources/test/identities retained.",
+        "02": "Exact same base:1 pass3 fail; high-scale wrong means; decimal empty-window panic; negative-scale STRING CAST rejected before AVG (fixture assumption).",
+        "03": "Exact same base:2 pass3 fail; NUMERIC negative-scale CAST reaches AVG panic; input-precision subtotal90+90 successful scalar/grouped control.",
+        "04": "Candidate compile failure: distinct_count is usize rather than assumedu64, and obsolete import; exact candidate snapshots retained.",
+        "05": "Candidate5 public tests pass. PROVENANCE LIMIT: grouped emission-poison source edit overlapped compilation; not treated as immutable final-source proof. Later08/10/final immutable runs supersede.",
+        "06": "Exact original average.rs in isolated package + tiny added memory assertion fails32 vs minimum160. The baseline test-only module included an unused helper (warning); not production warning.",
+        "07": "Root three AVG production files temporarily restored exactly from01 baseline; original single-row0.9 transition assertion passes. Candidate saved/restored; no other work lost.",
+        "08": "Immutable candidate aggregate85 library tests pass.",
+        "09": "Candidate common21 library tests pass.",
+        "10": "Immutable candidate app40 pass2ignored; five checked aggregate files verifier/format pass.",
+        "11": "Refined group merge sum/count poison assertions + helper doc cleanup; aggregate85 pass.",
+        "12": "Current candidate but ORIGINAL unchanged float/duration arithmetic/empty paths:2 public probes fail (Float IS NULL false, duration panic). Exact full source retained, no claim whole-source original baseline.",
+        "13": "Narrow Float/duration empty fixes: immutable app42 pass2ignored; snapshots/verification retained.",
+        "14": "Current candidate ORIGINAL duration nonempty arithmetic: boundary probe ends in window add panic before accumulated scalar/grouped failures printed. Initial parent message called it scalar panic; corrected by15 classification.",
+        "15": "Same production as14; each public query spawned/caught so all assertions report: scalar/grouped-1 instead ofMAX, window panic. No change in production between14/15.",
+        "16": "Duration checked correction + direct tests; immutable app44 pass2ignored, verifier/format pass.",
+        "17": "Final aggregate87 library tests pass.",
+        "18": "Final common21 library tests pass.",
+        "19": "Final test cleanup removes exploratory spawn wrappers and clarifies expected duration overflow; immutable final app44 pass2ignored; exact identities/final snapshot/verifier/format/whitespace checks retained.",
+        "20": "Final focused Clippy passes.",
+        "21": "Parent initial full gates stopped at workspace fmt: prior app file formatted using edition2021 instead of workspace2024. Mechanically reformatted only new app test with rustfmt --edition2024; workspacefmt and44 app controls passed. Production/package sources unchanged, no isolated rebuild or rerun. Prior final snapshot/identities/handoff71652e41 retained separately."
+      },
+      "provenance_limits": [
+        "All semantic probes use assertions; no diagnostic-print-only results. Original failures and candidate failures separately labeled;05 compile-time overlap disclosed.",
+        "Public SQL covers decimal128 high-scale overflow; all4 decimal widths checked directly with tiny internal max backing arrays, which are not claimed valid declared-precision public values.",
+        "Bounded decimal DISTINCT windows remain unsupported retract_batch; cumulative DISTINCT controls pass. No new duration DISTINCT capability.",
+        "Isolated package manifests/locks copied from prior verified pinned51 workflow: only aggregate common override points to sibling patched common; versions/other selections unchanged. Checks are full library suites, not doctests/server suites.",
+        "Existing vendor crypto deprecation/future-incompat warnings and link unwind-size warning retained; newly unused import removed. No benchmark/performance percentage or global memory-admission claim.",
+        "Whole-workspace gates and publication owned by parent, pending this handoff.",
+        "Clippy/package/verifier results apply to unchanged production sources and pre-format equivalent test source; final formatting correction explicitly rechecked workspacefmt and44 application controls per parent. Parent retained failed initial fmt gate separately."
+      ],
+      "cleanup": {
+        "removed_target": "/tmp/logex-audit-decimal-average-hkXubO/package-target",
+        "workspace_target_retained": true,
+        "parent_review_approved": true,
+        "allocated_file_bytes_before_removal": 3491815424
+      },
+      "prior_source_commit": "71652e41cc712f5362f543f7e7e1b78325b020cf"
+    }
+  },
+  "review": "Checked decimal and duration running arithmetic, correct empty average windows, safe relative decimal scales and grouped memory estimates. Preserve public result types, internal subtotal conventions and populated floating-point arithmetic; conservative subtotal/rescaling errors remain explicit.",
+  "performance": "No ingestion or storage change; primitive group layout and all-null fast paths retained, duration validity mask borrowed once per batch. No benchmark campaign or timing guarantee.",
+  "publication": "pending exact-head CI and merge",
+  "gate_logs": {
+    "path": "docs/audit/baselines/2026-09-17-query-decimal-average-validation.json.gz",
+    "sha256": "b13ead45b0db08009ef63c26949dd57bc965cf19ee751314652d21e6513302ba",
+    "bytes": 39523
+  }
+}

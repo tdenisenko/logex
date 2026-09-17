@@ -39,16 +39,19 @@ PACKAGES = (
         inventory_checksum="ffa15a2b3a48646a9276999ab6afc77b3a20b0917b788137262d386be1b6ce69",
         modified={
             PurePosixPath("src/sum.rs"): "7e32b0693d0cc0f3f87ea06f8d1eec24c1a7867fc0075e739d61336dabae4f80",
+            PurePosixPath("src/average.rs"): "1c7593be41592cc411a14a9c7ac0a3edc0b056b4220bd67fdb03218f1456279f",
         },
-        patch_checksum="71de71b771a96e9ff9956a5530774c129d62f71413e7e77729d7109430228362",
+        patch_checksum="ec4f88b7df5c8ca9292c3e7d3074cc0006be03b9bf73352354752c730ef38324",
     ),
     Package(
         name="datafusion-functions-aggregate-common",
         inventory_checksum="44ecc4490539baefaafe85c44058a761aa1afb343bb38aad4c4fe24197fa142a",
         modified={
             PurePosixPath("src/aggregate/sum_distinct/numeric.rs"): "200e613a0e19b80d5dfa3404ce5c5a405dc905cd8b66608ae4f0de244b5cf124",
+            PurePosixPath("src/aggregate/avg_distinct/decimal.rs"): "18737d6fdcedf1e2fce4f86497425e73d96c7d3fcbfe34c2adb7736fe8002742",
+            PurePosixPath("src/utils.rs"): "8d2d1a38a2a0cbeff691d4f3196573500f77780131741d3e263d7a9ecbf532ff",
         },
-        patch_checksum="b0ef11b60394384d09168661f7afc2f4193108ada1952030af3b962dc172bea1",
+        patch_checksum="a2fd4f7c06aef7502a244fa254246b26a08c5319cdc2204c9525a7165283ac5a",
     ),
     Package(
         name="datafusion-functions-nested",
