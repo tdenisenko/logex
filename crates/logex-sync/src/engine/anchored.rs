@@ -2066,28 +2066,7 @@ impl SyncEngine {
             let historical_backfill_active = !self.config.disable_historical_sync
                 && self.historical_resume_required_block().await.is_some();
 
-            let Some(consensus) = self.consensus.clone() else {
-                if !historical_backfill_active {
-                    return Ok(());
-                }
-                if historical_pre_forward_progressed {
-                    continue;
-                }
-                if self.ingest_historical_backfill_batch().await? {
-                    continue;
-                }
-                self.set_runtime_state(NodeState::WaitingForConsensus);
-                if cancelable(
-                    &mut self.shutdown,
-                    tokio::time::sleep(CONSENSUS_WAIT_INTERVAL),
-                )
-                .await
-                .is_none()
-                {
-                    return self.finish_shutdown();
-                }
-                continue;
-            };
+            let consensus = Arc::clone(&self.consensus);
             let historical_pre_anchor_progressed =
                 historical_backfill_active && self.ingest_historical_backfill_batch().await?;
 
@@ -6720,9 +6699,7 @@ impl SyncEngine {
     }
 
     async fn reconcile_consensus_reorg(&mut self) -> Result<bool> {
-        let Some(consensus) = self.consensus.as_ref() else {
-            return Ok(false);
-        };
+        let consensus = &self.consensus;
 
         let recent_headers = self.head_tracker.snapshot();
         let Some(reorg) = locate_consensus_reorg(consensus, &recent_headers)? else {
@@ -6762,9 +6739,7 @@ impl SyncEngine {
     }
 
     pub(super) async fn refresh_consensus_status(&self) {
-        let Some(consensus) = self.consensus.as_ref() else {
-            return;
-        };
+        let consensus = &self.consensus;
 
         let checkpoint = consensus.checkpoint();
         let mut anchors = consensus.chain_anchors();

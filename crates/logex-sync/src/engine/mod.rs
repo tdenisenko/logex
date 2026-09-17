@@ -34,18 +34,13 @@ mod anchored;
 mod helpers;
 mod historical;
 mod ingest;
-mod live;
 mod memory;
 
 use self::helpers::{
     assemble_txs, cancelable, execution_head, historical_backfill_peer_floor, peer_refill_goal,
-    preferred_body_peers, refill_peer_floor, should_mark_historical_complete,
-    should_switch_to_live_without_target, wait_for_shutdown,
+    preferred_body_peers, refill_peer_floor, wait_for_shutdown,
 };
 
-const HISTORICAL_EMPTY_THRESHOLD: u32 = 5;
-const HISTORICAL_TIP_CONFIRM_EMPTY_RESPONSES: u32 = 2;
-const LIVE_SYNC_POLL_INTERVAL: Duration = Duration::from_secs(12);
 const MIN_ACTIVE_SYNC_PEERS: usize = 8;
 const TARGET_ACTIVE_SYNC_PEERS: usize = 80;
 const PEER_REFILL_STEP: usize = 16;
@@ -211,7 +206,7 @@ pub struct SyncEngine {
     storage: Arc<RwLock<PartitionManager>>,
     subscriptions: Option<SubscriptionManager>,
     sync_status: Arc<std::sync::Mutex<SyncStatus>>,
-    consensus: Option<Arc<ConsensusStore>>,
+    consensus: Arc<ConsensusStore>,
     head_tracker: HeadTracker,
     progress: ProgressTracker,
     historical_header_fetch_tx: mpsc::UnboundedSender<HistoricalHeaderFetchOutcome>,
@@ -244,13 +239,15 @@ pub struct SyncEngine {
 }
 
 impl SyncEngine {
+    /// Construct a sync engine rooted in the configured consensus checkpoint.
+    /// Execution peer data alone never authorizes canonical ingestion.
     pub fn new(
         config: SyncConfig,
         peers: PeerManager,
         storage: Arc<RwLock<PartitionManager>>,
         subscriptions: Option<SubscriptionManager>,
         sync_status: Arc<std::sync::Mutex<SyncStatus>>,
-        consensus: Option<Arc<ConsensusStore>>,
+        consensus: Arc<ConsensusStore>,
         shutdown: watch::Receiver<bool>,
     ) -> Self {
         let progress = ProgressTracker::new(Arc::clone(&sync_status));

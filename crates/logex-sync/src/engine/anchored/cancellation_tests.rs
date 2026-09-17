@@ -18,7 +18,13 @@ async fn fixture() -> (SyncEngine, watch::Sender<bool>, impl Sized) {
         Arc::new(RwLock::new(storage)),
         None,
         Arc::new(std::sync::Mutex::new(SyncStatus::default())),
-        None,
+        Arc::new(
+            ConsensusStore::open(
+                directory.path(),
+                Some("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            )
+            .unwrap(),
+        ),
         receiver,
     );
     (engine, shutdown, (resources, directory))
@@ -308,4 +314,34 @@ async fn cancellation_controls_closed_owner_stops_prepare_wait() {
             .expect("closed shutdown owner must stop the prepare wait")
             .unwrap()
     );
+}
+
+#[tokio::test]
+async fn required_consensus_without_execution_anchor_waits_without_ingesting() {
+    let (mut engine, shutdown, _resources) = fixture().await;
+    let status = Arc::clone(&engine.sync_status);
+    let storage = Arc::clone(&engine.storage);
+    assert!(engine.consensus.chain_anchors().optimistic_head.is_none());
+    assert!(engine.consensus.chain_anchors().finalized_head.is_none());
+
+    // Poll the real entry point until its first consensus wait. The peer fixture
+    // holds a dormant localhost listener and local channels; it never polls the
+    // network manager or starts discovery, peer connections, or external sync.
+    let mut run = Box::pin(engine.run());
+    tokio::select! {
+        biased;
+        result = &mut run => panic!("sync exited before waiting for consensus: {result:?}"),
+        _ = tokio::task::yield_now() => {}
+    }
+    assert_eq!(
+        status.lock().unwrap().node_state,
+        NodeState::WaitingForConsensus
+    );
+    assert!(storage.read().await.sync_head().is_none());
+    assert_eq!(storage.read().await.total_rows(), 0);
+    shutdown.send(true).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), &mut run)
+        .await
+        .expect("consensus wait must remain cancellable")
+        .unwrap();
 }

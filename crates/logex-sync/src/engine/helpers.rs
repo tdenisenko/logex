@@ -102,9 +102,10 @@ impl SyncEngine {
     }
 
     pub(super) fn set_peer_head_from_consensus(&mut self) -> bool {
-        let Some(anchor) = self.consensus.as_ref().and_then(|consensus| {
-            consensus_execution_head_anchor(consensus.chain_anchors(), consensus.anchor_coverage())
-        }) else {
+        let Some(anchor) = consensus_execution_head_anchor(
+            self.consensus.chain_anchors(),
+            self.consensus.anchor_coverage(),
+        ) else {
             return false;
         };
 
@@ -113,7 +114,7 @@ impl SyncEngine {
     }
 
     pub(super) fn consensus_required_block_for_peer_readiness(&self) -> Option<u64> {
-        let consensus = self.consensus.as_ref()?;
+        let consensus = &self.consensus;
         consensus_required_block_for_peer_readiness(
             consensus.chain_anchors(),
             consensus.anchor_coverage(),
@@ -138,11 +139,6 @@ impl SyncEngine {
             .filter(|header| header.number() + 1 == expected_start_block)
     }
 
-    pub(super) fn known_target_block(&self) -> Option<u64> {
-        let (_, target_block) = self.sync_cursor();
-        (target_block > 0).then_some(target_block)
-    }
-
     pub(super) fn try_mark_synced(&self, reason: &'static str) -> bool {
         let (current_block, target_block) = self.sync_cursor();
         if target_block == 0 || current_block < target_block {
@@ -150,7 +146,7 @@ impl SyncEngine {
         }
         {
             let status = self.sync_status.lock().unwrap();
-            if self.consensus.is_some() && status.consensus_head_fresh != Some(true) {
+            if status.consensus_head_fresh != Some(true) {
                 return false;
             }
             if !status.historical_sync_disabled
@@ -213,24 +209,6 @@ pub(super) async fn wait_for_shutdown(shutdown: &mut watch::Receiver<bool>) {
     // and returns an error when the sender closes. Both true and closure stop
     // the engine. Drop its temporary Ref here, before the caller can await.
     let _ = shutdown.wait_for(|requested| *requested).await;
-}
-
-pub(super) fn should_mark_historical_complete(
-    next_block: u64,
-    target_block: Option<u64>,
-    consecutive_empty: u32,
-) -> Option<u64> {
-    let target_block = target_block?;
-    (next_block > target_block && consecutive_empty >= HISTORICAL_TIP_CONFIRM_EMPTY_RESPONSES)
-        .then_some(target_block)
-}
-
-pub(super) fn should_switch_to_live_without_target(
-    next_block: u64,
-    target_block: Option<u64>,
-    consecutive_empty: u32,
-) -> bool {
-    target_block.is_none() && next_block > 1 && consecutive_empty >= HISTORICAL_EMPTY_THRESHOLD
 }
 
 pub(super) fn historical_backfill_peer_floor(max_peers: usize) -> usize {
@@ -481,41 +459,6 @@ mod tests {
             consensus_required_block_for_peer_readiness(anchors, coverage),
             Some(floor.block_number)
         );
-    }
-
-    #[test]
-    fn historical_completion_requires_known_target_and_confirmed_empty_responses() {
-        assert_eq!(
-            should_mark_historical_complete(101, Some(100), HISTORICAL_TIP_CONFIRM_EMPTY_RESPONSES),
-            Some(100)
-        );
-        assert_eq!(
-            should_mark_historical_complete(100, Some(100), HISTORICAL_TIP_CONFIRM_EMPTY_RESPONSES),
-            None
-        );
-        assert_eq!(
-            should_mark_historical_complete(101, None, HISTORICAL_TIP_CONFIRM_EMPTY_RESPONSES),
-            None
-        );
-    }
-
-    #[test]
-    fn historical_fallback_to_live_requires_real_progress_without_target() {
-        assert!(should_switch_to_live_without_target(
-            2,
-            None,
-            HISTORICAL_EMPTY_THRESHOLD
-        ));
-        assert!(!should_switch_to_live_without_target(
-            1,
-            None,
-            HISTORICAL_EMPTY_THRESHOLD
-        ));
-        assert!(!should_switch_to_live_without_target(
-            2,
-            Some(10),
-            HISTORICAL_EMPTY_THRESHOLD
-        ));
     }
 
     #[test]
