@@ -5129,6 +5129,7 @@ dependencies = [
  "futures",
  "libp2p",
  "libp2p-mplex",
+ "logex-fs",
  "logex-types",
  "serde",
  "serde_json",
@@ -5144,6 +5145,14 @@ dependencies = [
  "tree_hash_derive",
  "typenum",
  "unsigned-varint 0.8.0",
+]
+
+[[package]]
+name = "logex-fs"
+version = "0.1.0"
+dependencies = [
+ "getrandom 0.3.4",
+ "tempfile",
 ]
 
 [[package]]
@@ -5170,6 +5179,7 @@ dependencies = [
  "futures-util",
  "libc",
  "logex-cl",
+ "logex-fs",
  "logex-index",
  "logex-server",
  "logex-storage",
@@ -5273,6 +5283,7 @@ dependencies = [
  "futures-util",
  "libc",
  "logex-cl",
+ "logex-fs",
  "logex-index",
  "logex-server",
  "logex-storage",

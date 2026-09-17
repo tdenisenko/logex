@@ -112,15 +112,13 @@ pub(super) fn write_with_checkpoints(
     let path = sync_mode_state_path(data_dir);
     state_entry_exists(&path)?;
     let contents = serde_json::to_vec_pretty(state).map_err(io::Error::other)?;
-    let mut staged = tempfile::Builder::new()
-        .prefix(".sync-mode-")
-        .tempfile_in(data_dir)?;
+    let mut staged = logex_fs::StagedFile::new_in(data_dir, ".sync-mode-")?;
     checkpoint(WriteStep::Staged)?;
-    staged.write_all(&contents)?;
+    staged.as_file_mut().write_all(&contents)?;
     checkpoint(WriteStep::Written)?;
     staged.as_file().sync_all()?;
     checkpoint(WriteStep::FileSynced)?;
-    staged.persist(&path).map_err(|error| error.error)?;
+    staged.persist(&path)?;
     checkpoint(WriteStep::Replaced)?;
     parent.sync_all()?;
     checkpoint(WriteStep::DirectorySynced)

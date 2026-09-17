@@ -1,0 +1,11 @@
+[package]
+name = "logex-fs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+getrandom = "0.3"
+
+[dev-dependencies]
+tempfile = "3"

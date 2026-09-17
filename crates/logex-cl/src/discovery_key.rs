@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use alloy_primitives::hex;
 use discv5::enr::CombinedKey;
-use tempfile::NamedTempFile;
+use logex_fs::StagedFile;
 
 const MAX_ENCODED_KEY_BYTES: usize = 128;
 
@@ -17,7 +17,7 @@ const MAX_ENCODED_KEY_BYTES: usize = 128;
 /// contents are preserved and reported. A stable sidecar lock is never removed;
 /// external writers that ignore it are outside this trusted-directory protocol.
 ///
-/// New temporary files use tempfile's private creation permissions where the
+/// New staging files use private creation permissions where the
 /// filesystem enforces POSIX modes. Existing permissions are never changed.
 /// The caller must initialize the parent directory first. Concurrent creation
 /// returns `WouldBlock` so startup can retry without waiting indefinitely.
@@ -51,8 +51,10 @@ fn load_or_create_with(path: &Path, generate: impl FnOnce() -> [u8; 32]) -> io::
     // No directory creation: a missing initialized storage directory is an error.
     let bytes = generate();
     validate_key(bytes)?;
-    let mut temporary = NamedTempFile::new_in(parent)?;
-    temporary.write_all(hex::encode(bytes).as_bytes())?;
+    let mut temporary = StagedFile::new_in(parent, ".discovery-key-")?;
+    temporary
+        .as_file_mut()
+        .write_all(hex::encode(bytes).as_bytes())?;
     temporary.as_file().sync_all()?;
     // Preserve an observable external entry, though uncooperative concurrent
     // writers remain outside the protocol's serialization guarantee.
@@ -61,7 +63,7 @@ fn load_or_create_with(path: &Path, generate: impl FnOnce() -> [u8; 32]) -> io::
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => return Err(error),
     }
-    temporary.persist(path).map_err(|error| error.error)?;
+    temporary.persist(path)?;
     File::open(parent)?.sync_all()?;
     drop(lock);
     Ok(bytes)

@@ -1,0 +1,11 @@
+# Linux example. On macOS use the actual /Volumes/... mount and its descendant.
+data_dir = "/mnt/logex/mainnet"
+expected_volume_mount = "/mnt/logex"
+# Replace with the filesystem UUID, not a label or transient device name.
+# This placeholder intentionally fails preflight until configured.
+expected_volume_uuid = "REPLACE_WITH_FILESYSTEM_UUID"
+
+log_level = "info"
+partition_target_rows = 1000000
+http_host = "127.0.0.1"
+grpc_host = "127.0.0.1"

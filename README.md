@@ -301,6 +301,8 @@ Global options:
 | Option | Default | Use |
 | --- | --- | --- |
 | `--data-dir <PATH>` | OS app data directory | Storage directory. Use an explicit path for servers, backups, and systemd services. |
+| `--expected-volume-mount <PATH>` | disabled | Require this mounted filesystem before storage access; pair with `--expected-volume-uuid`. See [external-volume services](deploy/README.md). |
+| `--expected-volume-uuid <UUID>` | disabled | Require the expected filesystem UUID and monitor volume availability. |
 | `--log-level <FILTER>` | `info` | Tracing filter. Examples: `debug`, `info,logex_sync=debug`, `info,discv5=error`. The effective default suppresses noisy discovery warnings. |
 | `--partition-target-rows <N>` | `1000000` | Target log rows per storage segment before sealing and compaction. Larger values reduce segment count; smaller values seal sooner. |
 | `--config <PATH>` | none | Optional TOML config file. Supported keys are listed below. |

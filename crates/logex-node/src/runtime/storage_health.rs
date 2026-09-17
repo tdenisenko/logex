@@ -7,7 +7,7 @@ use tokio::task::JoinSet;
 
 const POLL_INTERVAL: Duration = Duration::from_secs(10);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
-const MIN_FREE_BYTES: u64 = 10 * 1024 * 1024 * 1024;
+use crate::volume::MIN_FREE_BYTES;
 
 #[derive(Debug, thiserror::Error)]
 pub(super) enum StorageHealthFailure {
@@ -27,7 +27,24 @@ pub(super) enum StorageHealthFailure {
     },
 }
 
-pub(super) async fn wait_for_failure(path: PathBuf) -> StorageHealthFailure {
+pub(super) async fn wait_for_failure(
+    path: PathBuf,
+    volume: Option<tokio::sync::watch::Receiver<Option<String>>>,
+) -> StorageHealthFailure {
+    if let Some(mut volume) = volume {
+        let reason = loop {
+            if let Some(reason) = volume.borrow_and_update().clone() {
+                break reason;
+            }
+            if volume.changed().await.is_err() {
+                break "volume monitor notification channel closed".into();
+            }
+        };
+        return StorageHealthFailure::Probe {
+            path,
+            source: io::Error::other(reason),
+        };
+    }
     let mut interval = tokio::time::interval(POLL_INTERVAL);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {

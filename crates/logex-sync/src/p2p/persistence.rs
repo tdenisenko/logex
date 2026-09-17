@@ -104,9 +104,8 @@ fn parent_directory(path: &Path) -> &Path {
 }
 
 fn quarantine_known_peers(path: &Path) -> io::Result<PathBuf> {
-    let directory = tempfile::Builder::new()
-        .prefix(".known-peers-quarantine-")
-        .tempdir_in(parent_directory(path))?;
+    let directory =
+        logex_fs::StagedDirectory::new_in(parent_directory(path), ".known-peers-quarantine-")?;
     let retained = directory.path().join(KNOWN_PEERS_FILE);
     fs::rename(path, &retained)?;
     // Once moved, the damaged hints must outlive temporary-directory cleanup.
@@ -128,13 +127,11 @@ pub fn persist_known_peers(path: &Path, peers: &[NodeRecord]) -> io::Result<()> 
             "known-peer cache exceeds byte limit",
         ));
     }
-    let mut temporary = tempfile::Builder::new()
-        .prefix(".known-peers-")
-        .tempfile_in(parent_directory(path))?;
-    temporary.write_all(&json)?;
+    let mut temporary = logex_fs::StagedFile::new_in(parent_directory(path), ".known-peers-")?;
+    temporary.as_file_mut().write_all(&json)?;
     // Derived hints need atomic visibility, not periodic power-loss barriers.
     // The storage owner initializes the parent; never recreate missing storage.
-    temporary.persist(path).map_err(|error| error.error)?;
+    temporary.persist(path)?;
     Ok(())
 }
 

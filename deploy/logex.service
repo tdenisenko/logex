@@ -1,0 +1,26 @@
+[Unit]
+Description=LogEx verified log node
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=logex
+Group=logex
+WorkingDirectory=/
+# The config must include expected_volume_mount and expected_volume_uuid.
+# The executable checks them before opening storage on every restart.
+ExecStart=/usr/local/bin/logex --config /etc/logex/config.toml sync
+Restart=always
+RestartSec=30s
+KillSignal=SIGTERM
+KillMode=control-group
+TimeoutStopSec=195s
+LimitNOFILE=16384
+UMask=0077
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

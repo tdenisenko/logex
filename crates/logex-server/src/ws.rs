@@ -458,7 +458,16 @@ pub async fn handle_ws_upgrade(
     ws: WebSocketUpgrade,
     State(state): State<Arc<AppState>>,
 ) -> Response {
-    ws.on_upgrade(move |socket| handle_ws(socket, state))
+    if let Some(reason) = state.storage_failure() {
+        return crate::rest::storage_unavailable_response(reason);
+    }
+    ws.on_upgrade(move |socket| async move {
+        tokio::select! {
+            biased;
+            _ = state.storage_unavailable() => {},
+            _ = handle_ws(socket, Arc::clone(&state)) => {},
+        }
+    })
 }
 
 /// Create or update a service-scoped ERC20 transfer subscription.
@@ -471,6 +480,9 @@ pub(crate) async fn handle_live_transfer_subscribe(
     State(state): State<Arc<AppState>>,
     Json(mut request): Json<SubscribeRequest>,
 ) -> Response {
+    if let Some(reason) = state.storage_failure() {
+        return crate::rest::storage_unavailable_response(reason);
+    }
     request.subscription_type = SubscriptionKind::Erc20Transfers;
     request.scope = LiveSubscriptionScope::Service;
     let requested_id = request.subscription_id.clone();
@@ -499,6 +511,9 @@ pub(crate) async fn handle_live_transfer_get(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Response {
+    if let Some(reason) = state.storage_failure() {
+        return crate::rest::storage_unavailable_response(reason);
+    }
     let Some(subs) = state.subscriptions.as_ref() else {
         return json_error(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -635,6 +650,15 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>) {
     tracing::debug!("WebSocket subscription closed");
 }
 
+// Detach even when storage failure cancels the entire socket future.
+struct DetachSession<'a>(&'a SubscriptionManager, String);
+
+impl Drop for DetachSession<'_> {
+    fn drop(&mut self) {
+        self.0.detach_live_transfer_session(&self.1);
+    }
+}
+
 async fn handle_live_transfer_ws(
     mut socket: WebSocket,
     subs: SubscriptionManager,
@@ -651,6 +675,7 @@ async fn handle_live_transfer_ws(
         }
     };
     let mut attachment = subs.upsert_live_transfer_session(requested_id, scope, subscription, true);
+    let _detach = DetachSession(&subs, attachment.id.clone());
 
     tracing::debug!(
         kind = "erc20Transfers",
@@ -668,7 +693,6 @@ async fn handle_live_transfer_ws(
         .await
         .is_err()
     {
-        subs.detach_live_transfer_session(&attachment.id);
         return;
     }
 
@@ -707,7 +731,6 @@ async fn handle_live_transfer_ws(
         }
     }
 
-    subs.detach_live_transfer_session(&attachment.id);
     tracing::debug!(
         subscription_id = %attachment.id,
         "server-backed WebSocket subscription closed"
@@ -1038,6 +1061,40 @@ mod tests {
         }
         mgr.notify(&[make_log(0xAA, 11)]);
         assert!(mgr.live_transfer_session("dashboard-1").is_none());
+    }
+
+    #[tokio::test]
+    async fn dropping_pending_session_work_releases_its_connection() {
+        let manager = SubscriptionManager::new();
+        let subscription =
+            Erc20TransferSubscription::new(vec![Address::repeat_byte(0xA1)], vec![], None, None)
+                .unwrap();
+        let attachment = manager.upsert_live_transfer_session(
+            Some("owned-session".into()),
+            LiveSubscriptionScope::Dashboard,
+            subscription,
+            true,
+        );
+        let owned = manager.clone();
+        let (ready, started) = tokio::sync::oneshot::channel();
+        let work = tokio::spawn(async move {
+            let _detach = DetachSession(&owned, attachment.id);
+            ready.send(()).unwrap();
+            std::future::pending::<()>().await;
+        });
+        started.await.unwrap();
+        assert_eq!(
+            manager
+                .live_transfer_session("owned-session")
+                .unwrap()
+                .active_connections,
+            1
+        );
+        work.abort();
+        assert!(work.await.unwrap_err().is_cancelled());
+        let snapshot = manager.live_transfer_session("owned-session").unwrap();
+        assert_eq!(snapshot.active_connections, 0);
+        assert!(snapshot.expires_in_seconds.is_some());
     }
 
     #[test]

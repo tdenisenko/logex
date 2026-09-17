@@ -75,6 +75,24 @@ pub fn execute_log_filter(
     storage: &PartitionManager,
     filter: &NativeLogFilter,
 ) -> std::io::Result<Vec<LogRow>> {
+    execute_log_filter_with_cancel(storage, filter, None)
+}
+
+/// Scan with cooperative cancellation between filesystem operations.
+/// An operating-system I/O already in progress cannot be interrupted here.
+pub fn execute_log_filter_with_cancel(
+    storage: &PartitionManager,
+    filter: &NativeLogFilter,
+    cancel: Option<&crate::QueryCancelCheck>,
+) -> std::io::Result<Vec<LogRow>> {
+    let check = || {
+        if cancel.is_some_and(|check| check()) {
+            Err(io::Error::new(io::ErrorKind::Interrupted, "query canceled"))
+        } else {
+            Ok(())
+        }
+    };
+    check()?;
     if filter.limit == Some(0) {
         return Ok(Vec::new());
     }
@@ -86,6 +104,7 @@ pub fn execute_log_filter(
         .map(|limit| limit.saturating_add(filter.offset));
 
     for partition in snapshot.partitions_in_order(filter.order) {
+        check()?;
         if ordered_page_is_complete(&partition, &rows, filter.order, scan_limit) {
             break;
         }
@@ -98,7 +117,9 @@ pub fn execute_log_filter(
             continue;
         }
 
+        check()?;
         let reader = SegmentReader::open(&partition.path)?;
+        check()?;
         let mut partition_rows = reader.read_log_rows(Some(&candidate_ids))?;
         partition_rows.retain(|row| matches_native_filter(row, filter));
 
@@ -120,6 +141,7 @@ pub fn execute_log_filter(
         rows.truncate(limit);
     }
 
+    check()?;
     snapshot.validate()?;
     Ok(rows)
 }

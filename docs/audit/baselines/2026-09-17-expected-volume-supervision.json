@@ -1,0 +1,690 @@
+{
+  "status": "All local Rust gates pass; Linux fixture device-manager synchronization updated; exact-head CI and merge pending",
+  "base": {
+    "commit": "0b611c2df1899abf4d2a21ab8113285ee96a200e"
+  },
+  "findings": [
+    "B10-16",
+    "B10-17",
+    "B10-18"
+  ],
+  "original_controls": {
+    "base": "0b611c2df1899abf4d2a21ab8113285ee96a200e",
+    "production_file_sha256": "c60bad90a2657d4305cf7874a6936feb2db04dc21a4b78c68182153068c940a9",
+    "added_test_sha256": "b3a040fde8036caf90bcef3ff6a0a41c433a97d2a51a9f015db8aae16ecda50e",
+    "exit_code": 101
+  },
+  "focused": {
+    "staging_passed": 10,
+    "cl_passed": 354,
+    "cl_ignored": 1,
+    "node_before_final_monitor_controls_passed": 200,
+    "server_before_final_session_control_passed": 96,
+    "final_volume_controls_passed": 13,
+    "final_node_passed": 204,
+    "final_server_passed": 97
+  },
+  "macos_mounts": {
+    "results": [
+      {
+        "case": "missing mount",
+        "passed": true,
+        "exit_code": 1,
+        "stderr": "Error: Os { code: 2, kind: NotFound, message: \"No such file or directory\" }\n"
+      },
+      {
+        "case": "low space",
+        "passed": true,
+        "exit_code": 1,
+        "stderr": "Error: Custom { kind: Other, error: \"expected volume has 536608768 free bytes; at least 10737418240 are required\" }\n"
+      },
+      {
+        "case": "wrong UUID",
+        "passed": true,
+        "exit_code": 1,
+        "stderr": "Error: Custom { kind: InvalidInput, error: \"expected volume UUID abcd-1234 at \\\"/private/tmp/logex-audit-volume-20260917.UNHsNT/mount\\\", found 5cd407f1-5919-38ab-aa19-c0fbb55076f6\" }\n"
+      },
+      {
+        "case": "real ExFAT preflight, anchored write and availability check",
+        "passed": true
+      },
+      {
+        "case": "forced detach retains underlay contents",
+        "passed": true,
+        "check": "error: Operation not supported (os error 45)",
+        "inflight_write": "error: No such file or directory (os error 2)"
+      },
+      {
+        "case": "unmounted path cannot initialize storage",
+        "passed": true,
+        "exit_code": 1,
+        "stderr": "Error: Custom { kind: InvalidInput, error: \"expected mount \\\"/private/tmp/logex-audit-volume-20260917.UNHsNT/mount\\\" is not a mounted filesystem (opened filesystem is mounted at \\\"/System/Volumes/Data\\\")\" }\n"
+      },
+      {
+        "case": "different volume at same path",
+        "passed": true,
+        "exit_code": 1,
+        "stderr": "Error: Custom { kind: InvalidInput, error: \"expected volume UUID 5cd407f1-5919-38ab-aa19-c0fbb55076f6 at \\\"/private/tmp/logex-audit-volume-20260917.UNHsNT/mount\\\", found 4ab0706b-ea0e-36ca-9760-f015bf9c4f79\" }\n"
+      },
+      {
+        "case": "replacement volume receives no writes from old owner",
+        "passed": true,
+        "inflight_write": "error: No such file or directory (os error 2)"
+      },
+      {
+        "case": "correct volume remount and restart",
+        "passed": true
+      }
+    ],
+    "cleanup": [],
+    "still_mounted": [],
+    "binary_sha256": "f3383bf518fe275b6cc2a01fe65d69de6663376b8aff5b20f4695d8f790e2e24"
+  },
+  "macos_tested_source": {
+    "scope": "Exact current production volume and staging sources; generated minimal fixture manifests pin production libc/getrandom versions; no network client or actual node started.",
+    "files": [
+      {
+        "path": "crates/logex-fs/src/lib.rs",
+        "sha256": "f8fab59c58731d090f65af349b22e9906914e855fd21bee2539114b0a8e884e9",
+        "bytes": 4624
+      },
+      {
+        "path": "crates/logex-node/src/volume.rs",
+        "sha256": "076333321116c1940f50052d36239be997a1ed383e8f2652d125ffc26b699048",
+        "bytes": 6574
+      },
+      {
+        "path": "crates/logex-node/examples/volume_probe.rs",
+        "sha256": "143b896e92ae2fdc6a7a7c2f644c26da07500b7d9d1e251e549f80f79be6f230",
+        "bytes": 1576
+      },
+      {
+        "path": "crates/logex-node/src/volume/unix.rs",
+        "sha256": "c05ac11a4ce44c717174dbf527cff95e44917b26eabce9818b4269201fc261a3",
+        "bytes": 13468
+      },
+      {
+        "path": "crates/logex-node/src/volume/macos.rs",
+        "sha256": "ae673f54197b3fda3734af14237676f1978eb793e1ca20080b83e662ef70a35c",
+        "bytes": 4455
+      },
+      {
+        "path": "crates/logex-node/src/volume/deadline.rs",
+        "sha256": "bec26383a701c6979566f91765226c3961379e7ab8ff4f3a74c68a6da585a42d",
+        "bytes": 2799
+      },
+      {
+        "path": "crates/logex-node/src/volume/linux.rs",
+        "sha256": "0a38dfdc1ca877a84c9f9676b368f2d482f205de53b149646ff2af81a9383d17",
+        "bytes": 7419
+      },
+      {
+        "path": "crates/logex-node/src/volume/tests.rs",
+        "sha256": "ce052f2b4191bf7f616ef1a2a5ee7dc10840c61622c883320ae0064b273763c4",
+        "bytes": 1524
+      }
+    ]
+  },
+  "macos_final_source_difference": "Preflight wrapper includes checkpoint resolution; independent lifetime-wide monitor and teardown code added. macOS identity, staging and Unix production I/O sequence remain unchanged from the real ExFAT runs; final node is validated locally and in CI.",
+  "remote_cleanup": {
+    "host": "mac-mini",
+    "owned_root": "/private/tmp/logex-audit-volume-20260917.UNHsNT",
+    "root_removed": true,
+    "owned_images_detached": true,
+    "removed_files": 933,
+    "removed_file_bytes": 17739526958,
+    "evidence_archive_bytes": 215040,
+    "evidence_archive_sha256": "da0a7c02736b7f4fec619c6c2451cb74a39edba9b179b648b707da0b515a7696",
+    "scope": "Observed cleanup result from this task; no unrelated files, processes or physical external volume changed."
+  },
+  "linux_mounts": "Pending exact-head CI",
+  "evidence_directory": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-expected-volume-cjc4xw2a",
+  "evidence": {
+    "design-research.md": {
+      "bytes": 7064,
+      "sha256": "3de7736d20a6e49dddaf98605ef97bc4366122e6a44564cae2d99d9c9affbf69"
+    },
+    "fd-path-probe.json": {
+      "bytes": 181,
+      "sha256": "281ae9e5ec530fa08942d98d7a176a6a35032cc85d8d7024e7d16e2d8c1220fc"
+    },
+    "image-create.json": {
+      "bytes": 387,
+      "sha256": "690456254f982bb73fa7d5cc4d41e569a734dd595d43bdfcc891b706c3c5449a"
+    },
+    "logex-volume-all-targets.log": {
+      "bytes": 2960,
+      "sha256": "613e6865aaa81e5303207438bf988be4ea9e942a4b7698903b209e8c4c116679"
+    },
+    "logex-volume-clippy-final.log": {
+      "bytes": 457,
+      "sha256": "fe08dfa8da8a3ff5479ab186fc00bd02f5f06f8a909ca0953823c8259d80c700"
+    },
+    "logex-volume-final-controls.log": {
+      "bytes": 2251,
+      "sha256": "ade0d884de4f9b804525cc8fc7ea6e1ca0e06a85ecf3b347146705fc06368bce"
+    },
+    "logex-volume-focused-packages-retry.log": {
+      "bytes": 57313,
+      "sha256": "14513fe7f58c8fb3da1503a0d82998a4c794db3269e4cb59b9074d7c6fa94ded"
+    },
+    "macos-getattr-probe.json": {
+      "bytes": 169,
+      "sha256": "bff4fc0e3c5085a4c9616e23c6d52bb90ae8cb92e8e69ca67d07d85761e2963c"
+    },
+    "original-peer-parent.json": {
+      "bytes": 264,
+      "sha256": "b7db66daa0066476453682c7ed8f534391bec7bff509bba2c42ec664f5fb5fab"
+    },
+    "original-peer-parent.log": {
+      "bytes": 1388,
+      "sha256": "434b0d5448e87b5658c538b8837c370a35b137d181aa62ee60a6af12057f104b"
+    },
+    "remote-cleanup-result.json": {
+      "bytes": 464,
+      "sha256": "480c96265406d3aca073297ad3ac1d222c296fac64c8eca9aa72cc063e6a62da"
+    },
+    "remote-dependency-inventory.json": {
+      "bytes": 1007,
+      "sha256": "f1275f98ddc84a3b9700065875d38f7f7e35ce9b746ea732438892c65637b4f4"
+    },
+    "remote-payload.json": {
+      "bytes": 1331,
+      "sha256": "66b05fb40b007b6e2df0fcd86ad2587e1fdb2e2bbcbac6fa389858d0a6f6defc"
+    },
+    "remote-source-inventory-initial.json": {
+      "bytes": 1572,
+      "sha256": "8c7aab00d00d90c49a03f22af861caa92f7ca504be3dd9fb7815aacd354a8303"
+    },
+    "remote-source-inventory.json": {
+      "bytes": 1572,
+      "sha256": "eb7baa2821d3643ad3b84ff99d0deb53dd1241f78b8d7a9c9019c553d35d1fea"
+    },
+    "source.json": {
+      "bytes": 106,
+      "sha256": "ad6eec4675faba63cc0b13e64aa786b2ba66167a78b6e66104b182166ed70aa3"
+    },
+    "gates/results.json": {
+      "bytes": 4837,
+      "sha256": "649ed1bab0673ea49735ff916ef238e0cdbe92220550394d6e4f2bd20385aceb"
+    },
+    "run-gates.py": {
+      "bytes": 2183,
+      "sha256": "b9e6b39097ea36d4bdc3045e360917885c87d5dfe64d4e667a36e67839867bc5"
+    },
+    "logex-volume-session-drop.log": {
+      "bytes": 1635,
+      "sha256": "ea81b5f7fb94753a7cc95b37e80e0c59c5680fc1da810f0d3efd311cdacde2d6"
+    },
+    "record-gates.py": {
+      "bytes": 3132,
+      "sha256": "797fb25593b07b6725dd39868e240705bdaecfda7da3d43d1420af3aa3a80661"
+    },
+    "original-health-blocking.log": {
+      "bytes": 1868,
+      "sha256": "069a486103ab680d4877fdba6832977544919c9ef5de2e1d8a64506a6c7e2a17"
+    },
+    "original-health-blocking-control.rs": {
+      "bytes": 872,
+      "sha256": "502f11448b8283f8e5ca7ee11f29f293c5e155fb0d8686723205c17644b67267"
+    },
+    "ci-initial-failure.log": {
+      "bytes": 11832,
+      "sha256": "f3887296e42ae7e7eb6eeb3255e96294c3248d917f089082d0645ea18c5eae34"
+    },
+    "ci-linux-initial/volume-mount-results.json": {
+      "bytes": 1944,
+      "sha256": "5007e5592868aaf707526a8eed4579c535b9664b2f208be16ec474a9228bf033"
+    },
+    "independent-volume-controls.log": {
+      "bytes": 2227,
+      "sha256": "bb3278cee352cf26b52d60abdcac767792ecf9488867ae0651e56a6041acd3cd"
+    },
+    "independent-monitor-node.log": {
+      "bytes": 24717,
+      "sha256": "e3997b620d078c2a97fdbe927cb832d3aa3841baa4be4c3f720fb5e305a7f941"
+    },
+    "independent-monitor-node-retry.log": {
+      "bytes": 18209,
+      "sha256": "fba2d6fb03486df1b8b518504dc6a6b357f500695b4134e5f5c5b9cfe163063e"
+    },
+    "gates-final/results.json": {
+      "bytes": 4885,
+      "sha256": "dfcef52db3a4fd66b440d2a4809efa2d8550dcafff7ef0233629a32b188f3cba"
+    },
+    "run-gates-final.py": {
+      "bytes": 2189,
+      "sha256": "8151c05338f18a82e9d0569e000f665f23873eaf5150d13e7b3faa422aada984"
+    },
+    "record-final-gates.py": {
+      "bytes": 3171,
+      "sha256": "253b932f9973414eda4ab993d6e7e4af50b4aa12dbad84acf31917e0be3c20e4"
+    },
+    "ci-second-failure.log": {
+      "bytes": 10845,
+      "sha256": "76143ae9588e77fe6d16d211500b2c0376338c3f82f4f06b98a6bff5d7d43ee4"
+    },
+    "ci-linux-second/volume-mount-results.json": {
+      "bytes": 747,
+      "sha256": "27c87f9230161ebff46b35c55dd74c8f648552abdb638d06bbc6b745af33fa8d"
+    },
+    "linux-fixture-help.log": {
+      "bytes": 479,
+      "sha256": "12c2f290d14e6e7ca45185941c9a968cf95a0ea4e5f21fa5b12c57e6a8692573"
+    }
+  },
+  "linux_fixture_sha256": "9118a70746ea5a3de47534afc9aa5fcf69ff6966bb51118bee1ad7ff99f947ae",
+  "initial_validation": {
+    "commit": "099ca40502c5411523dfe7d831ae3bc51ffbb066",
+    "rustc": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+    "gates": [
+      {
+        "name": "vendor",
+        "command": [
+          "python3",
+          "tools/verify_datafusion_vendor.py"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-16T23:16:37.660315+00:00",
+        "finished": "2026-09-16T23:16:37.728949+00:00",
+        "sha256": "5de30a03a2c21d0dd165f1d3f30b23ef080e06616866e0a02f37198cff7f3a16",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-expected-volume-cjc4xw2a/gates/vendor.log"
+      },
+      {
+        "name": "format",
+        "command": [
+          "cargo",
+          "fmt",
+          "--all",
+          "--",
+          "--check"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-16T23:16:37.729335+00:00",
+        "finished": "2026-09-16T23:16:38.693672+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-expected-volume-cjc4xw2a/gates/format.log"
+      },
+      {
+        "name": "vendor-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2024",
+          "--config-path",
+          "vendor/reth-network/rustfmt.toml",
+          "--config",
+          "skip_children=true",
+          "vendor/reth-network/src/eth_requests.rs",
+          "vendor/reth-network/src/session/active.rs",
+          "vendor/reth-network/src/session/mod.rs",
+          "vendor/reth-network/src/session/types.rs",
+          "vendor/reth-network/src/session/range_update.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-16T23:16:38.694078+00:00",
+        "finished": "2026-09-16T23:16:38.755333+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-expected-volume-cjc4xw2a/gates/vendor-format.log"
+      },
+      {
+        "name": "check",
+        "command": [
+          "cargo",
+          "check",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-16T23:16:38.755692+00:00",
+        "finished": "2026-09-16T23:16:48.853826+00:00",
+        "sha256": "060ee274a47f03eae419cb500e4834b1c5e176108e4d7eab9005e7b5f1c858da",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-expected-volume-cjc4xw2a/gates/check.log"
+      },
+      {
+        "name": "clippy",
+        "command": [
+          "cargo",
+          "clippy",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-16T23:16:48.854577+00:00",
+        "finished": "2026-09-16T23:17:03.194738+00:00",
+        "sha256": "26b155ba2c0172b618a7dd748620810eaa3fe84565b08cd2813e665f21b767f7",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-expected-volume-cjc4xw2a/gates/clippy.log"
+      },
+      {
+        "name": "test",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-16T23:17:03.195216+00:00",
+        "finished": "2026-09-16T23:22:20.215385+00:00",
+        "sha256": "10b2748f77206c620b53e3423a474f9c4f1cec19a7da68c601c72301fd2b2d4d",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-expected-volume-cjc4xw2a/gates/test.log"
+      },
+      {
+        "name": "doc",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--doc",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-16T23:22:20.219227+00:00",
+        "finished": "2026-09-16T23:22:36.899394+00:00",
+        "sha256": "e45ac1148a0d712e9b2b2dd9a558402d66d4df1f4d311be9759c4c0217b5af89",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-expected-volume-cjc4xw2a/gates/doc.log"
+      },
+      {
+        "name": "release-build",
+        "command": [
+          "cargo",
+          "build",
+          "-p",
+          "logex-node",
+          "--release",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-16T23:22:36.900176+00:00",
+        "finished": "2026-09-16T23:24:28.463207+00:00",
+        "sha256": "9f7fb05413957d2637455ca8cbab31ac3f8977955371343362eab521c196abac",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-expected-volume-cjc4xw2a/gates/release-build.log"
+      }
+    ]
+  },
+  "initial_source_commit": "099ca40502c5411523dfe7d831ae3bc51ffbb066",
+  "initial_workspace_tests": {
+    "passed": 1827,
+    "ignored": 24,
+    "groups": 27
+  },
+  "initial_linux_mounts": {
+    "results": [
+      {
+        "case": "systemd template validation",
+        "passed": true,
+        "diagnostic": ""
+      },
+      {
+        "case": "missing mount",
+        "passed": true,
+        "diagnostic": "Error: Os { code: 2, kind: NotFound, message: \"No such file or directory\" }\n"
+      },
+      {
+        "case": "low space",
+        "passed": true,
+        "diagnostic": "Error: Custom { kind: Other, error: \"expected volume has 473272320 free bytes; at least 10737418240 are required\" }\n"
+      },
+      {
+        "case": "wrong UUID",
+        "passed": true,
+        "diagnostic": "Error: Custom { kind: InvalidInput, error: \"expected volume UUID abcd-1234 is not available in /dev/disk/by-uuid\" }\n"
+      },
+      {
+        "case": "real filesystem preflight and anchored write",
+        "passed": true
+      },
+      {
+        "case": "lazy detach retains underlay contents",
+        "passed": true,
+        "inflight_write": "ok"
+      },
+      {
+        "case": "unmounted path cannot initialize storage",
+        "passed": true,
+        "diagnostic": "Error: Custom { kind: InvalidInput, error: \"expected path is not the opened filesystem's current mount location\" }\n"
+      },
+      {
+        "case": "different volume at same path",
+        "passed": true,
+        "diagnostic": "Error: Custom { kind: InvalidInput, error: \"mounted filesystem at \\\"/tmp/logex-volume-mounts-3lazcej_/mount\\\" does not match expected UUID a1987213-53b9-42ee-9f97-b033ea95592e\" }\n"
+      },
+      {
+        "case": "replacement volume receives no old-owner writes",
+        "passed": true
+      },
+      {
+        "case": "correct volume remount and restart",
+        "passed": true
+      }
+    ],
+    "errors": [
+      "cleanup small-volume.img: AssertionError()",
+      "cleanup volume.img: AssertionError()"
+    ],
+    "fixtures_detached": false,
+    "fixture_root_removed": false,
+    "fixture_root": "/tmp/logex-volume-mounts-3lazcej_",
+    "binary_sha256": "06edc66d1641ebd5aa4850d03e6db24e87f3a0fa8a5052e0dbab20b3385e0bbe"
+  },
+  "initial_ci": {
+    "run": 35162285551,
+    "head": "e6c0b08a270a69ca5903fec795377522616681e9",
+    "passed_jobs": 5,
+    "failed_job": "Test: fixture cleanup"
+  },
+  "health_gap_reproducer": {
+    "head": "e6c0b08a270a69ca5903fec795377522616681e9",
+    "result": "Expected failure: one bounded synchronous engine poll prevented the sibling async health future from running. Production unchanged; test-only append.",
+    "log": "original-health-blocking.log"
+  },
+  "source_commit": "de1a42f2188fbf1512abb7f4f21f1b2a621dadb9",
+  "validation": {
+    "commit": "de1a42f2188fbf1512abb7f4f21f1b2a621dadb9",
+    "rustc": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+    "gates": [
+      {
+        "name": "vendor",
+        "command": [
+          "python3",
+          "tools/verify_datafusion_vendor.py"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-16T23:41:51.192943+00:00",
+        "finished": "2026-09-16T23:41:51.257973+00:00",
+        "sha256": "5de30a03a2c21d0dd165f1d3f30b23ef080e06616866e0a02f37198cff7f3a16",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-expected-volume-cjc4xw2a/gates-final/vendor.log"
+      },
+      {
+        "name": "format",
+        "command": [
+          "cargo",
+          "fmt",
+          "--all",
+          "--",
+          "--check"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-16T23:41:51.258341+00:00",
+        "finished": "2026-09-16T23:41:52.200630+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-expected-volume-cjc4xw2a/gates-final/format.log"
+      },
+      {
+        "name": "vendor-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2024",
+          "--config-path",
+          "vendor/reth-network/rustfmt.toml",
+          "--config",
+          "skip_children=true",
+          "vendor/reth-network/src/eth_requests.rs",
+          "vendor/reth-network/src/session/active.rs",
+          "vendor/reth-network/src/session/mod.rs",
+          "vendor/reth-network/src/session/types.rs",
+          "vendor/reth-network/src/session/range_update.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-16T23:41:52.201023+00:00",
+        "finished": "2026-09-16T23:41:52.264865+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-expected-volume-cjc4xw2a/gates-final/vendor-format.log"
+      },
+      {
+        "name": "check",
+        "command": [
+          "cargo",
+          "check",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-16T23:41:52.265286+00:00",
+        "finished": "2026-09-16T23:41:55.753701+00:00",
+        "sha256": "7017989a88b289554ee98c0fb6b481ebb7180d5cefc0ccf456996b5728277d63",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-expected-volume-cjc4xw2a/gates-final/check.log"
+      },
+      {
+        "name": "clippy",
+        "command": [
+          "cargo",
+          "clippy",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-16T23:41:55.754270+00:00",
+        "finished": "2026-09-16T23:41:58.367339+00:00",
+        "sha256": "b69112a88a4a0c181ba3b11cab3dcb17422c0b001784df437324825c06046d19",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-expected-volume-cjc4xw2a/gates-final/clippy.log"
+      },
+      {
+        "name": "test",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-16T23:41:58.367807+00:00",
+        "finished": "2026-09-16T23:45:00.561833+00:00",
+        "sha256": "e39138dea2f2dc97fab8ce9ca45513d0f43dafdfc94da1c5c085c58e01c385f1",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-expected-volume-cjc4xw2a/gates-final/test.log"
+      },
+      {
+        "name": "doc",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--doc",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-16T23:45:00.563696+00:00",
+        "finished": "2026-09-16T23:45:04.046198+00:00",
+        "sha256": "db1f87d51fb2350c183feb266eb0a0dc7fef993a2dd74d4ba01589ea8d7f098b",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-expected-volume-cjc4xw2a/gates-final/doc.log"
+      },
+      {
+        "name": "release-build",
+        "command": [
+          "cargo",
+          "build",
+          "-p",
+          "logex-node",
+          "--release",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-16T23:45:04.046645+00:00",
+        "finished": "2026-09-16T23:45:43.571660+00:00",
+        "sha256": "c60d3658ac36204bff308d716cf0b5ce1d5ddd8308225868c45ceed075bf6efc",
+        "log": "/var/folders/ks/qj77p8bs33vczj77b0t887kr0000gn/T/logex-expected-volume-cjc4xw2a/gates-final/release-build.log"
+      }
+    ]
+  },
+  "workspace_tests": {
+    "passed": 1829,
+    "ignored": 24,
+    "groups": 27
+  },
+  "initial_validation_followup": "After local Rust gates, the Linux fixture verifier adds --recursive-errors=no so warnings in the reviewed systemd unit fail CI. Rust source unchanged; actual fixture/template validation is an exact-head Linux CI gate.",
+  "second_linux_mounts": {
+    "results": [
+      {
+        "case": "systemd template validation",
+        "passed": true,
+        "diagnostic": ""
+      },
+      {
+        "case": "missing mount",
+        "passed": true,
+        "diagnostic": "Error: Os { code: 2, kind: NotFound, message: \"No such file or directory\" }\n"
+      }
+    ],
+    "errors": [
+      "RuntimeError(\"['sudo', '-n', 'ln', '-s', '/dev/loop0', '/dev/disk/by-uuid/8bc5c91a-bf4c-4fb2-8a0e-db04c7053627']: ln: failed to create symbolic link '/dev/disk/by-uuid/8bc5c91a-bf4c-4fb2-8a0e-db04c7053627': File exists\\n\")"
+    ],
+    "fixtures_detached": true,
+    "fixture_root_removed": true,
+    "fixture_root": "/tmp/logex-volume-mounts-z11byqrj",
+    "binary_sha256": "f67eede630f8716febdd40a2b4796fe8c7b83f4696a9c9295128ecf9c5353288"
+  },
+  "second_ci": {
+    "run": 35163764502,
+    "head": "827b9aa1c7936c136efd6ba21257e1e34fc5a71a",
+    "passed_jobs": 5,
+    "failed_job": "Test: fixture UUID link creation raced udev",
+    "fixtures_detached": true,
+    "fixture_root_removed": true
+  },
+  "fixture_followup": "Delegate UUID links entirely to udev and wait for device events to settle; no manual creation/removal. Rust sources remain identical to the final local gate source de1a42f2. Python syntax and --help pass; actual lifecycle verification remains required in CI."
+}

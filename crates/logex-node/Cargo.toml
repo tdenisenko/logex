@@ -9,6 +9,7 @@ name = "logex"
 path = "src/main.rs"
 
 [dependencies]
+logex-fs = { workspace = true }
 alloy-primitives = { workspace = true }
 logex-cl = { workspace = true }
 logex-types = { workspace = true }
@@ -31,8 +32,10 @@ futures-util = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 libc = "0.2"
-tempfile = "3"
 
 [target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
 tikv-jemallocator = "0.6"
 
+
+[dev-dependencies]
+tempfile = "3"

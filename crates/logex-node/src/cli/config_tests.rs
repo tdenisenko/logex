@@ -360,3 +360,50 @@ fn missing_config_reports_its_path_without_creating_it() {
     assert!(error.contains("missing.toml"));
     assert!(!path.exists());
 }
+
+#[test]
+fn expected_volume_options_follow_cli_file_precedence_for_every_command() {
+    for command in ["sync", "info", "compact", "build-indexes"] {
+        for prefix in [true, false] {
+            let config: Config = toml::from_str(
+                "expected_volume_mount = '/file-volume'\nexpected_volume_uuid = 'abcd-1234'\n",
+            )
+            .unwrap();
+            let args = if prefix {
+                vec![
+                    "logex",
+                    "--expected-volume-mount",
+                    "/cli-volume",
+                    "--expected-volume-uuid",
+                    "1234-abcd",
+                    command,
+                ]
+            } else {
+                vec![
+                    "logex",
+                    command,
+                    "--expected-volume-mount",
+                    "/cli-volume",
+                    "--expected-volume-uuid",
+                    "1234-abcd",
+                ]
+            };
+            let cli = resolve(&args, config);
+            assert_eq!(
+                cli.expected_volume_mount,
+                Some(PathBuf::from("/cli-volume"))
+            );
+            assert_eq!(cli.expected_volume_uuid.as_deref(), Some("1234-abcd"));
+        }
+        let config: Config = toml::from_str(
+            "expected_volume_mount = '/file-volume'\nexpected_volume_uuid = 'abcd-1234'\n",
+        )
+        .unwrap();
+        let cli = resolve(&["logex", command], config);
+        assert_eq!(
+            cli.expected_volume_mount,
+            Some(PathBuf::from("/file-volume"))
+        );
+        assert_eq!(cli.expected_volume_uuid.as_deref(), Some("abcd-1234"));
+    }
+}

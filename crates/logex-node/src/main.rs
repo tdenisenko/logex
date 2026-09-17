@@ -3,6 +3,7 @@ mod checkpoint;
 mod cli;
 mod commands;
 mod runtime;
+mod volume;
 
 use clap::{CommandFactory, FromArgMatches};
 use std::net::IpAddr;
@@ -44,10 +45,37 @@ fn main() {
 
     raise_file_descriptor_limit();
 
-    let data_dir = cli.data_dir.unwrap_or_else(default_data_dir);
+    let mut data_dir = cli.data_dir.unwrap_or_else(default_data_dir);
     let partition_target_rows = cli.partition_target_rows;
-    let checkpoint = cli.checkpoint;
+    let mut checkpoint = cli.checkpoint;
     let checkpoint_sync_url = cli.checkpoint_sync_url;
+
+    let expected_volume =
+        match volume::configured(cli.expected_volume_mount, cli.expected_volume_uuid).and_then(
+            |configured| {
+                configured
+                    .map(|(mount, uuid)| {
+                        volume::ExpectedVolume::prepare(&mount, &uuid, &data_dir, &mut checkpoint)
+                            .map(std::sync::Arc::new)
+                    })
+                    .transpose()
+            },
+        ) {
+            Ok(volume) => volume,
+            Err(error) => {
+                eprintln!("Error: storage volume preflight failed: {error}");
+                std::process::exit(1);
+            }
+        };
+    if expected_volume.is_some() {
+        data_dir = std::path::PathBuf::from(".");
+    }
+    let mut volume_monitor = expected_volume.map(|volume| {
+        volume::VolumeMonitor::start(volume).unwrap_or_else(|error| {
+            eprintln!("Error: cannot supervise storage volume: {error}");
+            std::process::exit(1);
+        })
+    });
 
     let pm_config = PartitionManagerConfig {
         data_dir,
@@ -100,6 +128,7 @@ fn main() {
             let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
             let shutdown = rt.block_on(runtime::run_sync(runtime::RunSyncOptions {
                 pm_config,
+                volume_monitor: volume_monitor.as_ref().map(volume::VolumeMonitor::handle),
                 checkpoint,
                 checkpoint_sync_url,
                 http_host,
@@ -120,7 +149,9 @@ fn main() {
                 dashboard_password,
                 disable_historical_sync,
             }));
-            if runtime::finish_runtime_shutdown(rt, shutdown).is_err() {
+            if runtime::finish_runtime_shutdown(rt, shutdown, || drop(volume_monitor.take()))
+                .is_err()
+            {
                 std::process::exit(1);
             }
         }
@@ -153,6 +184,8 @@ fn main() {
         Command::Compact { limit } => commands::run_compact(pm_config, limit),
         Command::Info => commands::run_info(pm_config),
     }
+    // Offline commands also retain the monitor through all command-owned I/O.
+    drop(volume_monitor);
 }
 
 fn normalize_info_log_filter(filter: String) -> String {

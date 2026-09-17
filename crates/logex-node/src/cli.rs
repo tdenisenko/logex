@@ -26,6 +26,14 @@ pub struct Cli {
     #[arg(long, value_name = "PATH", global = true)]
     pub data_dir: Option<PathBuf>,
 
+    /// Required mount location for an external data volume (with --expected-volume-uuid).
+    #[arg(long, value_name = "PATH", global = true)]
+    pub expected_volume_mount: Option<PathBuf>,
+
+    /// Stable filesystem UUID of the external data volume.
+    #[arg(long, value_name = "UUID", global = true)]
+    pub expected_volume_uuid: Option<String>,
+
     /// Tracing filter.
     ///
     /// Examples: info, debug, info,logex_sync=debug,discv5=error.
@@ -44,7 +52,8 @@ pub struct Cli {
     ///
     /// Explicit command-line options override file settings; unknown keys are errors.
     ///
-    /// Supported keys: data_dir, log_level, partition_target_rows, checkpoint,
+    /// Supported keys: data_dir, expected_volume_mount, expected_volume_uuid,
+    /// log_level, partition_target_rows, checkpoint,
     /// checkpoint_sync_url, nat, p2p_bind_ip, execution_bootnodes, execution_discv5_port,
     /// http_host, grpc_host, allow_public_grpc, dashboard_enabled, dashboard_password.
     #[arg(long, global = true)]
@@ -75,6 +84,14 @@ impl Cli {
     /// `matches` must be the same parse used to construct this `Cli`.
     pub fn apply_config(&mut self, file_config: Config, matches: &ArgMatches) {
         self.data_dir = self.data_dir.take().or(file_config.data_dir);
+        self.expected_volume_mount = self
+            .expected_volume_mount
+            .take()
+            .or(file_config.expected_volume_mount);
+        self.expected_volume_uuid = self
+            .expected_volume_uuid
+            .take()
+            .or(file_config.expected_volume_uuid);
         apply_file_default(
             &mut self.log_level,
             file_config.log_level,
@@ -417,6 +434,10 @@ pub enum IndexProfile {
 pub struct Config {
     #[serde(default)]
     pub data_dir: Option<PathBuf>,
+    #[serde(default)]
+    pub expected_volume_mount: Option<PathBuf>,
+    #[serde(default)]
+    pub expected_volume_uuid: Option<String>,
     #[serde(default)]
     pub log_level: Option<String>,
     #[serde(default)]

@@ -45,6 +45,11 @@ impl LogExService for LogExGrpcService {
         &self,
         request: Request<QueryRequest>,
     ) -> Result<Response<QueryResponse>, Status> {
+        let query = self
+            .state
+            .query_control
+            .start_concurrent()
+            .map_err(Status::unavailable)?;
         let sql = &request.get_ref().sql;
         tracing::debug!(sql = %sql, "gRPC query");
 
@@ -63,21 +68,28 @@ impl LogExService for LogExGrpcService {
         // The view owns captured row boundaries and reorg validity. Retaining
         // the storage guard through SQL execution would stall ingestion.
         let (snapshot, head_block) = {
-            let storage = self.state.storage.read().await;
+            let storage = self
+                .state
+                .read_storage()
+                .await
+                .map_err(Status::unavailable)?;
             (
                 logex_query::NativeStorageSnapshot::from_storage(&storage),
                 storage.head_block().unwrap_or(0),
             )
         };
-        let result = match logex_query::execute_sql_page_on_snapshot(
+        let execution = logex_query::execute_sql_page_on_snapshot(
             sql,
             snapshot,
             head_block,
             SqlQueryPage::new(limit, offset),
-            None,
-        )
-        .await
-        {
+            Some(query.cancel_check()),
+        );
+        let result = match tokio::select! {
+            biased;
+            reason = self.state.storage_unavailable() => return Err(Status::unavailable(reason)),
+            result = execution => result,
+        } {
             Ok(result) => result,
             Err(error @ SqlQueryError::SnapshotChanged) => {
                 return Err(Status::aborted(error.to_string()));
@@ -119,7 +131,11 @@ impl LogExService for LogExGrpcService {
         &self,
         _request: Request<Empty>,
     ) -> Result<Response<HeadBlockResponse>, Status> {
-        let storage = self.state.storage.read().await;
+        let storage = self
+            .state
+            .read_storage()
+            .await
+            .map_err(Status::unavailable)?;
         let block_number = storage.head_block().unwrap_or(0);
         Ok(Response::new(HeadBlockResponse { block_number }))
     }
@@ -128,11 +144,30 @@ impl LogExService for LogExGrpcService {
         &self,
         request: Request<GetLogsRequest>,
     ) -> Result<Response<GetLogsResponse>, Status> {
+        let query = self
+            .state
+            .query_control
+            .start_concurrent()
+            .map_err(Status::unavailable)?;
         let filter = proto_filter_to_native_filter(request.get_ref()).map_err(|status| *status)?;
 
-        let storage = self.state.storage.read().await;
-        let rows = logex_query::execute_log_filter(&storage, &filter)
-            .map_err(|err| Status::internal(format!("execution error: {err}")))?;
+        let storage = self
+            .state
+            .read_storage()
+            .await
+            .map_err(Status::unavailable)?;
+        let rows = logex_query::execute_log_filter_with_cancel(
+            &storage,
+            &filter,
+            Some(&query.cancel_check()),
+        )
+        .map_err(|err| match self.state.storage_failure() {
+            Some(reason) => Status::unavailable(reason),
+            None => Status::internal(format!("execution error: {err}")),
+        })?;
+        if let Some(reason) = self.state.storage_failure() {
+            return Err(Status::unavailable(reason));
+        }
         let row_count = rows.len() as u64;
         let logs = rows.into_iter().map(log_row_to_proto).collect();
 
@@ -143,17 +178,43 @@ impl LogExService for LogExGrpcService {
         &self,
         request: Request<GetLogsRequest>,
     ) -> Result<Response<Self::StreamLogsStream>, Status> {
+        let query = self
+            .state
+            .query_control
+            .start_concurrent()
+            .map_err(Status::unavailable)?;
         let filter = proto_filter_to_native_filter(request.get_ref()).map_err(|status| *status)?;
 
-        let storage = self.state.storage.read().await;
-        let rows = logex_query::execute_log_filter(&storage, &filter)
-            .map_err(|err| Status::internal(format!("execution error: {err}")))?;
+        let storage = self
+            .state
+            .read_storage()
+            .await
+            .map_err(Status::unavailable)?;
+        let rows = logex_query::execute_log_filter_with_cancel(
+            &storage,
+            &filter,
+            Some(&query.cancel_check()),
+        )
+        .map_err(|err| match self.state.storage_failure() {
+            Some(reason) => Status::unavailable(reason),
+            None => Status::internal(format!("execution error: {err}")),
+        })?;
         let entries: Vec<Result<LogEntry, Status>> = rows
             .into_iter()
             .map(log_row_to_proto)
             .map(Ok::<_, Status>)
             .collect();
-        let stream = tokio_stream::iter(entries);
+        let state = Arc::clone(&self.state);
+        // Tonic requires an unboxed Status as the stream item's error type.
+        #[allow(clippy::result_large_err)]
+        let stream = tokio_stream::StreamExt::map(tokio_stream::iter(entries), move |entry| {
+            // Retain admission until the buffered response stream is dropped.
+            let _query = &query;
+            match state.storage_failure() {
+                Some(reason) => Err(Status::unavailable(reason)),
+                None => entry,
+            }
+        });
 
         Ok(Response::new(Box::pin(stream)))
     }
@@ -423,6 +484,94 @@ mod tests {
             sql: "SELECT MAX(block_number) AS maximum, COUNT(*) AS total FROM logs WHERE block_number <= latest".into(),
             ..Default::default()
         })
+    }
+
+    #[tokio::test]
+    async fn failed_storage_rejects_every_grpc_method_without_storage_lock() {
+        let (_tmp, state) = setup_partitioned_state();
+        let service = LogExGrpcService::new(state.clone());
+        let _writer = state.storage.write().await;
+        state.mark_storage_unavailable("test storage failure");
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            assert_eq!(
+                service
+                    .query(aggregate_request())
+                    .await
+                    .err()
+                    .unwrap()
+                    .code(),
+                tonic::Code::Unavailable
+            );
+            assert_eq!(
+                service
+                    .get_head_block(Request::new(Empty {}))
+                    .await
+                    .err()
+                    .unwrap()
+                    .code(),
+                tonic::Code::Unavailable
+            );
+            assert_eq!(
+                service
+                    .get_logs(Request::new(GetLogsRequest::default()))
+                    .await
+                    .err()
+                    .unwrap()
+                    .code(),
+                tonic::Code::Unavailable
+            );
+            assert_eq!(
+                service
+                    .stream_logs(Request::new(GetLogsRequest::default()))
+                    .await
+                    .err()
+                    .unwrap()
+                    .code(),
+                tonic::Code::Unavailable
+            );
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn storage_failure_rejects_buffered_grpc_stream_entries() {
+        let (_tmp, state) = setup_partitioned_state();
+        let service = LogExGrpcService::new(state.clone());
+        let mut stream = service
+            .stream_logs(Request::new(GetLogsRequest::default()))
+            .await
+            .unwrap()
+            .into_inner();
+        state.mark_storage_unavailable("test storage failure");
+        assert_eq!(
+            stream.next().await.unwrap().unwrap_err().code(),
+            tonic::Code::Unavailable
+        );
+    }
+
+    #[tokio::test]
+    async fn storage_failure_cancels_pending_grpc_query() {
+        use std::task::Poll;
+        let (_tmp, state) = setup_partitioned_state();
+        let service = LogExGrpcService::new(state.clone());
+        let mut query = service.query(aggregate_request());
+        assert!(
+            std::future::poll_fn(|cx| Poll::Ready(query.as_mut().poll(cx)))
+                .await
+                .is_pending()
+        );
+        let _writer = state.storage.try_write().unwrap();
+        state.mark_storage_unavailable("test storage failure");
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), query)
+                .await
+                .unwrap()
+                .err()
+                .unwrap()
+                .code(),
+            tonic::Code::Unavailable
+        );
     }
 
     #[tokio::test]

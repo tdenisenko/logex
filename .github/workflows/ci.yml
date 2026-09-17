@@ -79,6 +79,19 @@ jobs:
       - run: cargo test --workspace --all-targets --locked
       - run: cargo test --workspace --doc --locked
 
+      - name: Verify external-volume lifecycle with disposable Linux images
+        run: |
+          cargo build -p logex-node --example volume_probe --locked
+          python3 tools/test_volume_mounts.py --binary target/debug/examples/volume_probe --report target/volume-mount-results.json
+
+      - name: Retain volume test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-volume-mount-results
+          path: target/volume-mount-results.json
+          if-no-files-found: warn
+
   macos-test:
     name: macOS Test
     runs-on: macos-latest
