@@ -1,0 +1,325 @@
+{
+  "date": "2026-09-18",
+  "branch": "audit/consensus-metadata-lifetime",
+  "base": "59f5722ca67806cc23a6efae8854ba0bd6200193",
+  "source_commit": "ab618bf56c10dfda7d94bcb8a75c517099ab501c",
+  "source_inventory": {
+    "base": "59f5722ca67806cc23a6efae8854ba0bd6200193",
+    "source_commit": "ab618bf56c10dfda7d94bcb8a75c517099ab501c",
+    "files": {
+      "crates/logex-cl/src/candidate_metadata.rs": {
+        "original": {
+          "bytes": 5683,
+          "sha256": "8fe930d554b775053ed8c7bdb05b5efc810e13c9ebac280da71704ddb6cac679"
+        },
+        "final": {
+          "bytes": 5783,
+          "sha256": "a13fb9808e63b113003c2b0cfbfe83cf0f519b4b54350d44a185dbadb3e3c5a5"
+        }
+      },
+      "crates/logex-cl/src/lib.rs": {
+        "original": {
+          "bytes": 140890,
+          "sha256": "3aa5f58c7d5452f36d1e64b62a5720858a76989b66fc759b4a8a2c072e357695"
+        },
+        "final": {
+          "bytes": 149676,
+          "sha256": "cfb63cc2cfaf32ab34d83ad98aa0bdc1f6a4c8e4839a087d870888913356f43e"
+        }
+      },
+      "crates/logex-cl/src/network.rs": {
+        "original": {
+          "bytes": 541954,
+          "sha256": "035175252cad53a0f74a90c8d5219b8f42835174a56ab5723cce662ddb3ba494"
+        },
+        "final": {
+          "bytes": 570590,
+          "sha256": "1c27da7e147117e42169a6619cd18fc3581dd176643b742fb9264faa820a860e"
+        }
+      }
+    }
+  },
+  "findings": [
+    "B3-73"
+  ],
+  "gates": {
+    "commit": "ab618bf56c10dfda7d94bcb8a75c517099ab501c",
+    "rustc": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+    "gates": [
+      {
+        "name": "vendor",
+        "command": [
+          "python3",
+          "tools/verify_datafusion_vendor.py"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T19:48:39.760216+00:00",
+        "finished": "2026-09-17T19:48:39.892926+00:00",
+        "sha256": "6755a02cf45534df3ee2ceb1312a5de76c07ade7dd1320e318bb2bbe38d0a97c",
+        "log": "/private/tmp/logex-audit-consensus-metadata-20260918/gates/vendor.log"
+      },
+      {
+        "name": "format",
+        "command": [
+          "cargo",
+          "fmt",
+          "--all",
+          "--",
+          "--check"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T19:48:39.893326+00:00",
+        "finished": "2026-09-17T19:48:40.996962+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-audit-consensus-metadata-20260918/gates/format.log"
+      },
+      {
+        "name": "vendor-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2024",
+          "--config-path",
+          "vendor/reth-network/rustfmt.toml",
+          "--config",
+          "skip_children=true",
+          "vendor/reth-network/src/eth_requests.rs",
+          "vendor/reth-network/src/session/active.rs",
+          "vendor/reth-network/src/session/mod.rs",
+          "vendor/reth-network/src/session/types.rs",
+          "vendor/reth-network/src/session/range_update.rs",
+          "vendor/reth-discv5/src/lib.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T19:48:40.997335+00:00",
+        "finished": "2026-09-17T19:48:41.065254+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-audit-consensus-metadata-20260918/gates/vendor-format.log"
+      },
+      {
+        "name": "enr-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2021",
+          "--config",
+          "skip_children=true",
+          "vendor/enr/src/lib.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T19:48:41.065583+00:00",
+        "finished": "2026-09-17T19:48:41.117762+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-audit-consensus-metadata-20260918/gates/enr-format.log"
+      },
+      {
+        "name": "gossipsub-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2021",
+          "--config",
+          "skip_children=true",
+          "vendor/libp2p-gossipsub/src/time_cache.rs",
+          "vendor/libp2p-gossipsub/src/behaviour.rs",
+          "vendor/libp2p-gossipsub/src/behaviour/tests.rs",
+          "vendor/libp2p-gossipsub/src/subscription_filter.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T19:48:41.118144+00:00",
+        "finished": "2026-09-17T19:48:41.217387+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-audit-consensus-metadata-20260918/gates/gossipsub-format.log"
+      },
+      {
+        "name": "aggregate-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2021",
+          "--config",
+          "max_width=90,skip_children=true",
+          "vendor/datafusion-functions-aggregate/src/sum.rs",
+          "vendor/datafusion-functions-aggregate/src/average.rs",
+          "vendor/datafusion-functions-aggregate-common/src/aggregate/sum_distinct/numeric.rs",
+          "vendor/datafusion-functions-aggregate-common/src/aggregate/avg_distinct/decimal.rs",
+          "vendor/datafusion-functions-aggregate-common/src/utils.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T19:48:41.217772+00:00",
+        "finished": "2026-09-17T19:48:41.280519+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-audit-consensus-metadata-20260918/gates/aggregate-format.log"
+      },
+      {
+        "name": "check",
+        "command": [
+          "cargo",
+          "check",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T19:48:41.280950+00:00",
+        "finished": "2026-09-17T19:48:48.466613+00:00",
+        "sha256": "d541a335506f9bc12f31333f4c4c0326a7535379a82e2bb82903263fc9aa9ea2",
+        "log": "/private/tmp/logex-audit-consensus-metadata-20260918/gates/check.log"
+      },
+      {
+        "name": "clippy",
+        "command": [
+          "cargo",
+          "clippy",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T19:48:48.467518+00:00",
+        "finished": "2026-09-17T19:48:55.977021+00:00",
+        "sha256": "544896a6eb0f55c833bfd987a3f8b19ef7d295d82878e165d442a8f87315fc1a",
+        "log": "/private/tmp/logex-audit-consensus-metadata-20260918/gates/clippy.log"
+      },
+      {
+        "name": "test",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T19:48:55.977912+00:00",
+        "finished": "2026-09-17T19:53:04.401533+00:00",
+        "sha256": "b926f17dcdc20c0b2788b9b186c66fbb743e301d4177d2d3de4421576441d6c4",
+        "log": "/private/tmp/logex-audit-consensus-metadata-20260918/gates/test.log"
+      },
+      {
+        "name": "doc",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--doc",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T19:53:04.406153+00:00",
+        "finished": "2026-09-17T19:53:17.388618+00:00",
+        "sha256": "8428d6b9eb239959eb5ea49aae537cb00786a963bc282e32dafd4904a68bd2d9",
+        "log": "/private/tmp/logex-audit-consensus-metadata-20260918/gates/doc.log"
+      },
+      {
+        "name": "release-build",
+        "command": [
+          "cargo",
+          "build",
+          "-p",
+          "logex-node",
+          "--release",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T19:53:17.389435+00:00",
+        "finished": "2026-09-17T19:54:27.172139+00:00",
+        "sha256": "b4da61d38fe6987080f0c1ff5a1675414b8c7f1644409038f5d514be9e1f3266",
+        "log": "/private/tmp/logex-audit-consensus-metadata-20260918/gates/release-build.log"
+      }
+    ]
+  },
+  "workspace_tests": {
+    "passed": 2072,
+    "failed": 0,
+    "ignored": 24,
+    "targets": 37
+  },
+  "documentation_tests": {
+    "passed": 0,
+    "failed": 0,
+    "ignored": 0,
+    "targets": 8
+  },
+  "focused_consensus_tests": {
+    "passed": 405,
+    "failed": 0,
+    "ignored": 1,
+    "targets": 1
+  },
+  "focused_metadata_tests": {
+    "passed": 9,
+    "failed": 0,
+    "ignored": 0,
+    "targets": 1
+  },
+  "focused_store_tests": {
+    "passed": 3,
+    "failed": 0,
+    "ignored": 0,
+    "targets": 1
+  },
+  "original_metadata_controls": {
+    "passed": 0,
+    "failed": 2,
+    "ignored": 0,
+    "targets": 1
+  },
+  "initial_draft_consensus_tests": {
+    "passed": 403,
+    "failed": 1,
+    "ignored": 1,
+    "targets": 1
+  },
+  "evidence": {
+    "path": "docs/audit/baselines/2026-09-18-consensus-metadata-lifetime-evidence.json.gz",
+    "files": 37,
+    "bytes_uncompressed": 1598195,
+    "bytes": 294582,
+    "sha256": "91fafa39ae7f0aff7a4aefa82992c812bb6d21d63d6a02a4fb0fcb9961ec5511"
+  },
+  "validation": {
+    "path": "docs/audit/baselines/2026-09-18-consensus-metadata-lifetime-validation.json.gz",
+    "files": 14,
+    "bytes_uncompressed": 247301,
+    "bytes": 47638,
+    "sha256": "82af6f1229b1ea1210e67b669449cdd120f08ef8edf9c4aac66ae44e84fa0c21"
+  },
+  "publication": {
+    "state": "pending"
+  },
+  "boundaries": [
+    "Two controls fail against unchanged original production. Nine final metadata and three store controls pass using finite offline fixtures; full CL suite passes 405 tests with one existing ignore.",
+    "B3-73 covers authenticated metadata whose former durable or volatile owners have ended. Required anchors, current/latest targets, checkpoint and pending/recovery dependencies keep exact cached decreasing-slot ancestry.",
+    "The writer returns same-height replaced-root candidates only after durable publication. Same beacon root at other heights remains supported; fresh borrowed membership handles aliases and reownership.",
+    "Snapshot ownership checks, demotion and optional FIFO removal share one lock without I/O, await or nested ConsensusStore calls. This does not provide a generic observer/reconstruction protocol for arbitrary future external store mutations.",
+    "Release work uses an ephemeral descending-slot heap and existing adjacency. No new per-anchor reverse index, permanent child counters or trusted-history cap. Ordinary unchanged and advancing-head controls add no retained-history scan.",
+    "A real unresolved release batch may scan O(N) retained anchors once. Affected graph work, temporary allocation and existing FIFO costs remain; no throughput, total memory or constant-time guarantee is claimed.",
+    "Whole response ownership spans nested processing and early returns. Draft missing-owner and changed-parent promotion defects were corrected before final validation. One old fixture now explicitly persists its retained head after real target switching, preserving every original assertion.",
+    "Borrowed startup/target/seed/materialization summaries remove unnecessary history or committee clones in the touched readers. No new dependency, storage encoding, durability barrier or quota was introduced.",
+    "An obsolete fork selected after optional eviction may require refetch. Eligible gossip cache overload, priority queues, shared query resources, dashboard, verified repair and integrated acceptance remain open.",
+    "No new benchmark campaign, live sync, production data, remote-host work or release-readiness claim."
+  ]
+}

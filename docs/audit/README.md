@@ -80,8 +80,7 @@ topic retention and late type-size admission (B3-71–72). Static CL eligibility
 enforced before message caches, GRAFT peer topics and PRUNE backoffs; supported
 fork lifecycle and message IDs are unchanged. Source `9778b322` passes independent
 review, 162 standalone vendor tests and all eleven local gates (2,060 workspace
-tests / 24 existing ignores). Source and local validation are complete;
-exact-head CI and merge remain. Eligible-cache capacity, priority controls and
+tests / 24 existing ignores). PR #236 merged as `59f5722c` after all six CI jobs and ten Linux controls. Eligible-cache capacity, priority controls and
 protected metadata are separate open ownership work.
 
 | Batch | Review area | Status / acceptance |
@@ -342,3 +341,10 @@ the maximum-prefix boundary in two public composite helpers (B6-05). Source
 review. All ten local gates pass (1,961 tests / 24 ignores); all six CI jobs and ten Linux controls passed before PR #224 merged as `2b86b8a6`. Reader, builder and
 storage-publication dispositions found no additional scoped defect requiring
 a change; integrated workloads and broader memory/repair work remain separate.
+
+The [consensus metadata lifetime correction](consensus-metadata-lifetime.md)
+addresses B3-73, permanently protected metadata from obsolete authenticated forks.
+Source `ab618bf5` passes nine metadata controls, 405 consensus tests / one existing
+ignore and strict Clippy. Independent ownership/store reviews and all eleven local gates pass
+(2,072 workspace tests / 24 existing ignores). Exact-head CI and merge remain.
+Required trusted history remains retained.
