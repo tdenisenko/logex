@@ -5,7 +5,7 @@ Branch: `audit/ethereum-filter-semantics`.
 Exact-base controls reproduce array-filter acceptance, changed unknown-extension
 meaning, a missing-topic wildcard match and a named-tag alias. Additional
 protocol/field tables now run every case and reproduce four HTTP/gRPC groups
-and two raw-WebSocket groups. Implementation and eleven local gates are complete; exact-head CI and merge remain.
+and two raw-WebSocket groups. Implementation and eleven local gates are complete; PR #230 merged as `a4eafd46` after all six CI jobs.
 
 ## Scope and invariants
 
@@ -69,4 +69,6 @@ source hashes, all original and final controls, independent review and full gate
 logs. All 142 focused server tests pass with two existing benchmark ignores;
 15 native and two storage controls, strict selected-crate Clippy and formatting
 also pass. Existing query snapshot, cancellation and ingestion recovery checks
-remain in the full suite. Exact-head CI and merge remain.
+remain in the full suite. Exact-head CI and merge passed; verified closure follows.
+
+All six CI jobs passed on `e3ced8d9` and ten Linux volume/template controls passed with verified cleanup. [PR #230](https://github.com/tdenisenko/logex/pull/230) merged as `a4eafd46`. The merge tree is identical to the tested head. B8-12–14 are closed within literal decoding and predicate consistency scope. Subscription lag/reorg notifications, shared query budgets, dashboard, verified repair and integrated acceptance remain open.

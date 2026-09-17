@@ -534,6 +534,16 @@ index fields. WebSocket subscriptions are for live ingested blocks; historical
 backfill remains queryable through SQL and JSON-RPC rather than replayed as
 alerts. Legacy raw log subscriptions still work by sending `{ "filter": { ... } }`.
 
+If a live subscriber falls behind the broadcast buffer, the server ends that
+stream instead of silently skipping batches. It attempts close code `1013` with
+a reconnect-and-reconcile reason, then releases the connection. The reason may
+not arrive over a stalled or broken transport. After losing continuity, clients
+should reconcile stored logs through the query APIs; reconnecting alone does
+not guarantee replay of every missed log. Retained transfer history is bounded
+to 10,000 notifications and can evict older entries. Healthy sends retain their
+existing backpressure; the one-second close grace applies only after a gap is
+detected. A blocked ordinary send can delay gap detection.
+
 Dashboard live-transfer sessions send `subscriptionScope: "dashboard"` and a
 browser-generated `subscriptionId`. They retain recent notifications in server
 memory across page refreshes and expire after about one minute without a visible

@@ -1,0 +1,310 @@
+{
+  "date": "2026-09-17",
+  "branch": "audit/websocket-delivery",
+  "base": "a4eafd463205eeefe38d47abd7a3326c6d2cd071",
+  "source_commit": "71ef3cc0c8b2669355dde499cde7bcd1b1040049",
+  "source_inventory": {
+    "base": "a4eafd463205eeefe38d47abd7a3326c6d2cd071",
+    "source_commit": "71ef3cc0c8b2669355dde499cde7bcd1b1040049",
+    "files": {
+      "crates/logex-server/src/ws.rs": {
+        "original": {
+          "bytes": 60644,
+          "sha256": "bc0d4b1988f6f848250874ad944586fa591c14522694134d1e24abfa59179c28"
+        },
+        "final": {
+          "bytes": 75903,
+          "sha256": "bf5df9178ad24a3a058e3a8ca62a52086ed81ab76cffbef8addfe6012d150b73"
+        }
+      },
+      "crates/logex-server/src/web_ui.html": {
+        "original": {
+          "bytes": 150127,
+          "sha256": "94057f6b82aec6db604e157aedba2d19848e45089866ef428739ef6934696dc4"
+        },
+        "final": {
+          "bytes": 150335,
+          "sha256": "a9c23177e847c588f9b8453b2e2f47bf2ca6d49ed63c3fea65e9f9bc60d6fa39"
+        }
+      }
+    }
+  },
+  "findings": [
+    "B8-15",
+    "B8-16"
+  ],
+  "gates": {
+    "commit": "71ef3cc0c8b2669355dde499cde7bcd1b1040049",
+    "rustc": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+    "gates": [
+      {
+        "name": "vendor",
+        "command": [
+          "python3",
+          "tools/verify_datafusion_vendor.py"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T15:53:07.911329+00:00",
+        "finished": "2026-09-17T15:53:08.046377+00:00",
+        "sha256": "66c8356dd4a2753b376fc6b222ceda74bb495616f72e05bb062c7fb877a81bd1",
+        "log": "/private/tmp/logex-audit-websocket-delivery-20260917/gates/vendor.log"
+      },
+      {
+        "name": "format",
+        "command": [
+          "cargo",
+          "fmt",
+          "--all",
+          "--",
+          "--check"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T15:53:08.046848+00:00",
+        "finished": "2026-09-17T15:53:09.414386+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-audit-websocket-delivery-20260917/gates/format.log"
+      },
+      {
+        "name": "vendor-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2024",
+          "--config-path",
+          "vendor/reth-network/rustfmt.toml",
+          "--config",
+          "skip_children=true",
+          "vendor/reth-network/src/eth_requests.rs",
+          "vendor/reth-network/src/session/active.rs",
+          "vendor/reth-network/src/session/mod.rs",
+          "vendor/reth-network/src/session/types.rs",
+          "vendor/reth-network/src/session/range_update.rs",
+          "vendor/reth-discv5/src/lib.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T15:53:09.414769+00:00",
+        "finished": "2026-09-17T15:53:09.483853+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-audit-websocket-delivery-20260917/gates/vendor-format.log"
+      },
+      {
+        "name": "enr-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2021",
+          "--config",
+          "skip_children=true",
+          "vendor/enr/src/lib.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T15:53:09.484202+00:00",
+        "finished": "2026-09-17T15:53:09.535275+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-audit-websocket-delivery-20260917/gates/enr-format.log"
+      },
+      {
+        "name": "gossipsub-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2021",
+          "--config",
+          "skip_children=true",
+          "vendor/libp2p-gossipsub/src/time_cache.rs",
+          "vendor/libp2p-gossipsub/src/behaviour.rs",
+          "vendor/libp2p-gossipsub/src/behaviour/tests.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T15:53:09.535637+00:00",
+        "finished": "2026-09-17T15:53:09.630309+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-audit-websocket-delivery-20260917/gates/gossipsub-format.log"
+      },
+      {
+        "name": "aggregate-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2021",
+          "--config",
+          "max_width=90,skip_children=true",
+          "vendor/datafusion-functions-aggregate/src/sum.rs",
+          "vendor/datafusion-functions-aggregate/src/average.rs",
+          "vendor/datafusion-functions-aggregate-common/src/aggregate/sum_distinct/numeric.rs",
+          "vendor/datafusion-functions-aggregate-common/src/aggregate/avg_distinct/decimal.rs",
+          "vendor/datafusion-functions-aggregate-common/src/utils.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T15:53:09.630674+00:00",
+        "finished": "2026-09-17T15:53:09.692997+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-audit-websocket-delivery-20260917/gates/aggregate-format.log"
+      },
+      {
+        "name": "check",
+        "command": [
+          "cargo",
+          "check",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T15:53:09.693403+00:00",
+        "finished": "2026-09-17T15:53:14.996307+00:00",
+        "sha256": "419320e0aacafe89974819b5fe9eeabc02edd0440db4d4ab2779102e9f8a8225",
+        "log": "/private/tmp/logex-audit-websocket-delivery-20260917/gates/check.log"
+      },
+      {
+        "name": "clippy",
+        "command": [
+          "cargo",
+          "clippy",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T15:53:14.996905+00:00",
+        "finished": "2026-09-17T15:53:19.701958+00:00",
+        "sha256": "f76746e3257e574e66c7e40970fc56a1e8a2614f0c3440c3f867f3e27f575349",
+        "log": "/private/tmp/logex-audit-websocket-delivery-20260917/gates/clippy.log"
+      },
+      {
+        "name": "test",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T15:53:19.702617+00:00",
+        "finished": "2026-09-17T15:57:26.380928+00:00",
+        "sha256": "479f2c6596cfdc184f9fa821b5cbb3a94e0778d760d7a0f49d7a67885261f8c3",
+        "log": "/private/tmp/logex-audit-websocket-delivery-20260917/gates/test.log"
+      },
+      {
+        "name": "doc",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--doc",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T15:57:26.383193+00:00",
+        "finished": "2026-09-17T15:57:35.011794+00:00",
+        "sha256": "78dc3d898fe48b605ad0c9688afcaa8a028b8b319e014cdd40e8d84bf74d14ef",
+        "log": "/private/tmp/logex-audit-websocket-delivery-20260917/gates/doc.log"
+      },
+      {
+        "name": "release-build",
+        "command": [
+          "cargo",
+          "build",
+          "-p",
+          "logex-node",
+          "--release",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T15:57:35.012409+00:00",
+        "finished": "2026-09-17T15:58:53.788792+00:00",
+        "sha256": "7dab0770e008044a9830a2aa0ec538abe3a3f6e7c36f938364173ac6a406c542",
+        "log": "/private/tmp/logex-audit-websocket-delivery-20260917/gates/release-build.log"
+      }
+    ]
+  },
+  "workspace_tests": {
+    "passed": 2007,
+    "failed": 0,
+    "ignored": 24,
+    "targets": 37
+  },
+  "documentation_tests": {
+    "passed": 0,
+    "failed": 0,
+    "ignored": 0,
+    "targets": 8
+  },
+  "original_delivery_controls": {
+    "passed": 0,
+    "failed": 2,
+    "ignored": 0,
+    "targets": 1
+  },
+  "final_server_tests": {
+    "passed": 149,
+    "failed": 0,
+    "ignored": 2,
+    "targets": 6
+  },
+  "browser_callback_controls": {
+    "original": {
+      "runtime": "v25.2.1",
+      "tests": 5,
+      "pass": 3,
+      "fail": 2,
+      "source_sha256": "94057f6b82aec6db604e157aedba2d19848e45089866ef428739ef6934696dc4"
+    },
+    "final": {
+      "runtime": "v25.2.1",
+      "tests": 5,
+      "pass": 5,
+      "fail": 0,
+      "source_sha256": "a9c23177e847c588f9b8453b2e2f47bf2ca6d49ed63c3fea65e9f9bc60d6fa39"
+    }
+  },
+  "evidence": {
+    "path": "docs/audit/baselines/2026-09-17-websocket-delivery-evidence.json.gz",
+    "files": 21,
+    "bytes_uncompressed": 372390,
+    "bytes": 76407,
+    "sha256": "ca0aa3546e52cc94c5aa28d3aefe2e15670d4bdf11381fb276b67eea0f7a60f7"
+  },
+  "validation": {
+    "path": "docs/audit/baselines/2026-09-17-websocket-delivery-validation.json.gz",
+    "files": 14,
+    "bytes_uncompressed": 239950,
+    "bytes": 45655,
+    "sha256": "7bde023f7a3eefe47f3e429c23d0e12978ed0e61afa53a2a76745506a43303e6"
+  },
+  "publication": {
+    "state": "pending"
+  },
+  "boundaries": [
+    "Exact original source is retained; both finite actual-loop lag controls fail by receiving a data frame after the missed batch instead of a close.",
+    "Code1013 close is best-effort with a one-second terminal-only grace. The socket is dropped after success, error or timeout; no post-gap stream continuation is allowed.",
+    "Existing healthy send backpressure is preserved and can delay observing lag. No new ordinary-send deadline or aggregate resource quota.",
+    "Acknowledgement snapshot release is established by explicit source ownership before the await, with content/order/lifetime controls. No allocator or throughput measurement claim.",
+    "Five isolated Node controls evaluate actual browser callbacks. This is not a full browser/layout test or a new application/build dependency.",
+    "Lost broadcast counts are batches, not rows. Retained history is bounded to10000 notifications and cannot guarantee complete replay; clients must reconcile after continuity loss.",
+    "No ingestion write-path or persisted format change, SQL implementation, production data, remote host, live chain or benchmark. Reorg notifications and broader audit acceptance remain open."
+  ]
+}

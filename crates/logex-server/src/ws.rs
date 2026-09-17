@@ -5,7 +5,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use alloy_primitives::{Address, B256, keccak256};
 use axum::Json;
-use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade, close_code};
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -22,6 +22,7 @@ const BROADCAST_CAPACITY: usize = 4096;
 const LIVE_TRANSFER_CHANNEL_CAPACITY: usize = 1024;
 const LIVE_TRANSFER_HISTORY_LIMIT: usize = 10_000;
 const DASHBOARD_SESSION_TIMEOUT: Duration = Duration::from_secs(60);
+const LAG_CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
 static ERC20_TRANSFER_TOPIC: LazyLock<B256> =
     LazyLock::new(|| keccak256(b"Transfer(address,address,uint256)"));
 
@@ -641,8 +642,9 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>) {
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::warn!(missed = n, "WebSocket subscriber lagged");
-                        continue;
+                        tracing::warn!(missed_batches = n, "WebSocket subscriber lagged; closing for resync");
+                        close_lagged(|message| socket.send(message)).await;
+                        break;
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
@@ -663,6 +665,20 @@ async fn handle_ws(mut socket: WebSocket, state: Arc<AppState>) {
     }
 
     tracing::debug!("WebSocket subscription closed");
+}
+
+/// A gap ends delivery; the close frame is only a best-effort resync diagnostic.
+/// Bound this terminal write so a stalled peer cannot keep the socket/session
+/// owner alive. Ordinary data, acknowledgement, and pong sends retain backpressure.
+async fn close_lagged<F>(send: impl FnOnce(Message) -> F)
+where
+    F: std::future::Future<Output = Result<(), axum::Error>>,
+{
+    let message = Message::Close(Some(CloseFrame {
+        code: close_code::AGAIN,
+        reason: "Live stream fell behind; reconnect and reconcile stored logs.".into(),
+    }));
+    let _ = tokio::time::timeout(LAG_CLOSE_TIMEOUT, send(message)).await;
 }
 
 // Detach even when storage failure cancels the entire socket future.
@@ -690,26 +706,28 @@ async fn handle_live_transfer_ws(
             return;
         }
     };
-    let mut attachment = subs.upsert_live_transfer_session(requested_id, scope, subscription, true);
-    let _detach = DetachSession(
-        &subs,
-        attachment.id.clone(),
-        Arc::clone(&attachment.identity),
-    );
+    let LiveTransferSessionAttachment {
+        id,
+        identity,
+        snapshot,
+        mut receiver,
+    } = subs.upsert_live_transfer_session(requested_id, scope, subscription, true);
+    let _detach = DetachSession(&subs, id.clone(), identity);
 
     tracing::debug!(
         kind = "erc20Transfers",
-        subscription_id = %attachment.id,
+        subscription_id = %id,
         ?scope,
         "new server-backed WebSocket subscription"
     );
 
+    let acknowledgement = serde_json::to_string(&snapshot)
+        .unwrap_or_else(|_| r#"{"status":"subscribed","type":"erc20Transfers"}"#.into());
+    // The acknowledgement owns its serialized data. Release the copied history
+    // before any socket await, including a slow acknowledgement send.
+    drop(snapshot);
     if socket
-        .send(Message::Text(
-            serde_json::to_string(&attachment.snapshot)
-                .unwrap_or_else(|_| r#"{"status":"subscribed","type":"erc20Transfers"}"#.into())
-                .into(),
-        ))
+        .send(Message::Text(acknowledgement.into()))
         .await
         .is_err()
     {
@@ -718,7 +736,7 @@ async fn handle_live_transfer_ws(
 
     loop {
         tokio::select! {
-            result = attachment.receiver.recv() => {
+            result = receiver.recv() => {
                 match result {
                     Ok(notifications) => {
                         if notifications.is_empty() {
@@ -731,8 +749,9 @@ async fn handle_live_transfer_ws(
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::warn!(missed = n, subscription_id = %attachment.id, "server-backed WebSocket subscriber lagged");
-                        continue;
+                        tracing::warn!(missed_batches = n, subscription_id = %id, "server-backed WebSocket subscriber lagged; closing for resync");
+                        close_lagged(|message| socket.send(message)).await;
+                        break;
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
@@ -752,7 +771,7 @@ async fn handle_live_transfer_ws(
     }
 
     tracing::debug!(
-        subscription_id = %attachment.id,
+        subscription_id = %id,
         "server-backed WebSocket subscription closed"
     );
 }
@@ -961,6 +980,356 @@ mod tests {
     use super::*;
     use alloy_primitives::{Address, B256, Bytes, bytes};
     use logex_types::Source;
+
+    struct CloseDropProbe(Arc<std::sync::atomic::AtomicBool>);
+
+    impl Drop for CloseDropProbe {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test]
+    async fn delivery_pending_terminal_close_expires_and_releases_future() {
+        let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let probe = CloseDropProbe(Arc::clone(&dropped));
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            close_lagged(|message| async move {
+                let Message::Close(Some(frame)) = message else {
+                    panic!("expected close")
+                };
+                assert_eq!(frame.code, close_code::AGAIN);
+                assert_eq!(
+                    frame.reason,
+                    "Live stream fell behind; reconnect and reconcile stored logs."
+                );
+                let _probe = probe;
+                std::future::pending::<Result<(), axum::Error>>().await
+            }),
+        )
+        .await
+        .expect("terminal close must be bounded");
+        assert!(dropped.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn delivery_terminal_close_cancellation_detaches_original_session() {
+        let manager = SubscriptionManager::new();
+        let subscription =
+            Erc20TransferSubscription::new(vec![Address::repeat_byte(1)], vec![], None, None)
+                .unwrap();
+        let attachment = manager.upsert_live_transfer_session(
+            Some("cancel-close".into()),
+            LiveSubscriptionScope::Dashboard,
+            subscription.clone(),
+            true,
+        );
+        let owned = manager.clone();
+        let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let probe = CloseDropProbe(Arc::clone(&dropped));
+        let (ready, started) = tokio::sync::oneshot::channel();
+        let work = tokio::spawn(async move {
+            let _detach = DetachSession(&owned, attachment.id, attachment.identity);
+            close_lagged(|_| async move {
+                let _probe = probe;
+                ready.send(()).unwrap();
+                std::future::pending::<Result<(), axum::Error>>().await
+            })
+            .await;
+        });
+        started.await.unwrap();
+        assert!(manager.remove_live_transfer_session("cancel-close"));
+        let replacement = manager.upsert_live_transfer_session(
+            Some("cancel-close".into()),
+            LiveSubscriptionScope::Dashboard,
+            subscription,
+            true,
+        );
+        work.abort();
+        assert!(work.await.unwrap_err().is_cancelled());
+        assert!(dropped.load(Ordering::SeqCst));
+        assert_eq!(
+            manager
+                .live_transfer_session("cancel-close")
+                .unwrap()
+                .active_connections,
+            1
+        );
+        manager.detach_live_transfer_session(&replacement.id, &replacement.identity);
+        assert_eq!(
+            manager
+                .live_transfer_session("cancel-close")
+                .unwrap()
+                .active_connections,
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn delivery_terminal_close_success_and_failure_finish_without_retry() {
+        for fail in [false, true] {
+            let calls = std::sync::atomic::AtomicUsize::new(0);
+            close_lagged(|message| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                assert!(matches!(message, Message::Close(Some(_))));
+                std::future::ready(if fail {
+                    Err(axum::Error::new(std::io::Error::other("closed")))
+                } else {
+                    Ok(())
+                })
+            })
+            .await;
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn delivery_healthy_raw_batches_remain_chronological() {
+        let manager = SubscriptionManager::new();
+        let mut client = DeliveryClient::connect(manager.clone(), r#"{"type":"logs"}"#).await;
+        assert_eq!(client.frame().await.0, 1);
+        manager.notify(&[make_log(1, 10), make_log(1, 11)]);
+        let (opcode, data) = client.frame().await;
+        assert_eq!(opcode, 1);
+        let rows: serde_json::Value = serde_json::from_slice(&data).unwrap();
+        assert_eq!(rows[0]["blockNumber"], "0xa");
+        assert_eq!(rows[1]["blockNumber"], "0xb");
+        assert_eq!(manager.inner.sender.receiver_count(), 1);
+        drop(client);
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while manager.inner.sender.receiver_count() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn delivery_retained_ack_history_and_live_order_are_preserved() {
+        let manager = SubscriptionManager::new();
+        let token = Address::repeat_byte(0xBB);
+        let tracked = Address::repeat_byte(0xA1);
+        let recipient = Address::repeat_byte(2);
+        let subscription =
+            Erc20TransferSubscription::new(vec![tracked], vec![token], None, None).unwrap();
+        drop(manager.upsert_live_transfer_session(
+            Some("healthy-service".into()),
+            LiveSubscriptionScope::Service,
+            subscription,
+            false,
+        ));
+        manager.notify(&[
+            make_transfer_log(token, tracked, recipient, 1, 8),
+            make_transfer_log(token, tracked, recipient, 2, 9),
+        ]);
+        let request = format!(
+            r#"{{"type":"erc20Transfers","subscriptionId":"healthy-service","scope":"service","addresses":["{tracked:#x}"]}}"#
+        );
+        let mut client = DeliveryClient::connect(manager.clone(), &request).await;
+        let (opcode, ack) = client.frame().await;
+        assert_eq!(opcode, 1);
+        let ack: serde_json::Value = serde_json::from_slice(&ack).unwrap();
+        assert_eq!(ack["activeConnections"], 1);
+        assert_eq!(ack["notifications"][0]["blockNumber"], 9);
+        assert_eq!(ack["notifications"][1]["blockNumber"], 8);
+        manager.notify(&[
+            make_transfer_log(token, tracked, recipient, 3, 10),
+            make_transfer_log(token, tracked, recipient, 4, 11),
+        ]);
+        let (opcode, data) = client.frame().await;
+        assert_eq!(opcode, 1);
+        let rows: serde_json::Value = serde_json::from_slice(&data).unwrap();
+        assert_eq!(rows[0]["blockNumber"], 10);
+        assert_eq!(rows[1]["blockNumber"], 11);
+        drop(client);
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while manager
+                .live_transfer_session("healthy-service")
+                .unwrap()
+                .active_connections
+                != 0
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let snapshot = manager.live_transfer_session("healthy-service").unwrap();
+        assert_eq!(snapshot.notifications.len(), 4);
+        assert_eq!(snapshot.notifications[0].block_number, 11);
+        assert_eq!(snapshot.expires_in_seconds, None);
+    }
+
+    // Tiny loopback WebSocket transport: no external client or production listener.
+    struct DeliveryClient {
+        stream: tokio::net::TcpStream,
+        server: tokio::task::JoinHandle<()>,
+        _directory: tempfile::TempDir,
+    }
+
+    impl Drop for DeliveryClient {
+        fn drop(&mut self) {
+            self.server.abort();
+        }
+    }
+
+    impl DeliveryClient {
+        async fn connect(manager: SubscriptionManager, request: &str) -> Self {
+            tokio::time::timeout(
+                Duration::from_secs(3),
+                Self::connect_inner(manager, request),
+            )
+            .await
+            .expect("bounded local handshake")
+        }
+
+        async fn connect_inner(manager: SubscriptionManager, request: &str) -> Self {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let directory = tempfile::tempdir().unwrap();
+            let storage =
+                logex_storage::PartitionManager::open(logex_storage::PartitionManagerConfig {
+                    data_dir: directory.path().to_path_buf(),
+                    partition_target_rows: 100,
+                    compaction_safety_margin_blocks: 2048,
+                })
+                .unwrap();
+            let state = Arc::new(AppState::new(storage, Some(manager), Default::default()));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let app = axum::Router::new()
+                .route("/ws", axum::routing::get(handle_ws_upgrade))
+                .with_state(state);
+            let server = tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+            let stream = tokio::net::TcpStream::connect(address).await.unwrap();
+            let mut client = Self {
+                stream,
+                server,
+                _directory: directory,
+            };
+            let stream = &mut client.stream;
+            stream.write_all(b"GET /ws HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n").await.unwrap();
+            let mut header = Vec::new();
+            while !header.ends_with(b"\r\n\r\n") {
+                header.push(stream.read_u8().await.unwrap());
+                assert!(header.len() < 4096);
+            }
+            assert!(header.starts_with(b"HTTP/1.1 101"));
+            let mut frame = vec![0x81];
+            if request.len() < 126 {
+                frame.push(0x80 | request.len() as u8);
+            } else {
+                frame.push(0x80 | 126);
+                frame.extend_from_slice(&(request.len() as u16).to_be_bytes());
+            }
+            frame.extend_from_slice(&[0; 4]);
+            frame.extend_from_slice(request.as_bytes());
+            stream.write_all(&frame).await.unwrap();
+            client
+        }
+
+        async fn frame(&mut self) -> (u8, Vec<u8>) {
+            use tokio::io::AsyncReadExt;
+            tokio::time::timeout(Duration::from_secs(3), async {
+                let opcode = self.stream.read_u8().await.unwrap() & 0x0f;
+                let mut length = u64::from(self.stream.read_u8().await.unwrap());
+                assert_eq!(length & 0x80, 0);
+                if length == 126 {
+                    length = u64::from(self.stream.read_u16().await.unwrap());
+                } else if length == 127 {
+                    length = self.stream.read_u64().await.unwrap();
+                }
+                assert!(length < 16_384);
+                let mut data = vec![0; length as usize];
+                self.stream.read_exact(&mut data).await.unwrap();
+                (opcode, data)
+            })
+            .await
+            .expect("bounded local frame")
+        }
+    }
+
+    #[tokio::test]
+    async fn delivery_raw_lag_is_terminal_on_wire() {
+        let (sender, _) = broadcast::channel(1);
+        let manager = SubscriptionManager {
+            inner: Arc::new(SubscriptionManagerInner {
+                sender,
+                live_transfers: Mutex::default(),
+                next_session_id: AtomicU64::new(1),
+            }),
+        };
+        let mut client = DeliveryClient::connect(manager.clone(), r#"{"type":"logs"}"#).await;
+        assert_eq!(client.frame().await.0, 1);
+        // No await between sends: the current-thread receiver must observe a gap.
+        manager.notify(&[make_log(1, 10)]);
+        manager.notify(&[make_log(1, 11)]);
+        let (opcode, data) = client.frame().await;
+        assert_eq!(
+            opcode, 8,
+            "lag must close, not deliver a successful partial batch"
+        );
+        assert_eq!(u16::from_be_bytes([data[0], data[1]]), 1013);
+        assert!(String::from_utf8_lossy(&data[2..]).contains("reconcile"));
+        assert_eq!(manager.inner.sender.receiver_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn delivery_retained_lag_is_terminal_and_detaches_on_wire() {
+        let manager = SubscriptionManager::new();
+        let tracked = Address::repeat_byte(0xA1);
+        let token = Address::repeat_byte(0xBB);
+        let subscription =
+            Erc20TransferSubscription::new(vec![tracked], vec![token], None, None).unwrap();
+        drop(manager.upsert_live_transfer_session(
+            Some("lag-session".into()),
+            LiveSubscriptionScope::Dashboard,
+            subscription,
+            false,
+        ));
+        {
+            let mut sessions = manager.inner.live_transfers.lock().unwrap();
+            sessions.sessions.get_mut("lag-session").unwrap().sender = broadcast::channel(1).0;
+        }
+        let request = format!(
+            r#"{{"type":"erc20Transfers","subscriptionId":"lag-session","scope":"dashboard","walletAddresses":["{tracked:#x}"],"tokenAddresses":["{token:#x}"]}}"#
+        );
+        let mut client = DeliveryClient::connect(manager.clone(), &request).await;
+        let (opcode, ack) = client.frame().await;
+        assert_eq!(opcode, 1);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&ack).unwrap()["status"],
+            "subscribed"
+        );
+        manager.notify(&[make_transfer_log(
+            token,
+            tracked,
+            Address::repeat_byte(2),
+            1,
+            10,
+        )]);
+        manager.notify(&[make_transfer_log(
+            token,
+            tracked,
+            Address::repeat_byte(2),
+            2,
+            11,
+        )]);
+        let (opcode, data) = client.frame().await;
+        assert_eq!(
+            opcode, 8,
+            "retained lag must close rather than skip live data"
+        );
+        assert_eq!(u16::from_be_bytes([data[0], data[1]]), 1013);
+        let snapshot = manager.live_transfer_session("lag-session").unwrap();
+        assert_eq!(snapshot.active_connections, 0);
+        assert!(snapshot.expires_in_seconds.is_some());
+        assert_eq!(snapshot.notifications.len(), 2);
+        assert_eq!(snapshot.notifications[0].block_number, 11);
+    }
 
     #[test]
     fn raw_log_numeric_bounds_and_empty_addresses_match_expected_rows() {
