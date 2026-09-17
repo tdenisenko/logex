@@ -308,7 +308,711 @@
     "sha256": "82af6f1229b1ea1210e67b669449cdd120f08ef8edf9c4aac66ae44e84fa0c21"
   },
   "publication": {
-    "state": "pending"
+    "state": "merged",
+    "pull_request": {
+      "headRefOid": "e8d17345d9b64e855dafa1372eecdbc487d1c7a4",
+      "mergeCommit": {
+        "oid": "93c160c33f1ccf702ec6dcef3f54d690df3851a3"
+      },
+      "mergedAt": "2026-09-17T20:07:36Z",
+      "number": 237,
+      "state": "MERGED",
+      "url": "https://github.com/tdenisenko/logex/pull/237"
+    },
+    "ci": [
+      {
+        "__typename": "CheckRun",
+        "completedAt": "2026-09-17T19:57:58Z",
+        "conclusion": "SUCCESS",
+        "detailsUrl": "https://github.com/tdenisenko/logex/actions/runs/35267881290/job/105359491776",
+        "name": "Check",
+        "startedAt": "2026-09-17T19:57:01Z",
+        "status": "COMPLETED",
+        "workflowName": "CI"
+      },
+      {
+        "__typename": "CheckRun",
+        "completedAt": "2026-09-17T19:57:23Z",
+        "conclusion": "SUCCESS",
+        "detailsUrl": "https://github.com/tdenisenko/logex/actions/runs/35267881290/job/105359491447",
+        "name": "Format",
+        "startedAt": "2026-09-17T19:57:01Z",
+        "status": "COMPLETED",
+        "workflowName": "CI"
+      },
+      {
+        "__typename": "CheckRun",
+        "completedAt": "2026-09-17T19:58:12Z",
+        "conclusion": "SUCCESS",
+        "detailsUrl": "https://github.com/tdenisenko/logex/actions/runs/35267881290/job/105359491846",
+        "name": "Clippy",
+        "startedAt": "2026-09-17T19:57:01Z",
+        "status": "COMPLETED",
+        "workflowName": "CI"
+      },
+      {
+        "__typename": "CheckRun",
+        "completedAt": "2026-09-17T20:05:07Z",
+        "conclusion": "SUCCESS",
+        "detailsUrl": "https://github.com/tdenisenko/logex/actions/runs/35267881290/job/105359492014",
+        "name": "Test",
+        "startedAt": "2026-09-17T19:57:03Z",
+        "status": "COMPLETED",
+        "workflowName": "CI"
+      },
+      {
+        "__typename": "CheckRun",
+        "completedAt": "2026-09-17T20:06:56Z",
+        "conclusion": "SUCCESS",
+        "detailsUrl": "https://github.com/tdenisenko/logex/actions/runs/35267881290/job/105359491814",
+        "name": "macOS Test",
+        "startedAt": "2026-09-17T19:57:07Z",
+        "status": "COMPLETED",
+        "workflowName": "CI"
+      },
+      {
+        "__typename": "CheckRun",
+        "completedAt": "2026-09-17T20:03:53Z",
+        "conclusion": "SUCCESS",
+        "detailsUrl": "https://github.com/tdenisenko/logex/actions/runs/35267881290/job/105359491730",
+        "name": "Release Build",
+        "startedAt": "2026-09-17T19:57:01Z",
+        "status": "COMPLETED",
+        "workflowName": "CI"
+      }
+    ],
+    "ci_run": {
+      "conclusion": "success",
+      "databaseId": 35267881290,
+      "headSha": "e8d17345d9b64e855dafa1372eecdbc487d1c7a4",
+      "jobs": [
+        {
+          "completedAt": "2026-09-17T19:57:23Z",
+          "conclusion": "success",
+          "databaseId": 105359491447,
+          "name": "Format",
+          "startedAt": "2026-09-17T19:57:01Z",
+          "status": "completed",
+          "steps": [
+            {
+              "completedAt": "2026-09-17T19:57:03Z",
+              "conclusion": "success",
+              "name": "Set up job",
+              "number": 1,
+              "startedAt": "2026-09-17T19:57:02Z",
+              "status": "completed"
+            },
+            {
+              "completedAt": "2026-09-17T19:57:09Z",
+              "conclusion": "success",
+              "name": "Run actions/checkout@v4",
+              "number": 2,
+              "startedAt": "2026-09-17T19:57:03Z",
+              "status": "completed"
+            },
+            {
+              "completedAt": "2026-09-17T19:57:19Z",
+              "conclusion": "success",
+              "name": "Run dtolnay/rust-toolchain@7c8d7d138f5c09cef361f8214cf96882cd029cdb",
+              "number": 3,
+              "startedAt": "2026-09-17T19:57:09Z",
+              "status": "completed"
+            },
+            {
+              "completedAt": "2026-09-17T19:57:20Z",
+              "conclusion": "success",
+              "name": "Run cargo fmt --all -- --check",
+              "number": 4,
+              "startedAt": "2026-09-17T19:57:19Z",
+              "status": "completed"
+            },
+            {
+              "completedAt": "2026-09-17T19:57:20Z",
+              "conclusion": "success",
+              "name": "Check patched Reth formatting",
+              "number": 5,
+              "startedAt": "2026-09-17T19:57:20Z",
+              "status": "completed"
+            },
+            {
+              "completedAt": "2026-09-17T19:57:21Z",
+              "conclusion": "success",
+              "name": "Check patched ENR formatting",
+              "number": 6,
+              "startedAt": "2026-09-17T19:57:20Z",
+              "status": "completed"
+            },
+            {
+              "completedAt": "2026-09-17T19:57:21Z",
+              "conclusion": "success",
+              "name": "Check patched gossipsub formatting",
+              "number": 7,
+              "startedAt": "2026-09-17T19:57:21Z",
+              "status": "completed"
+            },
+            {
+              "completedAt": "2026-09-17T19:57:21Z",
+              "conclusion": "success",
+              "name": "Check patched aggregate formatting",
+              "number": 8,
+              "startedAt": "2026-09-17T19:57:21Z",
+              "status": "completed"
+            },
+            {
+              "completedAt": "2026-09-17T19:57:21Z",
+              "conclusion": "success",
+              "name": "Post Run actions/checkout@v4",
+              "number": 16,
+              "startedAt": "2026-09-17T19:57:21Z",
+              "status": "completed"
+            },
+            {
+              "completedAt": "2026-09-17T19:57:21Z",
+              "conclusion": "success",
+              "name": "Complete job",
+              "number": 17,
+              "startedAt": "2026-09-17T19:57:21Z",
+              "status": "completed"
+            }
+          ],
+          "url": "https://github.com/tdenisenko/logex/actions/runs/35267881290/job/105359491447"
+        },
+        {
+          "completedAt": "2026-09-17T20:03:53Z",
+          "conclusion": "success",
+          "databaseId": 105359491730,
+          "name": "Release Build",
+          "startedAt": "2026-09-17T19:57:01Z",
+          "status": "completed",
+          "steps": [
+            {
+              "completedAt": "2026-09-17T19:57:04Z",
+              "conclusion": "success",
+              "name": "Set up job",
+              "number": 1,
+              "startedAt": "2026-09-17T19:57:02Z",
+              "status": "completed"
+            },
+            {
+              "completedAt": "2026-09-17T19:57:12Z",
+              "conclusion": "success",
+              "name": "Run actions/checkout@v4",
+              "number": 2,
+              "startedAt": "2026-09-17T19:57:04Z",
+              "status": "completed"
+            },
+            {
+              "completedAt": "2026-09-17T19:57:21Z",
+              "conclusion": "success",
+              "name": "Run dtolnay/rust-toolchain@7c8d7d138f5c09cef361f8214cf96882cd029cdb",
+              "number": 3,
+              "startedAt": "2026-09-17T19:57:12Z",
+              "status": "completed"
+            },
+            {
+              "completedAt": "2026-09-17T19:57:26Z",
+              "conclusion": "success",
+              "name": "Run arduino/setup-protoc@v3",
+              "number": 4,
+              "startedAt": "2026-09-17T19:57:21Z",
+              "status": "completed"
+            },
+            {
+              "completedAt": "2026-09-17T19:57:41Z",
+              "conclusion": "success",
+              "name": "Run Swatinem/rust-cache@v2",
+              "number": 5,
+              "startedAt": "2026-09-17T19:57:26Z",
+              "status": "completed"
+            },
+            {
+              "completedAt": "2026-09-17T20:03:50Z",
+              "conclusion": "success",
+              "name": "Run cargo build -p logex-node --release --locked",
+              "number": 6,
+              "startedAt": "2026-09-17T19:57:41Z",
+              "status": "completed"
+            },
+            {
+              "completedAt": "2026-09-17T20:03:50Z",
+              "conclusion": "success",
+              "name": "Post Run Swatinem/rust-cache@v2",
+              "number": 11,
+              "startedAt": "2026-09-17T20:03:50Z",
+              "status": "completed"
+            },
+            {
+              "completedAt": "2026-09-17T20:03:50Z",
+              "conclusion": "success",
+              "name": "Post Run actions/checkout@v4",
+              "number": 12,
+              "startedAt": "2026-09-17T20:03:50Z",
+              "status": "completed"
+            },
+            {
+              "completedAt": "2026-09-17T20:03:50Z",
+              "conclusion": "success",
+              "name": "Complete job",
+              "number": 13,
+              "startedAt": "2026-09-17T20:03:50Z",
+              "status": "completed"
+            }
+          ],
+          "url": "https://github.com/tdenisenko/logex/actions/runs/35267881290/job/105359491730"
+        },
+        {
+          "completedAt": "2026-09-17T19:57:58Z",
+          "conclusion": "success",
+          "databaseId": 105359491776,
+          "name": "Check",
+          "startedAt": "2026-09-17T19:57:01Z",
+          "status": "completed",
+          "steps": [
+            {
+              "completedAt": "2026-09-17T19:57:03Z",
+              "conclusion": "success",
+              "name": "Set up job",
+              "number": 1,
+              "startedAt": "2026-09-17T19:57:02Z",
+              "status": "completed"
+            },
+            {
+              "completedAt": "2026-09-17T19:57:09Z",
+              "conclusion": "success",
+              "name": "Run actions/checkout@v4",
+              "number": 2,
+              "startedAt": "2026-09-17T19:57:03Z",
+              "status": "completed"
+            },
+            {
+              "completedAt": "2026-09-17T19:57:09Z",
+              "conclusion": "success",
+              "name": "Verify vendored crates",
+              "number": 3,
+              "startedAt": "2026-09-17T19:57:09Z",
+              "status": "completed"
+            },
+            {
+              "completedAt": "2026-09-17T19:57:16Z",
+              "conclusion": "success",
+              "name": "Run dtolnay/rust-toolchain@7c8d7d138f5c09cef361f8214cf96882cd029cdb",
+              "number": 4,
+              "startedAt": "2026-09-17T19:57:09Z",
+              "status": "completed"
+            },
+            {
+              "completedAt": "2026-09-17T19:57:21Z",
+              "conclusion": "success",
+              "name": "Run arduino/setup-protoc@v3",
+              "number": 5,
+              "startedAt": "2026-09-17T19:57:16Z",
+              "status": "completed"
+            },
+            {
+              "completedAt": "2026-09-17T19:57:34Z",
+              "conclusion": "success",
+              "name": "Run Swatinem/rust-cache@v2",
+              "number": 6,
+              "startedAt": "2026-09-17T19:57:21Z",
+              "status": "completed"
+            },
+            {
+              "completedAt": "2026-09-17T19:57:56Z",
+              "conclusion": "success",
+              "name": "Run cargo check --workspace --all-targets --locked",
+              "number": 7,
+              "startedAt": "2026-09-17T19:57:34Z",
+              "status": "completed"
+            },
+            {
+              "completedAt": "2026-09-17T19:57:56Z",
+              "conclusion": "success",
+              "name": "Post Run Swatinem/rust-cache@v2",
+              "number": 13,
+              "startedAt": "2026-09-17T19:57:56Z",
+              "status": "completed"
+            },
+            {
+              "completedAt": "2026-09-17T19:57:56Z",
+              "conclusion": "success",
+              "name": "Post Run actions/checkout@v4",
+              "number": 14,
+              "startedAt": "2026-09-17T19:57:56Z",
+              "status": "completed"
+            },
+            {
+              "completedAt": "2026-09-17T19:57:56Z",
+              "conclusion": "success",
+              "name": "Complete job",
+              "number": 15,
+              "startedAt": "2026-09-17T19:57:56Z",
+              "status": "completed"
+            }
+          ],
+          "url": "https://github.com/tdenisenko/logex/actions/runs/35267881290/job/105359491776"
+        },
+        {
+          "completedAt": "2026-09-17T20:06:56Z",
+          "conclusion": "success",
+          "databaseId": 105359491814,
+          "name": "macOS Test",
+          "startedAt": "2026-09-17T19:57:07Z",
+          "status": "completed",
+          "steps": [
+            {
+              "completedAt": "2026-09-17T19:57:10Z",
+              "conclusion": "success",
+              "name": "Set up job",
+              "number": 1,
+              "startedAt": "2026-09-17T19:57:08Z",
+              "status": "completed"
+            },
+            {
+              "completedAt": "2026-09-17T19:57:19Z",
+              "conclusion": "success",
+              "name": "Run actions/checkout@v4",
+              "number": 2,
+              "startedAt": "2026-09-17T19:57:10Z",
+              "status": "completed"
+            },
+            {
+              "completedAt": "2026-09-17T19:57:27Z",
+              "conclusion": "success",
+              "name": "Run dtolnay/rust-toolchain@7c8d7d138f5c09cef361f8214cf96882cd029cdb",
+              "number": 3,
+              "startedAt": "2026-09-17T19:57:19Z",
+              "status": "completed"
+            },
+            {
+              "completedAt": "2026-09-17T19:57:32Z",
+              "conclusion": "success",
+              "name": "Run arduino/setup-protoc@v3",
+              "number": 4,
+              "startedAt": "2026-09-17T19:57:27Z",
+              "status": "completed"
+            },
+            {
+              "completedAt": "2026-09-17T19:58:42Z",
+              "conclusion": "success",
+              "name": "Run Swatinem/rust-cache@v2",
+              "number": 5,
+              "startedAt": "2026-09-17T19:57:32Z",
+              "status": "completed"
+            },
+            {
+              "completedAt": "2026-09-17T20:05:51Z",
+              "conclusion": "success",
+              "name": "Run cargo test --workspace --all-targets --locked",
+              "number": 6,
+              "startedAt": "2026-09-17T19:58:42Z",
+              "status": "completed"
+            },
+            {
+              "completedAt": "2026-09-17T20:06:31Z",
+              "conclusion": "success",
+              "name": "Run cargo test --workspace --doc --locked",
+              "number": 7,
+              "startedAt": "2026-09-17T20:05:51Z",
+              "status": "completed"
+            },
+            {
+              "completedAt": "2026-09-17T20:06:49Z",
+              "conclusion": "success",
+              "name": "Check pinned gossipsub regressions",
+              "number": 8,
+              "startedAt": "2026-09-17T20:06:31Z",
+              "status": "completed"
+            },
+            {
+              "completedAt": "2026-09-17T20:06:49Z",
+              "conclusion": "success",
+              "name": "Post Run Swatinem/rust-cache@v2",
+              "number": 15,
+              "startedAt": "2026-09-17T20:06:49Z",
+              "status": "completed"
+            },
+            {
+              "completedAt": "2026-09-17T20:06:50Z",
+              "conclusion": "success",
+              "name": "Post Run actions/checkout@v4",
+              "number": 16,
+              "startedAt": "2026-09-17T20:06:49Z",
+              "status": "completed"
+            },
+            {
+              "completedAt": "2026-09-17T20:06:54Z",
+              "conclusion": "success",
+              "name": "Complete job",
+              "number": 17,
+              "startedAt": "2026-09-17T20:06:50Z",
+              "status": "completed"
+            }
+          ],
+          "url": "https://github.com/tdenisenko/logex/actions/runs/35267881290/job/105359491814"
+        },
+        {
+          "completedAt": "2026-09-17T19:58:12Z",
+          "conclusion": "success",
+          "databaseId": 105359491846,
+          "name": "Clippy",
+          "startedAt": "2026-09-17T19:57:01Z",
+          "status": "completed",
+          "steps": [
+            {
+              "completedAt": "2026-09-17T19:57:05Z",
+              "conclusion": "success",
+              "name": "Set up job",
+              "number": 1,
+              "startedAt": "2026-09-17T19:57:02Z",
+              "status": "completed"
+            },
+            {
+              "completedAt": "2026-09-17T19:57:11Z",
+              "conclusion": "success",
+              "name": "Run actions/checkout@v4",
+              "number": 2,
+              "startedAt": "2026-09-17T19:57:05Z",
+              "status": "completed"
+            },
+            {
+              "completedAt": "2026-09-17T19:57:20Z",
+              "conclusion": "success",
+              "name": "Run dtolnay/rust-toolchain@7c8d7d138f5c09cef361f8214cf96882cd029cdb",
+              "number": 3,
+              "startedAt": "2026-09-17T19:57:11Z",
+              "status": "completed"
+            },
+            {
+              "completedAt": "2026-09-17T19:57:26Z",
+              "conclusion": "success",
+              "name": "Run arduino/setup-protoc@v3",
+              "number": 4,
+              "startedAt": "2026-09-17T19:57:20Z",
+              "status": "completed"
+            },
+            {
+              "completedAt": "2026-09-17T19:57:41Z",
+              "conclusion": "success",
+              "name": "Run Swatinem/rust-cache@v2",
+              "number": 5,
+              "startedAt": "2026-09-17T19:57:26Z",
+              "status": "completed"
+            },
+            {
+              "completedAt": "2026-09-17T19:58:09Z",
+              "conclusion": "success",
+              "name": "Run cargo clippy --workspace --all-targets --locked -- -D warnings",
+              "number": 6,
+              "startedAt": "2026-09-17T19:57:41Z",
+              "status": "completed"
+            },
+            {
+              "completedAt": "2026-09-17T19:58:10Z",
+              "conclusion": "success",
+              "name": "Post Run Swatinem/rust-cache@v2",
+              "number": 11,
+              "startedAt": "2026-09-17T19:58:09Z",
+              "status": "completed"
+            },
+            {
+              "completedAt": "2026-09-17T19:58:10Z",
+              "conclusion": "success",
+              "name": "Post Run actions/checkout@v4",
+              "number": 12,
+              "startedAt": "2026-09-17T19:58:10Z",
+              "status": "completed"
+            },
+            {
+              "completedAt": "2026-09-17T19:58:10Z",
+              "conclusion": "success",
+              "name": "Complete job",
+              "number": 13,
+              "startedAt": "2026-09-17T19:58:10Z",
+              "status": "completed"
+            }
+          ],
+          "url": "https://github.com/tdenisenko/logex/actions/runs/35267881290/job/105359491846"
+        },
+        {
+          "completedAt": "2026-09-17T20:05:07Z",
+          "conclusion": "success",
+          "databaseId": 105359492014,
+          "name": "Test",
+          "startedAt": "2026-09-17T19:57:03Z",
+          "status": "completed",
+          "steps": [
+            {
+              "completedAt": "2026-09-17T19:57:06Z",
+              "conclusion": "success",
+              "name": "Set up job",
+              "number": 1,
+              "startedAt": "2026-09-17T19:57:04Z",
+              "status": "completed"
+            },
+            {
+              "completedAt": "2026-09-17T19:57:13Z",
+              "conclusion": "success",
+              "name": "Run actions/checkout@v4",
+              "number": 2,
+              "startedAt": "2026-09-17T19:57:06Z",
+              "status": "completed"
+            },
+            {
+              "completedAt": "2026-09-17T19:57:21Z",
+              "conclusion": "success",
+              "name": "Run dtolnay/rust-toolchain@7c8d7d138f5c09cef361f8214cf96882cd029cdb",
+              "number": 3,
+              "startedAt": "2026-09-17T19:57:13Z",
+              "status": "completed"
+            },
+            {
+              "completedAt": "2026-09-17T19:57:26Z",
+              "conclusion": "success",
+              "name": "Run arduino/setup-protoc@v3",
+              "number": 4,
+              "startedAt": "2026-09-17T19:57:21Z",
+              "status": "completed"
+            },
+            {
+              "completedAt": "2026-09-17T19:58:00Z",
+              "conclusion": "success",
+              "name": "Run Swatinem/rust-cache@v2",
+              "number": 5,
+              "startedAt": "2026-09-17T19:57:26Z",
+              "status": "completed"
+            },
+            {
+              "completedAt": "2026-09-17T20:03:11Z",
+              "conclusion": "success",
+              "name": "Run cargo test --workspace --all-targets --locked",
+              "number": 6,
+              "startedAt": "2026-09-17T19:58:00Z",
+              "status": "completed"
+            },
+            {
+              "completedAt": "2026-09-17T20:03:41Z",
+              "conclusion": "success",
+              "name": "Run cargo test --workspace --doc --locked",
+              "number": 7,
+              "startedAt": "2026-09-17T20:03:11Z",
+              "status": "completed"
+            },
+            {
+              "completedAt": "2026-09-17T20:03:52Z",
+              "conclusion": "success",
+              "name": "Check pinned gossipsub regressions",
+              "number": 8,
+              "startedAt": "2026-09-17T20:03:41Z",
+              "status": "completed"
+            },
+            {
+              "completedAt": "2026-09-17T20:05:02Z",
+              "conclusion": "success",
+              "name": "Verify external-volume lifecycle with disposable Linux images",
+              "number": 9,
+              "startedAt": "2026-09-17T20:03:52Z",
+              "status": "completed"
+            },
+            {
+              "completedAt": "2026-09-17T20:05:03Z",
+              "conclusion": "success",
+              "name": "Retain volume test results",
+              "number": 10,
+              "startedAt": "2026-09-17T20:05:02Z",
+              "status": "completed"
+            },
+            {
+              "completedAt": "2026-09-17T20:05:04Z",
+              "conclusion": "success",
+              "name": "Post Run Swatinem/rust-cache@v2",
+              "number": 19,
+              "startedAt": "2026-09-17T20:05:03Z",
+              "status": "completed"
+            },
+            {
+              "completedAt": "2026-09-17T20:05:04Z",
+              "conclusion": "success",
+              "name": "Post Run actions/checkout@v4",
+              "number": 20,
+              "startedAt": "2026-09-17T20:05:04Z",
+              "status": "completed"
+            },
+            {
+              "completedAt": "2026-09-17T20:05:04Z",
+              "conclusion": "success",
+              "name": "Complete job",
+              "number": 21,
+              "startedAt": "2026-09-17T20:05:04Z",
+              "status": "completed"
+            }
+          ],
+          "url": "https://github.com/tdenisenko/logex/actions/runs/35267881290/job/105359492014"
+        }
+      ],
+      "status": "completed"
+    },
+    "linux_volume_controls": {
+      "results": [
+        {
+          "case": "systemd template validation",
+          "passed": true,
+          "diagnostic": ""
+        },
+        {
+          "case": "missing mount",
+          "passed": true,
+          "diagnostic": "Error: Os { code: 2, kind: NotFound, message: \"No such file or directory\" }\n"
+        },
+        {
+          "case": "low space",
+          "passed": true,
+          "diagnostic": "Error: Custom { kind: Other, error: \"expected volume has 473272320 free bytes; at least 10737418240 are required\" }\n"
+        },
+        {
+          "case": "wrong UUID",
+          "passed": true,
+          "diagnostic": "Error: Custom { kind: InvalidInput, error: \"expected volume UUID abcd-1234 is not available in /dev/disk/by-uuid\" }\n"
+        },
+        {
+          "case": "real filesystem preflight and anchored write",
+          "passed": true
+        },
+        {
+          "case": "lazy detach retains underlay contents",
+          "passed": true,
+          "inflight_write": "ok"
+        },
+        {
+          "case": "unmounted path cannot initialize storage",
+          "passed": true,
+          "diagnostic": "Error: Custom { kind: InvalidInput, error: \"expected path is not the opened filesystem's current mount location\" }\n"
+        },
+        {
+          "case": "different volume at same path",
+          "passed": true,
+          "diagnostic": "Error: Custom { kind: InvalidInput, error: \"mounted filesystem at \\\"/tmp/logex-volume-mounts-kidyi5ka/mount\\\" does not match expected UUID 2742b11f-9601-4f93-8e8c-7e5c1a7af650\" }\n"
+        },
+        {
+          "case": "replacement volume receives no old-owner writes",
+          "passed": true
+        },
+        {
+          "case": "correct volume remount and restart",
+          "passed": true
+        }
+      ],
+      "errors": [],
+      "fixtures_detached": true,
+      "fixture_root_removed": true,
+      "fixture_root": "/tmp/logex-volume-mounts-kidyi5ka",
+      "binary_sha256": "4b6dcf147358754e9c7d19984ab2505347dc6ce460d0d7e046e61fdfa5441f55"
+    },
+    "merge_tree_review": {
+      "head": "e8d17345d9b64e855dafa1372eecdbc487d1c7a4",
+      "merge": "93c160c33f1ccf702ec6dcef3f54d690df3851a3",
+      "tree": "7e2d496ae76557bb3cdfbef17cada22ace44364b",
+      "identical": true
+    }
   },
   "boundaries": [
     "Two controls fail against unchanged original production. Nine final metadata and three store controls pass using finite offline fixtures; full CL suite passes 405 tests with one existing ignore.",
@@ -321,5 +1025,35 @@
     "Borrowed startup/target/seed/materialization summaries remove unnecessary history or committee clones in the touched readers. No new dependency, storage encoding, durability barrier or quota was introduced.",
     "An obsolete fork selected after optional eviction may require refetch. Eligible gossip cache overload, priority queues, shared query resources, dashboard, verified repair and integrated acceptance remain open.",
     "No new benchmark campaign, live sync, production data, remote-host work or release-readiness claim."
-  ]
+  ],
+  "publication_evidence": {
+    "premerge.json": {
+      "sha256": "64dc27e4cbef45cfeb4fde87df33568622c46bf511187489c433ed8bcb12b3a3",
+      "bytes": 1894
+    },
+    "merged.json": {
+      "sha256": "5d40aa639675b6436475e85f52c43d790e2d656ba4633acc8890660c2695e73f",
+      "bytes": 240
+    },
+    "ci-watch.log": {
+      "sha256": "54158dd99c55eb535d7e035515daf3ed87ad118fbd59e7ecac782483d3e4f132",
+      "bytes": 19351
+    },
+    "ci-run.json": {
+      "sha256": "a0e89b73f0eee9b1053fcb0dbd4150bed26cc25c0a5347954bc673f8ee55504a",
+      "bytes": 12249
+    },
+    "ci-linux/volume-mount-results.json": {
+      "sha256": "0835f91819bb7af75d512dd452023f4ab1d7d93c032bd1d24fb141bd626921c7",
+      "bytes": 1846
+    },
+    "publication-inventory.json": {
+      "sha256": "d0300d98bf5e580875fa1df22208a3d7b60a883f6e9082222bbd3c6cad5d9b76",
+      "bytes": 2169
+    },
+    "merge-tree-review.json": {
+      "sha256": "7ae2f99392e96282ef21557cd745b87324ce2c861bc3c9419dbcf3deeed4e61c",
+      "bytes": 187
+    }
+  }
 }

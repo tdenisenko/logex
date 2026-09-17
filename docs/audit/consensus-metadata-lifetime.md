@@ -2,7 +2,7 @@
 
 Base: PR #236 merge `59f5722ca67806cc23a6efae8854ba0bd6200193`.
 Branch: `audit/consensus-metadata-lifetime`.
-Source: `ab618bf56c10dfda7d94bcb8a75c517099ab501c`. All eleven local gates pass; exact-head CI and merge remain.
+Source: `ab618bf56c10dfda7d94bcb8a75c517099ab501c`. All eleven local gates pass. PR #237 merged as `93c160c3` after all six CI jobs.
 
 ## B3-73: authenticated metadata outlives its owners
 
@@ -69,7 +69,7 @@ independent map reference, including duplicate roots/keys, moved roots, sparse
 and boundary ranges, journal and checkpoint reopen, exact no-op, metadata-only
 updates and a failed publication in a disposable directory. Nine network lifetime controls and all 405 consensus tests pass, with one existing
 ignore, and strict consensus Clippy passes. Independent store, network and
-combined ownership reviews are clear. All eleven local gates pass; exact-head CI and merge remain.
+combined ownership reviews are clear. All eleven local gates pass. PR #237 merged as `93c160c3` after all six CI jobs.
 
 The network controls cover durable replacement, abandoned unmaterialized targets,
 root aliases, reownership before cleanup, shared and unequal-depth ancestry,
@@ -100,3 +100,5 @@ contains original/final source inventories, exact commands and hashes. Compresse
 are JSON archives; every embedded file includes its size and SHA-256 digest.
 These are correctness records, not performance benchmark results. Linux/macOS
 CI and the existing Linux volume controls must pass before merge.
+
+All six CI jobs passed on `e8d17345` and ten Linux volume/template controls passed with verified cleanup. [PR #237](https://github.com/tdenisenko/logex/pull/237) merged as `93c160c3`. The merge tree is identical to the tested head. B3-73 are closed in their documented scope. Gossip admission, priority queues, shared query resources, dashboard review, verified repair and integrated acceptance remain open.

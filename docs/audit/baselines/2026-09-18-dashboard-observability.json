@@ -1,0 +1,1086 @@
+{
+  "date": "2026-09-18",
+  "branch": "audit/dashboard-observability",
+  "base": "93c160c33f1ccf702ec6dcef3f54d690df3851a3",
+  "source_commit": "d375e95b16e8389a3e89cf7f94be9806f357aa88",
+  "source_inventory": {
+    "base": "93c160c33f1ccf702ec6dcef3f54d690df3851a3",
+    "source_commit": "d375e95b16e8389a3e89cf7f94be9806f357aa88",
+    "files": {
+      ".github/workflows/ci.yml": {
+        "original": {
+          "bytes": 5320,
+          "sha256": "e8295af7655c7491683716a85e7452f81c5d23388710c617d6e446f8f346fa6e"
+        },
+        "final": {
+          "bytes": 5840,
+          "sha256": "88688bdecdfb72e99e1cad2f1f556e6f1091adda4a3ef3a17a23de28ae94ab08"
+        }
+      },
+      "crates/logex-server/src/rest.rs": {
+        "original": {
+          "bytes": 87460,
+          "sha256": "96e6223aa99e728182479462a0147881121db73e7f4e1766c3032e446291ea17"
+        },
+        "final": {
+          "bytes": 92935,
+          "sha256": "7f4469e585d4686c5e846f55c9839eaa4cf4b05327eff7a28490e50a4de1b527"
+        }
+      },
+      "crates/logex-server/src/web_ui.html": {
+        "original": {
+          "bytes": 151133,
+          "sha256": "d3b5fbd1ff1f64d367b5fa11fa1927f9fd232b23547982694208514edb514b06"
+        },
+        "final": {
+          "bytes": 157979,
+          "sha256": "3a9c86893c7b691808495db8af547f1bde8218a6b2e8ddf16734ac7554ba040b"
+        }
+      },
+      "tools/dashboard-query.test.mjs": {
+        "original": null,
+        "final": {
+          "bytes": 16844,
+          "sha256": "ea1dde3d7585169da2e28e35faa10801cda643ce3d002e26356c3ff8612b57f5"
+        }
+      },
+      "tools/dashboard-rendering.test.mjs": {
+        "original": null,
+        "final": {
+          "bytes": 10018,
+          "sha256": "32fca4b7fb866b464bdbfa5416d03d9a887df9097dcdb502f8ae79b5056110e2"
+        }
+      },
+      "tools/dashboard-status.test.mjs": {
+        "original": null,
+        "final": {
+          "bytes": 7960,
+          "sha256": "7c3c59685a2c805fee0b81c7432aa7fdc532ed2ea603b538931f0c2bbb24e14b"
+        }
+      },
+      "tools/dashboard-test-support.mjs": {
+        "original": null,
+        "final": {
+          "bytes": 1101,
+          "sha256": "739b9f01c974e4306427c89dc352956dc8d9b3e5e1e61d0d450397f085ac9f38"
+        }
+      }
+    }
+  },
+  "findings": [
+    "B9-01",
+    "B9-02",
+    "B9-03",
+    "B9-04",
+    "B9-05",
+    "B9-06",
+    "B9-07",
+    "B9-08",
+    "B9-09",
+    "B9-10",
+    "B9-11",
+    "B9-12",
+    "B9-13"
+  ],
+  "gates": {
+    "commit": "d375e95b16e8389a3e89cf7f94be9806f357aa88",
+    "rustc": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+    "gates": [
+      {
+        "name": "dashboard",
+        "command": [
+          "node",
+          "--test",
+          "tools/dashboard-query.test.mjs",
+          "tools/dashboard-rendering.test.mjs",
+          "tools/dashboard-status.test.mjs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T20:38:38.123724+00:00",
+        "finished": "2026-09-17T20:38:38.540121+00:00",
+        "sha256": "67f7956c5afb1a9aec4e3491dff270c88e14014777c58d1ba39518657ec2f2ac",
+        "log": "/private/tmp/logex-audit-dashboard-20260918/gates/dashboard.log"
+      },
+      {
+        "name": "vendor",
+        "command": [
+          "python3",
+          "tools/verify_datafusion_vendor.py"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T20:38:38.540623+00:00",
+        "finished": "2026-09-17T20:38:38.674158+00:00",
+        "sha256": "6755a02cf45534df3ee2ceb1312a5de76c07ade7dd1320e318bb2bbe38d0a97c",
+        "log": "/private/tmp/logex-audit-dashboard-20260918/gates/vendor.log"
+      },
+      {
+        "name": "format",
+        "command": [
+          "cargo",
+          "fmt",
+          "--all",
+          "--",
+          "--check"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T20:38:38.674478+00:00",
+        "finished": "2026-09-17T20:38:39.788019+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-audit-dashboard-20260918/gates/format.log"
+      },
+      {
+        "name": "vendor-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2024",
+          "--config-path",
+          "vendor/reth-network/rustfmt.toml",
+          "--config",
+          "skip_children=true",
+          "vendor/reth-network/src/eth_requests.rs",
+          "vendor/reth-network/src/session/active.rs",
+          "vendor/reth-network/src/session/mod.rs",
+          "vendor/reth-network/src/session/types.rs",
+          "vendor/reth-network/src/session/range_update.rs",
+          "vendor/reth-discv5/src/lib.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T20:38:39.788393+00:00",
+        "finished": "2026-09-17T20:38:39.860585+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-audit-dashboard-20260918/gates/vendor-format.log"
+      },
+      {
+        "name": "enr-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2021",
+          "--config",
+          "skip_children=true",
+          "vendor/enr/src/lib.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T20:38:39.860979+00:00",
+        "finished": "2026-09-17T20:38:39.916671+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-audit-dashboard-20260918/gates/enr-format.log"
+      },
+      {
+        "name": "gossipsub-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2021",
+          "--config",
+          "skip_children=true",
+          "vendor/libp2p-gossipsub/src/time_cache.rs",
+          "vendor/libp2p-gossipsub/src/behaviour.rs",
+          "vendor/libp2p-gossipsub/src/behaviour/tests.rs",
+          "vendor/libp2p-gossipsub/src/subscription_filter.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T20:38:39.917111+00:00",
+        "finished": "2026-09-17T20:38:40.024265+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-audit-dashboard-20260918/gates/gossipsub-format.log"
+      },
+      {
+        "name": "aggregate-format",
+        "command": [
+          "rustfmt",
+          "--check",
+          "--edition",
+          "2021",
+          "--config",
+          "max_width=90,skip_children=true",
+          "vendor/datafusion-functions-aggregate/src/sum.rs",
+          "vendor/datafusion-functions-aggregate/src/average.rs",
+          "vendor/datafusion-functions-aggregate-common/src/aggregate/sum_distinct/numeric.rs",
+          "vendor/datafusion-functions-aggregate-common/src/aggregate/avg_distinct/decimal.rs",
+          "vendor/datafusion-functions-aggregate-common/src/utils.rs"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T20:38:40.024745+00:00",
+        "finished": "2026-09-17T20:38:40.092163+00:00",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "log": "/private/tmp/logex-audit-dashboard-20260918/gates/aggregate-format.log"
+      },
+      {
+        "name": "check",
+        "command": [
+          "cargo",
+          "check",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T20:38:40.093384+00:00",
+        "finished": "2026-09-17T20:38:46.731554+00:00",
+        "sha256": "d82bbcb0b23216e103857f55e1e69e09a5b17e557120df4e474962086a76db75",
+        "log": "/private/tmp/logex-audit-dashboard-20260918/gates/check.log"
+      },
+      {
+        "name": "clippy",
+        "command": [
+          "cargo",
+          "clippy",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T20:38:46.732726+00:00",
+        "finished": "2026-09-17T20:38:52.356684+00:00",
+        "sha256": "786c06796603a132525274d9f7bb8d78b008fcedc99bb7dda3f38bd31b181b43",
+        "log": "/private/tmp/logex-audit-dashboard-20260918/gates/clippy.log"
+      },
+      {
+        "name": "test",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--all-targets",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T20:38:52.357714+00:00",
+        "finished": "2026-09-17T20:42:59.079783+00:00",
+        "sha256": "ee5218011f08f93f7cfe5217ab5b6728d9cb57554d199c7aa946bbe8a57cc313",
+        "log": "/private/tmp/logex-audit-dashboard-20260918/gates/test.log"
+      },
+      {
+        "name": "doc",
+        "command": [
+          "cargo",
+          "test",
+          "--workspace",
+          "--doc",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T20:42:59.082054+00:00",
+        "finished": "2026-09-17T20:43:06.546390+00:00",
+        "sha256": "51fa6a85dd45c801a486d228c9c781bd201a38aaacfe3219337626079ac8d711",
+        "log": "/private/tmp/logex-audit-dashboard-20260918/gates/doc.log"
+      },
+      {
+        "name": "release-build",
+        "command": [
+          "cargo",
+          "build",
+          "-p",
+          "logex-node",
+          "--release",
+          "--locked",
+          "--offline",
+          "-j",
+          "2"
+        ],
+        "exit_code": 0,
+        "started": "2026-09-17T20:43:06.546920+00:00",
+        "finished": "2026-09-17T20:44:24.650881+00:00",
+        "sha256": "7dab0770e008044a9830a2aa0ec538abe3a3f6e7c36f938364173ac6a406c542",
+        "log": "/private/tmp/logex-audit-dashboard-20260918/gates/release-build.log"
+      }
+    ]
+  },
+  "workspace_tests": {
+    "passed": 2074,
+    "failed": 0,
+    "ignored": 24,
+    "targets": 37
+  },
+  "documentation_tests": {
+    "passed": 0,
+    "failed": 0,
+    "ignored": 0,
+    "targets": 8
+  },
+  "focused_rest_tests": {
+    "passed": 39,
+    "failed": 0,
+    "ignored": 0,
+    "targets": 1
+  },
+  "original_rest_controls": {
+    "passed": 0,
+    "failed": 2,
+    "ignored": 0,
+    "targets": 1
+  },
+  "browser_tests": {
+    "passed": 36,
+    "failed": 0,
+    "skipped": 0
+  },
+  "browser_viewports": {
+    "version": {
+      "protocolVersion": "1.3",
+      "product": "Chrome/153.0.8010.48",
+      "revision": "@199a3a541d76237379e353b348e64045584db057",
+      "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/153.0.0.0 Safari/537.36",
+      "jsVersion": "15.3.76.12"
+    },
+    "reports": [
+      {
+        "viewport": 320,
+        "wrapper": {
+          "x": 19,
+          "y": 111,
+          "width": 282,
+          "height": 85,
+          "right": 301,
+          "bottom": 196
+        },
+        "clientWidth": 280,
+        "scrollWidth": 280,
+        "overflowX": "hidden",
+        "buttons": [
+          {
+            "action": "use",
+            "rect": {
+              "x": 272.765625,
+              "y": 155,
+              "width": 43.6875,
+              "height": 30,
+              "right": 316.453125,
+              "bottom": 185
+            },
+            "cell": {
+              "x": 260.765625,
+              "y": 145.5,
+              "width": 39.234375,
+              "height": 49,
+              "right": 300,
+              "bottom": 194.5
+            },
+            "insideCell": false
+          },
+          {
+            "action": "export",
+            "rect": {
+              "x": 324.453125,
+              "y": 155,
+              "width": 50.90625,
+              "height": 30,
+              "right": 375.359375,
+              "bottom": 185
+            },
+            "cell": {
+              "x": 260.765625,
+              "y": 145.5,
+              "width": 39.234375,
+              "height": 49,
+              "right": 300,
+              "bottom": 194.5
+            },
+            "insideCell": false
+          }
+        ],
+        "disclosure": {
+          "nativeButton": false,
+          "before": true
+        },
+        "scrolledButtons": [
+          {
+            "action": "use",
+            "rect": {
+              "x": 272.765625,
+              "y": 155,
+              "width": 43.6875,
+              "height": 30,
+              "right": 316.453125,
+              "bottom": 185
+            }
+          },
+          {
+            "action": "export",
+            "rect": {
+              "x": 324.453125,
+              "y": 155,
+              "width": 50.90625,
+              "height": 30,
+              "right": 375.359375,
+              "bottom": 185
+            }
+          }
+        ],
+        "kind": "original"
+      },
+      {
+        "viewport": 375,
+        "wrapper": {
+          "x": 19,
+          "y": 96,
+          "width": 337,
+          "height": 85,
+          "right": 356,
+          "bottom": 181
+        },
+        "clientWidth": 335,
+        "scrollWidth": 335,
+        "overflowX": "hidden",
+        "buttons": [
+          {
+            "action": "use",
+            "rect": {
+              "x": 320.078125,
+              "y": 140,
+              "width": 43.6875,
+              "height": 30,
+              "right": 363.765625,
+              "bottom": 170
+            },
+            "cell": {
+              "x": 308.078125,
+              "y": 130.5,
+              "width": 46.921875,
+              "height": 49,
+              "right": 355,
+              "bottom": 179.5
+            },
+            "insideCell": false
+          },
+          {
+            "action": "export",
+            "rect": {
+              "x": 371.765625,
+              "y": 140,
+              "width": 50.90625,
+              "height": 30,
+              "right": 422.671875,
+              "bottom": 170
+            },
+            "cell": {
+              "x": 308.078125,
+              "y": 130.5,
+              "width": 46.921875,
+              "height": 49,
+              "right": 355,
+              "bottom": 179.5
+            },
+            "insideCell": false
+          }
+        ],
+        "disclosure": {
+          "nativeButton": false,
+          "before": true
+        },
+        "scrolledButtons": [
+          {
+            "action": "use",
+            "rect": {
+              "x": 320.078125,
+              "y": 140,
+              "width": 43.6875,
+              "height": 30,
+              "right": 363.765625,
+              "bottom": 170
+            }
+          },
+          {
+            "action": "export",
+            "rect": {
+              "x": 371.765625,
+              "y": 140,
+              "width": 50.90625,
+              "height": 30,
+              "right": 422.671875,
+              "bottom": 170
+            }
+          }
+        ],
+        "kind": "original"
+      },
+      {
+        "viewport": 1280,
+        "wrapper": {
+          "x": 19,
+          "y": 96,
+          "width": 1242,
+          "height": 85,
+          "right": 1261,
+          "bottom": 181
+        },
+        "clientWidth": 1240,
+        "scrollWidth": 1240,
+        "overflowX": "hidden",
+        "buttons": [
+          {
+            "action": "use",
+            "rect": {
+              "x": 1098.375,
+              "y": 140,
+              "width": 43.6875,
+              "height": 30,
+              "right": 1142.0625,
+              "bottom": 170
+            },
+            "cell": {
+              "x": 1086.375,
+              "y": 130.5,
+              "width": 173.625,
+              "height": 49,
+              "right": 1260,
+              "bottom": 179.5
+            },
+            "insideCell": true
+          },
+          {
+            "action": "export",
+            "rect": {
+              "x": 1150.0625,
+              "y": 140,
+              "width": 50.90625,
+              "height": 30,
+              "right": 1200.96875,
+              "bottom": 170
+            },
+            "cell": {
+              "x": 1086.375,
+              "y": 130.5,
+              "width": 173.625,
+              "height": 49,
+              "right": 1260,
+              "bottom": 179.5
+            },
+            "insideCell": true
+          }
+        ],
+        "disclosure": {
+          "nativeButton": false,
+          "before": true
+        },
+        "scrolledButtons": [
+          {
+            "action": "use",
+            "rect": {
+              "x": 1098.375,
+              "y": 140,
+              "width": 43.6875,
+              "height": 30,
+              "right": 1142.0625,
+              "bottom": 170
+            }
+          },
+          {
+            "action": "export",
+            "rect": {
+              "x": 1150.0625,
+              "y": 140,
+              "width": 50.90625,
+              "height": 30,
+              "right": 1200.96875,
+              "bottom": 170
+            }
+          }
+        ],
+        "kind": "original"
+      },
+      {
+        "viewport": 320,
+        "wrapper": {
+          "x": 19,
+          "y": 111,
+          "width": 282,
+          "height": 123,
+          "right": 301,
+          "bottom": 234
+        },
+        "clientWidth": 280,
+        "scrollWidth": 920,
+        "overflowX": "auto",
+        "buttons": [
+          {
+            "action": "details",
+            "rect": {
+              "x": 823.1875,
+              "y": 155,
+              "width": 72.578125,
+              "height": 30,
+              "right": 895.765625,
+              "bottom": 185
+            },
+            "cell": {
+              "x": 811.1875,
+              "y": 145.5,
+              "width": 128.8125,
+              "height": 87,
+              "right": 940,
+              "bottom": 232.5
+            },
+            "insideCell": true
+          },
+          {
+            "action": "use",
+            "rect": {
+              "x": 823.1875,
+              "y": 193,
+              "width": 43.6875,
+              "height": 30,
+              "right": 866.875,
+              "bottom": 223
+            },
+            "cell": {
+              "x": 811.1875,
+              "y": 145.5,
+              "width": 128.8125,
+              "height": 87,
+              "right": 940,
+              "bottom": 232.5
+            },
+            "insideCell": true
+          },
+          {
+            "action": "export",
+            "rect": {
+              "x": 874.875,
+              "y": 193,
+              "width": 50.90625,
+              "height": 30,
+              "right": 925.78125,
+              "bottom": 223
+            },
+            "cell": {
+              "x": 811.1875,
+              "y": 145.5,
+              "width": 128.8125,
+              "height": 87,
+              "right": 940,
+              "bottom": 232.5
+            },
+            "insideCell": true
+          }
+        ],
+        "disclosure": {
+          "nativeButton": true,
+          "before": true,
+          "afterClick": false,
+          "expanded": "true"
+        },
+        "scrolledButtons": [
+          {
+            "action": "details",
+            "rect": {
+              "x": 183.1875,
+              "y": 155,
+              "width": 72.578125,
+              "height": 30,
+              "right": 255.765625,
+              "bottom": 185
+            }
+          },
+          {
+            "action": "use",
+            "rect": {
+              "x": 183.1875,
+              "y": 193,
+              "width": 43.6875,
+              "height": 30,
+              "right": 226.875,
+              "bottom": 223
+            }
+          },
+          {
+            "action": "export",
+            "rect": {
+              "x": 234.875,
+              "y": 193,
+              "width": 50.90625,
+              "height": 30,
+              "right": 285.78125,
+              "bottom": 223
+            }
+          }
+        ],
+        "kind": "proposed",
+        "keyboardEnter": {
+          "hidden": false,
+          "expanded": "true"
+        },
+        "keyboardSpace": {
+          "hidden": true,
+          "expanded": "false"
+        },
+        "normalMotion": [
+          "pulse",
+          "greenSweep",
+          "0.45s",
+          "0.18s, 0.18s"
+        ],
+        "reducedMotion": [
+          "none",
+          "none",
+          "0s",
+          "0s"
+        ],
+        "nativeIntegerSourcePreserved": true
+      },
+      {
+        "viewport": 375,
+        "wrapper": {
+          "x": 19,
+          "y": 96,
+          "width": 337,
+          "height": 123,
+          "right": 356,
+          "bottom": 219
+        },
+        "clientWidth": 335,
+        "scrollWidth": 920,
+        "overflowX": "auto",
+        "buttons": [
+          {
+            "action": "details",
+            "rect": {
+              "x": 823.1875,
+              "y": 140,
+              "width": 72.578125,
+              "height": 30,
+              "right": 895.765625,
+              "bottom": 170
+            },
+            "cell": {
+              "x": 811.1875,
+              "y": 130.5,
+              "width": 128.8125,
+              "height": 87,
+              "right": 940,
+              "bottom": 217.5
+            },
+            "insideCell": true
+          },
+          {
+            "action": "use",
+            "rect": {
+              "x": 823.1875,
+              "y": 178,
+              "width": 43.6875,
+              "height": 30,
+              "right": 866.875,
+              "bottom": 208
+            },
+            "cell": {
+              "x": 811.1875,
+              "y": 130.5,
+              "width": 128.8125,
+              "height": 87,
+              "right": 940,
+              "bottom": 217.5
+            },
+            "insideCell": true
+          },
+          {
+            "action": "export",
+            "rect": {
+              "x": 874.875,
+              "y": 178,
+              "width": 50.90625,
+              "height": 30,
+              "right": 925.78125,
+              "bottom": 208
+            },
+            "cell": {
+              "x": 811.1875,
+              "y": 130.5,
+              "width": 128.8125,
+              "height": 87,
+              "right": 940,
+              "bottom": 217.5
+            },
+            "insideCell": true
+          }
+        ],
+        "disclosure": {
+          "nativeButton": true,
+          "before": true,
+          "afterClick": false,
+          "expanded": "true"
+        },
+        "scrolledButtons": [
+          {
+            "action": "details",
+            "rect": {
+              "x": 238.1875,
+              "y": 140,
+              "width": 72.578125,
+              "height": 30,
+              "right": 310.765625,
+              "bottom": 170
+            }
+          },
+          {
+            "action": "use",
+            "rect": {
+              "x": 238.1875,
+              "y": 178,
+              "width": 43.6875,
+              "height": 30,
+              "right": 281.875,
+              "bottom": 208
+            }
+          },
+          {
+            "action": "export",
+            "rect": {
+              "x": 289.875,
+              "y": 178,
+              "width": 50.90625,
+              "height": 30,
+              "right": 340.78125,
+              "bottom": 208
+            }
+          }
+        ],
+        "kind": "proposed",
+        "keyboardEnter": {
+          "hidden": false,
+          "expanded": "true"
+        },
+        "keyboardSpace": {
+          "hidden": true,
+          "expanded": "false"
+        },
+        "normalMotion": [
+          "pulse",
+          "greenSweep",
+          "0.45s",
+          "0.18s, 0.18s"
+        ],
+        "reducedMotion": [
+          "none",
+          "none",
+          "0s",
+          "0s"
+        ],
+        "nativeIntegerSourcePreserved": true
+      },
+      {
+        "viewport": 1280,
+        "wrapper": {
+          "x": 19,
+          "y": 96,
+          "width": 1242,
+          "height": 123,
+          "right": 1261,
+          "bottom": 219
+        },
+        "clientWidth": 1240,
+        "scrollWidth": 1240,
+        "overflowX": "auto",
+        "buttons": [
+          {
+            "action": "details",
+            "rect": {
+              "x": 1098.375,
+              "y": 140,
+              "width": 72.578125,
+              "height": 30,
+              "right": 1170.953125,
+              "bottom": 170
+            },
+            "cell": {
+              "x": 1086.375,
+              "y": 130.5,
+              "width": 173.625,
+              "height": 87,
+              "right": 1260,
+              "bottom": 217.5
+            },
+            "insideCell": true
+          },
+          {
+            "action": "use",
+            "rect": {
+              "x": 1178.953125,
+              "y": 140,
+              "width": 43.6875,
+              "height": 30,
+              "right": 1222.640625,
+              "bottom": 170
+            },
+            "cell": {
+              "x": 1086.375,
+              "y": 130.5,
+              "width": 173.625,
+              "height": 87,
+              "right": 1260,
+              "bottom": 217.5
+            },
+            "insideCell": true
+          },
+          {
+            "action": "export",
+            "rect": {
+              "x": 1098.375,
+              "y": 178,
+              "width": 50.90625,
+              "height": 30,
+              "right": 1149.28125,
+              "bottom": 208
+            },
+            "cell": {
+              "x": 1086.375,
+              "y": 130.5,
+              "width": 173.625,
+              "height": 87,
+              "right": 1260,
+              "bottom": 217.5
+            },
+            "insideCell": true
+          }
+        ],
+        "disclosure": {
+          "nativeButton": true,
+          "before": true,
+          "afterClick": false,
+          "expanded": "true"
+        },
+        "scrolledButtons": [
+          {
+            "action": "details",
+            "rect": {
+              "x": 1098.375,
+              "y": 140,
+              "width": 72.578125,
+              "height": 30,
+              "right": 1170.953125,
+              "bottom": 170
+            }
+          },
+          {
+            "action": "use",
+            "rect": {
+              "x": 1178.953125,
+              "y": 140,
+              "width": 43.6875,
+              "height": 30,
+              "right": 1222.640625,
+              "bottom": 170
+            }
+          },
+          {
+            "action": "export",
+            "rect": {
+              "x": 1098.375,
+              "y": 178,
+              "width": 50.90625,
+              "height": 30,
+              "right": 1149.28125,
+              "bottom": 208
+            }
+          }
+        ],
+        "kind": "proposed",
+        "keyboardEnter": {
+          "hidden": false,
+          "expanded": "true"
+        },
+        "keyboardSpace": {
+          "hidden": true,
+          "expanded": "false"
+        },
+        "normalMotion": [
+          "pulse",
+          "greenSweep",
+          "0.45s",
+          "0.18s, 0.18s"
+        ],
+        "reducedMotion": [
+          "none",
+          "none",
+          "0s",
+          "0s"
+        ],
+        "nativeIntegerSourcePreserved": true
+      }
+    ]
+  },
+  "browser_cleanup": {
+    "profile": "/private/tmp/logex-audit-dashboard-20260918/chrome-profile",
+    "removed": true,
+    "only_dedicated_profile": true,
+    "user_profiles_untouched": true
+  },
+  "screenshots": [
+    {
+      "path": "history-original-1280.png",
+      "bytes": 216041,
+      "sha256": "b8765f577f7f6e65d84b2656b5a2df079bc5570c0ae2b7c8397a3f3ae803d186"
+    },
+    {
+      "path": "history-original-320.png",
+      "bytes": 138779,
+      "sha256": "52abd107458e722419b90bf1ab30b3e457bb2d267a35105b24930331bf7ad249"
+    },
+    {
+      "path": "history-original-375.png",
+      "bytes": 152301,
+      "sha256": "0c08e3a0e0fa9ff4a77291b0ac4d85e80f5d51333a34d9968928c293bbd4fc62"
+    },
+    {
+      "path": "history-proposed-1280.png",
+      "bytes": 220786,
+      "sha256": "8237de9b0e3f3486ce01b28d165425ef16aef479b72cbb64e9b9b5bee6dfc615"
+    },
+    {
+      "path": "history-proposed-320.png",
+      "bytes": 135805,
+      "sha256": "a0312574cca07d5f1e50dc01e969965963ebd62950b1376dc347c6768157a726"
+    },
+    {
+      "path": "history-proposed-375.png",
+      "bytes": 154158,
+      "sha256": "c05d43164b7d2d03edf24ba9c0e90addd3c165e2253f9d21d30678ee07585003"
+    }
+  ],
+  "evidence": {
+    "path": "docs/audit/baselines/2026-09-18-dashboard-observability-evidence.json.gz",
+    "files": 110,
+    "bytes_uncompressed": 2585150,
+    "bytes": 541961,
+    "sha256": "f55c1eefbdf6af06942c9cf0550876344108f55d1f98f70942ca79c87940bb9e"
+  },
+  "validation": {
+    "path": "docs/audit/baselines/2026-09-18-dashboard-observability-validation.json.gz",
+    "files": 15,
+    "bytes_uncompressed": 252166,
+    "bytes": 49451,
+    "sha256": "fd5b865f3893a794f933ebfeb13f011dee378292a55c67091fe1c861c2c1b28b"
+  },
+  "publication": {
+    "state": "pending"
+  },
+  "boundaries": [
+    "Original production controls establish stale status, presentation, export, range, clock and exact integer defects. Draft controls and later newly discovered custom metadata/integer findings are separately archived.",
+    "All browser tests use actual embedded functions and finite offline stubs; six Chrome component cases cover original/final layout, native keys, reduced motion and exact JSON source parsing. No application network or production data was used.",
+    "Ordinary unsafe integer tokens become browser-local decimal strings; server JSON-number types are unchanged. Legacy browsers without source context explicitly reject potentially unsafe integer-valued results, including ambiguous large whole-valued floats.",
+    "Status receipt age does not guarantee CPU/disk sample age. Cache refresh remains background and can exceed its sixty-second TTL. No index-readiness-category UI or new coverage guarantee is introduced.",
+    "One timed browser status owner has no effect on ingestion/query cancellation ownership, server task quotas or storage write barriers. There is no performance benchmark claim.",
+    "Existing Chart.js4.5.0 bytes match the published package and carry verified SHA384 plus anonymous CORS; downloaded code was not executed during verification.",
+    "Linux/macOS CI select Node24 through a pinned official action. The Rust toolchain, Cargo dependencies and data formats are unchanged.",
+    "Gossip/query resource policy, verified repair and integrated offline acceptance remain open. Live sync and staging acceptance follow offline completion; this is not release readiness."
+  ]
+}
