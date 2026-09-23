@@ -22,6 +22,20 @@
 
 use libp2p_identity::SigningError;
 
+/// A peer connection was denied while local control-queue recovery is pending.
+///
+/// This is a local capacity decision, not a transport or peer-validation failure.
+#[derive(Debug)]
+pub struct ControlQueueFull;
+
+impl std::fmt::Display for ControlQueueFull {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("gossip control queue closure is still pending")
+    }
+}
+
+impl std::error::Error for ControlQueueFull {}
+
 /// Error associated with publishing a gossipsub message.
 #[derive(Debug)]
 pub enum PublishError {
@@ -132,6 +146,8 @@ impl From<std::io::Error> for PublishError {
 /// Error associated with Config building.
 #[derive(Debug)]
 pub enum ConfigBuilderError {
+    /// Each queued-message lane requires at least one entry.
+    ConnectionHandlerQueueTooSmall,
     /// Maximum transmission size is too small.
     MaxTransmissionSizeTooSmall,
     /// History length less than history gossip length.
@@ -151,6 +167,7 @@ impl std::error::Error for ConfigBuilderError {}
 impl std::fmt::Display for ConfigBuilderError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
+            Self::ConnectionHandlerQueueTooSmall => write!(f, "Connection handler queue length must be at least two"),
             Self::MaxTransmissionSizeTooSmall => {
                 write!(f, "Maximum transmission size is too small")
             }

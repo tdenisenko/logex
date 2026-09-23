@@ -420,6 +420,38 @@ pub enum RpcOut {
 }
 
 impl RpcOut {
+    /// Dynamic allocations retained by the queued RPC. Fixed envelope and timer
+    /// metadata are bounded separately by the queue's entry limits.
+    pub(crate) fn retained_bytes(&self) -> Option<usize> {
+        fn ids_bytes(ids: &Vec<MessageId>) -> Option<usize> {
+            ids.iter().try_fold(
+                ids.capacity()
+                    .checked_mul(std::mem::size_of::<MessageId>())?,
+                |bytes, id| bytes.checked_add(id.0.capacity()),
+            )
+        }
+        match self {
+            Self::Publish { message, .. } | Self::Forward { message, .. } => message
+                .data
+                .capacity()
+                .checked_add(message.topic.retained_bytes())?
+                .checked_add(message.signature.as_ref().map_or(0, Vec::capacity))?
+                .checked_add(message.key.as_ref().map_or(0, Vec::capacity)),
+            Self::Subscribe(topic) | Self::Unsubscribe(topic) => Some(topic.retained_bytes()),
+            Self::Graft(graft) => Some(graft.topic_hash.retained_bytes()),
+            Self::Prune(prune) => prune
+                .peers
+                .capacity()
+                .checked_mul(std::mem::size_of::<PeerInfo>())?
+                .checked_add(prune.topic_hash.retained_bytes()),
+            Self::IHave(ihave) => {
+                ids_bytes(&ihave.message_ids)?.checked_add(ihave.topic_hash.retained_bytes())
+            }
+            Self::IWant(iwant) => ids_bytes(&iwant.message_ids),
+            Self::IDontWant(idontwant) => ids_bytes(&idontwant.message_ids),
+        }
+    }
+
     /// Converts the GossipsubRPC into its protobuf format.
     // A convenience function to avoid explicitly specifying types.
     pub fn into_protobuf(self) -> proto::RPC {

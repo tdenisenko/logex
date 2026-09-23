@@ -87,6 +87,10 @@ impl TopicHash {
     pub fn as_str(&self) -> &str {
         &self.hash
     }
+
+    pub(crate) fn retained_bytes(&self) -> usize {
+        self.hash.capacity()
+    }
 }
 
 /// A gossipsub topic.

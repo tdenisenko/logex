@@ -236,7 +236,10 @@ where
         }
     };
 
-    let sender = Sender::new(gs.config.connection_handler_queue_len());
+    let sender = Sender::new(
+        gs.config.connection_handler_queue_len(),
+        *gs.config.queue_limits(),
+    );
     let receiver = sender.new_receiver();
     let connection_id = ConnectionId::new_unchecked(0);
     gs.connected_peers.insert(
@@ -452,10 +455,9 @@ fn test_subscribe() {
     // collect all the subscriptions
     let subscriptions = receivers
         .into_values()
-        .fold(0, |mut collected_subscriptions, c| {
-            let priority = c.priority.get_ref();
-            while !priority.is_empty() {
-                if let Ok(RpcOut::Subscribe(_)) = priority.try_recv() {
+        .fold(0, |mut collected_subscriptions, mut c| {
+            for rpc in c.drain_priority() {
+                if let RpcOut::Subscribe(_) = rpc {
                     collected_subscriptions += 1
                 }
             }
@@ -513,10 +515,9 @@ fn test_unsubscribe() {
     // collect all the subscriptions
     let subscriptions = receivers
         .into_values()
-        .fold(0, |mut collected_subscriptions, c| {
-            let priority = c.priority.get_ref();
-            while !priority.is_empty() {
-                if let Ok(RpcOut::Subscribe(_)) = priority.try_recv() {
+        .fold(0, |mut collected_subscriptions, mut c| {
+            for rpc in c.drain_priority() {
+                if let RpcOut::Subscribe(_) = rpc {
                     collected_subscriptions += 1
                 }
             }
@@ -588,21 +589,13 @@ fn test_join() {
         let mut new_receivers = HashMap::new();
         let mut acc = 0;
 
-        for (peer_id, c) in receivers.into_iter() {
-            let priority = c.priority.get_ref();
-            while !priority.is_empty() {
-                if let Ok(RpcOut::Graft(_)) = priority.try_recv() {
+        for (peer_id, mut c) in receivers.into_iter() {
+            for rpc in c.drain_priority() {
+                if let RpcOut::Graft(_) = rpc {
                     acc += 1;
                 }
             }
-            new_receivers.insert(
-                peer_id,
-                Receiver {
-                    priority_queue_len: c.priority_queue_len,
-                    priority: c.priority,
-                    non_priority: c.non_priority,
-                },
-            );
+            new_receivers.insert(peer_id, c);
         }
         (acc, new_receivers)
     }
@@ -632,7 +625,10 @@ fn test_join() {
             &address,
         )
         .unwrap();
-        let sender = Sender::new(gs.config.connection_handler_queue_len());
+        let sender = Sender::new(
+            gs.config.connection_handler_queue_len(),
+            *gs.config.queue_limits(),
+        );
         let receiver = sender.new_receiver();
         let connection_id = ConnectionId::new_unchecked(0);
         gs.connected_peers.insert(
@@ -734,10 +730,9 @@ fn test_publish_without_flood_publishing() {
     // Collect all publish messages
     let publishes = receivers
         .into_values()
-        .fold(vec![], |mut collected_publish, c| {
-            let priority = c.priority.get_ref();
-            while !priority.is_empty() {
-                if let Ok(RpcOut::Publish { message, .. }) = priority.try_recv() {
+        .fold(vec![], |mut collected_publish, mut c| {
+            for rpc in c.drain_priority() {
+                if let RpcOut::Publish { message, .. } = rpc {
                     collected_publish.push(message);
                 }
             }
@@ -819,10 +814,9 @@ fn test_fanout() {
     // Collect all publish messages
     let publishes = receivers
         .into_values()
-        .fold(vec![], |mut collected_publish, c| {
-            let priority = c.priority.get_ref();
-            while !priority.is_empty() {
-                if let Ok(RpcOut::Publish { message, .. }) = priority.try_recv() {
+        .fold(vec![], |mut collected_publish, mut c| {
+            for rpc in c.drain_priority() {
+                if let RpcOut::Publish { message, .. } = rpc {
                     collected_publish.push(message);
                 }
             }
@@ -867,10 +861,9 @@ fn test_inject_connected() {
     // collect all the SendEvents
     let subscriptions = receivers.into_iter().fold(
         HashMap::<PeerId, Vec<String>>::new(),
-        |mut collected_subscriptions, (peer, c)| {
-            let priority = c.priority.get_ref();
-            while !priority.is_empty() {
-                if let Ok(RpcOut::Subscribe(topic)) = priority.try_recv() {
+        |mut collected_subscriptions, (peer, mut c)| {
+            for rpc in c.drain_priority() {
+                if let RpcOut::Subscribe(topic) = rpc {
                     let mut peer_subs = collected_subscriptions.remove(&peer).unwrap_or_default();
                     peer_subs.push(topic.into_string());
                     collected_subscriptions.insert(peer, peer_subs);
@@ -1039,7 +1032,10 @@ fn test_get_random_peers() {
                 connections: vec![ConnectionId::new_unchecked(0)],
                 outbound: false,
                 topics: topics.clone(),
-                sender: Sender::new(gs.config.connection_handler_queue_len()),
+                sender: Sender::new(
+                    gs.config.connection_handler_queue_len(),
+                    *gs.config.queue_limits(),
+                ),
                 dont_send: DontSendCache::with_limits(IDONTWANT_TIMEOUT, 10_000, 1024 * 1024),
             },
         );
@@ -1103,10 +1099,9 @@ fn test_handle_iwant_msg_cached() {
     // the messages we are sending
     let sent_messages = receivers
         .into_values()
-        .fold(vec![], |mut collected_messages, c| {
-            let non_priority = c.non_priority.get_ref();
-            while !non_priority.is_empty() {
-                if let Ok(RpcOut::Forward { message, .. }) = non_priority.try_recv() {
+        .fold(vec![], |mut collected_messages, mut c| {
+            for rpc in c.drain_non_priority() {
+                if let RpcOut::Forward { message, .. } = rpc {
                     collected_messages.push(message)
                 }
             }
@@ -1159,28 +1154,23 @@ fn test_handle_iwant_msg_cached_shifted() {
 
         // is the message is being sent?
         let mut message_exists = false;
-        receivers = receivers.into_iter().map(|(peer_id, c)| {
-            let non_priority = c.non_priority.get_ref();
-            while !non_priority.is_empty() {
-                if matches!(non_priority.try_recv(), Ok(RpcOut::Forward{message, timeout: _ }) if
+        receivers = receivers
+            .into_iter()
+            .map(|(peer_id, mut c)| {
+                for rpc in c.drain_non_priority() {
+                    if matches!(rpc, RpcOut::Forward{message, timeout: _ } if
                         gs.config.message_id(
                             &gs.data_transform
                                 .inbound_transform(message.clone())
                                 .unwrap(),
                         ) == msg_id)
-                {
-                    message_exists = true;
+                    {
+                        message_exists = true;
+                    }
                 }
-            }
-            (
-                peer_id,
-                Receiver {
-                    priority_queue_len: c.priority_queue_len,
-                    priority: c.priority,
-                    non_priority: c.non_priority,
-                },
-            )
-        }).collect();
+                (peer_id, c)
+            })
+            .collect();
         // default history_length is 5, expect no messages after shift > 5
         if shift < 5 {
             assert!(
@@ -1217,7 +1207,7 @@ fn test_handle_iwant_msg_not_cached() {
 
 #[test]
 fn test_handle_iwant_msg_but_already_sent_idontwant() {
-    let (mut gs, peers, receivers, _) = inject_nodes1()
+    let (mut gs, peers, mut receivers, _) = inject_nodes1()
         .peer_no(20)
         .topics(Vec::new())
         .to_subscribe(true)
@@ -1263,8 +1253,8 @@ fn test_handle_iwant_msg_but_already_sent_idontwant() {
     gs.handle_iwant(&peers[1], vec![msg_id.clone()]);
 
     // Check that no messages are sent.
-    receivers.iter().for_each(|(_, receiver)| {
-        assert!(receiver.non_priority.get_ref().is_empty());
+    receivers.values_mut().for_each(|receiver| {
+        assert!(receiver.drain_non_priority().is_empty());
     });
 }
 
@@ -1284,10 +1274,9 @@ fn test_handle_ihave_subscribed_and_msg_not_cached() {
 
     // check that we sent an IWANT request for `unknown id`
     let mut iwant_exists = false;
-    let receiver = receivers.remove(&peers[7]).unwrap();
-    let non_priority = receiver.non_priority.get_ref();
-    while !non_priority.is_empty() {
-        if let Ok(RpcOut::IWant(IWant { message_ids })) = non_priority.try_recv() {
+    let mut receiver = receivers.remove(&peers[7]).unwrap();
+    for rpc in receiver.drain_non_priority() {
+        if let RpcOut::IWant(IWant { message_ids }) = rpc {
             if message_ids
                 .iter()
                 .any(|m| *m == MessageId::new(b"unknown id"))
@@ -1328,11 +1317,10 @@ fn check_gossip_promise_expiry(scoring: bool) {
         .create_network();
     let peer = peers[0];
     let id = MessageId::new(b"unanswered-advertisement");
-    let receiver = receivers.remove(&peer).unwrap();
-    let count_requests = || {
-        let queue = receiver.non_priority.get_ref();
+    let mut receiver = receivers.remove(&peer).unwrap();
+    let mut count_requests = || {
         let mut count = 0;
-        while let Ok(message) = queue.try_recv() {
+        for message in receiver.drain_non_priority() {
             if let RpcOut::IWant(IWant { message_ids }) = message {
                 count += message_ids
                     .iter()
@@ -1565,29 +1553,13 @@ fn count_control_msgs(
 ) -> (usize, HashMap<PeerId, Receiver>) {
     let mut new_receivers = HashMap::new();
     let mut collected_messages = 0;
-    for (peer_id, c) in receivers.into_iter() {
-        let priority = c.priority.get_ref();
-        let non_priority = c.non_priority.get_ref();
-        while !priority.is_empty() || !non_priority.is_empty() {
-            if let Ok(rpc) = priority.try_recv() {
-                if filter(&peer_id, &rpc) {
-                    collected_messages += 1;
-                }
-            }
-            if let Ok(rpc) = non_priority.try_recv() {
-                if filter(&peer_id, &rpc) {
-                    collected_messages += 1;
-                }
+    for (peer_id, mut c) in receivers.into_iter() {
+        for rpc in c.drain_priority().into_iter().chain(c.drain_non_priority()) {
+            if filter(&peer_id, &rpc) {
+                collected_messages += 1;
             }
         }
-        new_receivers.insert(
-            peer_id,
-            Receiver {
-                priority_queue_len: c.priority_queue_len,
-                priority: c.priority,
-                non_priority: c.non_priority,
-            },
-        );
+        new_receivers.insert(peer_id, c);
     }
     (collected_messages, new_receivers)
 }
@@ -1598,21 +1570,10 @@ fn flush_events<D: DataTransform, F: TopicSubscriptionFilter>(
 ) -> HashMap<PeerId, Receiver> {
     gs.events.clear();
     let mut new_receivers = HashMap::new();
-    for (peer_id, c) in receivers.into_iter() {
-        let priority = c.priority.get_ref();
-        let non_priority = c.non_priority.get_ref();
-        while !priority.is_empty() || !non_priority.is_empty() {
-            let _ = priority.try_recv();
-            let _ = non_priority.try_recv();
-        }
-        new_receivers.insert(
-            peer_id,
-            Receiver {
-                priority_queue_len: c.priority_queue_len,
-                priority: c.priority,
-                non_priority: c.non_priority,
-            },
-        );
+    for (peer_id, mut c) in receivers.into_iter() {
+        c.drain_priority();
+        c.drain_non_priority();
+        new_receivers.insert(peer_id, c);
     }
     new_receivers
 }
@@ -1818,10 +1779,9 @@ fn do_forward_messages_to_explicit_peers() {
     };
     gs.handle_received_message(message.clone(), &local_id);
     assert_eq!(
-        receivers.into_iter().fold(0, |mut fwds, (peer_id, c)| {
-            let non_priority = c.non_priority.get_ref();
-            while !non_priority.is_empty() {
-                if matches!(non_priority.try_recv(), Ok(RpcOut::Forward{message: m, timeout: _}) if peer_id == peers[0] && m.data == message.data) {
+        receivers.into_iter().fold(0, |mut fwds, (peer_id, mut c)| {
+            for rpc in c.drain_non_priority() {
+                if matches!(rpc, RpcOut::Forward{message: m, timeout: _} if peer_id == peers[0] && m.data == message.data) {
         fwds +=1;
         }
                 }
@@ -1962,11 +1922,10 @@ fn no_gossip_gets_sent_to_explicit_peers() {
     }
 
     // assert that no gossip gets sent to explicit peer
-    let receiver = receivers.remove(&peers[0]).unwrap();
+    let mut receiver = receivers.remove(&peers[0]).unwrap();
     let mut gossips = 0;
-    let non_priority = receiver.non_priority.get_ref();
-    while !non_priority.is_empty() {
-        if let Ok(RpcOut::IHave(_)) = non_priority.try_recv() {
+    for rpc in receiver.drain_non_priority() {
+        if let RpcOut::IHave(_) = rpc {
             gossips += 1;
         }
     }
@@ -2367,10 +2326,9 @@ fn test_flood_publish() {
     // Collect all publish messages
     let publishes = receivers
         .into_values()
-        .fold(vec![], |mut collected_publish, c| {
-            let priority = c.priority.get_ref();
-            while !priority.is_empty() {
-                if let Ok(RpcOut::Publish { message, .. }) = priority.try_recv() {
+        .fold(vec![], |mut collected_publish, mut c| {
+            for rpc in c.drain_priority() {
+                if let RpcOut::Publish { message, .. } = rpc {
                     collected_publish.push(message);
                 }
             }
@@ -2853,13 +2811,9 @@ fn test_do_not_gossip_to_peers_below_gossip_threshold() {
         RpcOut::IHave(IHave {
             topic_hash,
             message_ids,
-        }) => {
-            if topic_hash == &topics[0] && message_ids.iter().any(|id| id == &msg_id) {
-                assert_eq!(peer, &p2);
-                true
-            } else {
-                false
-            }
+        }) if topic_hash == &topics[0] && message_ids.iter().any(|id| id == &msg_id) => {
+            assert_eq!(peer, &p2);
+            true
         }
         _ => false,
     });
@@ -2929,10 +2883,9 @@ fn test_iwant_msg_from_peer_below_gossip_threshold_gets_ignored() {
     let sent_messages =
         receivers
             .into_iter()
-            .fold(vec![], |mut collected_messages, (peer_id, c)| {
-                let non_priority = c.non_priority.get_ref();
-                while !non_priority.is_empty() {
-                    if let Ok(RpcOut::Forward { message, .. }) = non_priority.try_recv() {
+            .fold(vec![], |mut collected_messages, (peer_id, mut c)| {
+                for rpc in c.drain_non_priority() {
+                    if let RpcOut::Forward { message, .. } = rpc {
                         collected_messages.push((peer_id, message));
                     }
                 }
@@ -3016,13 +2969,9 @@ fn test_ihave_msg_from_peer_below_gossip_threshold_gets_ignored() {
 
     // check that we sent exactly one IWANT request to p2
     let (control_msgs, _) = count_control_msgs(receivers, |peer, c| match c {
-        RpcOut::IWant(IWant { message_ids }) => {
-            if message_ids.iter().any(|m| m == &msg_id) {
-                assert_eq!(peer, &p2);
-                true
-            } else {
-                false
-            }
+        RpcOut::IWant(IWant { message_ids }) if message_ids.iter().any(|m| m == &msg_id) => {
+            assert_eq!(peer, &p2);
+            true
         }
         _ => false,
     });
@@ -3074,17 +3023,17 @@ fn test_do_not_publish_to_peer_below_publish_threshold() {
     gs.publish(topic, publish_data).unwrap();
 
     // Collect all publish messages
-    let publishes = receivers
-        .into_iter()
-        .fold(vec![], |mut collected_publish, (peer_id, c)| {
-            let priority = c.priority.get_ref();
-            while !priority.is_empty() {
-                if let Ok(RpcOut::Publish { message, .. }) = priority.try_recv() {
-                    collected_publish.push((peer_id, message));
+    let publishes =
+        receivers
+            .into_iter()
+            .fold(vec![], |mut collected_publish, (peer_id, mut c)| {
+                for rpc in c.drain_priority() {
+                    if let RpcOut::Publish { message, .. } = rpc {
+                        collected_publish.push((peer_id, message));
+                    }
                 }
-            }
-            collected_publish
-        });
+                collected_publish
+            });
 
     // assert only published to p2
     assert_eq!(publishes.len(), 1);
@@ -3129,17 +3078,17 @@ fn test_do_not_flood_publish_to_peer_below_publish_threshold() {
     gs.publish(Topic::new("test"), publish_data).unwrap();
 
     // Collect all publish messages
-    let publishes = receivers
-        .into_iter()
-        .fold(vec![], |mut collected_publish, (peer_id, c)| {
-            let priority = c.priority.get_ref();
-            while !priority.is_empty() {
-                if let Ok(RpcOut::Publish { message, .. }) = priority.try_recv() {
-                    collected_publish.push((peer_id, message))
+    let publishes =
+        receivers
+            .into_iter()
+            .fold(vec![], |mut collected_publish, (peer_id, mut c)| {
+                for rpc in c.drain_priority() {
+                    if let RpcOut::Publish { message, .. } = rpc {
+                        collected_publish.push((peer_id, message))
+                    }
                 }
-            }
-            collected_publish
-        });
+                collected_publish
+            });
 
     // assert only published to p2
     assert_eq!(publishes.len(), 1);
@@ -4351,7 +4300,7 @@ fn test_scoring_p6() {
 
     // create 5 peers with the same ip
     let addr = Multiaddr::from(Ipv4Addr::new(10, 1, 2, 3));
-    let peers = vec![
+    let peers = [
         add_peer_with_addr(&mut gs, &[], false, false, addr.clone()).0,
         add_peer_with_addr(&mut gs, &[], false, false, addr.clone()).0,
         add_peer_with_addr(&mut gs, &[], true, false, addr.clone()).0,
@@ -4361,7 +4310,7 @@ fn test_scoring_p6() {
 
     // create 4 other peers with other ip
     let addr2 = Multiaddr::from(Ipv4Addr::new(10, 1, 2, 4));
-    let others = vec![
+    let others = [
         add_peer_with_addr(&mut gs, &[], false, false, addr2.clone()).0,
         add_peer_with_addr(&mut gs, &[], false, false, addr2.clone()).0,
         add_peer_with_addr(&mut gs, &[], true, false, addr2.clone()).0,
@@ -4678,10 +4627,9 @@ fn test_ignore_too_many_iwants_from_same_peer_for_same_message() {
     }
 
     assert_eq!(
-        receivers.into_values().fold(0, |mut fwds, c| {
-            let non_priority = c.non_priority.get_ref();
-            while !non_priority.is_empty() {
-                if let Ok(RpcOut::Forward { .. }) = non_priority.try_recv() {
+        receivers.into_values().fold(0, |mut fwds, mut c| {
+            for rpc in c.drain_non_priority() {
+                if let RpcOut::Forward { .. } = rpc {
                     fwds += 1;
                 }
             }
@@ -5093,11 +5041,10 @@ fn test_publish_to_floodsub_peers_without_flood_publish() {
     // Collect publish messages to floodsub peers
     let publishes = receivers
         .into_iter()
-        .fold(0, |mut collected_publish, (peer_id, c)| {
-            let priority = c.priority.get_ref();
-            while !priority.is_empty() {
-                if matches!(priority.try_recv(),
-            Ok(RpcOut::Publish{..}) if peer_id == p1 || peer_id == p2)
+        .fold(0, |mut collected_publish, (peer_id, mut c)| {
+            for rpc in c.drain_priority() {
+                if matches!(rpc,
+            RpcOut::Publish{..} if peer_id == p1 || peer_id == p2)
                 {
                     collected_publish += 1;
                 }
@@ -5149,11 +5096,10 @@ fn test_do_not_use_floodsub_in_fanout() {
     // Collect publish messages to floodsub peers
     let publishes = receivers
         .into_iter()
-        .fold(0, |mut collected_publish, (peer_id, c)| {
-            let priority = c.priority.get_ref();
-            while !priority.is_empty() {
-                if matches!(priority.try_recv(),
-            Ok(RpcOut::Publish{..}) if peer_id == p1 || peer_id == p2)
+        .fold(0, |mut collected_publish, (peer_id, mut c)| {
+            for rpc in c.drain_priority() {
+                if matches!(rpc,
+            RpcOut::Publish{..} if peer_id == p1 || peer_id == p2)
                 {
                     collected_publish += 1;
                 }
@@ -5378,10 +5324,9 @@ fn test_subscribe_and_graft_with_negative_score() {
                                   receivers: HashMap<PeerId, Receiver>|
      -> HashMap<PeerId, Receiver> {
         let new_receivers = HashMap::new();
-        for (peer_id, receiver) in receivers.into_iter() {
-            let non_priority = receiver.non_priority.get_ref();
-            match non_priority.try_recv() {
-                Ok(rpc) if peer_id == p1 => {
+        for (peer_id, mut receiver) in receivers.into_iter() {
+            match receiver.drain_non_priority().into_iter().next() {
+                Some(rpc) if peer_id == p1 => {
                     gs1.on_connection_handler_event(
                         p2,
                         connection_id,
@@ -5471,10 +5416,9 @@ fn sends_idontwant() {
     assert_eq!(
         receivers
             .into_iter()
-            .fold(0, |mut idontwants, (peer_id, c)| {
-                let non_priority = c.non_priority.get_ref();
-                while !non_priority.is_empty() {
-                    if let Ok(RpcOut::IDontWant(_)) = non_priority.try_recv() {
+            .fold(0, |mut idontwants, (peer_id, mut c)| {
+                for rpc in c.drain_non_priority() {
+                    if let RpcOut::IDontWant(_) = rpc {
                         assert_ne!(peer_id, peers[1]);
                         idontwants += 1;
                     }
@@ -5513,10 +5457,9 @@ fn doesnt_sends_idontwant_for_lower_message_size() {
     assert_eq!(
         receivers
             .into_iter()
-            .fold(0, |mut idontwants, (peer_id, c)| {
-                let non_priority = c.non_priority.get_ref();
-                while !non_priority.is_empty() {
-                    if let Ok(RpcOut::IDontWant(_)) = non_priority.try_recv() {
+            .fold(0, |mut idontwants, (peer_id, mut c)| {
+                for rpc in c.drain_non_priority() {
+                    if let RpcOut::IDontWant(_) = rpc {
                         assert_ne!(peer_id, peers[1]);
                         idontwants += 1;
                     }
@@ -5556,10 +5499,9 @@ fn doesnt_send_idontwant() {
     assert_eq!(
         receivers
             .into_iter()
-            .fold(0, |mut idontwants, (peer_id, c)| {
-                let non_priority = c.non_priority.get_ref();
-                while !non_priority.is_empty() {
-                    if matches!(non_priority.try_recv(), Ok(RpcOut::IDontWant(_)) if peer_id != peers[1]) {
+            .fold(0, |mut idontwants, (peer_id, mut c)| {
+                for rpc in c.drain_non_priority() {
+                    if matches!(rpc, RpcOut::IDontWant(_) if peer_id != peers[1]) {
                         idontwants += 1;
                     }
                 }
@@ -5604,10 +5546,9 @@ fn doesnt_forward_idontwant() {
 
     gs.handle_received_message(raw_message.clone(), &local_id);
     assert_eq!(
-        receivers.into_iter().fold(0, |mut fwds, (peer_id, c)| {
-            let non_priority = c.non_priority.get_ref();
-            while !non_priority.is_empty() {
-                if let Ok(RpcOut::Forward { .. }) = non_priority.try_recv() {
+        receivers.into_iter().fold(0, |mut fwds, (peer_id, mut c)| {
+            for rpc in c.drain_non_priority() {
+                if let RpcOut::Forward { .. } = rpc {
                     assert_ne!(peer_id, peers[2]);
                     fwds += 1;
                 }
@@ -5697,7 +5638,7 @@ fn test_all_queues_full() {
             connections: vec![ConnectionId::new_unchecked(0)],
             outbound: false,
             topics: topics.clone(),
-            sender: Sender::new(2),
+            sender: Sender::new(2, crate::QueueLimits::default()),
             dont_send: DontSendCache::with_limits(IDONTWANT_TIMEOUT, 10_000, 1024 * 1024),
         },
     );
@@ -5733,7 +5674,7 @@ fn test_slow_peer_returns_failed_publish() {
             connections: vec![ConnectionId::new_unchecked(0)],
             outbound: false,
             topics: topics.clone(),
-            sender: Sender::new(2),
+            sender: Sender::new(2, crate::QueueLimits::default()),
             dont_send: DontSendCache::with_limits(IDONTWANT_TIMEOUT, 10_000, 1024 * 1024),
         },
     );
@@ -5746,7 +5687,10 @@ fn test_slow_peer_returns_failed_publish() {
             connections: vec![ConnectionId::new_unchecked(0)],
             outbound: false,
             topics: topics.clone(),
-            sender: Sender::new(gs.config.connection_handler_queue_len()),
+            sender: Sender::new(
+                gs.config.connection_handler_queue_len(),
+                *gs.config.queue_limits(),
+            ),
             dont_send: DontSendCache::with_limits(IDONTWANT_TIMEOUT, 10_000, 1024 * 1024),
         },
     );
@@ -5807,7 +5751,7 @@ fn test_slow_peer_returns_failed_ihave_handling() {
             connections: vec![ConnectionId::new_unchecked(0)],
             outbound: false,
             topics: topics.clone(),
-            sender: Sender::new(2),
+            sender: Sender::new(2, crate::QueueLimits::default()),
             dont_send: DontSendCache::with_limits(IDONTWANT_TIMEOUT, 10_000, 1024 * 1024),
         },
     );
@@ -5824,7 +5768,10 @@ fn test_slow_peer_returns_failed_ihave_handling() {
             connections: vec![ConnectionId::new_unchecked(0)],
             outbound: false,
             topics: topics.clone(),
-            sender: Sender::new(gs.config.connection_handler_queue_len()),
+            sender: Sender::new(
+                gs.config.connection_handler_queue_len(),
+                *gs.config.queue_limits(),
+            ),
             dont_send: DontSendCache::with_limits(IDONTWANT_TIMEOUT, 10_000, 1024 * 1024),
         },
     );
@@ -5921,7 +5868,7 @@ fn test_slow_peer_returns_failed_iwant_handling() {
             connections: vec![ConnectionId::new_unchecked(0)],
             outbound: false,
             topics: topics.clone(),
-            sender: Sender::new(2),
+            sender: Sender::new(2, crate::QueueLimits::default()),
             dont_send: DontSendCache::with_limits(IDONTWANT_TIMEOUT, 10_000, 1024 * 1024),
         },
     );
@@ -5938,7 +5885,10 @@ fn test_slow_peer_returns_failed_iwant_handling() {
             connections: vec![ConnectionId::new_unchecked(0)],
             outbound: false,
             topics: topics.clone(),
-            sender: Sender::new(gs.config.connection_handler_queue_len()),
+            sender: Sender::new(
+                gs.config.connection_handler_queue_len(),
+                *gs.config.queue_limits(),
+            ),
             dont_send: DontSendCache::with_limits(IDONTWANT_TIMEOUT, 10_000, 1024 * 1024),
         },
     );
@@ -6015,7 +5965,7 @@ fn test_slow_peer_returns_failed_forward() {
             connections: vec![ConnectionId::new_unchecked(0)],
             outbound: false,
             topics: topics.clone(),
-            sender: Sender::new(2),
+            sender: Sender::new(2, crate::QueueLimits::default()),
             dont_send: DontSendCache::with_limits(IDONTWANT_TIMEOUT, 10_000, 1024 * 1024),
         },
     );
@@ -6032,7 +5982,10 @@ fn test_slow_peer_returns_failed_forward() {
             connections: vec![ConnectionId::new_unchecked(0)],
             outbound: false,
             topics: topics.clone(),
-            sender: Sender::new(gs.config.connection_handler_queue_len()),
+            sender: Sender::new(
+                gs.config.connection_handler_queue_len(),
+                *gs.config.queue_limits(),
+            ),
             dont_send: DontSendCache::with_limits(IDONTWANT_TIMEOUT, 10_000, 1024 * 1024),
         },
     );
@@ -6114,7 +6067,7 @@ fn test_slow_peer_is_downscored_on_publish() {
             connections: vec![ConnectionId::new_unchecked(0)],
             outbound: false,
             topics: topics.clone(),
-            sender: Sender::new(2),
+            sender: Sender::new(2, crate::QueueLimits::default()),
             dont_send: DontSendCache::with_limits(IDONTWANT_TIMEOUT, 10_000, 1024 * 1024),
         },
     );
@@ -6128,7 +6081,10 @@ fn test_slow_peer_is_downscored_on_publish() {
             connections: vec![ConnectionId::new_unchecked(0)],
             outbound: false,
             topics: topics.clone(),
-            sender: Sender::new(gs.config.connection_handler_queue_len()),
+            sender: Sender::new(
+                gs.config.connection_handler_queue_len(),
+                *gs.config.queue_limits(),
+            ),
             dont_send: DontSendCache::with_limits(IDONTWANT_TIMEOUT, 10_000, 1024 * 1024),
         },
     );
@@ -6152,7 +6108,7 @@ async fn test_timedout_messages_are_reported() {
 
     let mut gs: Behaviour = Behaviour::new(MessageAuthenticity::RandomAuthor, gs_config).unwrap();
 
-    let sender = Sender::new(2);
+    let sender = Sender::new(2, crate::QueueLimits::default());
     let topic_hash = Topic::new("Test").hash();
     let publish_data = vec![2; 59];
     let raw_message = gs.build_raw_message(topic_hash, publish_data).unwrap();
@@ -6169,17 +6125,50 @@ async fn test_timedout_messages_are_reported() {
 }
 
 #[test]
-fn test_priority_messages_are_always_sent() {
-    let sender = Sender::new(2);
+fn test_priority_controls_have_a_reserved_finite_budget() {
+    let sender = Sender::new(
+        2,
+        crate::QueueLimits {
+            max_control_messages: 3,
+            ..Default::default()
+        },
+    );
     let topic_hash = Topic::new("Test").hash();
-    // Fill the buffer with the first message.
+    let message = RawMessage {
+        source: None,
+        data: vec![1],
+        sequence_number: None,
+        topic: topic_hash.clone(),
+        signature: None,
+        key: None,
+        validated: true,
+    };
+    // Saturate both data classes; control capacity remains independently reserved.
     assert!(sender
-        .send_message(RpcOut::Subscribe(topic_hash.clone()))
+        .send_message(RpcOut::Publish {
+            message: message.clone(),
+            timeout: Delay::new(Duration::from_secs(60)),
+        })
+        .is_ok());
+    assert!(sender
+        .send_message(RpcOut::Forward {
+            message,
+            timeout: Delay::new(Duration::from_secs(60)),
+        })
         .is_ok());
     assert!(sender
         .send_message(RpcOut::Subscribe(topic_hash.clone()))
         .is_ok());
-    assert!(sender.send_message(RpcOut::Unsubscribe(topic_hash)).is_ok());
+    assert!(sender
+        .send_message(RpcOut::Subscribe(topic_hash.clone()))
+        .is_ok());
+    assert!(sender
+        .send_message(RpcOut::Unsubscribe(topic_hash.clone()))
+        .is_ok());
+    assert!(sender.send_message(RpcOut::Subscribe(topic_hash)).is_err());
+    let mut receiver = sender.new_receiver();
+    assert_eq!(receiver.drain_priority().len(), 4);
+    assert_eq!(receiver.drain_non_priority().len(), 1);
 }
 
 /// Test that specific topic configurations are correctly applied
@@ -6551,10 +6540,9 @@ fn test_fanout_with_topic_config() {
     // Collect publish messages
     let publishes = receivers
         .into_values()
-        .fold(vec![], |mut collected_publish, c| {
-            let priority = c.priority.get_ref();
-            while !priority.is_empty() {
-                if let Ok(RpcOut::Publish { message, .. }) = priority.try_recv() {
+        .fold(vec![], |mut collected_publish, mut c| {
+            for rpc in c.drain_priority() {
+                if let RpcOut::Publish { message, .. } = rpc {
                     collected_publish.push(message);
                 }
             }
@@ -6913,10 +6901,9 @@ fn logex_expiry_ihave_requests_expired_but_not_live_id() {
         &peers[0],
         vec![(topics[0].clone(), vec![expired.clone(), live])],
     );
-    let receiver = receivers.remove(&peers[0]).unwrap();
-    let queue = receiver.non_priority.get_ref();
+    let mut receiver = receivers.remove(&peers[0]).unwrap();
     let mut requested = Vec::new();
-    while let Ok(rpc) = queue.try_recv() {
+    for rpc in receiver.drain_non_priority() {
         if let RpcOut::IWant(IWant { message_ids }) = rpc {
             requested.extend(message_ids);
         }
@@ -7208,15 +7195,11 @@ fn logex_topic_allow_all_retains_unsubscribed_message_behavior() {
     assert!(gs.backoffs.get_backoff_time(&topic, &peers[0]).is_some());
 }
 
-fn logex_drain_cache_test_queues(receivers: &HashMap<PeerId, Receiver>) -> Vec<RpcOut> {
+fn logex_drain_cache_test_queues(receivers: &mut HashMap<PeerId, Receiver>) -> Vec<RpcOut> {
     let mut messages = Vec::new();
-    for receiver in receivers.values() {
-        while let Ok(message) = receiver.priority.get_ref().try_recv() {
-            messages.push(message);
-        }
-        while let Ok(message) = receiver.non_priority.get_ref().try_recv() {
-            messages.push(message);
-        }
+    for receiver in receivers.values_mut() {
+        messages.extend(receiver.drain_priority());
+        messages.extend(receiver.drain_non_priority());
     }
     messages
 }
@@ -7240,7 +7223,7 @@ fn logex_received_cache_limits_ignore_overflow_without_side_effects() {
             2 => limits.message_entries = 1,
             _ => limits.message_bytes = 5,
         }
-        let (mut gs, peers, receivers, topics) = inject_nodes1()
+        let (mut gs, peers, mut receivers, topics) = inject_nodes1()
             .peer_no(2)
             .topics(vec!["t".into()])
             .to_subscribe(true)
@@ -7267,7 +7250,7 @@ fn logex_received_cache_limits_ignore_overflow_without_side_effects() {
         assert!(gs.events.iter().any(|event| matches!(event,
             ToSwarm::GenerateEvent(Event::Message { message_id, .. }) if message_id == &first)));
         gs.events.clear();
-        logex_drain_cache_test_queues(&receivers);
+        logex_drain_cache_test_queues(&mut receivers);
         let usage = gs.mcache.usage();
         let score = gs.peer_score(&peers[0]);
         gs.gossip_promises.add_promise(
@@ -7281,7 +7264,7 @@ fn logex_received_cache_limits_ignore_overflow_without_side_effects() {
             "overflow generated an event, limit {limit}"
         );
         assert!(
-            logex_drain_cache_test_queues(&receivers).is_empty(),
+            logex_drain_cache_test_queues(&mut receivers).is_empty(),
             "overflow sent a control or payload, limit {limit}"
         );
         assert_eq!(gs.mcache.usage(), usage);
@@ -7309,7 +7292,7 @@ fn logex_publish_cache_limits_fail_before_partial_admission_or_send() {
             4 => limits.published_entries = 1,
             _ => limits.published_bytes = 2,
         }
-        let (mut gs, peers, receivers, _) = inject_nodes1()
+        let (mut gs, peers, mut receivers, _) = inject_nodes1()
             .peer_no(1)
             .topics(vec!["t".into(), "u".into()])
             .to_subscribe(true)
@@ -7332,7 +7315,7 @@ fn logex_publish_cache_limits_fail_before_partial_admission_or_send() {
         assert!(!gs.fanout.contains_key(&unpublished));
         assert!(!gs.fanout_last_pub.contains_key(&unpublished));
         gs.events.clear();
-        logex_drain_cache_test_queues(&receivers);
+        logex_drain_cache_test_queues(&mut receivers);
         let usage = gs.mcache.usage();
         let seen = gs.duplicate_cache.retained_len();
         let published = gs.published_message_ids.retained_len();
@@ -7351,7 +7334,7 @@ fn logex_publish_cache_limits_fail_before_partial_admission_or_send() {
         assert_eq!(gs.fanout, fanout);
         assert_eq!(gs.fanout_last_pub, last_pub);
         assert!(gs.events.is_empty());
-        assert!(logex_drain_cache_test_queues(&receivers).is_empty());
+        assert!(logex_drain_cache_test_queues(&mut receivers).is_empty());
         assert!(gs.mcache.get(&first).is_some());
         assert!(matches!(
             gs.publish(Topic::new("t"), vec![1]),
@@ -7366,7 +7349,7 @@ fn logex_iwant_requests_only_admitted_promises_and_clears_unsent() {
         promise_entries: 1,
         ..Default::default()
     };
-    let (mut gs, peers, receivers, topics) = inject_nodes1()
+    let (mut gs, peers, mut receivers, topics) = inject_nodes1()
         .peer_no(1)
         .topics(vec!["t".into()])
         .to_subscribe(true)
@@ -7376,10 +7359,10 @@ fn logex_iwant_requests_only_admitted_promises_and_clears_unsent() {
         )))
         .gs_config(logex_cache_test_config(limits))
         .create_network();
-    logex_drain_cache_test_queues(&receivers);
+    logex_drain_cache_test_queues(&mut receivers);
     let ids = vec![MessageId::new(&[1]), MessageId::new(&[2])];
     gs.handle_ihave(&peers[0], vec![(topics[0].clone(), ids.clone())]);
-    let requested: Vec<_> = logex_drain_cache_test_queues(&receivers)
+    let requested: Vec<_> = logex_drain_cache_test_queues(&mut receivers)
         .into_iter()
         .flat_map(|message| match message {
             RpcOut::IWant(IWant { message_ids }) => message_ids,
@@ -7393,7 +7376,7 @@ fn logex_iwant_requests_only_admitted_promises_and_clears_unsent() {
         assert_eq!(gs.gossip_promises.contains(id), requested.contains(id));
     }
     gs.gossip_promises.message_delivered(&requested[0]);
-    receivers[&peers[0]].non_priority.get_ref().close();
+    receivers[&peers[0]].close_non_priority();
     let unsent = MessageId::new(&[3]);
     gs.handle_ihave(&peers[0], vec![(topics[0].clone(), vec![unsent.clone()])]);
     assert!(!gs.gossip_promises.contains(&unsent));
@@ -7515,7 +7498,7 @@ fn logex_established_connections_apply_configured_idontwant_limits() {
 
 #[test]
 fn logex_payload_history_suppresses_duplicates_after_seen_expiry() {
-    let (mut gs, peers, receivers, topics) = inject_nodes1()
+    let (mut gs, peers, mut receivers, topics) = inject_nodes1()
         .peer_no(1)
         .topics(vec!["t".into()])
         .to_subscribe(true)
@@ -7537,7 +7520,7 @@ fn logex_payload_history_suppresses_duplicates_after_seen_expiry() {
         .prune_expired(Instant::now() + gs.config.duplicate_cache_time());
     assert_eq!(gs.duplicate_cache.retained_len(), 0);
     gs.events.clear();
-    logex_drain_cache_test_queues(&receivers);
+    logex_drain_cache_test_queues(&mut receivers);
     let usage = gs.mcache.usage();
     gs.handle_received_message(raw, &peers[0]);
     assert!(gs.events.is_empty());
@@ -7547,5 +7530,270 @@ fn logex_payload_history_suppresses_duplicates_after_seen_expiry() {
         gs.publish(Topic::new("t"), vec![1]),
         Err(PublishError::Duplicate)
     ));
-    assert!(logex_drain_cache_test_queues(&receivers).is_empty());
+    assert!(logex_drain_cache_test_queues(&mut receivers).is_empty());
+}
+
+#[test]
+fn logex_control_overflow_preserves_admitted_work_and_closes_only_saturated_peer() {
+    let config = ConfigBuilder::default()
+        .queue_limits(crate::QueueLimits {
+            max_control_messages: 2,
+            ..Default::default()
+        })
+        .build()
+        .unwrap();
+    let (mut gs, peers, mut receivers, _) = inject_nodes1()
+        .peer_no(2)
+        .gs_config(config)
+        .create_network();
+    gs.events.clear();
+    logex_drain_cache_test_queues(&mut receivers);
+    let saturated = peers[0];
+    let healthy = peers[1];
+    let admitted = Topic::new("already-queued").hash();
+    for _ in 0..2 {
+        assert!(gs.send_message(saturated, RpcOut::Subscribe(admitted.clone())));
+    }
+    gs.events.push_back(ToSwarm::NotifyHandler {
+        peer_id: saturated,
+        handler: NotifyHandler::Any,
+        event: HandlerIn::JoinedMesh,
+    });
+    // Real subscription production encounters the reserved control bound.
+    assert!(gs.subscribe(&Topic::new("t")).unwrap());
+    assert!(gs.closing_peers.contains_key(&saturated));
+    assert!(!gs.closing_peers.contains_key(&healthy));
+    let retained = receivers.get_mut(&saturated).unwrap().drain_priority();
+    assert_eq!(retained.len(), 2);
+    assert!(retained.into_iter().all(|rpc| matches!(rpc,
+        RpcOut::Subscribe(topic) if topic == admitted)));
+    assert!(receivers
+        .get_mut(&healthy)
+        .unwrap()
+        .drain_priority()
+        .into_iter()
+        .any(|rpc| matches!(rpc, RpcOut::Subscribe(topic) if topic == Topic::new("t").hash())));
+    let backlog = gs.events.len();
+    for _ in 0..4 {
+        assert!(!gs.send_message(
+            saturated,
+            RpcOut::Graft(Graft {
+                topic_hash: Topic::new("t").hash(),
+            })
+        ));
+        gs.on_connection_handler_event(
+            saturated,
+            ConnectionId::new_unchecked(0),
+            HandlerEvent::Message {
+                rpc: Rpc {
+                    messages: vec![],
+                    subscriptions: vec![Subscription {
+                        action: SubscriptionAction::Subscribe,
+                        topic_hash: Topic::new("ignored-while-closing").hash(),
+                    }],
+                    control_msgs: vec![],
+                },
+                invalid_messages: vec![],
+            },
+        );
+    }
+    assert_eq!(gs.events.len(), backlog);
+    assert!(!gs.connected_peers[&saturated]
+        .topics
+        .contains(&Topic::new("ignored-while-closing").hash()));
+    assert!(receivers
+        .get_mut(&saturated)
+        .unwrap()
+        .drain_priority()
+        .is_empty());
+    assert!(gs.send_message(
+        healthy,
+        RpcOut::Graft(Graft {
+            topic_hash: Topic::new("t").hash(),
+        })
+    ));
+    let mut cx = Context::from_waker(futures::task::noop_waker_ref());
+    assert!(
+        matches!(gs.poll(&mut cx), Poll::Ready(ToSwarm::GenerateEvent(
+        Event::ControlQueueFull { peer_id }
+    )) if peer_id == saturated)
+    );
+    assert!(
+        matches!(gs.poll(&mut cx), Poll::Ready(ToSwarm::CloseConnection {
+        peer_id,
+        connection: libp2p_swarm::CloseConnection::All,
+    }) if peer_id == saturated)
+    );
+    assert!(!gs.events.iter().any(|event| matches!(event,
+        ToSwarm::NotifyHandler { peer_id, .. } if *peer_id == saturated)));
+    // Drain only the finite existing backlog, then check closure is not repeated.
+    for _ in 0..=backlog {
+        assert!(!matches!(
+            gs.poll(&mut cx),
+            Poll::Ready(ToSwarm::GenerateEvent(Event::ControlQueueFull { .. }))
+                | Poll::Ready(ToSwarm::CloseConnection { .. })
+        ));
+    }
+}
+
+#[test]
+fn logex_control_overflow_blocks_new_connections_until_final_disconnect() {
+    let config = ConfigBuilder::default()
+        .queue_limits(crate::QueueLimits {
+            max_control_messages: 1,
+            ..Default::default()
+        })
+        .build()
+        .unwrap();
+    let (mut gs, _, _, _) = inject_nodes1().gs_config(config).create_network();
+    let peer = PeerId::random();
+    let address = "/ip4/127.0.0.1/tcp/1234".parse::<Multiaddr>().unwrap();
+    let first = ConnectionId::new_unchecked(101);
+    let second = ConnectionId::new_unchecked(102);
+    let next = ConnectionId::new_unchecked(103);
+    let _first_handler = gs
+        .handle_established_inbound_connection(first, peer, &address, &address)
+        .unwrap();
+    let _second_handler = gs
+        .handle_established_outbound_connection(
+            second,
+            peer,
+            &address,
+            Endpoint::Dialer,
+            PortUse::Reuse,
+        )
+        .unwrap();
+    let topic_hash = Topic::new("t").hash();
+    assert!(gs.send_message(peer, RpcOut::Subscribe(topic_hash.clone())));
+    assert!(!gs.send_message(
+        peer,
+        RpcOut::Graft(Graft {
+            topic_hash: topic_hash.clone()
+        })
+    ));
+    assert!(gs.closing_peers.contains_key(&peer));
+    assert!(gs
+        .handle_established_inbound_connection(next, peer, &address, &address)
+        .err()
+        .expect("connection must be denied while the peer is closing")
+        .downcast_ref::<crate::ControlQueueFull>()
+        .is_some());
+    assert!(gs
+        .handle_established_outbound_connection(
+            next,
+            peer,
+            &address,
+            Endpoint::Dialer,
+            PortUse::Reuse
+        )
+        .err()
+        .expect("connection must be denied while the peer is closing")
+        .downcast_ref::<crate::ControlQueueFull>()
+        .is_some());
+    let endpoint = ConnectedPoint::Dialer {
+        address: address.clone(),
+        role_override: Endpoint::Dialer,
+        port_use: PortUse::Reuse,
+    };
+    gs.on_swarm_event(FromSwarm::ConnectionClosed(ConnectionClosed {
+        peer_id: peer,
+        connection_id: first,
+        endpoint: &endpoint,
+        remaining_established: 1,
+        cause: None,
+    }));
+    assert!(gs.closing_peers.contains_key(&peer));
+    assert_eq!(gs.connected_peers[&peer].connections, vec![second]);
+    assert!(gs
+        .handle_established_inbound_connection(next, peer, &address, &address)
+        .err()
+        .expect("connection must be denied while the peer is closing")
+        .downcast_ref::<crate::ControlQueueFull>()
+        .is_some());
+    assert!(gs
+        .handle_established_outbound_connection(
+            next,
+            peer,
+            &address,
+            Endpoint::Dialer,
+            PortUse::Reuse,
+        )
+        .err()
+        .expect("outbound connection must remain denied after partial closure")
+        .downcast_ref::<crate::ControlQueueFull>()
+        .is_some());
+    gs.on_swarm_event(FromSwarm::ConnectionClosed(ConnectionClosed {
+        peer_id: peer,
+        connection_id: second,
+        endpoint: &endpoint,
+        remaining_established: 0,
+        cause: None,
+    }));
+    assert!(!gs.closing_peers.contains_key(&peer));
+    assert!(!gs.connected_peers.contains_key(&peer));
+    let _reconnected = gs
+        .handle_established_inbound_connection(next, peer, &address, &address)
+        .unwrap();
+    assert!(gs.send_message(peer, RpcOut::Subscribe(topic_hash)));
+    let mut cx = Context::from_waker(futures::task::noop_waker_ref());
+    assert!(!matches!(
+        gs.poll(&mut cx),
+        Poll::Ready(ToSwarm::GenerateEvent(Event::ControlQueueFull { .. }))
+            | Poll::Ready(ToSwarm::CloseConnection { .. })
+    ));
+}
+
+#[test]
+fn logex_oversized_queued_messages_do_not_penalize_an_idle_peer() {
+    let config = ConfigBuilder::default()
+        .queue_limits(crate::QueueLimits {
+            max_publish_bytes: 1,
+            max_non_priority_bytes: 1,
+            ..Default::default()
+        })
+        .build()
+        .unwrap();
+    let (mut gs, peers, mut receivers, _) = inject_nodes1()
+        .peer_no(1)
+        .peer_kind(PeerKind::Gossipsubv1_2)
+        .scoring(Some((
+            PeerScoreParams::default(),
+            PeerScoreThresholds::default(),
+        )))
+        .gs_config(config)
+        .create_network();
+    let peer = peers[0];
+    gs.events.clear();
+    assert!(logex_drain_cache_test_queues(&mut receivers).is_empty());
+    let score = gs.peer_score(&peer).expect("peer scoring is enabled");
+    let message = RawMessage {
+        source: None,
+        data: vec![1],
+        sequence_number: None,
+        topic: Topic::new("t").hash(),
+        signature: None,
+        key: None,
+        validated: true,
+    };
+    let messages = [
+        RpcOut::Publish {
+            message: message.clone(),
+            timeout: Delay::new(Duration::from_secs(60)),
+        },
+        RpcOut::Forward {
+            message,
+            timeout: Delay::new(Duration::from_secs(60)),
+        },
+        RpcOut::IDontWant(IDontWant {
+            message_ids: vec![MessageId::new(&[1])],
+        }),
+    ];
+    for rpc in messages {
+        assert!(!gs.send_message(peer, rpc));
+        assert!(logex_drain_cache_test_queues(&mut receivers).is_empty());
+        assert_eq!(gs.peer_score(&peer), Some(score));
+        assert!(gs.failed_messages.is_empty());
+        assert!(!gs.closing_peers.contains_key(&peer));
+        assert!(gs.events.is_empty());
+    }
 }

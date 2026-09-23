@@ -60,7 +60,7 @@ use crate::{
     mcache::MessageCache,
     peer_score::{PeerScore, PeerScoreParams, PeerScoreState, PeerScoreThresholds, RejectReason},
     protocol::SIGNING_PREFIX,
-    rpc::Sender,
+    rpc::{SendErrorReason, Sender},
     rpc_proto::proto,
     subscription_filter::{AllowAllSubscriptionFilter, TopicSubscriptionFilter},
     time_cache::{CacheAdmission, DuplicateCache},
@@ -71,7 +71,8 @@ use crate::{
         MessageId, PeerDetails, PeerInfo, PeerKind, Prune, RawMessage, RpcOut, Subscription,
         SubscriptionAction,
     },
-    FailedMessages, PublishError, SubscriptionError, TopicScoreParams, ValidationError,
+    ControlQueueFull, FailedMessages, PublishError, SubscriptionError, TopicScoreParams,
+    ValidationError,
 };
 
 #[cfg(test)]
@@ -162,6 +163,10 @@ pub enum Event {
     },
     /// A peer that does not support gossipsub has connected.
     GossipsubNotSupported { peer_id: PeerId },
+    /// Local capacity could not retain a critical subscription or mesh control.
+    /// All connections to this peer will close after this event is delivered.
+    /// A fresh connection reconstructs its subscription and mesh state.
+    ControlQueueFull { peer_id: PeerId },
     /// A peer is not able to download messages in time.
     SlowPeer {
         /// The peer_id
@@ -252,6 +257,13 @@ impl From<MessageAuthenticity> for PublishConfig {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CloseState {
+    PendingNotification,
+    PendingClose,
+    Closing,
+}
+
 /// Network behaviour that handles the gossipsub protocol.
 ///
 /// NOTE: Initialisation requires a [`MessageAuthenticity`] and [`Config`] instance. If
@@ -280,6 +292,10 @@ pub struct Behaviour<D = IdentityTransform, F = AllowAllSubscriptionFilter> {
     /// A set of connected peers, indexed by their [`PeerId`] tracking both the [`PeerKind`] and
     /// the set of [`ConnectionId`]s.
     connected_peers: HashMap<PeerId, PeerDetails>,
+
+    /// At most one closure state per connected peer. Kept until the final
+    /// connection closes so late input cannot rebuild divergent mesh state.
+    closing_peers: HashMap<PeerId, CloseState>,
 
     /// A set of all explicit peers. These are peers that remain connected and we unconditionally
     /// forward messages to, outside of the scoring system.
@@ -435,6 +451,7 @@ where
             #[cfg(feature = "metrics")]
             metrics: None,
             events: VecDeque::new(),
+            closing_peers: HashMap::new(),
             publish_config: privacy.into(),
             duplicate_cache: DuplicateCache::with_limits(
                 config.duplicate_cache_time(),
@@ -2952,10 +2969,13 @@ where
     /// Send a [`RpcOut`] message to a peer.
     ///
     /// Returns `true` if sending was successful, `false` otherwise.
-    /// The method will update the peer score and failed message counter if
-    /// sending the message failed due to the channel to the connection handler being
-    /// full (which indicates a slow peer).
+    /// Existing backlog pressure updates the slow-peer score and failure counter.
+    /// Individual RPCs exceeding a local byte limit and closed queues are neutral.
+    /// Critical-control rejection instead initiates an explicit peer reconnect.
     fn send_message(&mut self, peer_id: PeerId, rpc: RpcOut) -> bool {
+        if self.closing_peers.contains_key(&peer_id) {
+            return false;
+        }
         #[cfg(feature = "metrics")]
         if let Some(m) = self.metrics.as_mut() {
             if let RpcOut::Publish { ref message, .. } | RpcOut::Forward { ref message, .. } = rpc {
@@ -2978,9 +2998,30 @@ where
         // Try sending the message to the connection handler.
         match peer.sender.send_message(rpc) {
             Ok(()) => true,
-            Err(rpc) => {
+            Err(error) => {
+                let rpc = error.rpc;
+                if matches!(
+                    rpc,
+                    RpcOut::Graft(_)
+                        | RpcOut::Prune(_)
+                        | RpcOut::Subscribe(_)
+                        | RpcOut::Unsubscribe(_)
+                ) {
+                    // Local topology already changed. Do not silently leave the
+                    // remote with a different subscription/mesh view, or blame
+                    // the peer for a local capacity decision.
+                    tracing::warn!(peer=%peer_id, "Gossip control queue full; reconnecting peer");
+                    self.closing_peers
+                        .insert(peer_id, CloseState::PendingNotification);
+                    self.discard_peer_notifications(peer_id);
+                    return false;
+                }
+                if error.reason != SendErrorReason::Full {
+                    tracing::debug!(peer=%peer_id, reason=?error.reason, "Gossip RPC not admitted locally");
+                    return false;
+                }
                 // Sending failed because the channel is full.
-                tracing::warn!(peer=%peer_id, "Send Queue full. Could not send {:?}.", rpc);
+                tracing::warn!(peer=%peer_id, "Gossip message queue full");
 
                 // Update failed message counter.
                 let failed_messages = self.failed_messages.entry(peer_id).or_default();
@@ -3000,7 +3041,9 @@ where
                     | RpcOut::Prune(_)
                     | RpcOut::Subscribe(_)
                     | RpcOut::Unsubscribe(_) => {
-                        unreachable!("Channel for highpriority control messages is unbounded and should always be open.")
+                        unreachable!(
+                            "critical control saturation is handled before message scoring"
+                        )
                     }
                 }
 
@@ -3011,6 +3054,34 @@ where
 
                 false
             }
+        }
+    }
+
+    fn discard_peer_notifications(&mut self, peer_id: PeerId) {
+        self.events.retain(|event| {
+            !matches!(event, ToSwarm::NotifyHandler { peer_id: queued_peer, .. } if *queued_peer == peer_id)
+        });
+    }
+
+    fn next_peer_close(&mut self) -> Option<ToSwarm<Event, HandlerIn>> {
+        let (peer_id, state) = self
+            .closing_peers
+            .iter_mut()
+            .find(|(_, state)| **state != CloseState::Closing)?;
+        let peer_id = *peer_id;
+        match state {
+            CloseState::PendingNotification => {
+                *state = CloseState::PendingClose;
+                Some(ToSwarm::GenerateEvent(Event::ControlQueueFull { peer_id }))
+            }
+            CloseState::PendingClose => {
+                *state = CloseState::Closing;
+                Some(ToSwarm::CloseConnection {
+                    peer_id,
+                    connection: libp2p_swarm::CloseConnection::All,
+                })
+            }
+            CloseState::Closing => unreachable!("only pending closures are selected"),
         }
     }
 
@@ -3044,6 +3115,9 @@ where
             peer_score.add_peer(peer_id);
         }
 
+        if self.closing_peers.contains_key(&peer_id) {
+            return;
+        }
         // Ignore connections from blacklisted peers.
         if self.blacklisted_peers.contains(&peer_id) {
             tracing::debug!(peer=%peer_id, "Ignoring connection from blacklisted peer");
@@ -3092,7 +3166,7 @@ where
 
                 // If there are more connections and this peer is in a mesh, inform the first
                 // connection handler.
-                if !peer.connections.is_empty() {
+                if !peer.connections.is_empty() && !self.closing_peers.contains_key(&peer_id) {
                     for topic in &peer.topics {
                         if let Some(mesh_peers) = self.mesh.get(topic) {
                             if mesh_peers.contains(&peer_id) {
@@ -3108,6 +3182,8 @@ where
                 }
             }
         } else {
+            self.closing_peers.remove(&peer_id);
+            self.discard_peer_notifications(peer_id);
             // remove from mesh, topic_peers, peer_topic and the fanout
             tracing::debug!(peer=%peer_id, "Peer disconnected");
             let Some(connected_peer) = self.connected_peers.get(&peer_id) else {
@@ -3221,6 +3297,9 @@ where
         _: &Multiaddr,
         _: &Multiaddr,
     ) -> Result<THandler<Self>, ConnectionDenied> {
+        if self.closing_peers.contains_key(&peer_id) {
+            return Err(ConnectionDenied::new(ControlQueueFull));
+        }
         // By default we assume a peer is only a floodsub peer.
         //
         // The protocol negotiation occurs once a message is sent/received. Once this happens we
@@ -3230,7 +3309,10 @@ where
             kind: PeerKind::Floodsub,
             connections: vec![],
             outbound: false,
-            sender: Sender::new(self.config.connection_handler_queue_len()),
+            sender: Sender::new(
+                self.config.connection_handler_queue_len(),
+                *self.config.queue_limits(),
+            ),
             topics: Default::default(),
             dont_send: DontSendCache::with_limits(
                 IDONTWANT_TIMEOUT,
@@ -3255,13 +3337,19 @@ where
         _: Endpoint,
         _: PortUse,
     ) -> Result<THandler<Self>, ConnectionDenied> {
+        if self.closing_peers.contains_key(&peer_id) {
+            return Err(ConnectionDenied::new(ControlQueueFull));
+        }
         let connected_peer = self.connected_peers.entry(peer_id).or_insert(PeerDetails {
             kind: PeerKind::Floodsub,
             connections: vec![],
             // Diverging from the go implementation we only want to consider a peer as outbound peer
             // if its first connection is outbound.
             outbound: !self.px_peers.contains(&peer_id),
-            sender: Sender::new(self.config.connection_handler_queue_len()),
+            sender: Sender::new(
+                self.config.connection_handler_queue_len(),
+                *self.config.queue_limits(),
+            ),
             topics: Default::default(),
             dont_send: DontSendCache::with_limits(
                 IDONTWANT_TIMEOUT,
@@ -3284,6 +3372,9 @@ where
         _connection_id: ConnectionId,
         handler_event: THandlerOutEvent<Self>,
     ) {
+        if self.closing_peers.contains_key(&propagation_source) {
+            return;
+        }
         match handler_event {
             HandlerEvent::PeerKind(kind) => {
                 // We have identified the protocol this peer is using
@@ -3361,6 +3452,9 @@ where
                 // Update connected peers topics
                 if !rpc.subscriptions.is_empty() {
                     self.handle_received_subscriptions(&rpc.subscriptions, &propagation_source);
+                }
+                if self.closing_peers.contains_key(&propagation_source) {
+                    return;
                 }
 
                 // Check if peer is graylisted in which case we ignore the event
@@ -3477,7 +3571,14 @@ where
         &mut self,
         cx: &mut Context<'_>,
     ) -> Poll<ToSwarm<Self::ToSwarm, THandlerInEvent<Self>>> {
-        if let Some(event) = self.events.pop_front() {
+        if let Some(event) = self.next_peer_close() {
+            return Poll::Ready(event);
+        }
+        while let Some(event) = self.events.pop_front() {
+            if matches!(&event, ToSwarm::NotifyHandler { peer_id, .. } if self.closing_peers.contains_key(peer_id))
+            {
+                continue;
+            }
             return Poll::Ready(event);
         }
 
@@ -3494,6 +3595,10 @@ where
         if self.heartbeat.poll_unpin(cx).is_ready() {
             self.heartbeat();
             self.heartbeat.reset(self.config.heartbeat_interval());
+        }
+
+        if let Some(event) = self.next_peer_close() {
+            return Poll::Ready(event);
         }
 
         Poll::Pending

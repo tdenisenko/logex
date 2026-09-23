@@ -233,8 +233,11 @@ impl EnabledHandler {
             }
         }
 
-        // determine if we need to create the outbound stream
-        if !self.send_queue.poll_is_empty(cx)
+        // Negotiate once even without queued work so we learn the peer's
+        // protocol. Subsequent streams require actual queued work.
+        let needs_outbound =
+            !self.send_queue.poll_is_empty(cx) || self.outbound_substream_attempts == 0;
+        if needs_outbound
             && self.outbound_substream.is_none()
             && !self.outbound_substream_establishing
         {
@@ -554,5 +557,61 @@ impl ConnectionHandler for Handler {
             }
             Handler::Disabled(_) => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod logex_tests {
+    use futures::task::noop_waker;
+
+    use super::*;
+    use crate::{rpc::Sender, QueueLimits, TopicHash};
+
+    #[test]
+    fn logex_empty_handler_negotiates_once_then_waits_for_work() {
+        let sender = Sender::new(2, QueueLimits::default());
+        let mut handler = Handler::new(ProtocolConfig::default(), sender.new_receiver());
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        assert!(matches!(
+            handler.poll(&mut cx),
+            Poll::Ready(ConnectionHandlerEvent::OutboundSubstreamRequest { .. })
+        ));
+        assert!(handler.poll(&mut cx).is_pending());
+        handler.on_connection_event(ConnectionEvent::DialUpgradeError(DialUpgradeError {
+            info: (),
+            error: StreamUpgradeError::Timeout,
+        }));
+        assert!(handler.poll(&mut cx).is_pending());
+        sender
+            .send_message(RpcOut::Subscribe(TopicHash::from_raw("t")))
+            .unwrap();
+        assert!(matches!(
+            handler.poll(&mut cx),
+            Poll::Ready(ConnectionHandlerEvent::OutboundSubstreamRequest { .. })
+        ));
+    }
+
+    #[test]
+    fn logex_empty_handler_reports_unsupported_protocol_once() {
+        let sender = Sender::new(2, QueueLimits::default());
+        let mut handler = Handler::new(ProtocolConfig::default(), sender.new_receiver());
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        assert!(matches!(
+            handler.poll(&mut cx),
+            Poll::Ready(ConnectionHandlerEvent::OutboundSubstreamRequest { .. })
+        ));
+        handler.on_connection_event(ConnectionEvent::DialUpgradeError(DialUpgradeError {
+            info: (),
+            error: StreamUpgradeError::NegotiationFailed,
+        }));
+        assert!(matches!(
+            handler.poll(&mut cx),
+            Poll::Ready(ConnectionHandlerEvent::NotifyBehaviour(
+                HandlerEvent::PeerKind(PeerKind::NotSupported)
+            ))
+        ));
+        assert!(handler.poll(&mut cx).is_pending());
     }
 }

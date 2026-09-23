@@ -66,6 +66,9 @@ jobs:
           vendor/libp2p-gossipsub/src/mcache.rs
           vendor/libp2p-gossipsub/src/peer_score.rs
           vendor/libp2p-gossipsub/src/types.rs
+          vendor/libp2p-gossipsub/src/rpc.rs
+          vendor/libp2p-gossipsub/src/topic.rs
+          vendor/libp2p-gossipsub/src/handler.rs
 
       - name: Check patched aggregate formatting
         run: >-
