@@ -99,6 +99,7 @@ impl std::fmt::Debug for TopicConfigs {
 /// Retained-data budgets for gossip caches. Entry and association limits bound
 /// fixed metadata; byte limits cover owned IDs and payload buffers, not total RSS.
 /// Excess new entries are dropped without evicting or refreshing admitted entries.
+/// Backoff identity capacity instead refuses new connections before admission.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CacheLimits {
     /// Seen-message IDs retained for duplicate suppression.
@@ -125,6 +126,11 @@ pub struct CacheLimits {
     /// Counters survive reconnects. Excess new peers' IHAVEs are ignored until
     /// the next heartbeat; already admitted peers keep their existing quotas.
     pub ihave_peers: usize,
+    /// Identities reserved for connected/provisional peers or retained backoffs.
+    /// New identities are refused at connection admission when full; admitted
+    /// identities retain all required delays and can reconnect. This denial
+    /// affects the entire composed connection, including other protocols.
+    pub backoff_peers: usize,
     /// Suppression IDs retained for each connected peer.
     pub idontwant_entries_per_peer: usize,
     /// Owned suppression-ID bytes for each connected peer.
@@ -145,6 +151,7 @@ impl Default for CacheLimits {
             promise_bytes: 1024 * 1024,
             promise_peer_associations: 65_536,
             ihave_peers: 16_384,
+            backoff_peers: 4_096,
             idontwant_entries_per_peer: 10_000,
             idontwant_bytes_per_peer: 1024 * 1024,
         }

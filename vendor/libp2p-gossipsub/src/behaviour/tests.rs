@@ -174,6 +174,339 @@ fn inject_nodes1() -> InjectNodes<IdentityTransform, AllowAllSubscriptionFilter>
     InjectNodes::<IdentityTransform, AllowAllSubscriptionFilter>::default()
 }
 
+// Swarm 0.47.1 sends a failure, not ConnectionClosed, when a later composed
+// behaviour rejects an established callback. These controls reproduce that
+// synchronous callback sequence without sockets or transport execution.
+fn logex_backoff_admit<F: TopicSubscriptionFilter + Send + 'static>(
+    gs: &mut Behaviour<IdentityTransform, F>,
+    peer: PeerId,
+    connection: ConnectionId,
+    outbound: bool,
+) -> Result<(Handler, ConnectedPoint), ConnectionDenied> {
+    let address = "/memory/1234".parse::<Multiaddr>().unwrap();
+    if outbound {
+        let handler = gs.handle_established_outbound_connection(
+            connection,
+            peer,
+            &address,
+            Endpoint::Dialer,
+            PortUse::Reuse,
+        )?;
+        Ok((
+            handler,
+            ConnectedPoint::Dialer {
+                address,
+                role_override: Endpoint::Dialer,
+                port_use: PortUse::Reuse,
+            },
+        ))
+    } else {
+        let handler =
+            gs.handle_established_inbound_connection(connection, peer, &address, &address)?;
+        Ok((
+            handler,
+            ConnectedPoint::Listener {
+                local_addr: address.clone(),
+                send_back_addr: address,
+            },
+        ))
+    }
+}
+
+fn logex_backoff_sibling_denial(
+    gs: &mut Behaviour,
+    peer: PeerId,
+    connection: ConnectionId,
+    outbound: bool,
+) {
+    let cause = ConnectionDenied::new(std::io::Error::other("test sibling denial"));
+    if outbound {
+        let error = libp2p_swarm::DialError::Denied { cause };
+        gs.on_swarm_event(FromSwarm::DialFailure(
+            libp2p_swarm::behaviour::DialFailure {
+                peer_id: Some(peer),
+                connection_id: connection,
+                error: &error,
+            },
+        ));
+    } else {
+        let error = libp2p_swarm::ListenError::Denied { cause };
+        let address = "/memory/1234".parse::<Multiaddr>().unwrap();
+        gs.on_swarm_event(FromSwarm::ListenFailure(
+            libp2p_swarm::behaviour::ListenFailure {
+                peer_id: Some(peer),
+                connection_id: connection,
+                local_addr: &address,
+                send_back_addr: &address,
+                error: &error,
+            },
+        ));
+    }
+}
+
+#[test]
+fn logex_backoff_sibling_denial_releases_first_connection() {
+    for outbound in [false, true] {
+        let config = ConfigBuilder::default()
+            .cache_limits(crate::CacheLimits {
+                backoff_peers: 1,
+                ..Default::default()
+            })
+            .build()
+            .unwrap();
+        let (mut gs, _, _, _) = inject_nodes1().gs_config(config).create_network();
+        let peer = PeerId::random();
+        let connection = ConnectionId::new_unchecked(90_001);
+        let (handler, _) = logex_backoff_admit(&mut gs, peer, connection, outbound).unwrap();
+        assert_eq!(gs.connected_peers[&peer].connections, vec![connection]);
+
+        // A failure for an attempt that never reached this behaviour is harmless.
+        logex_backoff_sibling_denial(&mut gs, peer, ConnectionId::new_unchecked(90_002), outbound);
+        assert_eq!(gs.connected_peers[&peer].connections, vec![connection]);
+        logex_backoff_sibling_denial(
+            &mut gs,
+            PeerId::random(),
+            ConnectionId::new_unchecked(90_003),
+            outbound,
+        );
+        assert_eq!(gs.connected_peers.len(), 1);
+
+        drop(handler); // The derived sibling callback drops earlier handlers on error.
+        logex_backoff_sibling_denial(&mut gs, peer, connection, outbound);
+        assert!(
+            gs.connected_peers.is_empty(),
+            "sibling denial must roll back provisional peer state"
+        );
+        assert!(gs.pending_handler_peers.is_empty());
+        assert!(gs.events.is_empty());
+
+        let replacement = PeerId::random();
+        assert!(gs.has_backoff_capacity(&replacement));
+        let (handler, _) = logex_backoff_admit(
+            &mut gs,
+            replacement,
+            ConnectionId::new_unchecked(90_004),
+            outbound,
+        )
+        .unwrap();
+        drop(handler);
+        logex_backoff_sibling_denial(
+            &mut gs,
+            replacement,
+            ConnectionId::new_unchecked(90_004),
+            outbound,
+        );
+        assert!(gs.connected_peers.is_empty());
+    }
+}
+
+#[test]
+fn logex_backoff_sibling_denial_preserves_established_connection() {
+    for outbound in [false, true] {
+        let config = ConfigBuilder::default()
+            .cache_limits(crate::CacheLimits {
+                backoff_peers: 1,
+                ..Default::default()
+            })
+            .build()
+            .unwrap();
+        let (mut gs, _, _, _) = inject_nodes1().gs_config(config).create_network();
+        let peer = PeerId::random();
+        let first = ConnectionId::new_unchecked(90_101);
+        let rejected = ConnectionId::new_unchecked(90_102);
+        let (first_handler, endpoint) =
+            logex_backoff_admit(&mut gs, peer, first, !outbound).unwrap();
+        gs.on_swarm_event(FromSwarm::ConnectionEstablished(ConnectionEstablished {
+            peer_id: peer,
+            connection_id: first,
+            endpoint: &endpoint,
+            failed_addresses: &[],
+            other_established: 0,
+        }));
+        let topic = Topic::new("allowed").hash();
+        gs.handle_received_subscriptions(
+            &[Subscription {
+                action: SubscriptionAction::Subscribe,
+                topic_hash: topic.clone(),
+            }],
+            &peer,
+        );
+        let topics = gs.connected_peers[&peer].topics.clone();
+        assert!(topics.contains(&topic));
+        let mut receiver = gs.connected_peers[&peer].sender.new_receiver();
+        assert!(gs.send_message(peer, RpcOut::Subscribe(topic.clone())));
+
+        let (handler, _) = logex_backoff_admit(&mut gs, peer, rejected, outbound).unwrap();
+        drop(handler);
+        logex_backoff_sibling_denial(&mut gs, peer, rejected, outbound);
+        assert_eq!(gs.connected_peers[&peer].connections, vec![first]);
+        assert_eq!(gs.connected_peers[&peer].outbound, !outbound);
+        assert_eq!(gs.connected_peers[&peer].topics, topics);
+        assert!(matches!(receiver.drain_priority().as_slice(),
+            [RpcOut::Subscribe(observed)] if observed == &topic));
+        // An old receiver must still receive new messages from the same sender.
+        assert!(gs.send_message(peer, RpcOut::Unsubscribe(topic.clone())));
+        assert!(matches!(receiver.drain_priority().as_slice(),
+            [RpcOut::Unsubscribe(observed)] if observed == &topic));
+        let newcomer = PeerId::random();
+        assert!(gs.has_backoff_capacity(&peer));
+        assert!(!gs.has_backoff_capacity(&newcomer));
+
+        drop(first_handler);
+        gs.on_swarm_event(FromSwarm::ConnectionClosed(ConnectionClosed {
+            peer_id: peer,
+            connection_id: first,
+            endpoint: &endpoint,
+            remaining_established: 0,
+            cause: None,
+        }));
+        assert!(!gs.connected_peers.contains_key(&peer));
+        assert!(!gs.pending_handler_peers.contains(&peer));
+        assert!(gs.has_backoff_capacity(&newcomer));
+    }
+}
+
+#[test]
+fn logex_backoff_refused_reconnect_preserves_disconnected_identity() {
+    for outbound in [false, true] {
+        let config = ConfigBuilder::default()
+            .cache_limits(crate::CacheLimits {
+                backoff_peers: 1,
+                ..Default::default()
+            })
+            .build()
+            .unwrap();
+        let (mut gs, _, _, _) = inject_nodes1().gs_config(config).create_network();
+        let peer = PeerId::random();
+        let connection = ConnectionId::new_unchecked(90_201);
+        let (handler, endpoint) = logex_backoff_admit(&mut gs, peer, connection, outbound).unwrap();
+        gs.on_swarm_event(FromSwarm::ConnectionEstablished(ConnectionEstablished {
+            peer_id: peer,
+            connection_id: connection,
+            endpoint: &endpoint,
+            failed_addresses: &[],
+            other_established: 0,
+        }));
+        let topic = Topic::new("allowed").hash();
+        gs.handle_prune(&peer, vec![(topic.clone(), vec![], Some(60))]);
+        let deadline = gs.backoffs.get_backoff_time(&topic, &peer).unwrap();
+        drop(handler);
+        gs.on_swarm_event(FromSwarm::ConnectionClosed(ConnectionClosed {
+            peer_id: peer,
+            connection_id: connection,
+            endpoint: &endpoint,
+            remaining_established: 0,
+            cause: None,
+        }));
+        let reconnect = ConnectionId::new_unchecked(90_202);
+        let (handler, _) = logex_backoff_admit(&mut gs, peer, reconnect, outbound).unwrap();
+        drop(handler);
+        logex_backoff_sibling_denial(&mut gs, peer, reconnect, outbound);
+        assert!(gs.connected_peers.is_empty());
+        assert_eq!(gs.backoffs.get_backoff_time(&topic, &peer), Some(deadline));
+        assert!(gs.has_backoff_capacity(&peer));
+        let newcomer = PeerId::random();
+        assert!(!gs.has_backoff_capacity(&newcomer));
+        let denial = match logex_backoff_admit(
+            &mut gs,
+            newcomer,
+            ConnectionId::new_unchecked(90_203),
+            outbound,
+        ) {
+            Err(cause) => cause,
+            Ok(_) => panic!("refused reconnect must not discard its retained backoff"),
+        };
+        assert!(denial.downcast_ref::<crate::BackoffCapacity>().is_some());
+    }
+}
+
+#[test]
+fn logex_backoff_default_identity_capacity_preserves_required_delays() {
+    const CAPACITY: usize = 4_096;
+    let topic = Topic::new("allowed").hash();
+    let mut gs = Behaviour::new_with_subscription_filter(
+        MessageAuthenticity::Anonymous,
+        ConfigBuilder::default()
+            .validation_mode(ValidationMode::Anonymous)
+            .build()
+            .unwrap(),
+        WhitelistSubscriptionFilter(HashSet::from([topic.clone()])),
+    )
+    .unwrap();
+    let mut retained = Vec::with_capacity(CAPACITY);
+    for index in 0..CAPACITY {
+        let peer = PeerId::random();
+        let connection = ConnectionId::new_unchecked(100_000 + index);
+        let (handler, endpoint) =
+            logex_backoff_admit(&mut gs, peer, connection, index % 2 == 0).unwrap();
+        gs.on_swarm_event(FromSwarm::ConnectionEstablished(ConnectionEstablished {
+            peer_id: peer,
+            connection_id: connection,
+            endpoint: &endpoint,
+            failed_addresses: &[],
+            other_established: 0,
+        }));
+        gs.handle_prune(&peer, vec![(topic.clone(), vec![], Some(3_600))]);
+        let deadline = gs
+            .backoffs
+            .get_backoff_time(&topic, &peer)
+            .expect("permitted PRUNE must retain its delay");
+        retained.push((peer, deadline));
+        drop(handler);
+        gs.on_swarm_event(FromSwarm::ConnectionClosed(ConnectionClosed {
+            peer_id: peer,
+            connection_id: connection,
+            endpoint: &endpoint,
+            remaining_established: 0,
+            cause: None,
+        }));
+        assert!(gs.connected_peers.is_empty());
+    }
+    // Check every required deadline, including the oldest, after identity churn.
+    for (peer, deadline) in &retained {
+        assert_eq!(gs.backoffs.get_backoff_time(&topic, peer), Some(*deadline));
+    }
+    let first = retained[0].0;
+    let reconnect = ConnectionId::new_unchecked(110_000);
+    let (handler, endpoint) = logex_backoff_admit(&mut gs, first, reconnect, true)
+        .expect("a retained identity must be allowed to reconnect at capacity");
+    gs.on_swarm_event(FromSwarm::ConnectionEstablished(ConnectionEstablished {
+        peer_id: first,
+        connection_id: reconnect,
+        endpoint: &endpoint,
+        failed_addresses: &[],
+        other_established: 0,
+    }));
+    for outbound in [false, true] {
+        let newcomer = PeerId::random();
+        assert!(
+            logex_backoff_admit(
+                &mut gs,
+                newcomer,
+                ConnectionId::new_unchecked(110_001 + usize::from(outbound)),
+                outbound,
+            )
+            .is_err(),
+            "new identities must be refused when all 4,096 slots retain required delays"
+        );
+        assert!(!gs.connected_peers.contains_key(&newcomer));
+        assert_eq!(gs.connected_peers.len(), 1);
+        assert_eq!(
+            gs.backoffs.get_backoff_time(&topic, &first),
+            Some(retained[0].1)
+        );
+    }
+    drop(handler);
+    gs.on_swarm_event(FromSwarm::ConnectionClosed(ConnectionClosed {
+        peer_id: first,
+        connection_id: reconnect,
+        endpoint: &endpoint,
+        remaining_established: 0,
+        cause: None,
+    }));
+    assert!(gs.connected_peers.is_empty());
+}
+
 // helper functions for testing
 
 fn add_peer<D, F>(
@@ -242,6 +575,9 @@ where
     );
     let receiver = sender.new_receiver();
     let connection_id = ConnectionId::new_unchecked(0);
+    // This upstream fixture constructs PeerDetails directly instead of calling
+    // the established callback; retain the same admission ownership as production.
+    assert!(gs.backoffs.reserve_peer(&peer));
     gs.connected_peers.insert(
         peer,
         PeerDetails {
