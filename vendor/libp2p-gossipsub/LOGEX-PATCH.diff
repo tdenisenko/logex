@@ -63,9 +63,627 @@
  [dev-dependencies.libp2p-core]
  version = "0.43.1"
 
+--- a/src/backoff.rs
++++ b/src/backoff.rs
+@@ -35,8 +35,18 @@
+ #[derive(Copy, Clone)]
+ struct HeartbeatIndex(usize);
+
++#[derive(Default)]
++struct PeerRetention {
++    // Includes a provisional handler until Swarm reports admission or failure.
++    connected: bool,
++    topics: usize,
++}
++
+ /// Stores backoffs in an efficient manner.
+ pub(crate) struct BackoffStorage {
++    /// One identity reservation for connected peers or retained topic backoffs.
++    peers: HashMap<PeerId, PeerRetention>,
++    max_peers: usize,
+     /// Stores backoffs and the index in backoffs_by_heartbeat per peer per topic.
+     backoffs: HashMap<TopicHash, HashMap<PeerId, (Instant, HeartbeatIndex)>>,
+     /// Stores peer topic pairs per heartbeat (this is cyclic the current index is
+@@ -59,11 +69,14 @@
+         prune_backoff: &Duration,
+         heartbeat_interval: Duration,
+         backoff_slack: u32,
++        max_peers: usize,
+     ) -> BackoffStorage {
+         // We add one additional slot for partial heartbeat
+         let max_heartbeats =
+             Self::heartbeats(prune_backoff, &heartbeat_interval) + backoff_slack as usize + 1;
+         BackoffStorage {
++            peers: HashMap::new(),
++            max_peers,
+             backoffs: HashMap::new(),
+             backoffs_by_heartbeat: vec![HashSet::new(); max_heartbeats],
+             heartbeat_index: HeartbeatIndex(0),
+@@ -72,10 +85,59 @@
+         }
+     }
+
++    /// Reserve before constructing a handler. Retained identities can reconnect
++    /// even at capacity; new identities must wait for ordinary ownership expiry.
++    pub(crate) fn reserve_peer(&mut self, peer: &PeerId) -> bool {
++        if let Some(retained) = self.peers.get_mut(peer) {
++            retained.connected = true;
++            return true;
++        }
++        if self.peers.len() >= self.max_peers {
++            return false;
++        }
++        self.peers.insert(
++            *peer,
++            PeerRetention {
++                connected: true,
++                topics: 0,
++            },
++        );
++        true
++    }
++
++    pub(crate) fn has_capacity(&self, peer: &PeerId) -> bool {
++        self.peers.len() < self.max_peers || self.peers.contains_key(peer)
++    }
++
++    /// Release only after the behaviour has removed the final connection ID,
++    /// including a provisional connection refused by a sibling behaviour.
++    pub(crate) fn release_peer(&mut self, peer: &PeerId) {
++        if let Entry::Occupied(mut entry) = self.peers.entry(*peer) {
++            entry.get_mut().connected = false;
++            if entry.get().topics == 0 {
++                entry.remove();
++            }
++        }
++    }
++
+     /// Updates the backoff for a peer (if there is already a more restrictive backoff then this
+-    /// call doesn't change anything).
++    /// call doesn't change anything). Only admitted identities can retain state.
+     pub(crate) fn update_backoff(&mut self, topic: &TopicHash, peer: &PeerId, time: Duration) {
+-        let Some(instant) = Instant::now().checked_add(time) else {
++        self.update_backoff_at(topic, peer, time, Instant::now());
++    }
++
++    fn update_backoff_at(
++        &mut self,
++        topic: &TopicHash,
++        peer: &PeerId,
++        time: Duration,
++        now: Instant,
++    ) {
++        let Some(retained) = self.peers.get_mut(peer) else {
++            tracing::debug!(%peer, "ignoring backoff without connection admission");
++            return;
++        };
++        let Some(instant) = now.checked_add(time) else {
+             tracing::warn!("ignoring oversized prune backoff");
+             return;
+         };
+@@ -118,14 +180,14 @@
+                     self.backoff_slack,
+                 );
+                 v.insert((instant, index));
++                retained.topics += 1;
+             }
+         };
+     }
+
+     /// Checks if a given peer is backoffed for the given topic. This method respects the
+-    /// configured BACKOFF_SLACK and may return true even if the backup is already over.
+-    /// It is guaranteed to return false if the backoff is not over and eventually if enough time
+-    /// passed true if the backoff is over.
++    /// configured BACKOFF_SLACK and may return true even if the backoff is already over.
++    /// It stays true until heartbeat cleanup observes expiry of the delay and slack.
+     ///
+     /// This method should be used for deciding if we can already send a GRAFT to a previously
+     /// backoffed peer.
+@@ -152,11 +214,15 @@
+     /// Applies a heartbeat. That should be called regularly in intervals of length
+     /// `heartbeat_interval`.
+     pub(crate) fn heartbeat(&mut self) {
++        self.heartbeat_at(Instant::now());
++    }
++
++    fn heartbeat_at(&mut self, now: Instant) {
+         // Clean up backoffs_by_heartbeat
+         if let Some(s) = self.backoffs_by_heartbeat.get_mut(self.heartbeat_index.0) {
+             let backoffs = &mut self.backoffs;
++            let peers = &mut self.peers;
+             let slack = self.heartbeat_interval * self.backoff_slack;
+-            let now = Instant::now();
+             s.retain(|(topic, peer)| {
+                 let keep = match Self::get_backoff_time_from_backoffs(backoffs, topic, peer) {
+                     Some(backoff_time) => backoff_time
+@@ -168,8 +234,16 @@
+                 if !keep {
+                     // remove from backoffs
+                     if let Entry::Occupied(mut m) = backoffs.entry(topic.clone()) {
+-                        if m.get_mut().remove(peer).is_some() && m.get().is_empty() {
+-                            m.remove();
++                        if m.get_mut().remove(peer).is_some() {
++                            if let Entry::Occupied(mut retained) = peers.entry(*peer) {
++                                retained.get_mut().topics -= 1;
++                                if retained.get().topics == 0 && !retained.get().connected {
++                                    retained.remove();
++                                }
++                            }
++                            if m.get().is_empty() {
++                                m.remove();
++                            }
+                         }
+                     }
+                 }
+@@ -183,3 +257,124 @@
+             HeartbeatIndex((self.heartbeat_index.0 + 1) % self.backoffs_by_heartbeat.len());
+     }
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn storage(capacity: usize) -> BackoffStorage {
++        BackoffStorage::new(&Duration::from_secs(4), Duration::from_secs(1), 2, capacity)
++    }
++
++    // Drive ordinary one-second heartbeats with an explicit clock. Long delays
++    // cross the same wheel buckets repeatedly; no sleeping or early expiry.
++    fn advance_to(storage: &mut BackoffStorage, next_tick: &mut Instant, end: Instant) {
++        while *next_tick <= end {
++            storage.heartbeat_at(*next_tick);
++            *next_tick += Duration::from_secs(1);
++        }
++    }
++
++    #[test]
++    fn logex_backoff_identity_admission_and_connection_ownership() {
++        let now = Instant::now();
++        let peer = PeerId::random();
++        let newcomer = PeerId::random();
++        let topic = TopicHash::from_raw("allowed");
++        let mut zero = storage(0);
++        assert!(!zero.reserve_peer(&peer));
++        zero.update_backoff_at(&topic, &peer, Duration::from_secs(4), now);
++        assert!(zero.peers.is_empty());
++        assert!(zero.backoffs.is_empty());
++
++        let mut one = storage(1);
++        assert!(one.reserve_peer(&peer));
++        assert!(one.reserve_peer(&peer));
++        assert!(!one.reserve_peer(&newcomer));
++        one.update_backoff_at(&topic, &newcomer, Duration::from_secs(4), now);
++        assert!(one.backoffs.is_empty());
++        let mut next_tick = now + Duration::from_secs(1);
++        advance_to(&mut one, &mut next_tick, now + Duration::from_secs(20));
++        assert!(
++            !one.reserve_peer(&newcomer),
++            "a connected owner does not expire"
++        );
++        one.release_peer(&peer);
++        one.release_peer(&peer);
++        assert!(one.reserve_peer(&newcomer));
++        assert_eq!(one.peers.len(), 1);
++    }
++
++    #[test]
++    fn logex_backoff_identity_waits_for_every_topic_and_slack() {
++        let now = Instant::now();
++        let mut next_tick = now + Duration::from_secs(1);
++        let peer = PeerId::random();
++        let newcomer = PeerId::random();
++        let a = TopicHash::from_raw("a");
++        let b = TopicHash::from_raw("b");
++        let mut store = storage(1);
++        assert!(store.reserve_peer(&peer));
++        store.update_backoff_at(&a, &peer, Duration::from_secs(5), now);
++        store.update_backoff_at(&b, &peer, Duration::from_secs(12), now);
++        store.release_peer(&peer);
++        assert_eq!(store.peers[&peer].topics, 2);
++
++        advance_to(&mut store, &mut next_tick, now + Duration::from_secs(6));
++        assert!(store.is_backoff_with_slack(&a, &peer));
++        assert!(!store.reserve_peer(&newcomer));
++        advance_to(&mut store, &mut next_tick, now + Duration::from_secs(10));
++        assert!(!store.is_backoff_with_slack(&a, &peer));
++        assert!(store.is_backoff_with_slack(&b, &peer));
++        assert_eq!(store.peers[&peer].topics, 1);
++        assert!(!store.reserve_peer(&newcomer));
++        advance_to(&mut store, &mut next_tick, now + Duration::from_secs(13));
++        assert!(
++            store.is_backoff_with_slack(&b, &peer),
++            "retain required slack"
++        );
++        advance_to(&mut store, &mut next_tick, now + Duration::from_secs(21));
++        assert!(store.backoffs.is_empty());
++        assert!(store.peers.is_empty());
++        assert!(store.backoffs_by_heartbeat.iter().all(HashSet::is_empty));
++        assert!(store.reserve_peer(&newcomer));
++    }
++
++    #[test]
++    fn logex_backoff_extension_and_reconnect_keep_one_reservation() {
++        let now = Instant::now();
++        let mut next_tick = now + Duration::from_secs(1);
++        let peer = PeerId::random();
++        let newcomer = PeerId::random();
++        let topic = TopicHash::from_raw("allowed");
++        let mut store = storage(1);
++        assert!(store.reserve_peer(&peer));
++        store.update_backoff_at(&topic, &peer, Duration::from_secs(4), now);
++        advance_to(&mut store, &mut next_tick, now + Duration::from_secs(2));
++        let updated = now + Duration::from_secs(2);
++        store.update_backoff_at(&topic, &peer, Duration::from_secs(15), updated);
++        store.update_backoff_at(&topic, &peer, Duration::from_secs(1), updated);
++        let deadline = now + Duration::from_secs(17);
++        assert_eq!(store.get_backoff_time(&topic, &peer), Some(deadline));
++        assert_eq!(store.peers[&peer].topics, 1);
++        store.release_peer(&peer);
++        advance_to(&mut store, &mut next_tick, now + Duration::from_secs(10));
++        assert!(!store.reserve_peer(&newcomer));
++        assert!(
++            store.reserve_peer(&peer),
++            "retained identity can reconnect at capacity"
++        );
++        assert_eq!(store.get_backoff_time(&topic, &peer), Some(deadline));
++        advance_to(&mut store, &mut next_tick, now + Duration::from_secs(18));
++        assert!(store.is_backoff_with_slack(&topic, &peer));
++        advance_to(&mut store, &mut next_tick, now + Duration::from_secs(25));
++        assert!(store.backoffs.is_empty());
++        assert_eq!(store.peers[&peer].topics, 0);
++        assert!(
++            !store.reserve_peer(&newcomer),
++            "connected identity remains reserved"
++        );
++        store.release_peer(&peer);
++        assert!(store.reserve_peer(&newcomer));
++    }
++}
 --- a/src/behaviour/tests.rs
 +++ b/src/behaviour/tests.rs
-@@ -236,18 +236,22 @@
+@@ -172,6 +172,340 @@
+
+ fn inject_nodes1() -> InjectNodes<IdentityTransform, AllowAllSubscriptionFilter> {
+     InjectNodes::<IdentityTransform, AllowAllSubscriptionFilter>::default()
++}
++
++// Swarm 0.47.1 sends a failure, not ConnectionClosed, when a later composed
++// behaviour rejects an established callback. These controls reproduce that
++// synchronous callback sequence without sockets or transport execution.
++fn logex_backoff_admit<F: TopicSubscriptionFilter + Send + 'static>(
++    gs: &mut Behaviour<IdentityTransform, F>,
++    peer: PeerId,
++    connection: ConnectionId,
++    outbound: bool,
++) -> Result<(Handler, ConnectedPoint), ConnectionDenied> {
++    let address = "/memory/1234".parse::<Multiaddr>().unwrap();
++    if outbound {
++        let handler = gs.handle_established_outbound_connection(
++            connection,
++            peer,
++            &address,
++            Endpoint::Dialer,
++            PortUse::Reuse,
++        )?;
++        Ok((
++            handler,
++            ConnectedPoint::Dialer {
++                address,
++                role_override: Endpoint::Dialer,
++                port_use: PortUse::Reuse,
++            },
++        ))
++    } else {
++        let handler =
++            gs.handle_established_inbound_connection(connection, peer, &address, &address)?;
++        Ok((
++            handler,
++            ConnectedPoint::Listener {
++                local_addr: address.clone(),
++                send_back_addr: address,
++            },
++        ))
++    }
++}
++
++fn logex_backoff_sibling_denial(
++    gs: &mut Behaviour,
++    peer: PeerId,
++    connection: ConnectionId,
++    outbound: bool,
++) {
++    let cause = ConnectionDenied::new(std::io::Error::other("test sibling denial"));
++    if outbound {
++        let error = libp2p_swarm::DialError::Denied { cause };
++        gs.on_swarm_event(FromSwarm::DialFailure(
++            libp2p_swarm::behaviour::DialFailure {
++                peer_id: Some(peer),
++                connection_id: connection,
++                error: &error,
++            },
++        ));
++    } else {
++        let error = libp2p_swarm::ListenError::Denied { cause };
++        let address = "/memory/1234".parse::<Multiaddr>().unwrap();
++        gs.on_swarm_event(FromSwarm::ListenFailure(
++            libp2p_swarm::behaviour::ListenFailure {
++                peer_id: Some(peer),
++                connection_id: connection,
++                local_addr: &address,
++                send_back_addr: &address,
++                error: &error,
++            },
++        ));
++    }
++}
++
++#[test]
++fn logex_backoff_sibling_denial_releases_first_connection() {
++    for outbound in [false, true] {
++        let config = ConfigBuilder::default()
++            .cache_limits(crate::CacheLimits {
++                backoff_peers: 1,
++                ..Default::default()
++            })
++            .build()
++            .unwrap();
++        let (mut gs, _, _, _) = inject_nodes1().gs_config(config).create_network();
++        let peer = PeerId::random();
++        let connection = ConnectionId::new_unchecked(90_001);
++        let (handler, _) = logex_backoff_admit(&mut gs, peer, connection, outbound).unwrap();
++        assert_eq!(gs.connected_peers[&peer].connections, vec![connection]);
++
++        drop(handler); // The derived sibling callback drops earlier handlers on error.
++        logex_backoff_sibling_denial(&mut gs, peer, connection, outbound);
++        assert!(
++            gs.connected_peers.is_empty(),
++            "sibling denial must roll back provisional peer state"
++        );
++        assert!(gs.pending_handler_peers.is_empty());
++        assert!(gs.events.is_empty());
++
++        let replacement = PeerId::random();
++        assert!(gs.has_backoff_capacity(&replacement));
++        let (handler, _) = logex_backoff_admit(
++            &mut gs,
++            replacement,
++            ConnectionId::new_unchecked(90_004),
++            outbound,
++        )
++        .unwrap();
++        drop(handler);
++        logex_backoff_sibling_denial(
++            &mut gs,
++            replacement,
++            ConnectionId::new_unchecked(90_004),
++            outbound,
++        );
++        assert!(gs.connected_peers.is_empty());
++    }
++}
++
++#[test]
++fn logex_backoff_sibling_denial_preserves_established_connection() {
++    for outbound in [false, true] {
++        let config = ConfigBuilder::default()
++            .cache_limits(crate::CacheLimits {
++                backoff_peers: 1,
++                ..Default::default()
++            })
++            .build()
++            .unwrap();
++        let (mut gs, _, _, _) = inject_nodes1().gs_config(config).create_network();
++        let peer = PeerId::random();
++        let first = ConnectionId::new_unchecked(90_101);
++        let rejected = ConnectionId::new_unchecked(90_102);
++        let (first_handler, endpoint) =
++            logex_backoff_admit(&mut gs, peer, first, !outbound).unwrap();
++        gs.on_swarm_event(FromSwarm::ConnectionEstablished(ConnectionEstablished {
++            peer_id: peer,
++            connection_id: first,
++            endpoint: &endpoint,
++            failed_addresses: &[],
++            other_established: 0,
++        }));
++        // A different attempt can fail before reaching gossip while this first
++        // connection is established. Its failure must not disturb the owner.
++        logex_backoff_sibling_denial(&mut gs, peer, ConnectionId::new_unchecked(90_002), outbound);
++        assert_eq!(gs.connected_peers[&peer].connections, vec![first]);
++        logex_backoff_sibling_denial(
++            &mut gs,
++            PeerId::random(),
++            ConnectionId::new_unchecked(90_003),
++            outbound,
++        );
++        assert_eq!(gs.connected_peers.len(), 1);
++
++        let topic = Topic::new("allowed").hash();
++        gs.handle_received_subscriptions(
++            &[Subscription {
++                action: SubscriptionAction::Subscribe,
++                topic_hash: topic.clone(),
++            }],
++            &peer,
++        );
++        let topics = gs.connected_peers[&peer].topics.clone();
++        assert!(topics.contains(&topic));
++        let mut receiver = gs.connected_peers[&peer].sender.new_receiver();
++        assert!(gs.send_message(peer, RpcOut::Subscribe(topic.clone())));
++
++        let (handler, _) = logex_backoff_admit(&mut gs, peer, rejected, outbound).unwrap();
++        drop(handler);
++        logex_backoff_sibling_denial(&mut gs, peer, rejected, outbound);
++        assert_eq!(gs.connected_peers[&peer].connections, vec![first]);
++        assert_eq!(gs.connected_peers[&peer].outbound, !outbound);
++        assert_eq!(gs.connected_peers[&peer].topics, topics);
++        assert!(matches!(receiver.drain_priority().as_slice(),
++            [RpcOut::Subscribe(observed)] if observed == &topic));
++        // An old receiver must still receive new messages from the same sender.
++        assert!(gs.send_message(peer, RpcOut::Unsubscribe(topic.clone())));
++        assert!(matches!(receiver.drain_priority().as_slice(),
++            [RpcOut::Unsubscribe(observed)] if observed == &topic));
++        let newcomer = PeerId::random();
++        assert!(gs.has_backoff_capacity(&peer));
++        assert!(!gs.has_backoff_capacity(&newcomer));
++
++        drop(first_handler);
++        gs.on_swarm_event(FromSwarm::ConnectionClosed(ConnectionClosed {
++            peer_id: peer,
++            connection_id: first,
++            endpoint: &endpoint,
++            remaining_established: 0,
++            cause: None,
++        }));
++        assert!(!gs.connected_peers.contains_key(&peer));
++        assert!(!gs.pending_handler_peers.contains(&peer));
++        assert!(gs.has_backoff_capacity(&newcomer));
++    }
++}
++
++#[test]
++fn logex_backoff_refused_reconnect_preserves_disconnected_identity() {
++    for outbound in [false, true] {
++        let config = ConfigBuilder::default()
++            .cache_limits(crate::CacheLimits {
++                backoff_peers: 1,
++                ..Default::default()
++            })
++            .build()
++            .unwrap();
++        let (mut gs, _, _, _) = inject_nodes1().gs_config(config).create_network();
++        let peer = PeerId::random();
++        let connection = ConnectionId::new_unchecked(90_201);
++        let (handler, endpoint) = logex_backoff_admit(&mut gs, peer, connection, outbound).unwrap();
++        gs.on_swarm_event(FromSwarm::ConnectionEstablished(ConnectionEstablished {
++            peer_id: peer,
++            connection_id: connection,
++            endpoint: &endpoint,
++            failed_addresses: &[],
++            other_established: 0,
++        }));
++        let topic = Topic::new("allowed").hash();
++        gs.handle_prune(&peer, vec![(topic.clone(), vec![], Some(60))]);
++        let deadline = gs.backoffs.get_backoff_time(&topic, &peer).unwrap();
++        drop(handler);
++        gs.on_swarm_event(FromSwarm::ConnectionClosed(ConnectionClosed {
++            peer_id: peer,
++            connection_id: connection,
++            endpoint: &endpoint,
++            remaining_established: 0,
++            cause: None,
++        }));
++        let reconnect = ConnectionId::new_unchecked(90_202);
++        let (handler, _) = logex_backoff_admit(&mut gs, peer, reconnect, outbound).unwrap();
++        drop(handler);
++        logex_backoff_sibling_denial(&mut gs, peer, reconnect, outbound);
++        assert!(gs.connected_peers.is_empty());
++        assert_eq!(gs.backoffs.get_backoff_time(&topic, &peer), Some(deadline));
++        assert!(gs.has_backoff_capacity(&peer));
++        let newcomer = PeerId::random();
++        assert!(!gs.has_backoff_capacity(&newcomer));
++        let denial = match logex_backoff_admit(
++            &mut gs,
++            newcomer,
++            ConnectionId::new_unchecked(90_203),
++            outbound,
++        ) {
++            Err(cause) => cause,
++            Ok(_) => panic!("refused reconnect must not discard its retained backoff"),
++        };
++        assert!(denial.downcast_ref::<crate::BackoffCapacity>().is_some());
++    }
++}
++
++#[test]
++fn logex_backoff_default_identity_capacity_preserves_required_delays() {
++    const CAPACITY: usize = 4_096;
++    let topic = Topic::new("allowed").hash();
++    let mut gs = Behaviour::new_with_subscription_filter(
++        MessageAuthenticity::Anonymous,
++        ConfigBuilder::default()
++            .validation_mode(ValidationMode::Anonymous)
++            .build()
++            .unwrap(),
++        WhitelistSubscriptionFilter(HashSet::from([topic.clone()])),
++    )
++    .unwrap();
++    let mut retained = Vec::with_capacity(CAPACITY);
++    for index in 0..CAPACITY {
++        let peer = PeerId::random();
++        let connection = ConnectionId::new_unchecked(100_000 + index);
++        let (handler, endpoint) =
++            logex_backoff_admit(&mut gs, peer, connection, index % 2 == 0).unwrap();
++        gs.on_swarm_event(FromSwarm::ConnectionEstablished(ConnectionEstablished {
++            peer_id: peer,
++            connection_id: connection,
++            endpoint: &endpoint,
++            failed_addresses: &[],
++            other_established: 0,
++        }));
++        gs.handle_prune(&peer, vec![(topic.clone(), vec![], Some(3_600))]);
++        let deadline = gs
++            .backoffs
++            .get_backoff_time(&topic, &peer)
++            .expect("permitted PRUNE must retain its delay");
++        retained.push((peer, deadline));
++        drop(handler);
++        gs.on_swarm_event(FromSwarm::ConnectionClosed(ConnectionClosed {
++            peer_id: peer,
++            connection_id: connection,
++            endpoint: &endpoint,
++            remaining_established: 0,
++            cause: None,
++        }));
++        assert!(gs.connected_peers.is_empty());
++    }
++    // Check every required deadline, including the oldest, after identity churn.
++    for (peer, deadline) in &retained {
++        assert_eq!(gs.backoffs.get_backoff_time(&topic, peer), Some(*deadline));
++    }
++    let first = retained[0].0;
++    let reconnect = ConnectionId::new_unchecked(110_000);
++    let (handler, endpoint) = logex_backoff_admit(&mut gs, first, reconnect, true)
++        .expect("a retained identity must be allowed to reconnect at capacity");
++    gs.on_swarm_event(FromSwarm::ConnectionEstablished(ConnectionEstablished {
++        peer_id: first,
++        connection_id: reconnect,
++        endpoint: &endpoint,
++        failed_addresses: &[],
++        other_established: 0,
++    }));
++    for outbound in [false, true] {
++        let newcomer = PeerId::random();
++        assert!(
++            logex_backoff_admit(
++                &mut gs,
++                newcomer,
++                ConnectionId::new_unchecked(110_001 + usize::from(outbound)),
++                outbound,
++            )
++            .is_err(),
++            "new identities must be refused when all 4,096 slots retain required delays"
++        );
++        assert!(!gs.connected_peers.contains_key(&newcomer));
++        assert_eq!(gs.connected_peers.len(), 1);
++        assert_eq!(
++            gs.backoffs.get_backoff_time(&topic, &first),
++            Some(retained[0].1)
++        );
++    }
++    drop(handler);
++    gs.on_swarm_event(FromSwarm::ConnectionClosed(ConnectionClosed {
++        peer_id: first,
++        connection_id: reconnect,
++        endpoint: &endpoint,
++        remaining_established: 0,
++        cause: None,
++    }));
++    assert!(gs.connected_peers.is_empty());
+ }
+
+ // helper functions for testing
+@@ -236,18 +570,25 @@
          }
      };
 
@@ -76,6 +694,9 @@
 +    );
      let receiver = sender.new_receiver();
      let connection_id = ConnectionId::new_unchecked(0);
++    // This upstream fixture constructs PeerDetails directly instead of calling
++    // the established callback; retain the same admission ownership as production.
++    assert!(gs.backoffs.reserve_peer(&peer));
      gs.connected_peers.insert(
          peer,
          PeerDetails {
@@ -90,7 +711,7 @@
          },
      );
 
-@@ -452,10 +456,9 @@
+@@ -452,10 +793,9 @@
      // collect all the subscriptions
      let subscriptions = receivers
          .into_values()
@@ -104,7 +725,7 @@
                      collected_subscriptions += 1
                  }
              }
-@@ -513,10 +516,9 @@
+@@ -513,10 +853,9 @@
      // collect all the subscriptions
      let subscriptions = receivers
          .into_values()
@@ -118,7 +739,7 @@
                      collected_subscriptions += 1
                  }
              }
-@@ -588,21 +590,13 @@
+@@ -588,21 +927,13 @@
          let mut new_receivers = HashMap::new();
          let mut acc = 0;
 
@@ -144,7 +765,7 @@
          }
          (acc, new_receivers)
      }
-@@ -632,18 +626,22 @@
+@@ -632,18 +963,22 @@
              &address,
          )
          .unwrap();
@@ -169,7 +790,7 @@
              },
          );
          receivers.insert(random_peer, receiver);
-@@ -734,10 +732,9 @@
+@@ -734,10 +1069,9 @@
      // Collect all publish messages
      let publishes = receivers
          .into_values()
@@ -183,7 +804,7 @@
                      collected_publish.push(message);
                  }
              }
-@@ -819,10 +816,9 @@
+@@ -819,10 +1153,9 @@
      // Collect all publish messages
      let publishes = receivers
          .into_values()
@@ -197,7 +818,7 @@
                      collected_publish.push(message);
                  }
              }
-@@ -867,10 +863,9 @@
+@@ -867,10 +1200,9 @@
      // collect all the SendEvents
      let subscriptions = receivers.into_iter().fold(
          HashMap::<PeerId, Vec<String>>::new(),
@@ -211,7 +832,7 @@
                      let mut peer_subs = collected_subscriptions.remove(&peer).unwrap_or_default();
                      peer_subs.push(topic.into_string());
                      collected_subscriptions.insert(peer, peer_subs);
-@@ -1035,12 +1030,16 @@
+@@ -1035,12 +1367,16 @@
          gs.connected_peers.insert(
              peer_id,
              PeerDetails {
@@ -230,7 +851,7 @@
              },
          );
      }
-@@ -1103,10 +1102,9 @@
+@@ -1103,10 +1439,9 @@
      // the messages we are sending
      let sent_messages = receivers
          .into_values()
@@ -244,7 +865,7 @@
                      collected_messages.push(message)
                  }
              }
-@@ -1159,28 +1157,23 @@
+@@ -1159,28 +1494,23 @@
 
          // is the message is being sent?
          let mut message_exists = false;
@@ -284,7 +905,7 @@
          // default history_length is 5, expect no messages after shift > 5
          if shift < 5 {
              assert!(
-@@ -1217,7 +1210,7 @@
+@@ -1217,7 +1547,7 @@
 
  #[test]
  fn test_handle_iwant_msg_but_already_sent_idontwant() {
@@ -293,7 +914,7 @@
          .peer_no(20)
          .topics(Vec::new())
          .to_subscribe(true)
-@@ -1263,8 +1256,8 @@
+@@ -1263,8 +1593,8 @@
      gs.handle_iwant(&peers[1], vec![msg_id.clone()]);
 
      // Check that no messages are sent.
@@ -304,7 +925,7 @@
      });
  }
 
-@@ -1284,10 +1277,9 @@
+@@ -1284,10 +1614,9 @@
 
      // check that we sent an IWANT request for `unknown id`
      let mut iwant_exists = false;
@@ -318,7 +939,7 @@
              if message_ids
                  .iter()
                  .any(|m| *m == MessageId::new(b"unknown id"))
-@@ -1304,6 +1296,108 @@
+@@ -1304,6 +1633,108 @@
      );
  }
 
@@ -427,7 +1048,7 @@
  /// tests that an event is not created when a peer shares that it has a message that
  /// we already have
  #[test]
-@@ -1462,29 +1556,13 @@
+@@ -1462,29 +1893,13 @@
  ) -> (usize, HashMap<PeerId, Receiver>) {
      let mut new_receivers = HashMap::new();
      let mut collected_messages = 0;
@@ -462,7 +1083,7 @@
      }
      (collected_messages, new_receivers)
  }
-@@ -1495,21 +1573,10 @@
+@@ -1495,21 +1910,10 @@
  ) -> HashMap<PeerId, Receiver> {
      gs.events.clear();
      let mut new_receivers = HashMap::new();
@@ -488,7 +1109,7 @@
      }
      new_receivers
  }
-@@ -1715,10 +1782,9 @@
+@@ -1715,10 +2119,9 @@
      };
      gs.handle_received_message(message.clone(), &local_id);
      assert_eq!(
@@ -502,7 +1123,7 @@
          fwds +=1;
          }
                  }
-@@ -1859,11 +1925,10 @@
+@@ -1859,11 +2262,10 @@
      }
 
      // assert that no gossip gets sent to explicit peer
@@ -517,7 +1138,7 @@
              gossips += 1;
          }
      }
-@@ -2264,10 +2329,9 @@
+@@ -2264,10 +2666,9 @@
      // Collect all publish messages
      let publishes = receivers
          .into_values()
@@ -531,7 +1152,7 @@
                      collected_publish.push(message);
                  }
              }
-@@ -2750,13 +2814,9 @@
+@@ -2750,13 +3151,9 @@
          RpcOut::IHave(IHave {
              topic_hash,
              message_ids,
@@ -548,7 +1169,7 @@
          }
          _ => false,
      });
-@@ -2826,10 +2886,9 @@
+@@ -2826,10 +3223,9 @@
      let sent_messages =
          receivers
              .into_iter()
@@ -562,7 +1183,7 @@
                          collected_messages.push((peer_id, message));
                      }
                  }
-@@ -2913,13 +2972,9 @@
+@@ -2913,13 +3309,9 @@
 
      // check that we sent exactly one IWANT request to p2
      let (control_msgs, _) = count_control_msgs(receivers, |peer, c| match c {
@@ -579,7 +1200,7 @@
          }
          _ => false,
      });
-@@ -2971,17 +3026,17 @@
+@@ -2971,17 +3363,17 @@
      gs.publish(topic, publish_data).unwrap();
 
      // Collect all publish messages
@@ -607,7 +1228,7 @@
 
      // assert only published to p2
      assert_eq!(publishes.len(), 1);
-@@ -3026,17 +3081,17 @@
+@@ -3026,17 +3418,17 @@
      gs.publish(Topic::new("test"), publish_data).unwrap();
 
      // Collect all publish messages
@@ -635,7 +1256,7 @@
 
      // assert only published to p2
      assert_eq!(publishes.len(), 1);
-@@ -3146,12 +3201,10 @@
+@@ -3146,12 +3538,10 @@
          },
      );
 
@@ -652,7 +1273,7 @@
 
      let control_action = ControlAction::IHave(IHave {
          topic_hash: topics[0].clone(),
-@@ -3172,8 +3225,9 @@
+@@ -3172,8 +3562,9 @@
          },
      );
 
@@ -664,7 +1285,7 @@
  }
 
  #[test]
-@@ -4248,7 +4302,7 @@
+@@ -4248,7 +4639,7 @@
 
      // create 5 peers with the same ip
      let addr = Multiaddr::from(Ipv4Addr::new(10, 1, 2, 3));
@@ -673,7 +1294,7 @@
          add_peer_with_addr(&mut gs, &[], false, false, addr.clone()).0,
          add_peer_with_addr(&mut gs, &[], false, false, addr.clone()).0,
          add_peer_with_addr(&mut gs, &[], true, false, addr.clone()).0,
-@@ -4258,7 +4312,7 @@
+@@ -4258,7 +4649,7 @@
 
      // create 4 other peers with other ip
      let addr2 = Multiaddr::from(Ipv4Addr::new(10, 1, 2, 4));
@@ -682,7 +1303,7 @@
          add_peer_with_addr(&mut gs, &[], false, false, addr2.clone()).0,
          add_peer_with_addr(&mut gs, &[], false, false, addr2.clone()).0,
          add_peer_with_addr(&mut gs, &[], true, false, addr2.clone()).0,
-@@ -4575,10 +4629,9 @@
+@@ -4575,10 +4966,9 @@
      }
 
      assert_eq!(
@@ -696,7 +1317,7 @@
                      fwds += 1;
                  }
              }
-@@ -4990,11 +5043,10 @@
+@@ -4990,11 +5380,10 @@
      // Collect publish messages to floodsub peers
      let publishes = receivers
          .into_iter()
@@ -712,7 +1333,7 @@
                  {
                      collected_publish += 1;
                  }
-@@ -5046,11 +5098,10 @@
+@@ -5046,11 +5435,10 @@
      // Collect publish messages to floodsub peers
      let publishes = receivers
          .into_iter()
@@ -728,7 +1349,7 @@
                  {
                      collected_publish += 1;
                  }
-@@ -5275,10 +5326,9 @@
+@@ -5275,10 +5663,9 @@
                                    receivers: HashMap<PeerId, Receiver>|
       -> HashMap<PeerId, Receiver> {
          let new_receivers = HashMap::new();
@@ -742,7 +1363,7 @@
                      gs1.on_connection_handler_event(
                          p2,
                          connection_id,
-@@ -5368,10 +5418,9 @@
+@@ -5368,10 +5755,9 @@
      assert_eq!(
          receivers
              .into_iter()
@@ -756,7 +1377,7 @@
                          assert_ne!(peer_id, peers[1]);
                          idontwants += 1;
                      }
-@@ -5410,10 +5459,9 @@
+@@ -5410,10 +5796,9 @@
      assert_eq!(
          receivers
              .into_iter()
@@ -770,7 +1391,7 @@
                          assert_ne!(peer_id, peers[1]);
                          idontwants += 1;
                      }
-@@ -5453,10 +5501,9 @@
+@@ -5453,10 +5838,9 @@
      assert_eq!(
          receivers
              .into_iter()
@@ -784,7 +1405,7 @@
                          idontwants += 1;
                      }
                  }
-@@ -5497,14 +5544,13 @@
+@@ -5497,14 +5881,13 @@
          .unwrap();
      let message_id = gs.config.message_id(&message);
      let peer = gs.connected_peers.get_mut(&peers[2]).unwrap();
@@ -803,7 +1424,7 @@
                      assert_ne!(peer_id, peers[2]);
                      fwds += 1;
                  }
-@@ -5546,7 +5592,7 @@
+@@ -5546,7 +5929,7 @@
          },
      );
      let peer = gs.connected_peers.get_mut(&peers[1]).unwrap();
@@ -812,7 +1433,7 @@
  }
 
  /// Test that a node clears stale IDONTWANT messages.
-@@ -5562,12 +5608,13 @@
+@@ -5562,12 +5945,13 @@
          .create_network();
 
      let peer = gs.connected_peers.get_mut(&peers[2]).unwrap();
@@ -830,7 +1451,7 @@
  }
 
  #[test]
-@@ -5589,12 +5636,13 @@
+@@ -5589,12 +5973,13 @@
      gs.connected_peers.insert(
          peer_id,
          PeerDetails {
@@ -846,7 +1467,7 @@
          },
      );
 
-@@ -5625,12 +5673,13 @@
+@@ -5625,12 +6010,13 @@
      gs.connected_peers.insert(
          slow_peer_id,
          PeerDetails {
@@ -862,7 +1483,7 @@
          },
      );
      let peer_id = PeerId::random();
-@@ -5638,12 +5687,16 @@
+@@ -5638,12 +6024,16 @@
      gs.connected_peers.insert(
          peer_id,
          PeerDetails {
@@ -881,7 +1502,7 @@
          },
      );
 
-@@ -5699,12 +5752,13 @@
+@@ -5699,12 +6089,13 @@
      gs.connected_peers.insert(
          slow_peer_id,
          PeerDetails {
@@ -897,7 +1518,7 @@
          },
      );
      peers.push(slow_peer_id);
-@@ -5716,12 +5770,16 @@
+@@ -5716,12 +6107,16 @@
      gs.connected_peers.insert(
          peer_id,
          PeerDetails {
@@ -916,7 +1537,7 @@
          },
      );
 
-@@ -5767,12 +5825,12 @@
+@@ -5767,12 +6162,12 @@
 
      let slow_peer_failed_messages = gs
          .events
@@ -931,7 +1552,7 @@
              _ => None,
          })
          .unwrap();
-@@ -5813,12 +5871,13 @@
+@@ -5813,12 +6208,13 @@
      gs.connected_peers.insert(
          slow_peer_id,
          PeerDetails {
@@ -947,7 +1568,7 @@
          },
      );
      peers.push(slow_peer_id);
-@@ -5830,12 +5889,16 @@
+@@ -5830,12 +6226,16 @@
      gs.connected_peers.insert(
          peer_id,
          PeerDetails {
@@ -966,7 +1587,7 @@
          },
      );
 
-@@ -5861,12 +5924,12 @@
+@@ -5861,12 +6261,12 @@
 
      let slow_peer_failed_messages = gs
          .events
@@ -981,7 +1602,7 @@
              _ => None,
          })
          .unwrap();
-@@ -5907,12 +5970,13 @@
+@@ -5907,12 +6307,13 @@
      gs.connected_peers.insert(
          slow_peer_id,
          PeerDetails {
@@ -997,7 +1618,7 @@
          },
      );
      peers.push(slow_peer_id);
-@@ -5924,12 +5988,16 @@
+@@ -5924,12 +6325,16 @@
      gs.connected_peers.insert(
          peer_id,
          PeerDetails {
@@ -1016,7 +1637,7 @@
          },
      );
 
-@@ -5955,12 +6023,12 @@
+@@ -5955,12 +6360,12 @@
 
      let slow_peer_failed_messages = gs
          .events
@@ -1031,7 +1652,7 @@
              _ => None,
          })
          .unwrap();
-@@ -6006,12 +6074,13 @@
+@@ -6006,12 +6411,13 @@
      gs.connected_peers.insert(
          slow_peer_id,
          PeerDetails {
@@ -1047,7 +1668,7 @@
          },
      );
      gs.as_peer_score_mut().add_peer(slow_peer_id);
-@@ -6020,12 +6089,16 @@
+@@ -6020,12 +6426,16 @@
      gs.connected_peers.insert(
          peer_id,
          PeerDetails {
@@ -1066,7 +1687,7 @@
          },
      );
 
-@@ -6048,7 +6121,7 @@
+@@ -6048,7 +6458,7 @@
 
      let mut gs: Behaviour = Behaviour::new(MessageAuthenticity::RandomAuthor, gs_config).unwrap();
 
@@ -1075,7 +1696,7 @@
      let topic_hash = Topic::new("Test").hash();
      let publish_data = vec![2; 59];
      let raw_message = gs.build_raw_message(topic_hash, publish_data).unwrap();
-@@ -6065,17 +6138,50 @@
+@@ -6065,17 +6475,50 @@
  }
 
  #[test]
@@ -1130,7 +1751,7 @@
  }
 
  /// Test that specific topic configurations are correctly applied
-@@ -6447,10 +6553,9 @@
+@@ -6447,10 +6890,9 @@
      // Collect publish messages
      let publishes = receivers
          .into_values()
@@ -1144,7 +1765,7 @@
                      collected_publish.push(message);
                  }
              }
-@@ -6603,6 +6708,7 @@
+@@ -6603,6 +7045,7 @@
          .to_subscribe(true)
          .gs_config(config)
          .create_network();
@@ -1152,7 +1773,7 @@
 
      let data = vec![0u8; max_size + 1];
      let raw_message = RawMessage {
-@@ -6637,9 +6743,6 @@
+@@ -6637,9 +7080,6 @@
          }) => {
              assert_eq!(propagation_source, peers[0]);
              assert_eq!(message.data.len(), max_size + 1);
@@ -1162,7 +1783,7 @@
          }
          _ => panic!("Unexpected event"),
      }
-@@ -6707,6 +6810,7 @@
+@@ -6707,6 +7147,7 @@
          .to_subscribe(true)
          .gs_config(config)
          .create_network();
@@ -1170,7 +1791,7 @@
 
      let data = vec![0u8; max_size - 100];
      let raw_message = RawMessage {
-@@ -6741,9 +6845,6 @@
+@@ -6741,9 +7182,6 @@
          }) => {
              assert_eq!(propagation_source, peers[0]);
              assert_eq!(message.data.len(), max_size - 100);
@@ -1180,7 +1801,7 @@
          }
          _ => panic!("Unexpected event"),
      }
-@@ -6787,3 +6888,1767 @@
+@@ -6787,3 +7225,1767 @@
          _ => panic!("Unexpected event"),
      }
  }
@@ -2978,8 +3599,8 @@
          SubscriptionAction,
      },
 -    FailedMessages, PublishError, SubscriptionError, TopicScoreParams, ValidationError,
-+    ControlQueueFull, FailedMessages, PublishError, SubscriptionError, TopicScoreParams,
-+    ValidationError,
++    BackoffCapacity, ControlQueueFull, FailedMessages, PublishError, SubscriptionError,
++    TopicScoreParams, ValidationError,
  };
 
  #[cfg(test)]
@@ -3109,9 +3730,11 @@
              explicit_peers: HashSet::new(),
              blacklisted_peers: HashSet::new(),
              mesh: HashMap::new(),
-@@ -444,7 +481,13 @@
+@@ -443,8 +480,15 @@
+                 &config.prune_backoff(),
                  config.heartbeat_interval(),
                  config.backoff_slack(),
++                limits.backoff_peers,
              ),
 -            mcache: MessageCache::new(config.history_gossip(), config.history_length()),
 +            mcache: MessageCache::with_limits(
@@ -3124,7 +3747,7 @@
              heartbeat: Delay::new(config.heartbeat_interval() + config.heartbeat_initial_delay()),
              heartbeat_ticks: 0,
              px_peers: HashSet::new(),
-@@ -452,12 +495,21 @@
+@@ -452,12 +496,21 @@
              count_received_ihave: HashMap::new(),
              count_sent_iwant: HashMap::new(),
              connected_peers: HashMap::new(),
@@ -3148,7 +3771,7 @@
          })
      }
 
-@@ -609,7 +661,7 @@
+@@ -609,7 +662,7 @@
          });
 
          // Check the if the message has been published before
@@ -3157,7 +3780,7 @@
              // This message has already been seen. We don't re-publish messages that have already
              // been published on the network.
              tracing::warn!(
-@@ -617,6 +669,20 @@
+@@ -617,6 +670,20 @@
                  "Not publishing a message that has already been published"
              );
              return Err(PublishError::Duplicate);
@@ -3178,7 +3801,7 @@
          }
 
          tracing::trace!(message_id=%msg_id, "Publishing message");
-@@ -733,18 +799,19 @@
+@@ -733,18 +800,19 @@
 
          // If the message isn't a duplicate and we have sent it to some peers add it to the
          // duplicate cache and memcache.
@@ -3204,7 +3827,7 @@
          }
 
          // Send to peers we know are subscribed to the topic.
-@@ -1077,8 +1144,9 @@
+@@ -1077,8 +1145,9 @@
                  peer_id,
                  vec![topic_hash],
                  &self.mesh,
@@ -3216,7 +3839,7 @@
              );
          }
 
-@@ -1178,8 +1246,9 @@
+@@ -1178,8 +1247,9 @@
                      peer_id,
                      topic_hash,
                      &self.mesh,
@@ -3228,7 +3851,7 @@
                  );
              }
          }
-@@ -1213,9 +1282,17 @@
+@@ -1213,9 +1283,17 @@
              return;
          }
 
@@ -3247,7 +3870,7 @@
          if *peer_have > self.config.max_ihave_messages() {
              tracing::debug!(
                  peer=%peer_id,
-@@ -1252,7 +1329,7 @@
+@@ -1252,7 +1330,7 @@
              }
 
              for id in ids.into_iter().filter(|id| {
@@ -3256,7 +3879,7 @@
                      return false;
                  }
 
-@@ -1270,10 +1347,10 @@
+@@ -1270,10 +1348,10 @@
          }
 
          if !iwant_ids.is_empty() {
@@ -3270,7 +3893,7 @@
              }
 
              // Send the list of IWANT control messages
-@@ -1290,7 +1367,6 @@
+@@ -1290,7 +1368,6 @@
              iwant_ids_vec.partial_shuffle(&mut rng, iask);
 
              iwant_ids_vec.truncate(iask);
@@ -3278,7 +3901,7 @@
 
              let followup_time = Instant::now()
                  .checked_add(self.config.iwant_followup_time())
-@@ -1298,20 +1374,32 @@
+@@ -1298,20 +1375,32 @@
                      tracing::error!("Invalid iwant_followup_time using Instant::now()");
                      Instant::now()
                  });
@@ -3316,7 +3939,7 @@
          }
          tracing::trace!(peer=%peer_id, "Completed IHAVE handling for peer");
      }
-@@ -1337,11 +1425,7 @@
+@@ -1337,11 +1426,7 @@
          for id in iwant_msgs {
              // If we have it and the IHAVE count is not above the threshold,
              // forward the message.
@@ -3329,7 +3952,7 @@
                  if count > self.config.gossip_retransimission() {
                      tracing::debug!(
                          peer=%peer_id,
-@@ -1349,18 +1433,20 @@
+@@ -1349,18 +1434,20 @@
                          "IWANT: Peer has asked for message too many times; ignoring request"
                      );
                  } else {
@@ -3353,7 +3976,7 @@
                              timeout: Delay::new(self.config.forward_queue_duration()),
                          },
                      );
-@@ -1372,7 +1458,12 @@
+@@ -1372,7 +1459,12 @@
 
      /// Handles GRAFT control messages. If subscribed to the topic, adds the peer to mesh, if not,
      /// responds with PRUNE messages.
@@ -3367,7 +3990,7 @@
          tracing::debug!(peer=%peer_id, "Handling GRAFT message for peer");
 
          let mut to_prune_topics = HashSet::new();
-@@ -1510,8 +1601,9 @@
+@@ -1510,8 +1602,9 @@
                          *peer_id,
                          vec![&topic_hash],
                          &self.mesh,
@@ -3379,7 +4002,7 @@
                      );
 
                      if let PeerScoreState::Active(peer_score) = &mut self.peer_score {
-@@ -1579,8 +1671,9 @@
+@@ -1579,8 +1672,9 @@
                      *peer_id,
                      topic_hash,
                      &self.mesh,
@@ -3391,7 +4014,7 @@
                  );
              }
          }
-@@ -1608,6 +1701,10 @@
+@@ -1608,6 +1702,10 @@
              .peer_score
              .below_threshold(peer_id, |ts| ts.accept_px_threshold);
          for (topic_hash, px, backoff) in prune_data {
@@ -3402,7 +4025,7 @@
              if self.remove_peer_from_mesh(peer_id, &topic_hash, backoff, true) {
                  #[cfg(feature = "metrics")]
                  if let Some(m) = self.metrics.as_mut() {
-@@ -1766,6 +1863,10 @@
+@@ -1766,6 +1864,10 @@
          mut raw_message: RawMessage,
          propagation_source: &PeerId,
      ) {
@@ -3413,7 +4036,7 @@
          // Record the received metric
          #[cfg(feature = "metrics")]
          if let Some(metrics) = self.metrics.as_mut() {
-@@ -1791,6 +1892,21 @@
+@@ -1791,6 +1893,21 @@
          // Calculate the message id on the transformed data.
          let msg_id = self.config.message_id(&message);
 
@@ -3435,7 +4058,7 @@
          // Broadcast IDONTWANT messages
          if raw_message.raw_protobuf_len() > self.config.idontwant_message_size_threshold() {
              let recipient_peers = self
-@@ -1815,14 +1931,7 @@
+@@ -1815,14 +1932,7 @@
              }
          }
 
@@ -3451,7 +4074,7 @@
              tracing::debug!(message_id=%msg_id, "Message already received, ignoring");
              if let PeerScoreState::Active(peer_score) = &mut self.peer_score {
                  peer_score.duplicated_message(propagation_source, &msg_id, &message.topic);
-@@ -1830,6 +1939,11 @@
+@@ -1830,6 +1940,11 @@
              self.mcache.observe_duplicate(&msg_id, propagation_source);
              return;
          }
@@ -3463,7 +4086,7 @@
 
          tracing::debug!(
              message_id=%msg_id,
-@@ -1850,9 +1964,6 @@
+@@ -1850,9 +1965,6 @@
          if let PeerScoreState::Active(peer_score) = &mut self.peer_score {
              peer_score.validate_message(propagation_source, &msg_id, &message.topic);
          }
@@ -3473,7 +4096,7 @@
 
          // Dispatch the message to the user if we are subscribed to any of the topics
          #[allow(
-@@ -1967,7 +2078,8 @@
+@@ -1967,7 +2079,8 @@
 
              match subscription.action {
                  SubscriptionAction::Subscribe => {
@@ -3483,7 +4106,7 @@
                          tracing::debug!(
                              peer=%propagation_source,
                              topic=%topic_hash,
-@@ -2017,14 +2129,16 @@
+@@ -2017,14 +2130,16 @@
                              }
                          }
                      }
@@ -3506,7 +4129,7 @@
                          tracing::debug!(
                              peer=%propagation_source,
                              topic=%topic_hash,
-@@ -2038,11 +2152,12 @@
+@@ -2038,11 +2153,12 @@
                      }
 
                      unsubscribed_peers.push((*propagation_source, topic_hash.clone()));
@@ -3524,7 +4147,7 @@
                  }
              }
          }
-@@ -2067,8 +2182,9 @@
+@@ -2067,8 +2183,9 @@
                  *propagation_source,
                  topics_joined,
                  &self.mesh,
@@ -3536,7 +4159,7 @@
              );
          }
 
-@@ -2091,8 +2207,10 @@
+@@ -2091,8 +2208,10 @@
 
      /// Applies penalties to peers that did not respond to our IWANT requests.
      fn apply_iwant_penalties(&mut self) {
@@ -3548,7 +4171,7 @@
                  peer_score.add_penalty(&peer, count);
                  #[cfg(feature = "metrics")]
                  if let Some(metrics) = self.metrics.as_mut() {
-@@ -2106,6 +2224,10 @@
+@@ -2106,6 +2225,10 @@
      fn heartbeat(&mut self) {
          #[cfg(feature = "metrics")]
          let start = Instant::now();
@@ -3559,7 +4182,7 @@
 
          // Every heartbeat we sample the send queues to add to our metrics. We do this intentionally
          // before we add all the gossip from this heartbeat in order to gain a true measure of
-@@ -2538,15 +2660,9 @@
+@@ -2538,15 +2661,9 @@
          }
          self.failed_messages.shrink_to_fit();
 
@@ -3577,7 +4200,7 @@
          }
 
          #[cfg(feature = "metrics")]
-@@ -2647,8 +2763,9 @@
+@@ -2647,8 +2764,9 @@
                      peer_id,
                      vec![topic],
                      &self.mesh,
@@ -3589,7 +4212,7 @@
                  );
              }
              let rpc_msgs = topics.iter().map(|topic_hash| {
-@@ -2700,8 +2817,9 @@
+@@ -2700,8 +2818,9 @@
                      *peer_id,
                      topic_hash,
                      &self.mesh,
@@ -3601,7 +4224,7 @@
                  );
              }
          }
-@@ -2767,7 +2885,7 @@
+@@ -2767,7 +2886,7 @@
          // forward the message to peers
          for peer_id in recipient_peers.iter() {
              if let Some(peer) = self.connected_peers.get_mut(peer_id) {
@@ -3610,7 +4233,7 @@
                      tracing::debug!(%peer_id, message_id=%msg_id, "Peer doesn't want message");
                      continue;
                  }
-@@ -2882,10 +3000,13 @@
+@@ -2882,10 +3001,13 @@
      /// Send a [`RpcOut`] message to a peer.
      ///
      /// Returns `true` if sending was successful, `false` otherwise.
@@ -3627,7 +4250,7 @@
          #[cfg(feature = "metrics")]
          if let Some(m) = self.metrics.as_mut() {
              if let RpcOut::Publish { ref message, .. } | RpcOut::Forward { ref message, .. } = rpc {
-@@ -2908,29 +3029,53 @@
+@@ -2908,29 +3030,53 @@
          // Try sending the message to the connection handler.
          match peer.sender.send_message(rpc) {
              Ok(()) => true,
@@ -3703,7 +4326,7 @@
                      }
                  }
 
-@@ -2941,6 +3086,90 @@
+@@ -2941,6 +3087,90 @@
 
                  false
              }
@@ -3794,7 +4417,7 @@
          }
      }
 
-@@ -2974,6 +3203,9 @@
+@@ -2974,6 +3204,9 @@
              peer_score.add_peer(peer_id);
          }
 
@@ -3804,7 +4427,7 @@
          // Ignore connections from blacklisted peers.
          if self.blacklisted_peers.contains(&peer_id) {
              tracing::debug!(peer=%peer_id, "Ignoring connection from blacklisted peer");
-@@ -3020,24 +3252,31 @@
+@@ -3020,24 +3253,31 @@
                      .expect("Previously established connection to peer must be present");
                  peer.connections.remove(index);
 
@@ -3850,17 +4473,61 @@
              // remove from mesh, topic_peers, peer_topic and the fanout
              tracing::debug!(peer=%peer_id, "Peer disconnected");
              let Some(connected_peer) = self.connected_peers.get(&peer_id) else {
-@@ -3151,6 +3390,9 @@
+@@ -3080,11 +3320,40 @@
+             }
+
+             self.connected_peers.remove(&peer_id);
++            self.backoffs.release_peer(&peer_id);
+
+             if let PeerScoreState::Active(peer_score) = &mut self.peer_score {
+                 peer_score.remove_peer(&peer_id);
+             }
+         }
++    }
++
++    /// A later composed behaviour can refuse a handler we already constructed.
++    /// Swarm sends failure without Established/Closed for that exact connection;
++    /// roll back only its provisional ID, without touching established metrics,
++    /// scores, mesh state or a sibling connection's sender and subscriptions.
++    fn on_connection_failure(&mut self, peer_id: Option<PeerId>, connection_id: ConnectionId) {
++        let Some(peer_id) = peer_id else { return };
++        let Some(peer) = self.connected_peers.get_mut(&peer_id) else {
++            return;
++        };
++        let Some(index) = peer.connections.iter().position(|id| *id == connection_id) else {
++            return;
++        };
++        peer.connections.remove(index);
++        if peer.connections.is_empty() {
++            self.connected_peers.remove(&peer_id);
++            self.backoffs.release_peer(&peer_id);
++        }
++    }
++
++    /// Whether the current backoff identity budget permits this peer.
++    ///
++    /// Dial schedulers can skip new identities at capacity while allowing
++    /// retained peers to reconnect. This does not reserve capacity or evaluate
++    /// other admission rules; the established callback still checks admission.
++    pub fn has_backoff_capacity(&self, peer_id: &PeerId) -> bool {
++        self.backoffs.has_capacity(peer_id)
+     }
+
+     fn on_address_change(
+@@ -3151,6 +3420,12 @@
          _: &Multiaddr,
          _: &Multiaddr,
      ) -> Result<THandler<Self>, ConnectionDenied> {
 +        if self.closing_peers.contains_key(&peer_id) {
 +            return Err(ConnectionDenied::new(ControlQueueFull));
 +        }
++        if !self.backoffs.reserve_peer(&peer_id) {
++            return Err(ConnectionDenied::new(BackoffCapacity));
++        }
          // By default we assume a peer is only a floodsub peer.
          //
          // The protocol negotiation occurs once a message is sent/received. Once this happens we
-@@ -3159,10 +3401,18 @@
+@@ -3159,10 +3434,18 @@
          let connected_peer = self.connected_peers.entry(peer_id).or_insert(PeerDetails {
              kind: PeerKind::Floodsub,
              connections: vec![],
@@ -3881,12 +4548,15 @@
          });
          // Add the new connection
          connected_peer.connections.push(connection_id);
-@@ -3181,15 +3431,26 @@
+@@ -3181,15 +3464,29 @@
          _: Endpoint,
          _: PortUse,
      ) -> Result<THandler<Self>, ConnectionDenied> {
 +        if self.closing_peers.contains_key(&peer_id) {
 +            return Err(ConnectionDenied::new(ControlQueueFull));
++        }
++        if !self.backoffs.reserve_peer(&peer_id) {
++            return Err(ConnectionDenied::new(BackoffCapacity));
 +        }
          let connected_peer = self.connected_peers.entry(peer_id).or_insert(PeerDetails {
              kind: PeerKind::Floodsub,
@@ -3910,7 +4580,7 @@
          });
          // Add the new connection
          connected_peer.connections.push(connection_id);
-@@ -3206,6 +3467,9 @@
+@@ -3206,6 +3503,9 @@
          _connection_id: ConnectionId,
          handler_event: THandlerOutEvent<Self>,
      ) {
@@ -3920,7 +4590,7 @@
          match handler_event {
              HandlerEvent::PeerKind(kind) => {
                  // We have identified the protocol this peer is using
-@@ -3244,17 +3508,18 @@
+@@ -3244,17 +3544,18 @@
                      peer_score.failed_message_slow_peer(&propagation_source);
                  }
 
@@ -3949,7 +4619,7 @@
                  }
 
                  // Record metrics on the failure.
-@@ -3284,6 +3549,9 @@
+@@ -3284,6 +3585,9 @@
                  if !rpc.subscriptions.is_empty() {
                      self.handle_received_subscriptions(&rpc.subscriptions, &propagation_source);
                  }
@@ -3959,7 +4629,7 @@
 
                  // Check if peer is graylisted in which case we ignore the event
                  if let (true, _) = self
-@@ -3294,22 +3562,23 @@
+@@ -3294,22 +3598,23 @@
                      return;
                  }
 
@@ -3992,7 +4662,7 @@
                              "Invalid message from peer. Reason: {:?}",
                              validation_error,
                          );
-@@ -3375,11 +3644,7 @@
+@@ -3375,11 +3680,7 @@
                                  metrics.register_idontwant(message_ids.len());
                              }
                              for message_id in message_ids {
@@ -4005,7 +4675,7 @@
                              }
                          }
                      }
-@@ -3402,7 +3667,12 @@
+@@ -3402,7 +3703,12 @@
          &mut self,
          cx: &mut Context<'_>,
      ) -> Poll<ToSwarm<Self::ToSwarm, THandlerInEvent<Self>>> {
@@ -4019,7 +4689,7 @@
              return Poll::Ready(event);
          }
 
-@@ -3421,6 +3691,13 @@
+@@ -3421,6 +3727,13 @@
              self.heartbeat.reset(self.config.heartbeat_interval());
          }
 
@@ -4033,7 +4703,20 @@
          Poll::Pending
      }
 
-@@ -3445,11 +3722,15 @@
+@@ -3433,6 +3746,12 @@
+                 self.on_connection_closed(connection_closed)
+             }
+             FromSwarm::AddressChange(address_change) => self.on_address_change(address_change),
++            FromSwarm::DialFailure(failure) => {
++                self.on_connection_failure(failure.peer_id, failure.connection_id)
++            }
++            FromSwarm::ListenFailure(failure) => {
++                self.on_connection_failure(failure.peer_id, failure.connection_id)
++            }
+             _ => {}
+         }
+     }
+@@ -3445,11 +3764,15 @@
      peer_id: PeerId,
      new_topics: Vec<&TopicHash>,
      mesh: &HashMap<TopicHash, BTreeSet<PeerId>>,
@@ -4052,7 +4735,7 @@
          Some(p) => p
              .connections
              .first()
-@@ -3473,25 +3754,25 @@
+@@ -3473,25 +3796,25 @@
          }
      }
      // This is the first mesh the peer has joined, inform the handler
@@ -4088,7 +4771,7 @@
          Some(p) => p
              .connections
              .first()
-@@ -3515,11 +3796,22 @@
+@@ -3515,11 +3838,22 @@
          }
      }
      // The peer is not in any other mesh, inform the handler
@@ -4116,7 +4799,7 @@
  }
 
  /// Helper function to get a subset of random gossipsub peers for a `topic_hash`
-@@ -3583,14 +3875,12 @@
+@@ -3583,14 +3917,12 @@
                  return Err("Published messages contain an author but incoming messages with an author will be rejected. Consider adjusting the validation or privacy settings in the config");
              }
          }
@@ -4136,13 +4819,14 @@
      }
 --- a/src/config.rs
 +++ b/src/config.rs
-@@ -96,6 +96,98 @@
+@@ -96,6 +96,105 @@
      }
  }
 
 +/// Retained-data budgets for gossip caches. Entry and association limits bound
 +/// fixed metadata; byte limits cover owned IDs and payload buffers, not total RSS.
 +/// Excess new entries are dropped without evicting or refreshing admitted entries.
++/// Backoff identity capacity instead refuses new connections before admission.
 +#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 +pub struct CacheLimits {
 +    /// Seen-message IDs retained for duplicate suppression.
@@ -4169,6 +4853,11 @@
 +    /// Counters survive reconnects. Excess new peers' IHAVEs are ignored until
 +    /// the next heartbeat; already admitted peers keep their existing quotas.
 +    pub ihave_peers: usize,
++    /// Identities reserved for connected/provisional peers or retained backoffs.
++    /// New identities are refused at connection admission when full; admitted
++    /// identities retain all required delays and can reconnect. This denial
++    /// affects the entire composed connection, including other protocols.
++    pub backoff_peers: usize,
 +    /// Suppression IDs retained for each connected peer.
 +    pub idontwant_entries_per_peer: usize,
 +    /// Owned suppression-ID bytes for each connected peer.
@@ -4189,6 +4878,7 @@
 +            promise_bytes: 1024 * 1024,
 +            promise_peer_associations: 65_536,
 +            ihave_peers: 16_384,
++            backoff_peers: 4_096,
 +            idontwant_entries_per_peer: 10_000,
 +            idontwant_bytes_per_peer: 1024 * 1024,
 +        }
@@ -4235,7 +4925,7 @@
  /// Configuration parameters that define the performance of the gossipsub network.
  #[derive(Clone)]
  pub struct Config {
-@@ -110,6 +202,7 @@
+@@ -110,6 +209,7 @@
      fanout_ttl: Duration,
      check_explicit_peers_ticks: u64,
      duplicate_cache_time: Duration,
@@ -4243,7 +4933,7 @@
      validate_messages: bool,
      message_id_fn: Arc<dyn Fn(&Message) -> MessageId + Send + Sync + 'static>,
      allow_self_origin: bool,
-@@ -129,6 +222,7 @@
+@@ -129,6 +229,7 @@
      iwant_followup_time: Duration,
      published_message_ids_cache_time: Duration,
      connection_handler_queue_len: usize,
@@ -4251,7 +4941,7 @@
      connection_handler_publish_duration: Duration,
      connection_handler_forward_duration: Duration,
      idontwant_message_size_threshold: usize,
-@@ -267,12 +361,17 @@
+@@ -267,12 +368,17 @@
          self.protocol_config().max_transmit_size_for_topic(topic)
      }
 
@@ -4270,7 +4960,7 @@
      }
 
      /// When set to `true`, prevents automatic forwarding of all received messages. This setting
-@@ -449,9 +548,16 @@
+@@ -449,9 +555,16 @@
          self.published_message_ids_cache_time
      }
 
@@ -4288,7 +4978,7 @@
      }
 
      /// The duration a message to be published can wait to be sent before it is abandoned. The
-@@ -514,6 +620,7 @@
+@@ -514,6 +627,7 @@
                  fanout_ttl: Duration::from_secs(60),
                  check_explicit_peers_ticks: 300,
                  duplicate_cache_time: Duration::from_secs(60),
@@ -4296,7 +4986,7 @@
                  validate_messages: false,
                  message_id_fn: Arc::new(|message| {
                      // default message id is: source + sequence number
-@@ -548,6 +655,7 @@
+@@ -548,6 +662,7 @@
                  iwant_followup_time: Duration::from_secs(3),
                  published_message_ids_cache_time: Duration::from_secs(10),
                  connection_handler_queue_len: 5000,
@@ -4304,7 +4994,7 @@
                  connection_handler_publish_duration: Duration::from_secs(5),
                  connection_handler_forward_duration: Duration::from_secs(1),
                  idontwant_message_size_threshold: 1000,
-@@ -569,6 +677,15 @@
+@@ -569,6 +684,15 @@
  }
 
  impl ConfigBuilder {
@@ -4320,7 +5010,7 @@
      /// The protocol id prefix to negotiate this protocol (default is `/meshsub/1.1.0` and
      /// `/meshsub/1.0.0`).
      pub fn protocol_id_prefix(
-@@ -787,7 +904,7 @@
+@@ -787,7 +911,7 @@
          self
      }
 
@@ -4329,7 +5019,7 @@
      /// This settings sets the time period that messages are stored in the cache. Duplicates can be
      /// received if duplicate messages are sent at a time greater than this setting apart. The
      /// default is 1 minute.
-@@ -1017,9 +1134,19 @@
+@@ -1017,9 +1141,19 @@
          self
      }
 
@@ -4350,7 +5040,7 @@
          self
      }
 
-@@ -1094,6 +1221,10 @@
+@@ -1094,6 +1228,10 @@
      /// Constructs a [`Config`] from the given configuration and validates the settings.
      pub fn build(&self) -> Result<Config, ConfigBuilderError> {
          // check all constraints on config
@@ -4361,7 +5051,7 @@
 
          let pre_configured_topics = self.config.protocol.max_transmit_sizes.keys();
          for topic in pre_configured_topics {
-@@ -1156,6 +1287,12 @@
+@@ -1156,6 +1294,12 @@
          let _ = builder.field("heartbeat_interval", &self.heartbeat_interval);
          let _ = builder.field("fanout_ttl", &self.fanout_ttl);
          let _ = builder.field("duplicate_cache_time", &self.duplicate_cache_time);
@@ -4374,7 +5064,7 @@
          let _ = builder.field("validate_messages", &self.validate_messages);
          let _ = builder.field("allow_self_origin", &self.allow_self_origin);
          let _ = builder.field("do_px", &self.do_px);
-@@ -1203,6 +1340,26 @@
+@@ -1203,6 +1347,26 @@
      use crate::{topic::IdentityHash, Topic};
 
      #[test]
@@ -4403,7 +5093,7 @@
              .message_id_fn(message_id_plain_function)
 --- a/src/error.rs
 +++ b/src/error.rs
-@@ -22,11 +22,27 @@
+@@ -22,11 +22,40 @@
 
  use libp2p_identity::SigningError;
 
@@ -4421,6 +5111,19 @@
 +
 +impl std::error::Error for ControlQueueFull {}
 +
++/// A new identity was refused because all backoff reservations are owned.
++/// This is local admission pressure, not a peer or transport failure.
++#[derive(Debug)]
++pub struct BackoffCapacity;
++
++impl std::fmt::Display for BackoffCapacity {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        f.write_str("gossip backoff identity capacity is full")
++    }
++}
++
++impl std::error::Error for BackoffCapacity {}
++
  /// Error associated with publishing a gossipsub message.
  #[derive(Debug)]
  pub enum PublishError {
@@ -4431,7 +5134,7 @@
      /// An error occurred whilst signing the message.
      SigningError(SigningError),
      /// No peers are currently subscribed to receive messages on this topic.
-@@ -130,6 +146,8 @@
+@@ -130,6 +159,8 @@
  /// Error associated with Config building.
  #[derive(Debug)]
  pub enum ConfigBuilderError {
@@ -4440,7 +5143,7 @@
      /// Maximum transmission size is too small.
      MaxTransmissionSizeTooSmall,
      /// History length less than history gossip length.
-@@ -149,6 +167,7 @@
+@@ -149,6 +180,7 @@
  impl std::fmt::Display for ConfigBuilderError {
      fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
          match self {
@@ -4847,7 +5550,7 @@
  mod gossip_promises;
  mod handler;
  mod mcache;
-@@ -118,8 +119,10 @@
+@@ -118,8 +119,11 @@
 
  pub use self::{
      behaviour::{Behaviour, Event, MessageAuthenticity},
@@ -4855,7 +5558,8 @@
 -    error::{ConfigBuilderError, PublishError, SubscriptionError, ValidationError},
 +    config::{CacheLimits, Config, ConfigBuilder, QueueLimits, ValidationMode, Version},
 +    error::{
-+        ConfigBuilderError, ControlQueueFull, PublishError, SubscriptionError, ValidationError,
++        BackoffCapacity, ConfigBuilderError, ControlQueueFull, PublishError, SubscriptionError,
++        ValidationError,
 +    },
      peer_score::{
          score_parameter_decay, score_parameter_decay_with_base, PeerScoreParams,

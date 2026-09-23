@@ -119,6 +119,7 @@ const GOSSIP_CACHE_LIMITS: gossipsub::CacheLimits = gossipsub::CacheLimits {
     promise_bytes: 4_096 * 20,
     promise_peer_associations: 8_192,
     ihave_peers: 4_096,
+    backoff_peers: 4_096,
     idontwant_entries_per_peer: 1_024,
     idontwant_bytes_per_peer: 1_024 * 20,
 };
@@ -4806,7 +4807,8 @@ impl ConsensusNetwork {
     /// A refused extra dial does not invalidate work on an established connection.
     fn handle_local_connection_limit(&mut self, peer: PeerId, error: &DialError) -> bool {
         if !matches!(error, DialError::Denied { cause }
-            if cause.downcast_ref::<libp2p::connection_limits::Exceeded>().is_some())
+            if cause.downcast_ref::<libp2p::connection_limits::Exceeded>().is_some()
+                || cause.downcast_ref::<gossipsub::BackoffCapacity>().is_some())
         {
             return false;
         }
@@ -4818,6 +4820,9 @@ impl ConsensusNetwork {
     }
 
     fn ensure_connected(&mut self, peer: PeerId, addrs: Vec<Multiaddr>) {
+        if !self.swarm.behaviour().gossip.has_backoff_capacity(&peer) {
+            return;
+        }
         let bootstrap_needed = self.consensus.light_client_status().bootstrap.is_none();
         let addrs = self
             .select_dial_addresses(peer, addrs, bootstrap_needed)
@@ -4873,7 +4878,12 @@ impl ConsensusNetwork {
     }
 
     fn ensure_request(&mut self, peer: PeerId, kind: RpcRequestKind) {
-        if self.peer_remote_busy(peer, Instant::now())
+        // Request-response can initiate its own dial when no connection exists.
+        // Do not enqueue new RPC ownership for an identity admission cannot accept.
+        // Already queued attempts still reach the authoritative callback and its
+        // neutral failure cleanup if capacity changes while dialing.
+        if !self.swarm.behaviour().gossip.has_backoff_capacity(&peer)
+            || self.peer_remote_busy(peer, Instant::now())
             || !self.local_rpc_retry_ready(kind, Instant::now())
             || self.is_request_satisfied(peer, kind)
             || self.is_request_pending(peer, kind)
@@ -5906,6 +5916,11 @@ impl ConsensusNetwork {
     }
 
     fn peer_is_dialable(&self, peer: PeerId, bootstrap_needed: bool, now: Instant) -> bool {
+        // Filter before ranking and counting candidate slots so an unadmitted
+        // identity cannot repeatedly displace a retained peer at capacity.
+        if !self.swarm.behaviour().gossip.has_backoff_capacity(&peer) {
+            return false;
+        }
         let Some(lifecycle) = self.peer_lifecycle.get(&peer) else {
             return true;
         };
@@ -11083,6 +11098,300 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn gossip_backoff_scheduler_skips_ineligible_candidates_and_resumes_after_release() {
+        for release_before_selection in [false, true] {
+            let temp = TempDir::new().unwrap();
+            let (mut network, _) = request_lifecycle_fixture(&temp);
+            // Leave an outbound scheduling slot available beside the owner so
+            // rejection is due to identity capacity, not max_peers.
+            network.config.max_peers = 2;
+            let mut config = gossipsub::ConfigBuilder::from(build_gossip_config().unwrap());
+            config.cache_limits(gossipsub::CacheLimits {
+                backoff_peers: 1,
+                ..GOSSIP_CACHE_LIMITS
+            });
+            network.swarm.behaviour_mut().gossip =
+                gossipsub::Behaviour::new_with_subscription_filter_and_transform(
+                    gossipsub::MessageAuthenticity::Anonymous,
+                    config.build().unwrap(),
+                    gossipsub::WhitelistSubscriptionFilter(HashSet::from([network
+                        .gossip_topics
+                        .finality_update
+                        .hash()])),
+                    GossipSizeGuard,
+                )
+                .unwrap();
+            let retained = PeerId::random();
+            let newcomer = PeerId::random();
+            let address: libp2p::Multiaddr = "/memory/1".parse().unwrap();
+            let connection = libp2p::swarm::ConnectionId::new_unchecked(41);
+            // Drive real composed callbacks and their application event. Vendor
+            // controls separately cover disconnected identities retaining PRUNE.
+            let handler = network
+                .swarm
+                .behaviour_mut()
+                .handle_established_inbound_connection(connection, retained, &address, &address)
+                .unwrap();
+            let mut handler = Some(handler);
+            let endpoint = ConnectedPoint::Listener {
+                local_addr: address.clone(),
+                send_back_addr: address.clone(),
+            };
+            network.swarm.behaviour_mut().on_swarm_event(
+                libp2p::swarm::FromSwarm::ConnectionEstablished(
+                    libp2p::swarm::behaviour::ConnectionEstablished {
+                        peer_id: retained,
+                        connection_id: connection,
+                        endpoint: &endpoint,
+                        failed_addresses: &[],
+                        other_established: 0,
+                    },
+                ),
+            );
+            network.handle_swarm_event(SwarmEvent::ConnectionEstablished {
+                peer_id: retained,
+                connection_id: connection,
+                endpoint: endpoint.clone(),
+                num_established: std::num::NonZeroU32::new(1).unwrap(),
+                concurrent_dial_errors: None,
+                established_in: Duration::ZERO,
+            });
+            assert!(
+                network
+                    .swarm
+                    .behaviour()
+                    .gossip
+                    .has_backoff_capacity(&retained)
+            );
+            assert!(
+                !network
+                    .swarm
+                    .behaviour()
+                    .gossip
+                    .has_backoff_capacity(&newcomer)
+            );
+            assert!(network.peer_is_dialable(retained, false, Instant::now()));
+            assert!(!network.peer_is_dialable(newcomer, false, Instant::now()));
+            network
+                .peer_lifecycle
+                .entry(newcomer)
+                .or_default()
+                .status_successes = 10;
+            assert!(
+                network.peer_priority(newcomer, false, false)
+                    > network.peer_priority(retained, false, false)
+            );
+            assert!(
+                network.peer_priority(newcomer, false, true)
+                    > network.peer_priority(retained, false, true)
+            );
+
+            let dial_address: libp2p::Multiaddr = "/ip4/127.0.0.1/tcp/19004".parse().unwrap();
+            // Direct scheduling and request-response's independent enqueue path
+            // use the same check; neither creates ownership for refused peers.
+            network.ensure_connected(newcomer, vec![dial_address.clone()]);
+            network.ensure_request(newcomer, RpcRequestKind::LightClientUpdatesByRange);
+            assert!(!network.dialing_peers.contains(&newcomer));
+            assert!(network.pending_requests.is_empty());
+            assert!(network.pending_peer_kinds.is_empty());
+            assert!(network.pending_light_client_range_requests.is_empty());
+
+            if release_before_selection {
+                drop(handler.take());
+                network.swarm.behaviour_mut().on_swarm_event(
+                    libp2p::swarm::FromSwarm::ConnectionClosed(
+                        libp2p::swarm::behaviour::ConnectionClosed {
+                            peer_id: retained,
+                            connection_id: connection,
+                            endpoint: &endpoint,
+                            remaining_established: 0,
+                            cause: None,
+                        },
+                    ),
+                );
+                network.handle_swarm_event(SwarmEvent::ConnectionClosed {
+                    peer_id: retained,
+                    connection_id: connection,
+                    endpoint,
+                    num_established: 0,
+                    cause: None,
+                });
+                assert!(
+                    network
+                        .swarm
+                        .behaviour()
+                        .gossip
+                        .has_backoff_capacity(&newcomer)
+                );
+                assert!(network.peer_is_dialable(newcomer, false, Instant::now()));
+            }
+            network.dialable_peers.clear();
+            network
+                .dialable_peers
+                .insert(newcomer, vec![dial_address.clone()]);
+            network.dialable_peers.insert(retained, vec![dial_address]);
+            network.drive_peer_connections(); // Enqueues only; no Swarm/socket poll.
+            let selected = if release_before_selection {
+                assert_eq!(network.dialing_peers, HashSet::from([newcomer]));
+                newcomer
+            } else {
+                assert!(network.dialing_peers.is_empty());
+                retained
+            };
+            network.ensure_request(selected, RpcRequestKind::LightClientUpdatesByRange);
+            assert_eq!(network.pending_requests.len(), 1);
+            assert!(
+                network
+                    .pending_requests
+                    .values()
+                    .all(|peer| *peer == selected)
+            );
+            assert_eq!(network.peer_lifecycle[&newcomer].transport_failures, 0);
+            assert!(network.peer_lifecycle[&newcomer].cooldown_until.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn gossip_backoff_capacity_denial_is_neutral_and_preserves_other_requests() {
+        let temp = TempDir::new().unwrap();
+        let (mut network, _) = request_lifecycle_fixture(&temp);
+        let mut config = gossipsub::ConfigBuilder::from(build_gossip_config().unwrap());
+        config.cache_limits(gossipsub::CacheLimits {
+            backoff_peers: 1,
+            ..GOSSIP_CACHE_LIMITS
+        });
+        network.swarm.behaviour_mut().gossip =
+            gossipsub::Behaviour::new_with_subscription_filter_and_transform(
+                gossipsub::MessageAuthenticity::Anonymous,
+                config.build().unwrap(),
+                gossipsub::WhitelistSubscriptionFilter(HashSet::from([network
+                    .gossip_topics
+                    .finality_update
+                    .hash()])),
+                GossipSizeGuard,
+            )
+            .unwrap();
+        // Exercise request-response ownership directly: queue while the fixed
+        // budget is available, then another peer fills it before completion.
+        let newcomer = PeerId::random();
+        let kind = RpcRequestKind::LightClientUpdatesByRange;
+        network.peer_lifecycle.entry(newcomer).or_default();
+        network.ensure_request(newcomer, kind);
+        let request = *network
+            .pending_requests
+            .iter()
+            .find(|(_, peer)| **peer == newcomer)
+            .unwrap()
+            .0;
+        let address: libp2p::Multiaddr = "/memory/1".parse().unwrap();
+        let established = PeerId::random();
+        // One actual admitted identity fills the small capacity. Keep its
+        // handler alive and preserve its independent established RPC work.
+        let _established_handler = {
+            let connection = libp2p::swarm::ConnectionId::new_unchecked(31);
+            let handler = network
+                .swarm
+                .behaviour_mut()
+                .handle_established_inbound_connection(connection, established, &address, &address)
+                .unwrap();
+            let endpoint = ConnectedPoint::Listener {
+                local_addr: address.clone(),
+                send_back_addr: address.clone(),
+            };
+            network.swarm.behaviour_mut().on_swarm_event(
+                libp2p::swarm::FromSwarm::ConnectionEstablished(
+                    libp2p::swarm::behaviour::ConnectionEstablished {
+                        peer_id: established,
+                        connection_id: connection,
+                        endpoint: &endpoint,
+                        failed_addresses: &[],
+                        other_established: 0,
+                    },
+                ),
+            );
+            network.handle_swarm_event(SwarmEvent::ConnectionEstablished {
+                peer_id: established,
+                connection_id: connection,
+                endpoint,
+                num_established: std::num::NonZeroU32::new(1).unwrap(),
+                concurrent_dial_errors: None,
+                established_in: Duration::ZERO,
+            });
+            network.peer_lifecycle.entry(established).or_default();
+            network.ensure_request(established, kind);
+            handler
+        };
+        let established_request = network
+            .pending_requests
+            .iter()
+            .find_map(|(key, peer)| (*peer == established).then_some(*key))
+            .unwrap();
+
+        network.dialing_peers.insert(newcomer);
+        let connection = libp2p::swarm::ConnectionId::new_unchecked(32);
+        // The actual composed callback denies the entire connection before
+        // later RPC behaviours get handlers. No sockets or Swarm poll occur.
+        let cause = match network
+            .swarm
+            .behaviour_mut()
+            .handle_established_outbound_connection(
+                connection,
+                newcomer,
+                &address,
+                libp2p::core::Endpoint::Dialer,
+                libp2p::core::transport::PortUse::Reuse,
+            ) {
+            Err(cause) => cause,
+            Ok(_) => panic!("gossip identity capacity must deny a new peer"),
+        };
+        assert!(cause.downcast_ref::<gossipsub::BackoffCapacity>().is_some());
+        let error = DialError::Denied { cause };
+        // Match Swarm's failure broadcast before its application event.
+        network
+            .swarm
+            .behaviour_mut()
+            .on_swarm_event(libp2p::swarm::FromSwarm::DialFailure(
+                libp2p::swarm::behaviour::DialFailure {
+                    peer_id: Some(newcomer),
+                    connection_id: connection,
+                    error: &error,
+                },
+            ));
+        network.handle_swarm_event(SwarmEvent::OutgoingConnectionError {
+            peer_id: Some(newcomer),
+            connection_id: connection,
+            error,
+        });
+        assert!(!network.pending_requests.contains_key(&request));
+        assert!(!network.pending_peer_kinds.contains(&(newcomer, kind)));
+        assert!(
+            !network
+                .pending_light_client_range_requests
+                .contains_key(&request)
+        );
+        assert!(!network.dialing_peers.contains(&newcomer));
+        assert!(!network.closing_peers.contains(&newcomer));
+        assert!(!network.connected_peers.contains(&newcomer));
+        let lifecycle = &network.peer_lifecycle[&newcomer];
+        assert_eq!(lifecycle.transport_failures, 0);
+        assert_eq!(lifecycle.rpc_failures, 0);
+        assert_eq!(lifecycle.disconnects, 0);
+        assert!(lifecycle.cooldown_until.is_none());
+        assert!(!lifecycle.ignored_for_run);
+        let request = established_request;
+        assert!(network.connected_peers.contains(&established));
+        assert!(!network.closing_peers.contains(&established));
+        assert!(network.pending_requests.contains_key(&request));
+        assert!(network.pending_peer_kinds.contains(&(established, kind)));
+        assert!(
+            network
+                .pending_light_client_range_requests
+                .contains_key(&request)
+        );
+        assert_eq!(network.peer_lifecycle[&established].transport_failures, 0);
+    }
+
+    #[tokio::test]
     async fn gossip_control_combined_limit_denial_preserves_established_requests() {
         for overloaded in [false, true] {
             let temp = TempDir::new().unwrap();
@@ -11457,6 +11766,7 @@ mod tests {
         assert_eq!(config.queue_limits().max_advisory_events, 1_024);
         assert_eq!(config.queue_limits().max_advisory_bytes, 256 * 1024);
         assert_eq!(config.cache_limits().seen_entries, 16_384);
+        assert_eq!(config.cache_limits().backoff_peers, 4_096);
         assert_eq!(config.cache_limits().seen_bytes, 655_360);
         assert_eq!(config.cache_limits().message_bytes, 16 * 1024 * 1024);
         assert_eq!(config.cache_limits().promise_bytes, 81_920);

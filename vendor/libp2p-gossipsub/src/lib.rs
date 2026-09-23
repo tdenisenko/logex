@@ -121,7 +121,8 @@ pub use self::{
     behaviour::{Behaviour, Event, MessageAuthenticity},
     config::{CacheLimits, Config, ConfigBuilder, QueueLimits, ValidationMode, Version},
     error::{
-        ConfigBuilderError, ControlQueueFull, PublishError, SubscriptionError, ValidationError,
+        BackoffCapacity, ConfigBuilderError, ControlQueueFull, PublishError, SubscriptionError,
+        ValidationError,
     },
     peer_score::{
         score_parameter_decay, score_parameter_decay_with_base, PeerScoreParams,

@@ -55,6 +55,7 @@ jobs:
         run: >-
           rustfmt --check --edition 2021 --config skip_children=true
           vendor/libp2p-gossipsub/src/time_cache.rs
+          vendor/libp2p-gossipsub/src/backoff.rs
           vendor/libp2p-gossipsub/src/behaviour.rs
           vendor/libp2p-gossipsub/src/behaviour/tests.rs
           vendor/libp2p-gossipsub/src/subscription_filter.rs

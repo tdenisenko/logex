@@ -71,8 +71,8 @@ use crate::{
         MessageId, PeerDetails, PeerInfo, PeerKind, Prune, RawMessage, RpcOut, Subscription,
         SubscriptionAction,
     },
-    ControlQueueFull, FailedMessages, PublishError, SubscriptionError, TopicScoreParams,
-    ValidationError,
+    BackoffCapacity, ControlQueueFull, FailedMessages, PublishError, SubscriptionError,
+    TopicScoreParams, ValidationError,
 };
 
 #[cfg(test)]
@@ -480,6 +480,7 @@ where
                 &config.prune_backoff(),
                 config.heartbeat_interval(),
                 config.backoff_slack(),
+                limits.backoff_peers,
             ),
             mcache: MessageCache::with_limits(
                 config.history_gossip(),
@@ -3319,11 +3320,40 @@ where
             }
 
             self.connected_peers.remove(&peer_id);
+            self.backoffs.release_peer(&peer_id);
 
             if let PeerScoreState::Active(peer_score) = &mut self.peer_score {
                 peer_score.remove_peer(&peer_id);
             }
         }
+    }
+
+    /// A later composed behaviour can refuse a handler we already constructed.
+    /// Swarm sends failure without Established/Closed for that exact connection;
+    /// roll back only its provisional ID, without touching established metrics,
+    /// scores, mesh state or a sibling connection's sender and subscriptions.
+    fn on_connection_failure(&mut self, peer_id: Option<PeerId>, connection_id: ConnectionId) {
+        let Some(peer_id) = peer_id else { return };
+        let Some(peer) = self.connected_peers.get_mut(&peer_id) else {
+            return;
+        };
+        let Some(index) = peer.connections.iter().position(|id| *id == connection_id) else {
+            return;
+        };
+        peer.connections.remove(index);
+        if peer.connections.is_empty() {
+            self.connected_peers.remove(&peer_id);
+            self.backoffs.release_peer(&peer_id);
+        }
+    }
+
+    /// Whether the current backoff identity budget permits this peer.
+    ///
+    /// Dial schedulers can skip new identities at capacity while allowing
+    /// retained peers to reconnect. This does not reserve capacity or evaluate
+    /// other admission rules; the established callback still checks admission.
+    pub fn has_backoff_capacity(&self, peer_id: &PeerId) -> bool {
+        self.backoffs.has_capacity(peer_id)
     }
 
     fn on_address_change(
@@ -3393,6 +3423,9 @@ where
         if self.closing_peers.contains_key(&peer_id) {
             return Err(ConnectionDenied::new(ControlQueueFull));
         }
+        if !self.backoffs.reserve_peer(&peer_id) {
+            return Err(ConnectionDenied::new(BackoffCapacity));
+        }
         // By default we assume a peer is only a floodsub peer.
         //
         // The protocol negotiation occurs once a message is sent/received. Once this happens we
@@ -3433,6 +3466,9 @@ where
     ) -> Result<THandler<Self>, ConnectionDenied> {
         if self.closing_peers.contains_key(&peer_id) {
             return Err(ConnectionDenied::new(ControlQueueFull));
+        }
+        if !self.backoffs.reserve_peer(&peer_id) {
+            return Err(ConnectionDenied::new(BackoffCapacity));
         }
         let connected_peer = self.connected_peers.entry(peer_id).or_insert(PeerDetails {
             kind: PeerKind::Floodsub,
@@ -3710,6 +3746,12 @@ where
                 self.on_connection_closed(connection_closed)
             }
             FromSwarm::AddressChange(address_change) => self.on_address_change(address_change),
+            FromSwarm::DialFailure(failure) => {
+                self.on_connection_failure(failure.peer_id, failure.connection_id)
+            }
+            FromSwarm::ListenFailure(failure) => {
+                self.on_connection_failure(failure.peer_id, failure.connection_id)
+            }
             _ => {}
         }
     }

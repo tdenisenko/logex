@@ -36,6 +36,19 @@ impl std::fmt::Display for ControlQueueFull {
 
 impl std::error::Error for ControlQueueFull {}
 
+/// A new identity was refused because all backoff reservations are owned.
+/// This is local admission pressure, not a peer or transport failure.
+#[derive(Debug)]
+pub struct BackoffCapacity;
+
+impl std::fmt::Display for BackoffCapacity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("gossip backoff identity capacity is full")
+    }
+}
+
+impl std::error::Error for BackoffCapacity {}
+
 /// Error associated with publishing a gossipsub message.
 #[derive(Debug)]
 pub enum PublishError {
