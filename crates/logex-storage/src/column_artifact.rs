@@ -97,8 +97,9 @@ impl ColumnArtifacts {
     pub(crate) fn open_for_inspection(
         dir: &Path,
         manifest: Option<&SegmentManifest>,
+        projection: Option<&[&str]>,
     ) -> io::Result<Self> {
-        Self::open_projected_checked(dir, manifest, None, true)
+        Self::open_projected_checked(dir, manifest, projection, true)
     }
 
     fn open_projected_checked(

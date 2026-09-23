@@ -350,6 +350,15 @@ impl SegmentReader {
     /// Capture an offline source without opening symlinks or special artifacts.
     /// The caller must hold the offline directory lock for the complete read.
     pub(crate) fn open_for_inspection(dir: &Path) -> io::Result<Self> {
+        Self::open_for_inspection_projected(dir, None)
+    }
+
+    /// Selective offline capture retains the same regular-file checks while
+    /// allowing intact ownership metadata to be read beside damaged payloads.
+    pub(crate) fn open_for_inspection_projected(
+        dir: &Path,
+        projection: Option<&[&str]>,
+    ) -> io::Result<Self> {
         for relative in ["segment.json", crate::column::SOURCE_MARKER_FILE] {
             match crate::column_artifact::require_regular_artifact(dir, Path::new(relative)) {
                 Ok(()) => {}
@@ -357,7 +366,7 @@ impl SegmentReader {
                 Err(error) => return Err(error),
             }
         }
-        Self::open_manifest_checked(dir, None, load_manifest(dir)?, true)
+        Self::open_manifest_checked(dir, projection, load_manifest(dir)?, true)
     }
 
     /// Capture only the columns needed by a query, plus canonicality and row-count
@@ -464,7 +473,7 @@ impl SegmentReader {
                 ));
             }
             let captured = if inspection {
-                ColumnArtifacts::open_for_inspection(dir, manifest.as_ref())
+                ColumnArtifacts::open_for_inspection(dir, manifest.as_ref(), projection)
             } else {
                 ColumnArtifacts::open_projected(dir, manifest.as_ref(), projection)
             };
@@ -767,6 +776,27 @@ impl SegmentReader {
         };
         self.validate_bitmap_rows(bitmap.len())?;
         Ok(bitmap)
+    }
+
+    /// Bound the encoded canonical artifact before allocating its body. Raw
+    /// lengths are captured on the same pinned files; bundled lengths are part
+    /// of their immutable table. The decoded bitmap is additionally row-bounded
+    /// by the caller before this method is used.
+    pub(crate) fn read_canonical_for_inspection(
+        &mut self,
+        max_artifact_bytes: u64,
+    ) -> io::Result<NullBitmap> {
+        self.artifacts.inspection_artifact_lengths()?;
+        let length = self.artifacts.len(self.canonical_relative_path())?;
+        if length > max_artifact_bytes {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "canonical artifact requires {length} bytes; limit is {max_artifact_bytes}"
+                ),
+            ));
+        }
+        self.read_canonical()
     }
 
     pub fn read_canonical_len(&self) -> io::Result<u64> {

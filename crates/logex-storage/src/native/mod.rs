@@ -3,6 +3,7 @@ mod directory_lock;
 mod filter;
 mod inspection;
 mod recovery;
+mod repair;
 mod segment;
 mod storage;
 pub(crate) use segment::current_column_profile;
@@ -25,4 +26,8 @@ pub use storage::{
 pub use inspection::{
     InspectedSegmentRole, InspectionLimits, PrimaryDataDisposition, PrimaryDataInspection,
     SegmentInspection, inspect_primary_data,
+};
+pub use repair::{
+    RepairCandidateVerifier, RepairOwnershipGroup, RepairOwnershipPlan, RepairPlanLimits,
+    VerifiedRepairCandidate,
 };
