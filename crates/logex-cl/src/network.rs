@@ -2800,6 +2800,13 @@ impl ConsensusNetwork {
                 if let Some(peer_id) = peer_id {
                     self.dialing_peers.remove(&peer_id);
                     self.clear_pending_requests_for_peer(peer_id);
+                    if self.closing_peers.contains(&peer_id)
+                        && matches!(&error, DialError::Denied { .. })
+                    {
+                        // An overlapping dial can be denied by local admission
+                        // while the peer's planned close is still in progress.
+                        return;
+                    }
                     let ignored_for_run = self.record_dial_error(peer_id, &error);
                     if !ignored_for_run {
                         self.record_transport_backoff(peer_id, format!("dial_error error={error}"));
@@ -11096,6 +11103,19 @@ mod tests {
         network.handle_swarm_event(established(2));
         assert!(network.closing_peers.contains(&peer));
         assert!(network.pending_requests.is_empty());
+        // An outbound attempt started before the local close may finish with
+        // a local admission denial while the original connection still closes.
+        network.handle_swarm_event(SwarmEvent::OutgoingConnectionError {
+            peer_id: Some(peer),
+            connection_id: libp2p::swarm::ConnectionId::new_unchecked(3),
+            error: DialError::Denied {
+                cause: libp2p::swarm::ConnectionDenied::new(io::Error::other(
+                    "gossip control queue closure is still pending",
+                )),
+            },
+        });
+        assert!(network.closing_peers.contains(&peer));
+        assert_eq!(network.peer_lifecycle[&peer].transport_failures, 0);
         network.handle_swarm_event(closed(0));
         assert!(!network.closing_peers.contains(&peer));
         assert!(!network.connected_peers.contains(&peer));
