@@ -155,6 +155,114 @@ fn kind(error: &eyre::Report) -> RepairFetchErrorKind {
         .kind
 }
 
+fn stage_limits() -> InspectionLimits {
+    InspectionLimits {
+        max_segment_rows: 100,
+        max_retained_artifact_bytes: 16 * 1024 * 1024,
+        max_decoded_payload_bytes: 1024 * 1024,
+    }
+}
+
+#[tokio::test]
+async fn reconstruction_staging_builds_bound_indexes_without_publishing() {
+    let (mut source, headers) = fixture_with_logs(&[0, 2, 3]);
+    let rows = original_rows(&[0, 2, 3]).await;
+    let tmp = write(&rows, 100, &[]);
+    let before = tree(tmp.path());
+    let report = inspect(tmp.path());
+    let id = report
+        .catalog
+        .segments
+        .iter()
+        .find(|s| s.row_count > 0)
+        .unwrap()
+        .id;
+    let plan = plan(report, &[id]);
+    let mut reconstruction =
+        RepairReconstruction::new(&plan, limits(), fetching(), CancellationToken::new()).unwrap();
+    fetch(&mut reconstruction, &mut source, anchor(&headers[3]))
+        .await
+        .unwrap();
+    let rebuilt = reconstruction.finish().unwrap();
+    let parent = tempfile::tempdir().unwrap();
+    let staged = rebuilt
+        .stage_segment(
+            id,
+            &parent.path().join("replacement"),
+            stage_limits(),
+            IndexBuildProfile::All,
+        )
+        .unwrap();
+    staged.verify().unwrap();
+    assert!(!IndexBuilder::indexes_missing(&staged.segment_dir(), IndexBuildProfile::All).unwrap());
+    assert!(staged.segment_dir().join("indexes").is_dir());
+    assert_eq!(
+        staged.descriptor().source_commitment,
+        rebuilt.segments()[0].descriptor().source_commitment
+    );
+    assert_eq!(rebuilt.completions()[0].delivered_blocks(), 4);
+    assert_eq!(tree(tmp.path()), before);
+    let unknown = parent.path().join("unselected");
+    assert_eq!(
+        kind(
+            &rebuilt
+                .stage_segment(u64::MAX, &unknown, stage_limits(), IndexBuildProfile::All,)
+                .unwrap_err()
+        ),
+        RepairFetchErrorKind::InvalidInput
+    );
+    assert!(!unknown.exists());
+}
+
+#[tokio::test(start_paused = true)]
+async fn reconstruction_staging_empty_owner_and_terminal_lifetime_checks() {
+    for expired in [false, true] {
+        let tmp = write(&[], 100, &[]);
+        let before = tree(tmp.path());
+        let report = inspect(tmp.path());
+        let id = report.catalog.active_hot_segment.unwrap();
+        let plan = plan(report, &[id]);
+        let cancellation = CancellationToken::new();
+        let rebuilt = RepairReconstruction::new(&plan, limits(), fetching(), cancellation.clone())
+            .unwrap()
+            .finish()
+            .unwrap();
+        let parent = tempfile::tempdir().unwrap();
+        let staged = rebuilt
+            .stage_segment(
+                id,
+                &parent.path().join("empty"),
+                stage_limits(),
+                IndexBuildProfile::All,
+            )
+            .unwrap();
+        staged.verify().unwrap();
+        assert!(
+            !IndexBuilder::indexes_missing(&staged.segment_dir(), IndexBuildProfile::All).unwrap()
+        );
+        assert_eq!(staged.descriptor().row_count, 0);
+        if expired {
+            tokio::time::advance(Duration::from_secs(61)).await;
+        } else {
+            cancellation.cancel();
+        }
+        let destination = parent.path().join("refused");
+        let error = rebuilt
+            .stage_segment(id, &destination, stage_limits(), IndexBuildProfile::All)
+            .unwrap_err();
+        assert_eq!(
+            kind(&error),
+            if expired {
+                RepairFetchErrorKind::Deadline
+            } else {
+                RepairFetchErrorKind::Cancelled
+            }
+        );
+        assert!(!destination.exists());
+        assert_eq!(tree(tmp.path()), before);
+    }
+}
+
 #[tokio::test]
 async fn reconstruction_preserves_split_owners_local_rows_and_empty_block_coverage() {
     let (mut source, headers) = fixture_with_logs(&[0, 2, 3]);

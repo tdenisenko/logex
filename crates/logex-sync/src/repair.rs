@@ -1,4 +1,4 @@
-//! Finite repair fetching and reconstruction without storage publication.
+//! Finite repair fetching, reconstruction and staging without storage publication.
 //!
 //! The low-level fetcher requires an authentic execution anchor from its caller;
 //! the anchor type alone does not prove consensus provenance or finality. The
@@ -9,7 +9,8 @@
 //!
 //! Cancellation drops local waits, not already queued network requests. The owning
 //! network runtime remains responsible for transport timeout/teardown and may persist
-//! its ordinary peer cache. This module writes no repair data, sync state or notifications.
+//! its ordinary peer cache. Explicit staging writes fresh caller-reserved trees;
+//! it does not publish repair data, sync state or notifications to the live dataset.
 //! CPU validation is synchronous and bounded by caller work limits. Deadline and
 //! cancellation are observed between finite CPU steps, not hard CPU preemption; a
 //! coordinator needing runtime responsiveness must provide appropriate worker ownership.

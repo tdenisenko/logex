@@ -1,11 +1,14 @@
-//! Read-only ownership planning and exact local reconstruction checks.
+//! Ownership planning, exact reconstruction checks and private replacement staging.
 //!
 //! A successful check preserves published local contents; it does not prove
-//! chain membership or block completeness. The repair coordinator must still
-//! authenticate fetched blocks, verify staged artifacts and guard publication.
+//! chain membership or block completeness. Staging independently checks encoded
+//! primary data; the coordinator must retain authenticated fetch transcripts,
+//! reverify the final artifact identities and guard journaled publication.
 mod input;
 mod overlap;
+mod staging;
 pub use input::{RepairReadLimits, RepairRowInput};
+pub use staging::StagedRepairCandidate;
 
 use std::{collections::BTreeMap, io};
 
@@ -291,13 +294,29 @@ pub struct VerifiedRepairCandidate<'a> {
     canonical: NullBitmap,
 }
 
-impl VerifiedRepairCandidate<'_> {
+impl<'a> VerifiedRepairCandidate<'a> {
     pub fn descriptor(&self) -> &SegmentDescriptor {
         &self.plan.catalog().segments[self.index]
     }
 
     pub fn canonical(&self) -> &NullBitmap {
         &self.canonical
+    }
+
+    fn verifier(&self) -> io::Result<RepairCandidateVerifier<'a>> {
+        let namespace = self
+            .descriptor()
+            .source_namespace
+            .ok_or_else(|| invalid("verified repair source has no namespace"))?;
+        Ok(RepairCandidateVerifier {
+            plan: self.plan,
+            index: self.index,
+            canonical: self.canonical.clone(),
+            state: PrefixState::empty(namespace.0),
+            bounds: None,
+            data_bytes: 0,
+            failed: false,
+        })
     }
 }
 
