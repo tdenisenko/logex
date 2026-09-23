@@ -1,16 +1,50 @@
 //! Disposable writer/fetcher integration; scripted anchors are not CL proofs.
 use super::*;
 use crate::repair::tests::{anchor, fixture, fixture_with_logs, limits as fetch_limits};
+use logex_cl::AnchorRecord;
 use logex_storage::ColumnFileHeader;
 use logex_storage::native::{
     InspectionLimits, NativeStorage, NativeStorageConfig, PrimaryDataInspection, RepairPlanLimits,
     StorageCatalogPaths, inspect_primary_data,
 };
+use logex_types::ExecutionAnchor;
 use std::{
     fs,
     path::{Path, PathBuf},
     time::{Duration, SystemTime},
 };
+
+fn consensus(anchors: &[ExecutionAnchor]) -> (tempfile::TempDir, ConsensusStore) {
+    let directory = tempfile::tempdir().unwrap();
+    let store = ConsensusStore::open(
+        directory.path(),
+        Some("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+    )
+    .unwrap();
+    // Persist scripted retained anchors; CL proof validation has separate fixtures.
+    store
+        .replace_anchors(
+            anchors
+                .iter()
+                .map(|&anchor| AnchorRecord {
+                    anchor,
+                    finalized: false,
+                    parent_beacon_root: None,
+                })
+                .collect(),
+        )
+        .unwrap();
+    (directory, store)
+}
+
+async fn fetch(
+    reconstruction: &mut RepairReconstruction<'_>,
+    source: &mut impl RepairSource,
+    anchor: ExecutionAnchor,
+) -> Result<bool> {
+    let (_directory, store) = consensus(&[anchor]);
+    reconstruction.fetch_next_range(source, &store).await
+}
 
 fn read_limits() -> RepairReadLimits {
     RepairReadLimits {
@@ -165,14 +199,12 @@ async fn reconstruction_preserves_split_owners_local_rows_and_empty_block_covera
     let mut reconstruction =
         RepairReconstruction::new(&plan, limits(), fetching(), CancellationToken::new()).unwrap();
     assert!(
-        reconstruction
-            .fetch_next_range(&mut source, anchor(&headers[3]))
+        fetch(&mut reconstruction, &mut source, anchor(&headers[3]))
             .await
             .unwrap()
     );
     assert!(
-        !reconstruction
-            .fetch_next_range(&mut source, anchor(&headers[3]))
+        !fetch(&mut reconstruction, &mut source, anchor(&headers[3]))
             .await
             .unwrap()
     );
@@ -249,14 +281,12 @@ async fn reconstruction_preserves_original_order_duplicates_and_disjoint_fetch_g
     let mut reconstruction =
         RepairReconstruction::new(&plan, limits(), fetching(), CancellationToken::new()).unwrap();
     assert!(
-        reconstruction
-            .fetch_next_range(&mut source, anchor(&headers[3]))
+        fetch(&mut reconstruction, &mut source, anchor(&headers[3]))
             .await
             .unwrap()
     );
     assert!(
-        reconstruction
-            .fetch_next_range(&mut source, anchor(&headers[3]))
+        fetch(&mut reconstruction, &mut source, anchor(&headers[3]))
             .await
             .unwrap()
     );
@@ -309,8 +339,7 @@ async fn preserved_rows_still_require_fetch_completion_and_empty_owners_need_no_
     .unwrap();
     let (mut source, _) = fixture();
     assert!(
-        !reconstruction
-            .fetch_next_range(&mut source, anchor(&headers[3]))
+        !fetch(&mut reconstruction, &mut source, anchor(&headers[3]))
             .await
             .unwrap()
     );
@@ -352,9 +381,7 @@ async fn reconstruction_enforces_aggregate_rows_and_actual_data_with_terminal_fa
             CancellationToken::new(),
         )
         .unwrap();
-        let result = reconstruction
-            .fetch_next_range(&mut source, anchor(&headers[3]))
-            .await;
+        let result = fetch(&mut reconstruction, &mut source, anchor(&headers[3])).await;
         if budget == 7 {
             assert_eq!(
                 kind(&result.unwrap_err()),
@@ -385,7 +412,7 @@ async fn dropped_fetch_and_post_fetch_cancellation_or_deadline_cannot_complete()
     assert!(
         tokio::time::timeout(
             Duration::from_millis(1),
-            reconstruction.fetch_next_range(&mut source, anchor(&headers[3]))
+            fetch(&mut reconstruction, &mut source, anchor(&headers[3]))
         )
         .await
         .is_err()
@@ -399,8 +426,7 @@ async fn dropped_fetch_and_post_fetch_cancellation_or_deadline_cannot_complete()
         let cancellation = CancellationToken::new();
         let mut reconstruction =
             RepairReconstruction::new(&plan, limits(), fetching(), cancellation.clone()).unwrap();
-        reconstruction
-            .fetch_next_range(&mut source, anchor(&headers[3]))
+        fetch(&mut reconstruction, &mut source, anchor(&headers[3]))
             .await
             .unwrap();
         if expired {
@@ -438,8 +464,7 @@ async fn changed_original_routing_cannot_claim_verified_reconstruction() {
         let mut reconstruction =
             RepairReconstruction::new(&plan, limits(), fetching(), CancellationToken::new())
                 .unwrap();
-        let error = reconstruction
-            .fetch_next_range(&mut source, anchor(&headers[3]))
+        let error = fetch(&mut reconstruction, &mut source, anchor(&headers[3]))
             .await
             .unwrap_err();
         assert_eq!(kind(&error), RepairFetchErrorKind::Local);
@@ -467,13 +492,218 @@ async fn completed_fetch_cannot_replace_a_different_original_commitment() {
     let mut reconstruction =
         RepairReconstruction::new(&plan, limits(), fetching(), CancellationToken::new()).unwrap();
     assert!(
-        reconstruction
-            .fetch_next_range(&mut source, anchor(&headers[3]))
+        fetch(&mut reconstruction, &mut source, anchor(&headers[3]))
             .await
             .unwrap()
     );
     let error = reconstruction.finish().unwrap_err();
     assert_eq!(kind(&error), RepairFetchErrorKind::Local);
     assert!(format!("{error:#}").contains("original logical commitment"));
+    assert_eq!(tree(tmp.path()), before);
+}
+
+#[tokio::test]
+async fn consensus_reconstruction_uses_nearest_anchor_and_refuses_unavailable_bridge() {
+    let rows = original_rows(&[2]).await;
+    let tmp = write(&rows, 100, &[]);
+    let before = tree(tmp.path());
+    let report = inspect(tmp.path());
+    let seed = report.catalog.active_hot_segment.unwrap();
+    let plan = plan(report, &[seed]);
+    let (_, headers) = fixture();
+    for anchors in [Vec::new(), vec![anchor(&headers[3])]] {
+        let (_directory, store) = consensus(&anchors);
+        let (mut source, _) = fixture();
+        let mut reconstruction = RepairReconstruction::new(
+            &plan,
+            limits(),
+            RepairFetchLimits {
+                max_headers: 1,
+                ..fetching()
+            },
+            CancellationToken::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            kind(
+                &reconstruction
+                    .fetch_next_range(&mut source, &store)
+                    .await
+                    .unwrap_err()
+            ),
+            RepairFetchErrorKind::Unavailable
+        );
+        assert!(source.body_calls.is_empty());
+        assert_eq!(
+            kind(&reconstruction.finish().unwrap_err()),
+            RepairFetchErrorKind::Terminal
+        );
+    }
+    let (_directory, store) = consensus(&[anchor(&headers[2]), anchor(&headers[3])]);
+    let (mut source, _) = fixture();
+    let mut reconstruction = RepairReconstruction::new(
+        &plan,
+        limits(),
+        RepairFetchLimits {
+            max_headers: 1,
+            ..fetching()
+        },
+        CancellationToken::new(),
+    )
+    .unwrap();
+    assert!(
+        reconstruction
+            .fetch_next_range(&mut source, &store)
+            .await
+            .unwrap()
+    );
+    let rebuilt = reconstruction.finish().unwrap();
+    assert_eq!(rebuilt.completions()[0].anchor(), anchor(&headers[2]));
+    assert_eq!(rebuilt.segments()[0].rows(), rows);
+    assert_eq!(source.body_calls, vec![headers[2].number]);
+    assert_eq!(rebuilt.with_current_anchors(&store, || Ok(7)).unwrap(), 7);
+    assert_eq!(tree(tmp.path()), before);
+}
+
+#[tokio::test]
+async fn consensus_reconstruction_admits_every_range_or_none_including_repeated_anchors() {
+    let rows = original_rows(&[0, 3]).await;
+    let tmp = write(&rows, 2, &[]);
+    let before = tree(tmp.path());
+    let report = inspect(tmp.path());
+    let seeds: Vec<_> = report
+        .catalog
+        .segments
+        .iter()
+        .filter(|segment| segment.row_count != 0)
+        .map(|segment| segment.id)
+        .collect();
+    let plan = plan(report, &seeds);
+    assert_eq!(plan.block_ranges().len(), 2);
+    for repeated in [false, true] {
+        let (mut source, headers) = fixture_with_logs(&[0, 3]);
+        let anchors = if repeated {
+            vec![anchor(&headers[3])]
+        } else {
+            vec![anchor(&headers[0]), anchor(&headers[3])]
+        };
+        let (_directory, store) = consensus(&anchors);
+        let mut reconstruction =
+            RepairReconstruction::new(&plan, limits(), fetching(), CancellationToken::new())
+                .unwrap();
+        for _ in 0..2 {
+            assert!(
+                reconstruction
+                    .fetch_next_range(&mut source, &store)
+                    .await
+                    .unwrap()
+            );
+        }
+        let rebuilt = reconstruction.finish().unwrap();
+        assert_eq!(rebuilt.completions().len(), 2);
+        assert_eq!(rebuilt.completions()[0].anchor(), anchors[0]);
+        assert_eq!(rebuilt.completions()[1].anchor(), anchor(&headers[3]));
+        let calls = std::cell::Cell::new(0);
+        rebuilt
+            .with_current_anchors(&store, || {
+                calls.set(calls.get() + 1);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(calls.get(), 1);
+        // Removing an earlier completion cannot be hidden by a valid last anchor.
+        store
+            .replace_anchors(store.ordered_anchors().into_iter().skip(1).collect())
+            .unwrap();
+        assert_eq!(
+            kind(
+                &rebuilt
+                    .with_current_anchors(&store, || {
+                        calls.set(calls.get() + 1);
+                        Ok(())
+                    })
+                    .unwrap_err()
+            ),
+            RepairFetchErrorKind::Unavailable
+        );
+        assert_eq!(calls.get(), 1);
+        assert_eq!(tree(tmp.path()), before);
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn consensus_reconstruction_checks_lifetime_after_finish_before_admission() {
+    let rows = original_rows(&[2]).await;
+    let tmp = write(&rows, 100, &[]);
+    let before = tree(tmp.path());
+    let report = inspect(tmp.path());
+    let seed = report.catalog.active_hot_segment.unwrap();
+    let plan = plan(report, &[seed]);
+    for expired in [false, true] {
+        let (mut source, headers) = fixture();
+        let (_directory, store) = consensus(&[anchor(&headers[2])]);
+        let cancellation = CancellationToken::new();
+        let mut reconstruction =
+            RepairReconstruction::new(&plan, limits(), fetching(), cancellation.clone()).unwrap();
+        reconstruction
+            .fetch_next_range(&mut source, &store)
+            .await
+            .unwrap();
+        let rebuilt = reconstruction.finish().unwrap();
+        if expired {
+            tokio::time::advance(Duration::from_secs(60)).await;
+        } else {
+            cancellation.cancel();
+        }
+        let calls = std::cell::Cell::new(0);
+        let error = rebuilt
+            .with_current_anchors(&store, || {
+                calls.set(calls.get() + 1);
+                Ok(())
+            })
+            .unwrap_err();
+        assert_eq!(calls.get(), 0);
+        assert_eq!(
+            kind(&error),
+            if expired {
+                RepairFetchErrorKind::Deadline
+            } else {
+                RepairFetchErrorKind::Cancelled
+            }
+        );
+        assert_eq!(tree(tmp.path()), before);
+    }
+}
+
+#[tokio::test]
+async fn consensus_reconstruction_empty_owner_needs_no_chain_anchor() {
+    let tmp = write(&[], 100, &[]);
+    let before = tree(tmp.path());
+    let report = inspect(tmp.path());
+    let seed = report.catalog.active_hot_segment.unwrap();
+    let plan = plan(report, &[seed]);
+    let (_directory, store) = consensus(&[]);
+    let (mut source, _) = fixture();
+    let cancellation = CancellationToken::new();
+    let mut reconstruction =
+        RepairReconstruction::new(&plan, limits(), fetching(), cancellation.clone()).unwrap();
+    assert!(
+        !reconstruction
+            .fetch_next_range(&mut source, &store)
+            .await
+            .unwrap()
+    );
+    let rebuilt = reconstruction.finish().unwrap();
+    assert!(rebuilt.completions().is_empty());
+    assert_eq!(rebuilt.with_current_anchors(&store, || Ok(3)).unwrap(), 3);
+    // Admission forwards publication errors; it does not claim to roll back a callback.
+    let error = rebuilt
+        .with_current_anchors::<()>(&store, || Err(eyre::eyre!("fixture publication error")))
+        .unwrap_err();
+    assert_eq!(error.to_string(), "fixture publication error");
+    cancellation.cancel();
+    let error = rebuilt.with_current_anchors(&store, || Ok(())).unwrap_err();
+    assert_eq!(kind(&error), RepairFetchErrorKind::Cancelled);
+    assert!(source.body_calls.is_empty());
     assert_eq!(tree(tmp.path()), before);
 }

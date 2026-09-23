@@ -1,9 +1,11 @@
-//! Finite, caller-anchored repair fetching without storage publication.
+//! Finite repair fetching and reconstruction without storage publication.
 //!
-//! The caller must supply an authentic, still-selected execution anchor. Its type
-//! alone does not prove consensus provenance or finality. Stage each yielded block
-//! durably, including empty blocks; only explicit completion plus successful staging
-//! can support a separate repair coordinator's publication decision.
+//! The low-level fetcher requires an authentic execution anchor from its caller;
+//! the anchor type alone does not prove consensus provenance or finality. The
+//! reconstruction assembler selects retained anchors from ConsensusStore and can
+//! admit its whole transcript against one current snapshot. A separate coordinator
+//! must durably bind verified staged replacements and complete block coverage,
+//! including empty blocks, before publishing a repaired catalog.
 //!
 //! Cancellation drops local waits, not already queued network requests. The owning
 //! network runtime remains responsible for transport timeout/teardown and may persist

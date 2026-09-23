@@ -2,12 +2,14 @@
 //!
 //! The assembler drives its own verified fetch cursor for each fixed range, so
 //! completion cannot be supplied separately from the blocks actually consumed.
-//! Anchors still require caller-supplied consensus provenance and a fresh check
-//! before publication. These objects authorize neither staged files nor writes.
+//! Anchors come from the retained consensus store. Every completion must still
+//! be admitted against one current snapshot immediately before publication.
+//! These objects do not verify staged files or implement durable publication.
 use std::collections::{BTreeMap, BTreeSet};
 
 use alloy_primitives::B256;
 use eyre::{Result, WrapErr};
+use logex_cl::ConsensusStore;
 use logex_storage::{
     NullBitmap,
     native::{
@@ -15,7 +17,7 @@ use logex_storage::{
         VerifiedRepairCandidate,
     },
 };
-use logex_types::{ExecutionAnchor, LogRow, Source};
+use logex_types::{LogRow, Source};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
@@ -188,13 +190,14 @@ impl<'a> RepairReconstruction<'a> {
             .map(|&(start, end)| RepairRange { start, end })
     }
 
-    /// Fetch the next entire affected range using an authentic, still-selected
-    /// anchor supplied by the coordinator. Returns false once all ranges have
-    /// completed. No public method accepts externally assembled block evidence.
+    /// Fetch the next entire affected range using the nearest admissible retained
+    /// consensus anchor within the header budget. Returns false once all ranges
+    /// have completed. Selection can change during fetching; the completed result
+    /// therefore requires a fresh whole-transcript check before publication.
     pub async fn fetch_next_range(
         &mut self,
         source: &mut impl RepairSource,
-        anchor: ExecutionAnchor,
+        consensus: &ConsensusStore,
     ) -> Result<bool> {
         ensure_repair!(
             !self.failed,
@@ -209,6 +212,19 @@ impl<'a> RepairReconstruction<'a> {
             self.failed = false;
             return Ok(false);
         };
+        let anchor = consensus
+            .nearest_current_anchor(range.start, range.end, self.fetch_limits.max_headers)
+            .ok_or_else(|| {
+                failure(
+                    RepairFetchErrorKind::Unavailable,
+                    eyre::eyre!(
+                        "no current consensus anchor covers repair range {}..={} within the {}-header budget; retain the original artifacts and retry with available trusted history or an appropriate bridge budget",
+                        range.start,
+                        range.end,
+                        self.fetch_limits.max_headers
+                    ),
+                )
+            })?;
         let mut fetch =
             RepairFetcher::new(range, anchor, self.fetch_limits, self.cancellation.clone())?;
         let expected = range
@@ -308,8 +324,9 @@ impl<'a> RepairReconstruction<'a> {
     }
 
     /// Check complete block coverage and exact original segments before returning
-    /// immutable rows and canonical flags. Staging, index rebuilding, journal
-    /// publication and current consensus-anchor admission remain separate work.
+    /// immutable rows and canonical flags. Staging, index rebuilding and journal
+    /// publication remain separate work. The result retains the operation lifetime
+    /// for a fresh current-anchor and cancellation check at publication admission.
     pub fn finish(self) -> Result<ReconstructedRepair<'a>> {
         ensure_repair!(
             !self.failed,
@@ -357,18 +374,22 @@ impl<'a> RepairReconstruction<'a> {
             plan: self.plan,
             segments: verified,
             completions: self.completions,
+            deadline: self.fetch_limits.deadline,
+            cancellation: self.cancellation,
         })
     }
 }
 
 /// Exact local equivalence and complete fetch transcripts, under the original
-/// directory owner. The caller remains responsible for authentic anchor choice,
-/// staged-file verification and a coherent publication decision.
+/// directory owner. The caller remains responsible for staged-file verification
+/// and durable publication inside a fresh current-anchor admission.
 #[derive(Debug)]
 pub struct ReconstructedRepair<'a> {
     plan: &'a RepairOwnershipPlan,
     segments: Vec<ReconstructedSegment<'a>>,
     completions: Vec<RepairCompletion>,
+    deadline: Instant,
+    cancellation: CancellationToken,
 }
 
 impl ReconstructedRepair<'_> {
@@ -380,6 +401,42 @@ impl ReconstructedRepair<'_> {
     }
     pub fn completions(&self) -> &[RepairCompletion] {
         &self.completions
+    }
+
+    /// Admit one synchronous operation only while every completion anchor is
+    /// current under one consensus snapshot. Prepare and verify staging before
+    /// calling; keep the existing storage owner throughout. The callback must not
+    /// await, re-enter consensus APIs, or call peers, subscribers or progress hooks.
+    ///
+    /// Cancellation and deadline are checked again after acquiring that snapshot,
+    /// immediately before the callback. Cancellation after admission cannot undo
+    /// its writes; the callback must finish or leave recoverable journal evidence.
+    /// Empty transcripts are valid only for the already-proven empty range union
+    /// and make no chain claim. This is not finality or cross-file durability.
+    pub fn with_current_anchors<R>(
+        &self,
+        consensus: &ConsensusStore,
+        publish: impl FnOnce() -> Result<R>,
+    ) -> Result<R> {
+        check_active(self.deadline, &self.cancellation)?;
+        let mut anchors = Vec::new();
+        anchors
+            .try_reserve_exact(self.completions.len())
+            .wrap_err("reserve repair admission anchors")?;
+        anchors.extend(self.completions.iter().map(RepairCompletion::anchor));
+        consensus
+            .with_current_anchors(&anchors, || {
+                check_active(self.deadline, &self.cancellation)?;
+                publish()
+            })
+            .ok_or_else(|| {
+                failure(
+                    RepairFetchErrorKind::Unavailable,
+                    eyre::eyre!(
+                        "repair completion anchors are no longer current; retain staged and original artifacts for a fresh verified repair attempt"
+                    ),
+                )
+            })?
     }
 }
 
