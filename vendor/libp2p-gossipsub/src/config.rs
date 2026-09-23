@@ -146,6 +146,33 @@ impl Default for CacheLimits {
     }
 }
 
+/// Per-peer queued RPC budgets, shared by all connections to that peer.
+/// Counts include messages staged by a receiver. Bytes cover owned buffers and
+/// vector allocations, not total RSS or the handler's single in-flight frame.
+/// These limits are independent of protocol frame-size limits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct QueueLimits {
+    /// Reserved entries for subscriptions, GRAFT and PRUNE. Saturation closes the peer.
+    pub max_control_messages: usize,
+    /// Owned bytes for subscriptions, GRAFT and PRUNE.
+    pub max_control_bytes: usize,
+    /// Owned bytes for locally published messages awaiting transmission.
+    pub max_publish_bytes: usize,
+    /// Owned bytes for forwarded messages and IHAVE/IWANT/IDONTWANT controls.
+    pub max_non_priority_bytes: usize,
+}
+
+impl Default for QueueLimits {
+    fn default() -> Self {
+        Self {
+            max_control_messages: 256,
+            max_control_bytes: 256 * 1024,
+            max_publish_bytes: 16 * 1024 * 1024,
+            max_non_priority_bytes: 16 * 1024 * 1024,
+        }
+    }
+}
+
 /// Configuration parameters that define the performance of the gossipsub network.
 #[derive(Clone)]
 pub struct Config {
@@ -180,6 +207,7 @@ pub struct Config {
     iwant_followup_time: Duration,
     published_message_ids_cache_time: Duration,
     connection_handler_queue_len: usize,
+    queue_limits: QueueLimits,
     connection_handler_publish_duration: Duration,
     connection_handler_forward_duration: Duration,
     idontwant_message_size_threshold: usize,
@@ -505,9 +533,16 @@ impl Config {
         self.published_message_ids_cache_time
     }
 
-    /// The max number of messages a `ConnectionHandler` can buffer. The default is 5000.
+    /// Per-peer entry allowance split equally between published messages and the
+    /// non-priority lane. Odd values round down in each lane; the minimum is two.
+    /// Defaults to 5000. Critical controls have a separate [`QueueLimits`] budget.
     pub fn connection_handler_queue_len(&self) -> usize {
         self.connection_handler_queue_len
+    }
+
+    /// Per-peer owned-buffer and reserved critical-control budgets.
+    pub fn queue_limits(&self) -> &QueueLimits {
+        &self.queue_limits
     }
 
     /// The duration a message to be published can wait to be sent before it is abandoned. The
@@ -605,6 +640,7 @@ impl Default for ConfigBuilder {
                 iwant_followup_time: Duration::from_secs(3),
                 published_message_ids_cache_time: Duration::from_secs(10),
                 connection_handler_queue_len: 5000,
+                queue_limits: QueueLimits::default(),
                 connection_handler_publish_duration: Duration::from_secs(5),
                 connection_handler_forward_duration: Duration::from_secs(1),
                 idontwant_message_size_threshold: 1000,
@@ -1083,9 +1119,19 @@ impl ConfigBuilder {
         self
     }
 
-    /// The max number of messages a `ConnectionHandler` can buffer. The default is 5000.
+    /// Per-peer entry allowance split equally between published messages and the
+    /// non-priority lane. Odd values round down in each lane; the minimum is two.
+    /// Defaults to 5000. Critical controls have a separate [`QueueLimits`] budget.
     pub fn connection_handler_queue_len(&mut self, len: usize) -> &mut Self {
         self.config.connection_handler_queue_len = len;
+        self
+    }
+
+    /// Configure per-peer queued ownership. A full critical-control budget closes
+    /// the peer so a new connection can restore consistent subscriptions and mesh
+    /// state. Other full lanes reject the new RPC without evicting queued work.
+    pub fn queue_limits(&mut self, limits: QueueLimits) -> &mut Self {
+        self.config.queue_limits = limits;
         self
     }
 
@@ -1161,6 +1207,10 @@ impl ConfigBuilder {
     pub fn build(&self) -> Result<Config, ConfigBuilderError> {
         // check all constraints on config
 
+        if self.config.connection_handler_queue_len < 2 {
+            return Err(ConfigBuilderError::ConnectionHandlerQueueTooSmall);
+        }
+
         let pre_configured_topics = self.config.protocol.max_transmit_sizes.keys();
         for topic in pre_configured_topics {
             if self.config.protocol.max_transmit_size_for_topic(topic) < 100 {
@@ -1223,6 +1273,11 @@ impl std::fmt::Debug for Config {
         let _ = builder.field("fanout_ttl", &self.fanout_ttl);
         let _ = builder.field("duplicate_cache_time", &self.duplicate_cache_time);
         let _ = builder.field("cache_limits", &self.cache_limits);
+        let _ = builder.field(
+            "connection_handler_queue_len",
+            &self.connection_handler_queue_len,
+        );
+        let _ = builder.field("queue_limits", &self.queue_limits);
         let _ = builder.field("validate_messages", &self.validate_messages);
         let _ = builder.field("allow_self_origin", &self.allow_self_origin);
         let _ = builder.field("do_px", &self.do_px);
@@ -1268,6 +1323,26 @@ mod test {
 
     use super::*;
     use crate::{topic::IdentityHash, Topic};
+
+    #[test]
+    fn logex_queue_configuration_rejects_missing_message_lanes() {
+        for len in [0, 1] {
+            assert!(matches!(
+                ConfigBuilder::default()
+                    .connection_handler_queue_len(len)
+                    .build(),
+                Err(ConfigBuilderError::ConnectionHandlerQueueTooSmall)
+            ));
+        }
+        for len in [2, 3, 5000] {
+            let config = ConfigBuilder::default()
+                .connection_handler_queue_len(len)
+                .build()
+                .unwrap();
+            assert_eq!(config.connection_handler_queue_len(), len);
+            assert_eq!(config.queue_limits(), &QueueLimits::default());
+        }
+    }
 
     #[test]
     fn create_config_with_message_id_as_plain_function() {

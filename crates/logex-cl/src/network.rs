@@ -121,6 +121,12 @@ const GOSSIP_CACHE_LIMITS: gossipsub::CacheLimits = gossipsub::CacheLimits {
     idontwant_entries_per_peer: 1_024,
     idontwant_bytes_per_peer: 1_024 * 20,
 };
+const GOSSIP_QUEUE_LIMITS: gossipsub::QueueLimits = gossipsub::QueueLimits {
+    max_control_messages: 256,
+    max_control_bytes: 256 * 1024,
+    max_publish_bytes: 16 * 1024 * 1024,
+    max_non_priority_bytes: 16 * 1024 * 1024,
+};
 const P2P_BANDWIDTH_RATE_WINDOW: Duration = Duration::from_secs(15);
 const LIGHT_CLIENT_FINALITY_UPDATE_TOPIC_NAME: &str = "light_client_finality_update";
 const LIGHT_CLIENT_OPTIMISTIC_UPDATE_TOPIC_NAME: &str = "light_client_optimistic_update";
@@ -2720,6 +2726,15 @@ impl ConsensusNetwork {
                     self.disconnect_busy_peer(peer_id);
                     return;
                 }
+                // A connection notification may already be queued when local
+                // overload starts closing this peer. Do not restart its RPCs or
+                // erase planned-close attribution before the final close.
+                if self.closing_peers.contains(&peer_id) {
+                    self.dialing_peers.remove(&peer_id);
+                    self.connected_peers.insert(peer_id);
+                    self.clear_pending_requests_for_peer(peer_id);
+                    return;
+                }
                 let dial_class = match &endpoint {
                     ConnectedPoint::Dialer { address, .. } => dial_address_class(address),
                     ConnectedPoint::Listener { .. } => None,
@@ -2749,9 +2764,19 @@ impl ConsensusNetwork {
                 self.peer_endpoints.insert(peer_id, endpoint);
                 self.drive_rpc_requests();
             }
-            SwarmEvent::ConnectionClosed { peer_id, cause, .. } => {
+            SwarmEvent::ConnectionClosed {
+                peer_id,
+                cause,
+                num_established,
+                ..
+            } => {
                 tracing::debug!(%peer_id, cause = ?cause, "consensus libp2p connection closed");
                 self.last_connection_event = Some(format!("closed peer={peer_id} cause={cause:?}"));
+                if num_established != 0 {
+                    // Other connections still own this peer and any planned
+                    // closure. Final cleanup must run exactly once.
+                    return;
+                }
                 self.dialing_peers.remove(&peer_id);
                 self.connected_peers.remove(&peer_id);
                 let planned = self.closing_peers.remove(&peer_id);
@@ -3004,6 +3029,18 @@ impl ConsensusNetwork {
                         "consensus gossip message was no longer pending validation"
                     );
                 }
+            }
+            gossipsub::Event::ControlQueueFull { peer_id } => {
+                // Gossipsub emits this before its close-all action. Release
+                // application request ownership now so late responses/failures
+                // cannot blame the peer for our local queue pressure.
+                self.closing_peers.insert(peer_id);
+                self.clear_pending_requests_for_peer(peer_id);
+                self.last_peer_policy_event = Some(format!(
+                    "{} policy=local_control_overload action=reconnect",
+                    self.peer_context(peer_id)
+                ));
+                tracing::info!(%peer_id, "closing consensus peer after local gossip control queue overload");
             }
             gossipsub::Event::Subscribed { peer_id, topic } => {
                 tracing::debug!(%peer_id, topic = %topic, "consensus peer subscribed to gossip topic");
@@ -6906,6 +6943,7 @@ fn build_gossip_config() -> Result<gossipsub::Config, ConsensusNetworkError> {
         .history_gossip(3)
         .duplicate_cache_time(Duration::from_secs(768))
         .cache_limits(GOSSIP_CACHE_LIMITS)
+        .queue_limits(GOSSIP_QUEUE_LIMITS)
         .max_transmit_size(snap::raw::max_compress_len(GOSSIP_MAX_PAYLOAD_SIZE) + 1024)
         .message_id_fn(eth2_message_id)
         .build()
@@ -10978,6 +11016,101 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn gossip_control_overload_releases_requests_and_preserves_close_attribution() {
+        let temp = TempDir::new().unwrap();
+        let (mut network, update) = request_lifecycle_fixture(&temp);
+        let peer = PeerId::random();
+        network.connected_peers.insert(peer);
+        network.peer_lifecycle.entry(peer).or_default();
+        let original_store = network.consensus.light_client_store().unwrap();
+        let kind = RpcRequestKind::LightClientUpdatesByRange;
+        network.ensure_request(peer, kind);
+        let key = *network.pending_requests.keys().next().unwrap();
+        let root_key = memory_root_request(&mut network, peer, vec![B256::repeat_byte(7)]);
+        assert!(!network.pending_light_client_range_requests.is_empty());
+        assert!(
+            network
+                .pending_history_root_requests
+                .contains_key(&root_key)
+        );
+        network.handle_gossip_event(gossipsub::Event::ControlQueueFull { peer_id: peer });
+        assert!(network.closing_peers.contains(&peer));
+        assert!(network.connected_peers.contains(&peer));
+        assert!(network.pending_requests.is_empty());
+        assert!(network.pending_peer_kinds.is_empty());
+        assert!(network.pending_light_client_range_requests.is_empty());
+        assert!(network.pending_history_root_requests.is_empty());
+        assert!(
+            network
+                .last_peer_policy_event
+                .as_ref()
+                .unwrap()
+                .contains("local_control_overload")
+        );
+
+        network.handle_rpc_response(
+            kind,
+            peer,
+            key.request_id,
+            Eth2RpcResponse::LightClientUpdatesByRange(vec![update]),
+        );
+        network.handle_rpc_event(
+            kind,
+            request_response::Event::OutboundFailure {
+                peer,
+                connection_id: libp2p::swarm::ConnectionId::new_unchecked(1),
+                request_id: key.request_id,
+                error: request_response::OutboundFailure::ConnectionClosed,
+            },
+        );
+        assert_eq!(
+            network.consensus.light_client_store().unwrap(),
+            original_store
+        );
+        let closed = |num_established| SwarmEvent::ConnectionClosed {
+            peer_id: peer,
+            connection_id: libp2p::swarm::ConnectionId::new_unchecked(1),
+            endpoint: ConnectedPoint::Listener {
+                local_addr: "/memory/1".parse().unwrap(),
+                send_back_addr: "/memory/2".parse().unwrap(),
+            },
+            num_established,
+            cause: None,
+        };
+        network.handle_swarm_event(closed(1));
+        assert!(network.closing_peers.contains(&peer));
+        assert!(network.connected_peers.contains(&peer));
+        let established = |connections| SwarmEvent::ConnectionEstablished {
+            peer_id: peer,
+            connection_id: libp2p::swarm::ConnectionId::new_unchecked(2),
+            endpoint: ConnectedPoint::Listener {
+                local_addr: "/memory/1".parse().unwrap(),
+                send_back_addr: "/memory/2".parse().unwrap(),
+            },
+            num_established: std::num::NonZeroU32::new(connections).unwrap(),
+            concurrent_dial_errors: None,
+            established_in: Duration::ZERO,
+        };
+        // A previously queued establishment cannot restart work during close-all.
+        network.handle_swarm_event(established(2));
+        assert!(network.closing_peers.contains(&peer));
+        assert!(network.pending_requests.is_empty());
+        network.handle_swarm_event(closed(0));
+        assert!(!network.closing_peers.contains(&peer));
+        assert!(!network.connected_peers.contains(&peer));
+        let lifecycle = &network.peer_lifecycle[&peer];
+        assert_eq!(lifecycle.disconnects, 0);
+        assert_eq!(lifecycle.rpc_failures, 0);
+        assert_eq!(lifecycle.transport_failures, 0);
+        assert!(!lifecycle.ignored_for_run);
+        // No sockets are polled: this verifies normal fresh-establishment policy.
+        network.handle_swarm_event(established(1));
+        assert!(!network.closing_peers.contains(&peer));
+        assert!(network.connected_peers.contains(&peer));
+        assert!(network.connected_since.contains_key(&peer));
+    }
+
     #[test]
     fn gossip_config_matches_pinned_mainnet_parameters() {
         let config = build_gossip_config().unwrap();
@@ -10995,6 +11128,14 @@ mod tests {
         assert_eq!((config.history_length(), config.history_gossip()), (6, 3));
         assert_eq!(config.duplicate_cache_time(), Duration::from_secs(768));
         assert_eq!(config.cache_limits(), &GOSSIP_CACHE_LIMITS);
+        assert_eq!(config.queue_limits(), &GOSSIP_QUEUE_LIMITS);
+        assert_eq!(config.queue_limits().max_control_messages, 256);
+        assert_eq!(config.queue_limits().max_control_bytes, 256 * 1024);
+        assert_eq!(config.queue_limits().max_publish_bytes, 16 * 1024 * 1024);
+        assert_eq!(
+            config.queue_limits().max_non_priority_bytes,
+            16 * 1024 * 1024
+        );
         assert_eq!(config.cache_limits().seen_entries, 16_384);
         assert_eq!(config.cache_limits().seen_bytes, 655_360);
         assert_eq!(config.cache_limits().message_bytes, 16 * 1024 * 1024);

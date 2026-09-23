@@ -65,7 +65,19 @@
 
 --- a/src/behaviour/tests.rs
 +++ b/src/behaviour/tests.rs
-@@ -247,7 +247,7 @@
+@@ -236,7 +236,10 @@
+         }
+     };
+
+-    let sender = Sender::new(gs.config.connection_handler_queue_len());
++    let sender = Sender::new(
++        gs.config.connection_handler_queue_len(),
++        *gs.config.queue_limits(),
++    );
+     let receiver = sender.new_receiver();
+     let connection_id = ConnectionId::new_unchecked(0);
+     gs.connected_peers.insert(
+@@ -247,7 +250,7 @@
              connections: vec![connection_id],
              topics: Default::default(),
              sender,
@@ -74,7 +86,73 @@
          },
      );
 
-@@ -643,7 +643,7 @@
+@@ -452,10 +455,9 @@
+     // collect all the subscriptions
+     let subscriptions = receivers
+         .into_values()
+-        .fold(0, |mut collected_subscriptions, c| {
+-            let priority = c.priority.get_ref();
+-            while !priority.is_empty() {
+-                if let Ok(RpcOut::Subscribe(_)) = priority.try_recv() {
++        .fold(0, |mut collected_subscriptions, mut c| {
++            for rpc in c.drain_priority() {
++                if let RpcOut::Subscribe(_) = rpc {
+                     collected_subscriptions += 1
+                 }
+             }
+@@ -513,10 +515,9 @@
+     // collect all the subscriptions
+     let subscriptions = receivers
+         .into_values()
+-        .fold(0, |mut collected_subscriptions, c| {
+-            let priority = c.priority.get_ref();
+-            while !priority.is_empty() {
+-                if let Ok(RpcOut::Subscribe(_)) = priority.try_recv() {
++        .fold(0, |mut collected_subscriptions, mut c| {
++            for rpc in c.drain_priority() {
++                if let RpcOut::Subscribe(_) = rpc {
+                     collected_subscriptions += 1
+                 }
+             }
+@@ -588,21 +589,13 @@
+         let mut new_receivers = HashMap::new();
+         let mut acc = 0;
+
+-        for (peer_id, c) in receivers.into_iter() {
+-            let priority = c.priority.get_ref();
+-            while !priority.is_empty() {
+-                if let Ok(RpcOut::Graft(_)) = priority.try_recv() {
++        for (peer_id, mut c) in receivers.into_iter() {
++            for rpc in c.drain_priority() {
++                if let RpcOut::Graft(_) = rpc {
+                     acc += 1;
+                 }
+             }
+-            new_receivers.insert(
+-                peer_id,
+-                Receiver {
+-                    priority_queue_len: c.priority_queue_len,
+-                    priority: c.priority,
+-                    non_priority: c.non_priority,
+-                },
+-            );
++            new_receivers.insert(peer_id, c);
+         }
+         (acc, new_receivers)
+     }
+@@ -632,7 +625,10 @@
+             &address,
+         )
+         .unwrap();
+-        let sender = Sender::new(gs.config.connection_handler_queue_len());
++        let sender = Sender::new(
++            gs.config.connection_handler_queue_len(),
++            *gs.config.queue_limits(),
++        );
+         let receiver = sender.new_receiver();
+         let connection_id = ConnectionId::new_unchecked(0);
+         gs.connected_peers.insert(
+@@ -643,7 +639,7 @@
                  connections: vec![connection_id],
                  topics: Default::default(),
                  sender,
@@ -83,16 +161,151 @@
              },
          );
          receivers.insert(random_peer, receiver);
-@@ -1040,7 +1040,7 @@
+@@ -734,10 +730,9 @@
+     // Collect all publish messages
+     let publishes = receivers
+         .into_values()
+-        .fold(vec![], |mut collected_publish, c| {
+-            let priority = c.priority.get_ref();
+-            while !priority.is_empty() {
+-                if let Ok(RpcOut::Publish { message, .. }) = priority.try_recv() {
++        .fold(vec![], |mut collected_publish, mut c| {
++            for rpc in c.drain_priority() {
++                if let RpcOut::Publish { message, .. } = rpc {
+                     collected_publish.push(message);
+                 }
+             }
+@@ -819,10 +814,9 @@
+     // Collect all publish messages
+     let publishes = receivers
+         .into_values()
+-        .fold(vec![], |mut collected_publish, c| {
+-            let priority = c.priority.get_ref();
+-            while !priority.is_empty() {
+-                if let Ok(RpcOut::Publish { message, .. }) = priority.try_recv() {
++        .fold(vec![], |mut collected_publish, mut c| {
++            for rpc in c.drain_priority() {
++                if let RpcOut::Publish { message, .. } = rpc {
+                     collected_publish.push(message);
+                 }
+             }
+@@ -867,10 +861,9 @@
+     // collect all the SendEvents
+     let subscriptions = receivers.into_iter().fold(
+         HashMap::<PeerId, Vec<String>>::new(),
+-        |mut collected_subscriptions, (peer, c)| {
+-            let priority = c.priority.get_ref();
+-            while !priority.is_empty() {
+-                if let Ok(RpcOut::Subscribe(topic)) = priority.try_recv() {
++        |mut collected_subscriptions, (peer, mut c)| {
++            for rpc in c.drain_priority() {
++                if let RpcOut::Subscribe(topic) = rpc {
+                     let mut peer_subs = collected_subscriptions.remove(&peer).unwrap_or_default();
+                     peer_subs.push(topic.into_string());
+                     collected_subscriptions.insert(peer, peer_subs);
+@@ -1039,8 +1032,11 @@
+                 connections: vec![ConnectionId::new_unchecked(0)],
                  outbound: false,
                  topics: topics.clone(),
-                 sender: Sender::new(gs.config.connection_handler_queue_len()),
+-                sender: Sender::new(gs.config.connection_handler_queue_len()),
 -                dont_send: LinkedHashMap::new(),
++                sender: Sender::new(
++                    gs.config.connection_handler_queue_len(),
++                    *gs.config.queue_limits(),
++                ),
 +                dont_send: DontSendCache::with_limits(IDONTWANT_TIMEOUT, 10_000, 1024 * 1024),
              },
          );
      }
-@@ -1304,6 +1304,109 @@
+@@ -1103,10 +1099,9 @@
+     // the messages we are sending
+     let sent_messages = receivers
+         .into_values()
+-        .fold(vec![], |mut collected_messages, c| {
+-            let non_priority = c.non_priority.get_ref();
+-            while !non_priority.is_empty() {
+-                if let Ok(RpcOut::Forward { message, .. }) = non_priority.try_recv() {
++        .fold(vec![], |mut collected_messages, mut c| {
++            for rpc in c.drain_non_priority() {
++                if let RpcOut::Forward { message, .. } = rpc {
+                     collected_messages.push(message)
+                 }
+             }
+@@ -1159,28 +1154,23 @@
+
+         // is the message is being sent?
+         let mut message_exists = false;
+-        receivers = receivers.into_iter().map(|(peer_id, c)| {
+-            let non_priority = c.non_priority.get_ref();
+-            while !non_priority.is_empty() {
+-                if matches!(non_priority.try_recv(), Ok(RpcOut::Forward{message, timeout: _ }) if
++        receivers = receivers
++            .into_iter()
++            .map(|(peer_id, mut c)| {
++                for rpc in c.drain_non_priority() {
++                    if matches!(rpc, RpcOut::Forward{message, timeout: _ } if
+                         gs.config.message_id(
+                             &gs.data_transform
+                                 .inbound_transform(message.clone())
+                                 .unwrap(),
+                         ) == msg_id)
+-                {
+-                    message_exists = true;
++                    {
++                        message_exists = true;
++                    }
+                 }
+-            }
+-            (
+-                peer_id,
+-                Receiver {
+-                    priority_queue_len: c.priority_queue_len,
+-                    priority: c.priority,
+-                    non_priority: c.non_priority,
+-                },
+-            )
+-        }).collect();
++                (peer_id, c)
++            })
++            .collect();
+         // default history_length is 5, expect no messages after shift > 5
+         if shift < 5 {
+             assert!(
+@@ -1217,7 +1207,7 @@
+
+ #[test]
+ fn test_handle_iwant_msg_but_already_sent_idontwant() {
+-    let (mut gs, peers, receivers, _) = inject_nodes1()
++    let (mut gs, peers, mut receivers, _) = inject_nodes1()
+         .peer_no(20)
+         .topics(Vec::new())
+         .to_subscribe(true)
+@@ -1263,8 +1253,8 @@
+     gs.handle_iwant(&peers[1], vec![msg_id.clone()]);
+
+     // Check that no messages are sent.
+-    receivers.iter().for_each(|(_, receiver)| {
+-        assert!(receiver.non_priority.get_ref().is_empty());
++    receivers.values_mut().for_each(|receiver| {
++        assert!(receiver.drain_non_priority().is_empty());
+     });
+ }
+
+@@ -1284,10 +1274,9 @@
+
+     // check that we sent an IWANT request for `unknown id`
+     let mut iwant_exists = false;
+-    let receiver = receivers.remove(&peers[7]).unwrap();
+-    let non_priority = receiver.non_priority.get_ref();
+-    while !non_priority.is_empty() {
+-        if let Ok(RpcOut::IWant(IWant { message_ids })) = non_priority.try_recv() {
++    let mut receiver = receivers.remove(&peers[7]).unwrap();
++    for rpc in receiver.drain_non_priority() {
++        if let RpcOut::IWant(IWant { message_ids }) = rpc {
+             if message_ids
+                 .iter()
+                 .any(|m| *m == MessageId::new(b"unknown id"))
+@@ -1304,6 +1293,108 @@
      );
  }
 
@@ -120,11 +333,10 @@
 +        .create_network();
 +    let peer = peers[0];
 +    let id = MessageId::new(b"unanswered-advertisement");
-+    let receiver = receivers.remove(&peer).unwrap();
-+    let count_requests = || {
-+        let queue = receiver.non_priority.get_ref();
++    let mut receiver = receivers.remove(&peer).unwrap();
++    let mut count_requests = || {
 +        let mut count = 0;
-+        while let Ok(message) = queue.try_recv() {
++        for message in receiver.drain_non_priority() {
 +            if let RpcOut::IWant(IWant { message_ids }) = message {
 +                count += message_ids
 +                    .iter()
@@ -202,7 +414,335 @@
  /// tests that an event is not created when a peer shares that it has a message that
  /// we already have
  #[test]
-@@ -5497,7 +5600,7 @@
+@@ -1462,29 +1553,13 @@
+ ) -> (usize, HashMap<PeerId, Receiver>) {
+     let mut new_receivers = HashMap::new();
+     let mut collected_messages = 0;
+-    for (peer_id, c) in receivers.into_iter() {
+-        let priority = c.priority.get_ref();
+-        let non_priority = c.non_priority.get_ref();
+-        while !priority.is_empty() || !non_priority.is_empty() {
+-            if let Ok(rpc) = priority.try_recv() {
+-                if filter(&peer_id, &rpc) {
+-                    collected_messages += 1;
+-                }
+-            }
+-            if let Ok(rpc) = non_priority.try_recv() {
+-                if filter(&peer_id, &rpc) {
+-                    collected_messages += 1;
+-                }
++    for (peer_id, mut c) in receivers.into_iter() {
++        for rpc in c.drain_priority().into_iter().chain(c.drain_non_priority()) {
++            if filter(&peer_id, &rpc) {
++                collected_messages += 1;
+             }
+         }
+-        new_receivers.insert(
+-            peer_id,
+-            Receiver {
+-                priority_queue_len: c.priority_queue_len,
+-                priority: c.priority,
+-                non_priority: c.non_priority,
+-            },
+-        );
++        new_receivers.insert(peer_id, c);
+     }
+     (collected_messages, new_receivers)
+ }
+@@ -1495,21 +1570,10 @@
+ ) -> HashMap<PeerId, Receiver> {
+     gs.events.clear();
+     let mut new_receivers = HashMap::new();
+-    for (peer_id, c) in receivers.into_iter() {
+-        let priority = c.priority.get_ref();
+-        let non_priority = c.non_priority.get_ref();
+-        while !priority.is_empty() || !non_priority.is_empty() {
+-            let _ = priority.try_recv();
+-            let _ = non_priority.try_recv();
+-        }
+-        new_receivers.insert(
+-            peer_id,
+-            Receiver {
+-                priority_queue_len: c.priority_queue_len,
+-                priority: c.priority,
+-                non_priority: c.non_priority,
+-            },
+-        );
++    for (peer_id, mut c) in receivers.into_iter() {
++        c.drain_priority();
++        c.drain_non_priority();
++        new_receivers.insert(peer_id, c);
+     }
+     new_receivers
+ }
+@@ -1715,10 +1779,9 @@
+     };
+     gs.handle_received_message(message.clone(), &local_id);
+     assert_eq!(
+-        receivers.into_iter().fold(0, |mut fwds, (peer_id, c)| {
+-            let non_priority = c.non_priority.get_ref();
+-            while !non_priority.is_empty() {
+-                if matches!(non_priority.try_recv(), Ok(RpcOut::Forward{message: m, timeout: _}) if peer_id == peers[0] && m.data == message.data) {
++        receivers.into_iter().fold(0, |mut fwds, (peer_id, mut c)| {
++            for rpc in c.drain_non_priority() {
++                if matches!(rpc, RpcOut::Forward{message: m, timeout: _} if peer_id == peers[0] && m.data == message.data) {
+         fwds +=1;
+         }
+                 }
+@@ -1859,11 +1922,10 @@
+     }
+
+     // assert that no gossip gets sent to explicit peer
+-    let receiver = receivers.remove(&peers[0]).unwrap();
++    let mut receiver = receivers.remove(&peers[0]).unwrap();
+     let mut gossips = 0;
+-    let non_priority = receiver.non_priority.get_ref();
+-    while !non_priority.is_empty() {
+-        if let Ok(RpcOut::IHave(_)) = non_priority.try_recv() {
++    for rpc in receiver.drain_non_priority() {
++        if let RpcOut::IHave(_) = rpc {
+             gossips += 1;
+         }
+     }
+@@ -2264,10 +2326,9 @@
+     // Collect all publish messages
+     let publishes = receivers
+         .into_values()
+-        .fold(vec![], |mut collected_publish, c| {
+-            let priority = c.priority.get_ref();
+-            while !priority.is_empty() {
+-                if let Ok(RpcOut::Publish { message, .. }) = priority.try_recv() {
++        .fold(vec![], |mut collected_publish, mut c| {
++            for rpc in c.drain_priority() {
++                if let RpcOut::Publish { message, .. } = rpc {
+                     collected_publish.push(message);
+                 }
+             }
+@@ -2750,13 +2811,9 @@
+         RpcOut::IHave(IHave {
+             topic_hash,
+             message_ids,
+-        }) => {
+-            if topic_hash == &topics[0] && message_ids.iter().any(|id| id == &msg_id) {
+-                assert_eq!(peer, &p2);
+-                true
+-            } else {
+-                false
+-            }
++        }) if topic_hash == &topics[0] && message_ids.iter().any(|id| id == &msg_id) => {
++            assert_eq!(peer, &p2);
++            true
+         }
+         _ => false,
+     });
+@@ -2826,10 +2883,9 @@
+     let sent_messages =
+         receivers
+             .into_iter()
+-            .fold(vec![], |mut collected_messages, (peer_id, c)| {
+-                let non_priority = c.non_priority.get_ref();
+-                while !non_priority.is_empty() {
+-                    if let Ok(RpcOut::Forward { message, .. }) = non_priority.try_recv() {
++            .fold(vec![], |mut collected_messages, (peer_id, mut c)| {
++                for rpc in c.drain_non_priority() {
++                    if let RpcOut::Forward { message, .. } = rpc {
+                         collected_messages.push((peer_id, message));
+                     }
+                 }
+@@ -2913,13 +2969,9 @@
+
+     // check that we sent exactly one IWANT request to p2
+     let (control_msgs, _) = count_control_msgs(receivers, |peer, c| match c {
+-        RpcOut::IWant(IWant { message_ids }) => {
+-            if message_ids.iter().any(|m| m == &msg_id) {
+-                assert_eq!(peer, &p2);
+-                true
+-            } else {
+-                false
+-            }
++        RpcOut::IWant(IWant { message_ids }) if message_ids.iter().any(|m| m == &msg_id) => {
++            assert_eq!(peer, &p2);
++            true
+         }
+         _ => false,
+     });
+@@ -2971,17 +3023,17 @@
+     gs.publish(topic, publish_data).unwrap();
+
+     // Collect all publish messages
+-    let publishes = receivers
+-        .into_iter()
+-        .fold(vec![], |mut collected_publish, (peer_id, c)| {
+-            let priority = c.priority.get_ref();
+-            while !priority.is_empty() {
+-                if let Ok(RpcOut::Publish { message, .. }) = priority.try_recv() {
+-                    collected_publish.push((peer_id, message));
++    let publishes =
++        receivers
++            .into_iter()
++            .fold(vec![], |mut collected_publish, (peer_id, mut c)| {
++                for rpc in c.drain_priority() {
++                    if let RpcOut::Publish { message, .. } = rpc {
++                        collected_publish.push((peer_id, message));
++                    }
+                 }
+-            }
+-            collected_publish
+-        });
++                collected_publish
++            });
+
+     // assert only published to p2
+     assert_eq!(publishes.len(), 1);
+@@ -3026,17 +3078,17 @@
+     gs.publish(Topic::new("test"), publish_data).unwrap();
+
+     // Collect all publish messages
+-    let publishes = receivers
+-        .into_iter()
+-        .fold(vec![], |mut collected_publish, (peer_id, c)| {
+-            let priority = c.priority.get_ref();
+-            while !priority.is_empty() {
+-                if let Ok(RpcOut::Publish { message, .. }) = priority.try_recv() {
+-                    collected_publish.push((peer_id, message))
++    let publishes =
++        receivers
++            .into_iter()
++            .fold(vec![], |mut collected_publish, (peer_id, mut c)| {
++                for rpc in c.drain_priority() {
++                    if let RpcOut::Publish { message, .. } = rpc {
++                        collected_publish.push((peer_id, message))
++                    }
+                 }
+-            }
+-            collected_publish
+-        });
++                collected_publish
++            });
+
+     // assert only published to p2
+     assert_eq!(publishes.len(), 1);
+@@ -4248,7 +4300,7 @@
+
+     // create 5 peers with the same ip
+     let addr = Multiaddr::from(Ipv4Addr::new(10, 1, 2, 3));
+-    let peers = vec![
++    let peers = [
+         add_peer_with_addr(&mut gs, &[], false, false, addr.clone()).0,
+         add_peer_with_addr(&mut gs, &[], false, false, addr.clone()).0,
+         add_peer_with_addr(&mut gs, &[], true, false, addr.clone()).0,
+@@ -4258,7 +4310,7 @@
+
+     // create 4 other peers with other ip
+     let addr2 = Multiaddr::from(Ipv4Addr::new(10, 1, 2, 4));
+-    let others = vec![
++    let others = [
+         add_peer_with_addr(&mut gs, &[], false, false, addr2.clone()).0,
+         add_peer_with_addr(&mut gs, &[], false, false, addr2.clone()).0,
+         add_peer_with_addr(&mut gs, &[], true, false, addr2.clone()).0,
+@@ -4575,10 +4627,9 @@
+     }
+
+     assert_eq!(
+-        receivers.into_values().fold(0, |mut fwds, c| {
+-            let non_priority = c.non_priority.get_ref();
+-            while !non_priority.is_empty() {
+-                if let Ok(RpcOut::Forward { .. }) = non_priority.try_recv() {
++        receivers.into_values().fold(0, |mut fwds, mut c| {
++            for rpc in c.drain_non_priority() {
++                if let RpcOut::Forward { .. } = rpc {
+                     fwds += 1;
+                 }
+             }
+@@ -4990,11 +5041,10 @@
+     // Collect publish messages to floodsub peers
+     let publishes = receivers
+         .into_iter()
+-        .fold(0, |mut collected_publish, (peer_id, c)| {
+-            let priority = c.priority.get_ref();
+-            while !priority.is_empty() {
+-                if matches!(priority.try_recv(),
+-            Ok(RpcOut::Publish{..}) if peer_id == p1 || peer_id == p2)
++        .fold(0, |mut collected_publish, (peer_id, mut c)| {
++            for rpc in c.drain_priority() {
++                if matches!(rpc,
++            RpcOut::Publish{..} if peer_id == p1 || peer_id == p2)
+                 {
+                     collected_publish += 1;
+                 }
+@@ -5046,11 +5096,10 @@
+     // Collect publish messages to floodsub peers
+     let publishes = receivers
+         .into_iter()
+-        .fold(0, |mut collected_publish, (peer_id, c)| {
+-            let priority = c.priority.get_ref();
+-            while !priority.is_empty() {
+-                if matches!(priority.try_recv(),
+-            Ok(RpcOut::Publish{..}) if peer_id == p1 || peer_id == p2)
++        .fold(0, |mut collected_publish, (peer_id, mut c)| {
++            for rpc in c.drain_priority() {
++                if matches!(rpc,
++            RpcOut::Publish{..} if peer_id == p1 || peer_id == p2)
+                 {
+                     collected_publish += 1;
+                 }
+@@ -5275,10 +5324,9 @@
+                                   receivers: HashMap<PeerId, Receiver>|
+      -> HashMap<PeerId, Receiver> {
+         let new_receivers = HashMap::new();
+-        for (peer_id, receiver) in receivers.into_iter() {
+-            let non_priority = receiver.non_priority.get_ref();
+-            match non_priority.try_recv() {
+-                Ok(rpc) if peer_id == p1 => {
++        for (peer_id, mut receiver) in receivers.into_iter() {
++            match receiver.drain_non_priority().into_iter().next() {
++                Some(rpc) if peer_id == p1 => {
+                     gs1.on_connection_handler_event(
+                         p2,
+                         connection_id,
+@@ -5368,10 +5416,9 @@
+     assert_eq!(
+         receivers
+             .into_iter()
+-            .fold(0, |mut idontwants, (peer_id, c)| {
+-                let non_priority = c.non_priority.get_ref();
+-                while !non_priority.is_empty() {
+-                    if let Ok(RpcOut::IDontWant(_)) = non_priority.try_recv() {
++            .fold(0, |mut idontwants, (peer_id, mut c)| {
++                for rpc in c.drain_non_priority() {
++                    if let RpcOut::IDontWant(_) = rpc {
+                         assert_ne!(peer_id, peers[1]);
+                         idontwants += 1;
+                     }
+@@ -5410,10 +5457,9 @@
+     assert_eq!(
+         receivers
+             .into_iter()
+-            .fold(0, |mut idontwants, (peer_id, c)| {
+-                let non_priority = c.non_priority.get_ref();
+-                while !non_priority.is_empty() {
+-                    if let Ok(RpcOut::IDontWant(_)) = non_priority.try_recv() {
++            .fold(0, |mut idontwants, (peer_id, mut c)| {
++                for rpc in c.drain_non_priority() {
++                    if let RpcOut::IDontWant(_) = rpc {
+                         assert_ne!(peer_id, peers[1]);
+                         idontwants += 1;
+                     }
+@@ -5453,10 +5499,9 @@
+     assert_eq!(
+         receivers
+             .into_iter()
+-            .fold(0, |mut idontwants, (peer_id, c)| {
+-                let non_priority = c.non_priority.get_ref();
+-                while !non_priority.is_empty() {
+-                    if matches!(non_priority.try_recv(), Ok(RpcOut::IDontWant(_)) if peer_id != peers[1]) {
++            .fold(0, |mut idontwants, (peer_id, mut c)| {
++                for rpc in c.drain_non_priority() {
++                    if matches!(rpc, RpcOut::IDontWant(_) if peer_id != peers[1]) {
+                         idontwants += 1;
+                     }
+                 }
+@@ -5497,14 +5542,13 @@
          .unwrap();
      let message_id = gs.config.message_id(&message);
      let peer = gs.connected_peers.get_mut(&peers[2]).unwrap();
@@ -211,7 +751,17 @@
 
      gs.handle_received_message(raw_message.clone(), &local_id);
      assert_eq!(
-@@ -5546,7 +5649,7 @@
+-        receivers.into_iter().fold(0, |mut fwds, (peer_id, c)| {
+-            let non_priority = c.non_priority.get_ref();
+-            while !non_priority.is_empty() {
+-                if let Ok(RpcOut::Forward { .. }) = non_priority.try_recv() {
++        receivers.into_iter().fold(0, |mut fwds, (peer_id, mut c)| {
++            for rpc in c.drain_non_priority() {
++                if let RpcOut::Forward { .. } = rpc {
+                     assert_ne!(peer_id, peers[2]);
+                     fwds += 1;
+                 }
+@@ -5546,7 +5590,7 @@
          },
      );
      let peer = gs.connected_peers.get_mut(&peers[1]).unwrap();
@@ -220,7 +770,7 @@
  }
 
  /// Test that a node clears stale IDONTWANT messages.
-@@ -5562,12 +5665,13 @@
+@@ -5562,12 +5606,13 @@
          .create_network();
 
      let peer = gs.connected_peers.get_mut(&peers[2]).unwrap();
@@ -238,106 +788,221 @@
  }
 
  #[test]
-@@ -5594,7 +5698,7 @@
+@@ -5593,8 +5638,8 @@
+             connections: vec![ConnectionId::new_unchecked(0)],
              outbound: false,
              topics: topics.clone(),
-             sender: Sender::new(2),
+-            sender: Sender::new(2),
 -            dont_send: LinkedHashMap::new(),
++            sender: Sender::new(2, crate::QueueLimits::default()),
 +            dont_send: DontSendCache::with_limits(IDONTWANT_TIMEOUT, 10_000, 1024 * 1024),
          },
      );
 
-@@ -5630,7 +5734,7 @@
+@@ -5629,8 +5674,8 @@
+             connections: vec![ConnectionId::new_unchecked(0)],
              outbound: false,
              topics: topics.clone(),
-             sender: Sender::new(2),
+-            sender: Sender::new(2),
 -            dont_send: LinkedHashMap::new(),
++            sender: Sender::new(2, crate::QueueLimits::default()),
 +            dont_send: DontSendCache::with_limits(IDONTWANT_TIMEOUT, 10_000, 1024 * 1024),
          },
      );
      let peer_id = PeerId::random();
-@@ -5643,7 +5747,7 @@
+@@ -5642,8 +5687,11 @@
+             connections: vec![ConnectionId::new_unchecked(0)],
              outbound: false,
              topics: topics.clone(),
-             sender: Sender::new(gs.config.connection_handler_queue_len()),
+-            sender: Sender::new(gs.config.connection_handler_queue_len()),
 -            dont_send: LinkedHashMap::new(),
++            sender: Sender::new(
++                gs.config.connection_handler_queue_len(),
++                *gs.config.queue_limits(),
++            ),
 +            dont_send: DontSendCache::with_limits(IDONTWANT_TIMEOUT, 10_000, 1024 * 1024),
          },
      );
 
-@@ -5704,7 +5808,7 @@
+@@ -5703,8 +5751,8 @@
+             connections: vec![ConnectionId::new_unchecked(0)],
              outbound: false,
              topics: topics.clone(),
-             sender: Sender::new(2),
+-            sender: Sender::new(2),
 -            dont_send: LinkedHashMap::new(),
++            sender: Sender::new(2, crate::QueueLimits::default()),
 +            dont_send: DontSendCache::with_limits(IDONTWANT_TIMEOUT, 10_000, 1024 * 1024),
          },
      );
      peers.push(slow_peer_id);
-@@ -5721,7 +5825,7 @@
+@@ -5720,8 +5768,11 @@
+             connections: vec![ConnectionId::new_unchecked(0)],
              outbound: false,
              topics: topics.clone(),
-             sender: Sender::new(gs.config.connection_handler_queue_len()),
+-            sender: Sender::new(gs.config.connection_handler_queue_len()),
 -            dont_send: LinkedHashMap::new(),
++            sender: Sender::new(
++                gs.config.connection_handler_queue_len(),
++                *gs.config.queue_limits(),
++            ),
 +            dont_send: DontSendCache::with_limits(IDONTWANT_TIMEOUT, 10_000, 1024 * 1024),
          },
      );
 
-@@ -5818,7 +5922,7 @@
+@@ -5817,8 +5868,8 @@
+             connections: vec![ConnectionId::new_unchecked(0)],
              outbound: false,
              topics: topics.clone(),
-             sender: Sender::new(2),
+-            sender: Sender::new(2),
 -            dont_send: LinkedHashMap::new(),
++            sender: Sender::new(2, crate::QueueLimits::default()),
 +            dont_send: DontSendCache::with_limits(IDONTWANT_TIMEOUT, 10_000, 1024 * 1024),
          },
      );
      peers.push(slow_peer_id);
-@@ -5835,7 +5939,7 @@
+@@ -5834,8 +5885,11 @@
+             connections: vec![ConnectionId::new_unchecked(0)],
              outbound: false,
              topics: topics.clone(),
-             sender: Sender::new(gs.config.connection_handler_queue_len()),
+-            sender: Sender::new(gs.config.connection_handler_queue_len()),
 -            dont_send: LinkedHashMap::new(),
++            sender: Sender::new(
++                gs.config.connection_handler_queue_len(),
++                *gs.config.queue_limits(),
++            ),
 +            dont_send: DontSendCache::with_limits(IDONTWANT_TIMEOUT, 10_000, 1024 * 1024),
          },
      );
 
-@@ -5912,7 +6016,7 @@
+@@ -5911,8 +5965,8 @@
+             connections: vec![ConnectionId::new_unchecked(0)],
              outbound: false,
              topics: topics.clone(),
-             sender: Sender::new(2),
+-            sender: Sender::new(2),
 -            dont_send: LinkedHashMap::new(),
++            sender: Sender::new(2, crate::QueueLimits::default()),
 +            dont_send: DontSendCache::with_limits(IDONTWANT_TIMEOUT, 10_000, 1024 * 1024),
          },
      );
      peers.push(slow_peer_id);
-@@ -5929,7 +6033,7 @@
+@@ -5928,8 +5982,11 @@
+             connections: vec![ConnectionId::new_unchecked(0)],
              outbound: false,
              topics: topics.clone(),
-             sender: Sender::new(gs.config.connection_handler_queue_len()),
+-            sender: Sender::new(gs.config.connection_handler_queue_len()),
 -            dont_send: LinkedHashMap::new(),
++            sender: Sender::new(
++                gs.config.connection_handler_queue_len(),
++                *gs.config.queue_limits(),
++            ),
 +            dont_send: DontSendCache::with_limits(IDONTWANT_TIMEOUT, 10_000, 1024 * 1024),
          },
      );
 
-@@ -6011,7 +6115,7 @@
+@@ -6010,8 +6067,8 @@
+             connections: vec![ConnectionId::new_unchecked(0)],
              outbound: false,
              topics: topics.clone(),
-             sender: Sender::new(2),
+-            sender: Sender::new(2),
 -            dont_send: LinkedHashMap::new(),
++            sender: Sender::new(2, crate::QueueLimits::default()),
 +            dont_send: DontSendCache::with_limits(IDONTWANT_TIMEOUT, 10_000, 1024 * 1024),
          },
      );
      gs.as_peer_score_mut().add_peer(slow_peer_id);
-@@ -6025,7 +6129,7 @@
+@@ -6024,8 +6081,11 @@
+             connections: vec![ConnectionId::new_unchecked(0)],
              outbound: false,
              topics: topics.clone(),
-             sender: Sender::new(gs.config.connection_handler_queue_len()),
+-            sender: Sender::new(gs.config.connection_handler_queue_len()),
 -            dont_send: LinkedHashMap::new(),
++            sender: Sender::new(
++                gs.config.connection_handler_queue_len(),
++                *gs.config.queue_limits(),
++            ),
 +            dont_send: DontSendCache::with_limits(IDONTWANT_TIMEOUT, 10_000, 1024 * 1024),
          },
      );
 
-@@ -6787,3 +6891,661 @@
+@@ -6048,7 +6108,7 @@
+
+     let mut gs: Behaviour = Behaviour::new(MessageAuthenticity::RandomAuthor, gs_config).unwrap();
+
+-    let sender = Sender::new(2);
++    let sender = Sender::new(2, crate::QueueLimits::default());
+     let topic_hash = Topic::new("Test").hash();
+     let publish_data = vec![2; 59];
+     let raw_message = gs.build_raw_message(topic_hash, publish_data).unwrap();
+@@ -6065,17 +6125,50 @@
+ }
+
+ #[test]
+-fn test_priority_messages_are_always_sent() {
+-    let sender = Sender::new(2);
++fn test_priority_controls_have_a_reserved_finite_budget() {
++    let sender = Sender::new(
++        2,
++        crate::QueueLimits {
++            max_control_messages: 3,
++            ..Default::default()
++        },
++    );
+     let topic_hash = Topic::new("Test").hash();
+-    // Fill the buffer with the first message.
++    let message = RawMessage {
++        source: None,
++        data: vec![1],
++        sequence_number: None,
++        topic: topic_hash.clone(),
++        signature: None,
++        key: None,
++        validated: true,
++    };
++    // Saturate both data classes; control capacity remains independently reserved.
++    assert!(sender
++        .send_message(RpcOut::Publish {
++            message: message.clone(),
++            timeout: Delay::new(Duration::from_secs(60)),
++        })
++        .is_ok());
++    assert!(sender
++        .send_message(RpcOut::Forward {
++            message,
++            timeout: Delay::new(Duration::from_secs(60)),
++        })
++        .is_ok());
+     assert!(sender
+         .send_message(RpcOut::Subscribe(topic_hash.clone()))
+         .is_ok());
+     assert!(sender
+         .send_message(RpcOut::Subscribe(topic_hash.clone()))
+         .is_ok());
+-    assert!(sender.send_message(RpcOut::Unsubscribe(topic_hash)).is_ok());
++    assert!(sender
++        .send_message(RpcOut::Unsubscribe(topic_hash.clone()))
++        .is_ok());
++    assert!(sender.send_message(RpcOut::Subscribe(topic_hash)).is_err());
++    let mut receiver = sender.new_receiver();
++    assert_eq!(receiver.drain_priority().len(), 4);
++    assert_eq!(receiver.drain_non_priority().len(), 1);
+ }
+
+ /// Test that specific topic configurations are correctly applied
+@@ -6447,10 +6540,9 @@
+     // Collect publish messages
+     let publishes = receivers
+         .into_values()
+-        .fold(vec![], |mut collected_publish, c| {
+-            let priority = c.priority.get_ref();
+-            while !priority.is_empty() {
+-                if let Ok(RpcOut::Publish { message, .. }) = priority.try_recv() {
++        .fold(vec![], |mut collected_publish, mut c| {
++            for rpc in c.drain_priority() {
++                if let RpcOut::Publish { message, .. } = rpc {
+                     collected_publish.push(message);
+                 }
+             }
+@@ -6787,3 +6879,900 @@
          _ => panic!("Unexpected event"),
      }
  }
@@ -363,10 +1028,9 @@
 +        &peers[0],
 +        vec![(topics[0].clone(), vec![expired.clone(), live])],
 +    );
-+    let receiver = receivers.remove(&peers[0]).unwrap();
-+    let queue = receiver.non_priority.get_ref();
++    let mut receiver = receivers.remove(&peers[0]).unwrap();
 +    let mut requested = Vec::new();
-+    while let Ok(rpc) = queue.try_recv() {
++    for rpc in receiver.drain_non_priority() {
 +        if let RpcOut::IWant(IWant { message_ids }) = rpc {
 +            requested.extend(message_ids);
 +        }
@@ -658,15 +1322,11 @@
 +    assert!(gs.backoffs.get_backoff_time(&topic, &peers[0]).is_some());
 +}
 +
-+fn logex_drain_cache_test_queues(receivers: &HashMap<PeerId, Receiver>) -> Vec<RpcOut> {
++fn logex_drain_cache_test_queues(receivers: &mut HashMap<PeerId, Receiver>) -> Vec<RpcOut> {
 +    let mut messages = Vec::new();
-+    for receiver in receivers.values() {
-+        while let Ok(message) = receiver.priority.get_ref().try_recv() {
-+            messages.push(message);
-+        }
-+        while let Ok(message) = receiver.non_priority.get_ref().try_recv() {
-+            messages.push(message);
-+        }
++    for receiver in receivers.values_mut() {
++        messages.extend(receiver.drain_priority());
++        messages.extend(receiver.drain_non_priority());
 +    }
 +    messages
 +}
@@ -690,7 +1350,7 @@
 +            2 => limits.message_entries = 1,
 +            _ => limits.message_bytes = 5,
 +        }
-+        let (mut gs, peers, receivers, topics) = inject_nodes1()
++        let (mut gs, peers, mut receivers, topics) = inject_nodes1()
 +            .peer_no(2)
 +            .topics(vec!["t".into()])
 +            .to_subscribe(true)
@@ -717,7 +1377,7 @@
 +        assert!(gs.events.iter().any(|event| matches!(event,
 +            ToSwarm::GenerateEvent(Event::Message { message_id, .. }) if message_id == &first)));
 +        gs.events.clear();
-+        logex_drain_cache_test_queues(&receivers);
++        logex_drain_cache_test_queues(&mut receivers);
 +        let usage = gs.mcache.usage();
 +        let score = gs.peer_score(&peers[0]);
 +        gs.gossip_promises.add_promise(
@@ -731,7 +1391,7 @@
 +            "overflow generated an event, limit {limit}"
 +        );
 +        assert!(
-+            logex_drain_cache_test_queues(&receivers).is_empty(),
++            logex_drain_cache_test_queues(&mut receivers).is_empty(),
 +            "overflow sent a control or payload, limit {limit}"
 +        );
 +        assert_eq!(gs.mcache.usage(), usage);
@@ -759,7 +1419,7 @@
 +            4 => limits.published_entries = 1,
 +            _ => limits.published_bytes = 2,
 +        }
-+        let (mut gs, peers, receivers, _) = inject_nodes1()
++        let (mut gs, peers, mut receivers, _) = inject_nodes1()
 +            .peer_no(1)
 +            .topics(vec!["t".into(), "u".into()])
 +            .to_subscribe(true)
@@ -782,7 +1442,7 @@
 +        assert!(!gs.fanout.contains_key(&unpublished));
 +        assert!(!gs.fanout_last_pub.contains_key(&unpublished));
 +        gs.events.clear();
-+        logex_drain_cache_test_queues(&receivers);
++        logex_drain_cache_test_queues(&mut receivers);
 +        let usage = gs.mcache.usage();
 +        let seen = gs.duplicate_cache.retained_len();
 +        let published = gs.published_message_ids.retained_len();
@@ -801,7 +1461,7 @@
 +        assert_eq!(gs.fanout, fanout);
 +        assert_eq!(gs.fanout_last_pub, last_pub);
 +        assert!(gs.events.is_empty());
-+        assert!(logex_drain_cache_test_queues(&receivers).is_empty());
++        assert!(logex_drain_cache_test_queues(&mut receivers).is_empty());
 +        assert!(gs.mcache.get(&first).is_some());
 +        assert!(matches!(
 +            gs.publish(Topic::new("t"), vec![1]),
@@ -816,7 +1476,7 @@
 +        promise_entries: 1,
 +        ..Default::default()
 +    };
-+    let (mut gs, peers, receivers, topics) = inject_nodes1()
++    let (mut gs, peers, mut receivers, topics) = inject_nodes1()
 +        .peer_no(1)
 +        .topics(vec!["t".into()])
 +        .to_subscribe(true)
@@ -826,10 +1486,10 @@
 +        )))
 +        .gs_config(logex_cache_test_config(limits))
 +        .create_network();
-+    logex_drain_cache_test_queues(&receivers);
++    logex_drain_cache_test_queues(&mut receivers);
 +    let ids = vec![MessageId::new(&[1]), MessageId::new(&[2])];
 +    gs.handle_ihave(&peers[0], vec![(topics[0].clone(), ids.clone())]);
-+    let requested: Vec<_> = logex_drain_cache_test_queues(&receivers)
++    let requested: Vec<_> = logex_drain_cache_test_queues(&mut receivers)
 +        .into_iter()
 +        .flat_map(|message| match message {
 +            RpcOut::IWant(IWant { message_ids }) => message_ids,
@@ -843,7 +1503,7 @@
 +        assert_eq!(gs.gossip_promises.contains(id), requested.contains(id));
 +    }
 +    gs.gossip_promises.message_delivered(&requested[0]);
-+    receivers[&peers[0]].non_priority.get_ref().close();
++    receivers[&peers[0]].close_non_priority();
 +    let unsent = MessageId::new(&[3]);
 +    gs.handle_ihave(&peers[0], vec![(topics[0].clone(), vec![unsent.clone()])]);
 +    assert!(!gs.gossip_promises.contains(&unsent));
@@ -965,7 +1625,7 @@
 +
 +#[test]
 +fn logex_payload_history_suppresses_duplicates_after_seen_expiry() {
-+    let (mut gs, peers, receivers, topics) = inject_nodes1()
++    let (mut gs, peers, mut receivers, topics) = inject_nodes1()
 +        .peer_no(1)
 +        .topics(vec!["t".into()])
 +        .to_subscribe(true)
@@ -987,7 +1647,7 @@
 +        .prune_expired(Instant::now() + gs.config.duplicate_cache_time());
 +    assert_eq!(gs.duplicate_cache.retained_len(), 0);
 +    gs.events.clear();
-+    logex_drain_cache_test_queues(&receivers);
++    logex_drain_cache_test_queues(&mut receivers);
 +    let usage = gs.mcache.usage();
 +    gs.handle_received_message(raw, &peers[0]);
 +    assert!(gs.events.is_empty());
@@ -997,7 +1657,251 @@
 +        gs.publish(Topic::new("t"), vec![1]),
 +        Err(PublishError::Duplicate)
 +    ));
-+    assert!(logex_drain_cache_test_queues(&receivers).is_empty());
++    assert!(logex_drain_cache_test_queues(&mut receivers).is_empty());
++}
++
++#[test]
++fn logex_control_overflow_preserves_admitted_work_and_closes_only_saturated_peer() {
++    let config = ConfigBuilder::default()
++        .queue_limits(crate::QueueLimits {
++            max_control_messages: 2,
++            ..Default::default()
++        })
++        .build()
++        .unwrap();
++    let (mut gs, peers, mut receivers, _) = inject_nodes1()
++        .peer_no(2)
++        .gs_config(config)
++        .create_network();
++    gs.events.clear();
++    logex_drain_cache_test_queues(&mut receivers);
++    let saturated = peers[0];
++    let healthy = peers[1];
++    let admitted = Topic::new("already-queued").hash();
++    for _ in 0..2 {
++        assert!(gs.send_message(saturated, RpcOut::Subscribe(admitted.clone())));
++    }
++    gs.events.push_back(ToSwarm::NotifyHandler {
++        peer_id: saturated,
++        handler: NotifyHandler::Any,
++        event: HandlerIn::JoinedMesh,
++    });
++    // Real subscription production encounters the reserved control bound.
++    assert!(gs.subscribe(&Topic::new("t")).unwrap());
++    assert!(gs.closing_peers.contains_key(&saturated));
++    assert!(!gs.closing_peers.contains_key(&healthy));
++    let retained = receivers.get_mut(&saturated).unwrap().drain_priority();
++    assert_eq!(retained.len(), 2);
++    assert!(retained.into_iter().all(|rpc| matches!(rpc,
++        RpcOut::Subscribe(topic) if topic == admitted)));
++    assert!(receivers
++        .get_mut(&healthy)
++        .unwrap()
++        .drain_priority()
++        .into_iter()
++        .any(|rpc| matches!(rpc, RpcOut::Subscribe(topic) if topic == Topic::new("t").hash())));
++    let backlog = gs.events.len();
++    for _ in 0..4 {
++        assert!(!gs.send_message(
++            saturated,
++            RpcOut::Graft(Graft {
++                topic_hash: Topic::new("t").hash(),
++            })
++        ));
++        gs.on_connection_handler_event(
++            saturated,
++            ConnectionId::new_unchecked(0),
++            HandlerEvent::Message {
++                rpc: Rpc {
++                    messages: vec![],
++                    subscriptions: vec![Subscription {
++                        action: SubscriptionAction::Subscribe,
++                        topic_hash: Topic::new("ignored-while-closing").hash(),
++                    }],
++                    control_msgs: vec![],
++                },
++                invalid_messages: vec![],
++            },
++        );
++    }
++    assert_eq!(gs.events.len(), backlog);
++    assert!(!gs.connected_peers[&saturated]
++        .topics
++        .contains(&Topic::new("ignored-while-closing").hash()));
++    assert!(receivers
++        .get_mut(&saturated)
++        .unwrap()
++        .drain_priority()
++        .is_empty());
++    assert!(gs.send_message(
++        healthy,
++        RpcOut::Graft(Graft {
++            topic_hash: Topic::new("t").hash(),
++        })
++    ));
++    let mut cx = Context::from_waker(futures::task::noop_waker_ref());
++    assert!(
++        matches!(gs.poll(&mut cx), Poll::Ready(ToSwarm::GenerateEvent(
++        Event::ControlQueueFull { peer_id }
++    )) if peer_id == saturated)
++    );
++    assert!(
++        matches!(gs.poll(&mut cx), Poll::Ready(ToSwarm::CloseConnection {
++        peer_id,
++        connection: libp2p_swarm::CloseConnection::All,
++    }) if peer_id == saturated)
++    );
++    assert!(!gs.events.iter().any(|event| matches!(event,
++        ToSwarm::NotifyHandler { peer_id, .. } if *peer_id == saturated)));
++    // Drain only the finite existing backlog, then check closure is not repeated.
++    for _ in 0..=backlog {
++        assert!(!matches!(
++            gs.poll(&mut cx),
++            Poll::Ready(ToSwarm::GenerateEvent(Event::ControlQueueFull { .. }))
++                | Poll::Ready(ToSwarm::CloseConnection { .. })
++        ));
++    }
++}
++
++#[test]
++fn logex_control_overflow_blocks_new_connections_until_final_disconnect() {
++    let config = ConfigBuilder::default()
++        .queue_limits(crate::QueueLimits {
++            max_control_messages: 1,
++            ..Default::default()
++        })
++        .build()
++        .unwrap();
++    let (mut gs, _, _, _) = inject_nodes1().gs_config(config).create_network();
++    let peer = PeerId::random();
++    let address = "/ip4/127.0.0.1/tcp/1234".parse::<Multiaddr>().unwrap();
++    let first = ConnectionId::new_unchecked(101);
++    let second = ConnectionId::new_unchecked(102);
++    let next = ConnectionId::new_unchecked(103);
++    let _first_handler = gs
++        .handle_established_inbound_connection(first, peer, &address, &address)
++        .unwrap();
++    let _second_handler = gs
++        .handle_established_outbound_connection(
++            second,
++            peer,
++            &address,
++            Endpoint::Dialer,
++            PortUse::Reuse,
++        )
++        .unwrap();
++    let topic_hash = Topic::new("t").hash();
++    assert!(gs.send_message(peer, RpcOut::Subscribe(topic_hash.clone())));
++    assert!(!gs.send_message(
++        peer,
++        RpcOut::Graft(Graft {
++            topic_hash: topic_hash.clone()
++        })
++    ));
++    assert!(gs.closing_peers.contains_key(&peer));
++    assert!(gs
++        .handle_established_inbound_connection(next, peer, &address, &address)
++        .is_err());
++    assert!(gs
++        .handle_established_outbound_connection(
++            next,
++            peer,
++            &address,
++            Endpoint::Dialer,
++            PortUse::Reuse
++        )
++        .is_err());
++    let endpoint = ConnectedPoint::Dialer {
++        address: address.clone(),
++        role_override: Endpoint::Dialer,
++        port_use: PortUse::Reuse,
++    };
++    gs.on_swarm_event(FromSwarm::ConnectionClosed(ConnectionClosed {
++        peer_id: peer,
++        connection_id: first,
++        endpoint: &endpoint,
++        remaining_established: 1,
++        cause: None,
++    }));
++    assert!(gs.closing_peers.contains_key(&peer));
++    assert_eq!(gs.connected_peers[&peer].connections, vec![second]);
++    assert!(gs
++        .handle_established_inbound_connection(next, peer, &address, &address)
++        .is_err());
++    gs.on_swarm_event(FromSwarm::ConnectionClosed(ConnectionClosed {
++        peer_id: peer,
++        connection_id: second,
++        endpoint: &endpoint,
++        remaining_established: 0,
++        cause: None,
++    }));
++    assert!(!gs.closing_peers.contains_key(&peer));
++    assert!(!gs.connected_peers.contains_key(&peer));
++    let _reconnected = gs
++        .handle_established_inbound_connection(next, peer, &address, &address)
++        .unwrap();
++    assert!(gs.send_message(peer, RpcOut::Subscribe(topic_hash)));
++    let mut cx = Context::from_waker(futures::task::noop_waker_ref());
++    assert!(!matches!(
++        gs.poll(&mut cx),
++        Poll::Ready(ToSwarm::GenerateEvent(Event::ControlQueueFull { .. }))
++            | Poll::Ready(ToSwarm::CloseConnection { .. })
++    ));
++}
++
++#[test]
++fn logex_oversized_queued_messages_do_not_penalize_an_idle_peer() {
++    let config = ConfigBuilder::default()
++        .queue_limits(crate::QueueLimits {
++            max_publish_bytes: 1,
++            max_non_priority_bytes: 1,
++            ..Default::default()
++        })
++        .build()
++        .unwrap();
++    let (mut gs, peers, mut receivers, _) = inject_nodes1()
++        .peer_no(1)
++        .peer_kind(PeerKind::Gossipsubv1_2)
++        .scoring(Some((
++            PeerScoreParams::default(),
++            PeerScoreThresholds::default(),
++        )))
++        .gs_config(config)
++        .create_network();
++    let peer = peers[0];
++    gs.events.clear();
++    assert!(logex_drain_cache_test_queues(&mut receivers).is_empty());
++    let score = gs.peer_score(&peer).expect("peer scoring is enabled");
++    let message = RawMessage {
++        source: None,
++        data: vec![1],
++        sequence_number: None,
++        topic: Topic::new("t").hash(),
++        signature: None,
++        key: None,
++        validated: true,
++    };
++    let messages = [
++        RpcOut::Publish {
++            message: message.clone(),
++            timeout: Delay::new(Duration::from_secs(60)),
++        },
++        RpcOut::Forward {
++            message,
++            timeout: Delay::new(Duration::from_secs(60)),
++        },
++        RpcOut::IDontWant(IDontWant {
++            message_ids: vec![MessageId::new(&[1])],
++        }),
++    ];
++    for rpc in messages {
++        assert!(!gs.send_message(peer, rpc));
++        assert!(logex_drain_cache_test_queues(&mut receivers).is_empty());
++        assert_eq!(gs.peer_score(&peer), Some(score));
++        assert!(gs.failed_messages.is_empty());
++        assert!(!gs.closing_peers.contains_key(&peer));
++        assert!(gs.events.is_empty());
++    }
 +}
 --- a/src/behaviour.rs
 +++ b/src/behaviour.rs
@@ -1009,8 +1913,12 @@
  use libp2p_core::{
      multiaddr::Protocol::{Ip4, Ip6},
      transport::PortUse,
-@@ -64,12 +63,12 @@
-     rpc::Sender,
+@@ -61,15 +60,15 @@
+     mcache::MessageCache,
+     peer_score::{PeerScore, PeerScoreParams, PeerScoreState, PeerScoreThresholds, RejectReason},
+     protocol::SIGNING_PREFIX,
+-    rpc::Sender,
++    rpc::{SendErrorReason, Sender},
      rpc_proto::proto,
      subscription_filter::{AllowAllSubscriptionFilter, TopicSubscriptionFilter},
 -    time_cache::DuplicateCache,
@@ -1043,7 +1951,32 @@
 
  /// Max allowed PRUNE backoff, 1 hour.
  const MAX_REMOTE_PRUNE_BACKOFF_SECONDS: u64 = 3600;
-@@ -271,7 +273,7 @@
+@@ -160,6 +162,10 @@
+     },
+     /// A peer that does not support gossipsub has connected.
+     GossipsubNotSupported { peer_id: PeerId },
++    /// Local capacity could not retain a critical subscription or mesh control.
++    /// All connections to this peer will close after this event is delivered.
++    /// A fresh connection reconstructs its subscription and mesh state.
++    ControlQueueFull { peer_id: PeerId },
+     /// A peer is not able to download messages in time.
+     SlowPeer {
+         /// The peer_id
+@@ -250,6 +256,13 @@
+     }
+ }
+
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++enum CloseState {
++    PendingNotification,
++    PendingClose,
++    Closing,
++}
++
+ /// Network behaviour that handles the gossipsub protocol.
+ ///
+ /// NOTE: Initialisation requires a [`MessageAuthenticity`] and [`Config`] instance. If
+@@ -271,13 +284,17 @@
      /// Information used for publishing messages.
      publish_config: PublishConfig,
 
@@ -1052,7 +1985,17 @@
      /// duplicates from being propagated to the application and on the network.
      duplicate_cache: DuplicateCache<MessageId>,
 
-@@ -427,13 +429,19 @@
+     /// A set of connected peers, indexed by their [`PeerId`] tracking both the [`PeerKind`] and
+     /// the set of [`ConnectionId`]s.
+     connected_peers: HashMap<PeerId, PeerDetails>,
++
++    /// At most one closure state per connected peer. Kept until the final
++    /// connection closes so late input cannot rebuild divergent mesh state.
++    closing_peers: HashMap<PeerId, CloseState>,
+
+     /// A set of all explicit peers. These are peers that remain connected and we unconditionally
+     /// forward messages to, outside of the scoring system.
+@@ -427,13 +444,20 @@
          // We do not allow configurations where a published message would also be rejected if it
          // were received locally.
          validate_config(&privacy, config.validation_mode())?;
@@ -1062,6 +2005,7 @@
              #[cfg(feature = "metrics")]
              metrics: None,
              events: VecDeque::new(),
++            closing_peers: HashMap::new(),
              publish_config: privacy.into(),
 -            duplicate_cache: DuplicateCache::new(config.duplicate_cache_time()),
 +            duplicate_cache: DuplicateCache::with_limits(
@@ -1073,7 +2017,7 @@
              explicit_peers: HashSet::new(),
              blacklisted_peers: HashSet::new(),
              mesh: HashMap::new(),
-@@ -444,7 +452,13 @@
+@@ -444,7 +468,13 @@
                  config.heartbeat_interval(),
                  config.backoff_slack(),
              ),
@@ -1088,7 +2032,7 @@
              heartbeat: Delay::new(config.heartbeat_interval() + config.heartbeat_initial_delay()),
              heartbeat_ticks: 0,
              px_peers: HashSet::new(),
-@@ -452,12 +466,21 @@
+@@ -452,12 +482,21 @@
              count_received_ihave: HashMap::new(),
              count_sent_iwant: HashMap::new(),
              connected_peers: HashMap::new(),
@@ -1112,7 +2056,7 @@
          })
      }
 
-@@ -609,7 +632,7 @@
+@@ -609,7 +648,7 @@
          });
 
          // Check the if the message has been published before
@@ -1121,7 +2065,7 @@
              // This message has already been seen. We don't re-publish messages that have already
              // been published on the network.
              tracing::warn!(
-@@ -617,6 +640,20 @@
+@@ -617,6 +656,20 @@
                  "Not publishing a message that has already been published"
              );
              return Err(PublishError::Duplicate);
@@ -1142,7 +2086,7 @@
          }
 
          tracing::trace!(message_id=%msg_id, "Publishing message");
-@@ -733,18 +770,19 @@
+@@ -733,18 +786,19 @@
 
          // If the message isn't a duplicate and we have sent it to some peers add it to the
          // duplicate cache and memcache.
@@ -1168,7 +2112,7 @@
          }
 
          // Send to peers we know are subscribed to the topic.
-@@ -1215,7 +1253,7 @@
+@@ -1215,7 +1269,7 @@
 
          // IHAVE flood protection
          let peer_have = self.count_received_ihave.entry(*peer_id).or_insert(0);
@@ -1177,7 +2121,7 @@
          if *peer_have > self.config.max_ihave_messages() {
              tracing::debug!(
                  peer=%peer_id,
-@@ -1252,7 +1290,7 @@
+@@ -1252,7 +1306,7 @@
              }
 
              for id in ids.into_iter().filter(|id| {
@@ -1186,7 +2130,7 @@
                      return false;
                  }
 
-@@ -1272,7 +1310,7 @@
+@@ -1272,7 +1326,7 @@
          if !iwant_ids.is_empty() {
              let iasked = self.count_sent_iwant.entry(*peer_id).or_insert(0);
              let mut iask = iwant_ids.len();
@@ -1195,7 +2139,7 @@
                  iask = self.config.max_ihave_length().saturating_sub(*iasked);
              }
 
-@@ -1290,7 +1328,6 @@
+@@ -1290,7 +1344,6 @@
              iwant_ids_vec.partial_shuffle(&mut rng, iask);
 
              iwant_ids_vec.truncate(iask);
@@ -1203,7 +2147,7 @@
 
              let followup_time = Instant::now()
                  .checked_add(self.config.iwant_followup_time())
-@@ -1298,20 +1335,32 @@
+@@ -1298,20 +1351,32 @@
                      tracing::error!("Invalid iwant_followup_time using Instant::now()");
                      Instant::now()
                  });
@@ -1241,7 +2185,7 @@
          }
          tracing::trace!(peer=%peer_id, "Completed IHAVE handling for peer");
      }
-@@ -1337,11 +1386,7 @@
+@@ -1337,11 +1402,7 @@
          for id in iwant_msgs {
              // If we have it and the IHAVE count is not above the threshold,
              // forward the message.
@@ -1254,7 +2198,7 @@
                  if count > self.config.gossip_retransimission() {
                      tracing::debug!(
                          peer=%peer_id,
-@@ -1349,18 +1394,20 @@
+@@ -1349,18 +1410,20 @@
                          "IWANT: Peer has asked for message too many times; ignoring request"
                      );
                  } else {
@@ -1278,7 +2222,7 @@
                              timeout: Delay::new(self.config.forward_queue_duration()),
                          },
                      );
-@@ -1372,7 +1419,12 @@
+@@ -1372,7 +1435,12 @@
 
      /// Handles GRAFT control messages. If subscribed to the topic, adds the peer to mesh, if not,
      /// responds with PRUNE messages.
@@ -1292,7 +2236,7 @@
          tracing::debug!(peer=%peer_id, "Handling GRAFT message for peer");
 
          let mut to_prune_topics = HashSet::new();
-@@ -1608,6 +1660,10 @@
+@@ -1608,6 +1676,10 @@
              .peer_score
              .below_threshold(peer_id, |ts| ts.accept_px_threshold);
          for (topic_hash, px, backoff) in prune_data {
@@ -1303,7 +2247,7 @@
              if self.remove_peer_from_mesh(peer_id, &topic_hash, backoff, true) {
                  #[cfg(feature = "metrics")]
                  if let Some(m) = self.metrics.as_mut() {
-@@ -1766,6 +1822,10 @@
+@@ -1766,6 +1838,10 @@
          mut raw_message: RawMessage,
          propagation_source: &PeerId,
      ) {
@@ -1314,7 +2258,7 @@
          // Record the received metric
          #[cfg(feature = "metrics")]
          if let Some(metrics) = self.metrics.as_mut() {
-@@ -1791,6 +1851,21 @@
+@@ -1791,6 +1867,21 @@
          // Calculate the message id on the transformed data.
          let msg_id = self.config.message_id(&message);
 
@@ -1336,7 +2280,7 @@
          // Broadcast IDONTWANT messages
          if raw_message.raw_protobuf_len() > self.config.idontwant_message_size_threshold() {
              let recipient_peers = self
-@@ -1815,14 +1890,7 @@
+@@ -1815,14 +1906,7 @@
              }
          }
 
@@ -1352,7 +2296,7 @@
              tracing::debug!(message_id=%msg_id, "Message already received, ignoring");
              if let PeerScoreState::Active(peer_score) = &mut self.peer_score {
                  peer_score.duplicated_message(propagation_source, &msg_id, &message.topic);
-@@ -1830,6 +1898,11 @@
+@@ -1830,6 +1914,11 @@
              self.mcache.observe_duplicate(&msg_id, propagation_source);
              return;
          }
@@ -1364,7 +2308,7 @@
 
          tracing::debug!(
              message_id=%msg_id,
-@@ -1850,9 +1923,6 @@
+@@ -1850,9 +1939,6 @@
          if let PeerScoreState::Active(peer_score) = &mut self.peer_score {
              peer_score.validate_message(propagation_source, &msg_id, &message.topic);
          }
@@ -1374,7 +2318,7 @@
 
          // Dispatch the message to the user if we are subscribed to any of the topics
          #[allow(
-@@ -2091,8 +2161,10 @@
+@@ -2091,8 +2177,10 @@
 
      /// Applies penalties to peers that did not respond to our IWANT requests.
      fn apply_iwant_penalties(&mut self) {
@@ -1386,7 +2330,7 @@
                  peer_score.add_penalty(&peer, count);
                  #[cfg(feature = "metrics")]
                  if let Some(metrics) = self.metrics.as_mut() {
-@@ -2106,6 +2178,10 @@
+@@ -2106,6 +2194,10 @@
      fn heartbeat(&mut self) {
          #[cfg(feature = "metrics")]
          let start = Instant::now();
@@ -1397,7 +2341,7 @@
 
          // Every heartbeat we sample the send queues to add to our metrics. We do this intentionally
          // before we add all the gossip from this heartbeat in order to gain a true measure of
-@@ -2538,15 +2614,9 @@
+@@ -2538,15 +2630,9 @@
          }
          self.failed_messages.shrink_to_fit();
 
@@ -1415,7 +2359,7 @@
          }
 
          #[cfg(feature = "metrics")]
-@@ -2767,7 +2837,7 @@
+@@ -2767,7 +2853,7 @@
          // forward the message to peers
          for peer_id in recipient_peers.iter() {
              if let Some(peer) = self.connected_peers.get_mut(peer_id) {
@@ -1424,9 +2368,151 @@
                      tracing::debug!(%peer_id, message_id=%msg_id, "Peer doesn't want message");
                      continue;
                  }
-@@ -3162,7 +3232,11 @@
+@@ -2882,10 +2968,13 @@
+     /// Send a [`RpcOut`] message to a peer.
+     ///
+     /// Returns `true` if sending was successful, `false` otherwise.
+-    /// The method will update the peer score and failed message counter if
+-    /// sending the message failed due to the channel to the connection handler being
+-    /// full (which indicates a slow peer).
++    /// Existing backlog pressure updates the slow-peer score and failure counter.
++    /// Individual RPCs exceeding a local byte limit and closed queues are neutral.
++    /// Critical-control rejection instead initiates an explicit peer reconnect.
+     fn send_message(&mut self, peer_id: PeerId, rpc: RpcOut) -> bool {
++        if self.closing_peers.contains_key(&peer_id) {
++            return false;
++        }
+         #[cfg(feature = "metrics")]
+         if let Some(m) = self.metrics.as_mut() {
+             if let RpcOut::Publish { ref message, .. } | RpcOut::Forward { ref message, .. } = rpc {
+@@ -2908,9 +2997,30 @@
+         // Try sending the message to the connection handler.
+         match peer.sender.send_message(rpc) {
+             Ok(()) => true,
+-            Err(rpc) => {
++            Err(error) => {
++                let rpc = error.rpc;
++                if matches!(
++                    rpc,
++                    RpcOut::Graft(_)
++                        | RpcOut::Prune(_)
++                        | RpcOut::Subscribe(_)
++                        | RpcOut::Unsubscribe(_)
++                ) {
++                    // Local topology already changed. Do not silently leave the
++                    // remote with a different subscription/mesh view, or blame
++                    // the peer for a local capacity decision.
++                    tracing::warn!(peer=%peer_id, "Gossip control queue full; reconnecting peer");
++                    self.closing_peers
++                        .insert(peer_id, CloseState::PendingNotification);
++                    self.discard_peer_notifications(peer_id);
++                    return false;
++                }
++                if error.reason != SendErrorReason::Full {
++                    tracing::debug!(peer=%peer_id, reason=?error.reason, "Gossip RPC not admitted locally");
++                    return false;
++                }
+                 // Sending failed because the channel is full.
+-                tracing::warn!(peer=%peer_id, "Send Queue full. Could not send {:?}.", rpc);
++                tracing::warn!(peer=%peer_id, "Gossip message queue full");
+
+                 // Update failed message counter.
+                 let failed_messages = self.failed_messages.entry(peer_id).or_default();
+@@ -2930,7 +3040,9 @@
+                     | RpcOut::Prune(_)
+                     | RpcOut::Subscribe(_)
+                     | RpcOut::Unsubscribe(_) => {
+-                        unreachable!("Channel for highpriority control messages is unbounded and should always be open.")
++                        unreachable!(
++                            "critical control saturation is handled before message scoring"
++                        )
+                     }
+                 }
+
+@@ -2941,6 +3053,34 @@
+
+                 false
+             }
++        }
++    }
++
++    fn discard_peer_notifications(&mut self, peer_id: PeerId) {
++        self.events.retain(|event| {
++            !matches!(event, ToSwarm::NotifyHandler { peer_id: queued_peer, .. } if *queued_peer == peer_id)
++        });
++    }
++
++    fn next_peer_close(&mut self) -> Option<ToSwarm<Event, HandlerIn>> {
++        let (peer_id, state) = self
++            .closing_peers
++            .iter_mut()
++            .find(|(_, state)| **state != CloseState::Closing)?;
++        let peer_id = *peer_id;
++        match state {
++            CloseState::PendingNotification => {
++                *state = CloseState::PendingClose;
++                Some(ToSwarm::GenerateEvent(Event::ControlQueueFull { peer_id }))
++            }
++            CloseState::PendingClose => {
++                *state = CloseState::Closing;
++                Some(ToSwarm::CloseConnection {
++                    peer_id,
++                    connection: libp2p_swarm::CloseConnection::All,
++                })
++            }
++            CloseState::Closing => unreachable!("only pending closures are selected"),
+         }
+     }
+
+@@ -2974,6 +3114,9 @@
+             peer_score.add_peer(peer_id);
+         }
+
++        if self.closing_peers.contains_key(&peer_id) {
++            return;
++        }
+         // Ignore connections from blacklisted peers.
+         if self.blacklisted_peers.contains(&peer_id) {
+             tracing::debug!(peer=%peer_id, "Ignoring connection from blacklisted peer");
+@@ -3022,7 +3165,7 @@
+
+                 // If there are more connections and this peer is in a mesh, inform the first
+                 // connection handler.
+-                if !peer.connections.is_empty() {
++                if !peer.connections.is_empty() && !self.closing_peers.contains_key(&peer_id) {
+                     for topic in &peer.topics {
+                         if let Some(mesh_peers) = self.mesh.get(topic) {
+                             if mesh_peers.contains(&peer_id) {
+@@ -3038,6 +3181,8 @@
+                 }
+             }
+         } else {
++            self.closing_peers.remove(&peer_id);
++            self.discard_peer_notifications(peer_id);
+             // remove from mesh, topic_peers, peer_topic and the fanout
+             tracing::debug!(peer=%peer_id, "Peer disconnected");
+             let Some(connected_peer) = self.connected_peers.get(&peer_id) else {
+@@ -3151,6 +3296,11 @@
+         _: &Multiaddr,
+         _: &Multiaddr,
+     ) -> Result<THandler<Self>, ConnectionDenied> {
++        if self.closing_peers.contains_key(&peer_id) {
++            return Err(ConnectionDenied::new(std::io::Error::other(
++                "gossip control queue closure is still pending",
++            )));
++        }
+         // By default we assume a peer is only a floodsub peer.
+         //
+         // The protocol negotiation occurs once a message is sent/received. Once this happens we
+@@ -3160,9 +3310,16 @@
+             kind: PeerKind::Floodsub,
+             connections: vec![],
              outbound: false,
-             sender: Sender::new(self.config.connection_handler_queue_len()),
+-            sender: Sender::new(self.config.connection_handler_queue_len()),
++            sender: Sender::new(
++                self.config.connection_handler_queue_len(),
++                *self.config.queue_limits(),
++            ),
              topics: Default::default(),
 -            dont_send: LinkedHashMap::new(),
 +            dont_send: DontSendCache::with_limits(
@@ -1437,9 +2523,26 @@
          });
          // Add the new connection
          connected_peer.connections.push(connection_id);
-@@ -3189,7 +3263,11 @@
+@@ -3181,15 +3338,27 @@
+         _: Endpoint,
+         _: PortUse,
+     ) -> Result<THandler<Self>, ConnectionDenied> {
++        if self.closing_peers.contains_key(&peer_id) {
++            return Err(ConnectionDenied::new(std::io::Error::other(
++                "gossip control queue closure is still pending",
++            )));
++        }
+         let connected_peer = self.connected_peers.entry(peer_id).or_insert(PeerDetails {
+             kind: PeerKind::Floodsub,
+             connections: vec![],
+             // Diverging from the go implementation we only want to consider a peer as outbound peer
+             // if its first connection is outbound.
              outbound: !self.px_peers.contains(&peer_id),
-             sender: Sender::new(self.config.connection_handler_queue_len()),
+-            sender: Sender::new(self.config.connection_handler_queue_len()),
++            sender: Sender::new(
++                self.config.connection_handler_queue_len(),
++                *self.config.queue_limits(),
++            ),
              topics: Default::default(),
 -            dont_send: LinkedHashMap::new(),
 +            dont_send: DontSendCache::with_limits(
@@ -1450,7 +2553,27 @@
          });
          // Add the new connection
          connected_peer.connections.push(connection_id);
-@@ -3294,22 +3372,23 @@
+@@ -3206,6 +3375,9 @@
+         _connection_id: ConnectionId,
+         handler_event: THandlerOutEvent<Self>,
+     ) {
++        if self.closing_peers.contains_key(&propagation_source) {
++            return;
++        }
+         match handler_event {
+             HandlerEvent::PeerKind(kind) => {
+                 // We have identified the protocol this peer is using
+@@ -3284,6 +3456,9 @@
+                 if !rpc.subscriptions.is_empty() {
+                     self.handle_received_subscriptions(&rpc.subscriptions, &propagation_source);
+                 }
++                if self.closing_peers.contains_key(&propagation_source) {
++                    return;
++                }
+
+                 // Check if peer is graylisted in which case we ignore the event
+                 if let (true, _) = self
+@@ -3294,22 +3469,23 @@
                      return;
                  }
 
@@ -1483,7 +2606,7 @@
                              "Invalid message from peer. Reason: {:?}",
                              validation_error,
                          );
-@@ -3375,11 +3454,7 @@
+@@ -3375,11 +3551,7 @@
                                  metrics.register_idontwant(message_ids.len());
                              }
                              for message_id in message_ids {
@@ -1496,7 +2619,34 @@
                              }
                          }
                      }
-@@ -3583,14 +3658,12 @@
+@@ -3402,7 +3574,14 @@
+         &mut self,
+         cx: &mut Context<'_>,
+     ) -> Poll<ToSwarm<Self::ToSwarm, THandlerInEvent<Self>>> {
+-        if let Some(event) = self.events.pop_front() {
++        if let Some(event) = self.next_peer_close() {
++            return Poll::Ready(event);
++        }
++        while let Some(event) = self.events.pop_front() {
++            if matches!(&event, ToSwarm::NotifyHandler { peer_id, .. } if self.closing_peers.contains_key(peer_id))
++            {
++                continue;
++            }
+             return Poll::Ready(event);
+         }
+
+@@ -3419,6 +3598,10 @@
+         if self.heartbeat.poll_unpin(cx).is_ready() {
+             self.heartbeat();
+             self.heartbeat.reset(self.config.heartbeat_interval());
++        }
++
++        if let Some(event) = self.next_peer_close() {
++            return Poll::Ready(event);
+         }
+
+         Poll::Pending
+@@ -3583,14 +3766,12 @@
                  return Err("Published messages contain an author but incoming messages with an author will be rejected. Consider adjusting the validation or privacy settings in the config");
              }
          }
@@ -1516,7 +2666,7 @@
      }
 --- a/src/config.rs
 +++ b/src/config.rs
-@@ -96,6 +96,56 @@
+@@ -96,6 +96,83 @@
      }
  }
 
@@ -1570,10 +2720,37 @@
 +    }
 +}
 +
++/// Per-peer queued RPC budgets, shared by all connections to that peer.
++/// Counts include messages staged by a receiver. Bytes cover owned buffers and
++/// vector allocations, not total RSS or the handler's single in-flight frame.
++/// These limits are independent of protocol frame-size limits.
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub struct QueueLimits {
++    /// Reserved entries for subscriptions, GRAFT and PRUNE. Saturation closes the peer.
++    pub max_control_messages: usize,
++    /// Owned bytes for subscriptions, GRAFT and PRUNE.
++    pub max_control_bytes: usize,
++    /// Owned bytes for locally published messages awaiting transmission.
++    pub max_publish_bytes: usize,
++    /// Owned bytes for forwarded messages and IHAVE/IWANT/IDONTWANT controls.
++    pub max_non_priority_bytes: usize,
++}
++
++impl Default for QueueLimits {
++    fn default() -> Self {
++        Self {
++            max_control_messages: 256,
++            max_control_bytes: 256 * 1024,
++            max_publish_bytes: 16 * 1024 * 1024,
++            max_non_priority_bytes: 16 * 1024 * 1024,
++        }
++    }
++}
++
  /// Configuration parameters that define the performance of the gossipsub network.
  #[derive(Clone)]
  pub struct Config {
-@@ -110,6 +160,7 @@
+@@ -110,6 +187,7 @@
      fanout_ttl: Duration,
      check_explicit_peers_ticks: u64,
      duplicate_cache_time: Duration,
@@ -1581,7 +2758,15 @@
      validate_messages: bool,
      message_id_fn: Arc<dyn Fn(&Message) -> MessageId + Send + Sync + 'static>,
      allow_self_origin: bool,
-@@ -267,12 +318,17 @@
+@@ -129,6 +207,7 @@
+     iwant_followup_time: Duration,
+     published_message_ids_cache_time: Duration,
+     connection_handler_queue_len: usize,
++    queue_limits: QueueLimits,
+     connection_handler_publish_duration: Duration,
+     connection_handler_forward_duration: Duration,
+     idontwant_message_size_threshold: usize,
+@@ -267,12 +346,17 @@
          self.protocol_config().max_transmit_size_for_topic(topic)
      }
 
@@ -1600,7 +2785,25 @@
      }
 
      /// When set to `true`, prevents automatic forwarding of all received messages. This setting
-@@ -514,6 +570,7 @@
+@@ -449,9 +533,16 @@
+         self.published_message_ids_cache_time
+     }
+
+-    /// The max number of messages a `ConnectionHandler` can buffer. The default is 5000.
++    /// Per-peer entry allowance split equally between published messages and the
++    /// non-priority lane. Odd values round down in each lane; the minimum is two.
++    /// Defaults to 5000. Critical controls have a separate [`QueueLimits`] budget.
+     pub fn connection_handler_queue_len(&self) -> usize {
+         self.connection_handler_queue_len
++    }
++
++    /// Per-peer owned-buffer and reserved critical-control budgets.
++    pub fn queue_limits(&self) -> &QueueLimits {
++        &self.queue_limits
+     }
+
+     /// The duration a message to be published can wait to be sent before it is abandoned. The
+@@ -514,6 +605,7 @@
                  fanout_ttl: Duration::from_secs(60),
                  check_explicit_peers_ticks: 300,
                  duplicate_cache_time: Duration::from_secs(60),
@@ -1608,7 +2811,15 @@
                  validate_messages: false,
                  message_id_fn: Arc::new(|message| {
                      // default message id is: source + sequence number
-@@ -569,6 +626,15 @@
+@@ -548,6 +640,7 @@
+                 iwant_followup_time: Duration::from_secs(3),
+                 published_message_ids_cache_time: Duration::from_secs(10),
+                 connection_handler_queue_len: 5000,
++                queue_limits: QueueLimits::default(),
+                 connection_handler_publish_duration: Duration::from_secs(5),
+                 connection_handler_forward_duration: Duration::from_secs(1),
+                 idontwant_message_size_threshold: 1000,
+@@ -569,6 +662,15 @@
  }
 
  impl ConfigBuilder {
@@ -1624,7 +2835,7 @@
      /// The protocol id prefix to negotiate this protocol (default is `/meshsub/1.1.0` and
      /// `/meshsub/1.0.0`).
      pub fn protocol_id_prefix(
-@@ -787,7 +853,7 @@
+@@ -787,7 +889,7 @@
          self
      }
 
@@ -1633,14 +2844,78 @@
      /// This settings sets the time period that messages are stored in the cache. Duplicates can be
      /// received if duplicate messages are sent at a time greater than this setting apart. The
      /// default is 1 minute.
-@@ -1156,6 +1222,7 @@
+@@ -1017,9 +1119,19 @@
+         self
+     }
+
+-    /// The max number of messages a `ConnectionHandler` can buffer. The default is 5000.
++    /// Per-peer entry allowance split equally between published messages and the
++    /// non-priority lane. Odd values round down in each lane; the minimum is two.
++    /// Defaults to 5000. Critical controls have a separate [`QueueLimits`] budget.
+     pub fn connection_handler_queue_len(&mut self, len: usize) -> &mut Self {
+         self.config.connection_handler_queue_len = len;
++        self
++    }
++
++    /// Configure per-peer queued ownership. A full critical-control budget closes
++    /// the peer so a new connection can restore consistent subscriptions and mesh
++    /// state. Other full lanes reject the new RPC without evicting queued work.
++    pub fn queue_limits(&mut self, limits: QueueLimits) -> &mut Self {
++        self.config.queue_limits = limits;
+         self
+     }
+
+@@ -1094,6 +1206,10 @@
+     /// Constructs a [`Config`] from the given configuration and validates the settings.
+     pub fn build(&self) -> Result<Config, ConfigBuilderError> {
+         // check all constraints on config
++
++        if self.config.connection_handler_queue_len < 2 {
++            return Err(ConfigBuilderError::ConnectionHandlerQueueTooSmall);
++        }
+
+         let pre_configured_topics = self.config.protocol.max_transmit_sizes.keys();
+         for topic in pre_configured_topics {
+@@ -1156,6 +1272,12 @@
          let _ = builder.field("heartbeat_interval", &self.heartbeat_interval);
          let _ = builder.field("fanout_ttl", &self.fanout_ttl);
          let _ = builder.field("duplicate_cache_time", &self.duplicate_cache_time);
 +        let _ = builder.field("cache_limits", &self.cache_limits);
++        let _ = builder.field(
++            "connection_handler_queue_len",
++            &self.connection_handler_queue_len,
++        );
++        let _ = builder.field("queue_limits", &self.queue_limits);
          let _ = builder.field("validate_messages", &self.validate_messages);
          let _ = builder.field("allow_self_origin", &self.allow_self_origin);
          let _ = builder.field("do_px", &self.do_px);
+@@ -1203,6 +1325,26 @@
+     use crate::{topic::IdentityHash, Topic};
+
+     #[test]
++    fn logex_queue_configuration_rejects_missing_message_lanes() {
++        for len in [0, 1] {
++            assert!(matches!(
++                ConfigBuilder::default()
++                    .connection_handler_queue_len(len)
++                    .build(),
++                Err(ConfigBuilderError::ConnectionHandlerQueueTooSmall)
++            ));
++        }
++        for len in [2, 3, 5000] {
++            let config = ConfigBuilder::default()
++                .connection_handler_queue_len(len)
++                .build()
++                .unwrap();
++            assert_eq!(config.connection_handler_queue_len(), len);
++            assert_eq!(config.queue_limits(), &QueueLimits::default());
++        }
++    }
++
++    #[test]
+     fn create_config_with_message_id_as_plain_function() {
+         let config = ConfigBuilder::default()
+             .message_id_fn(message_id_plain_function)
 --- a/src/error.rs
 +++ b/src/error.rs
 @@ -27,6 +27,8 @@
@@ -1652,6 +2927,23 @@
      /// An error occurred whilst signing the message.
      SigningError(SigningError),
      /// No peers are currently subscribed to receive messages on this topic.
+@@ -130,6 +132,8 @@
+ /// Error associated with Config building.
+ #[derive(Debug)]
+ pub enum ConfigBuilderError {
++    /// Each queued-message lane requires at least one entry.
++    ConnectionHandlerQueueTooSmall,
+     /// Maximum transmission size is too small.
+     MaxTransmissionSizeTooSmall,
+     /// History length less than history gossip length.
+@@ -149,6 +153,7 @@
+ impl std::fmt::Display for ConfigBuilderError {
+     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+         match self {
++            Self::ConnectionHandlerQueueTooSmall => write!(f, "Connection handler queue length must be at least two"),
+             Self::MaxTransmissionSizeTooSmall => {
+                 write!(f, "Maximum transmission size is too small")
+             }
 --- a/src/gossip_promises.rs
 +++ b/src/gossip_promises.rs
 @@ -18,7 +18,7 @@
@@ -1965,6 +3257,82 @@
 +        assert_counts(&promises, 1, 1, 1);
 +    }
 +}
+--- a/src/handler.rs
++++ b/src/handler.rs
+@@ -233,8 +233,11 @@
+             }
+         }
+
+-        // determine if we need to create the outbound stream
+-        if !self.send_queue.poll_is_empty(cx)
++        // Negotiate once even without queued work so we learn the peer's
++        // protocol. Subsequent streams require actual queued work.
++        let needs_outbound =
++            !self.send_queue.poll_is_empty(cx) || self.outbound_substream_attempts == 0;
++        if needs_outbound
+             && self.outbound_substream.is_none()
+             && !self.outbound_substream_establishing
+         {
+@@ -556,3 +559,59 @@
+         }
+     }
+ }
++
++#[cfg(test)]
++mod logex_tests {
++    use futures::task::noop_waker;
++
++    use super::*;
++    use crate::{rpc::Sender, QueueLimits, TopicHash};
++
++    #[test]
++    fn logex_empty_handler_negotiates_once_then_waits_for_work() {
++        let sender = Sender::new(2, QueueLimits::default());
++        let mut handler = Handler::new(ProtocolConfig::default(), sender.new_receiver());
++        let waker = noop_waker();
++        let mut cx = Context::from_waker(&waker);
++        assert!(matches!(
++            handler.poll(&mut cx),
++            Poll::Ready(ConnectionHandlerEvent::OutboundSubstreamRequest { .. })
++        ));
++        assert!(handler.poll(&mut cx).is_pending());
++        handler.on_connection_event(ConnectionEvent::DialUpgradeError(DialUpgradeError {
++            info: (),
++            error: StreamUpgradeError::Timeout,
++        }));
++        assert!(handler.poll(&mut cx).is_pending());
++        sender
++            .send_message(RpcOut::Subscribe(TopicHash::from_raw("t")))
++            .unwrap();
++        assert!(matches!(
++            handler.poll(&mut cx),
++            Poll::Ready(ConnectionHandlerEvent::OutboundSubstreamRequest { .. })
++        ));
++    }
++
++    #[test]
++    fn logex_empty_handler_reports_unsupported_protocol_once() {
++        let sender = Sender::new(2, QueueLimits::default());
++        let mut handler = Handler::new(ProtocolConfig::default(), sender.new_receiver());
++        let waker = noop_waker();
++        let mut cx = Context::from_waker(&waker);
++        assert!(matches!(
++            handler.poll(&mut cx),
++            Poll::Ready(ConnectionHandlerEvent::OutboundSubstreamRequest { .. })
++        ));
++        handler.on_connection_event(ConnectionEvent::DialUpgradeError(DialUpgradeError {
++            info: (),
++            error: StreamUpgradeError::NegotiationFailed,
++        }));
++        assert!(matches!(
++            handler.poll(&mut cx),
++            Poll::Ready(ConnectionHandlerEvent::NotifyBehaviour(
++                HandlerEvent::PeerKind(PeerKind::NotSupported)
++            ))
++        ));
++        assert!(handler.poll(&mut cx).is_pending());
++    }
++}
 --- a/src/lib.rs
 +++ b/src/lib.rs
 @@ -118,7 +118,7 @@
@@ -1972,7 +3340,7 @@
  pub use self::{
      behaviour::{Behaviour, Event, MessageAuthenticity},
 -    config::{Config, ConfigBuilder, ValidationMode, Version},
-+    config::{CacheLimits, Config, ConfigBuilder, ValidationMode, Version},
++    config::{CacheLimits, Config, ConfigBuilder, QueueLimits, ValidationMode, Version},
      error::{ConfigBuilderError, PublishError, SubscriptionError, ValidationError},
      peer_score::{
          score_parameter_decay, score_parameter_decay_with_base, PeerScoreParams,
@@ -2584,6 +3952,829 @@
      pub(crate) fn validate_message(
          &mut self,
          from: &PeerId,
+--- a/src/rpc.rs
++++ b/src/rpc.rs
+@@ -30,33 +30,125 @@
+
+ use futures::{stream::Peekable, Stream, StreamExt};
+
+-use crate::types::RpcOut;
+-
+-/// `RpcOut` sender that is priority aware.
++use crate::{config::QueueLimits, types::RpcOut};
++
++/// A per-peer class budget, shared by all receivers for that peer.
++#[derive(Debug)]
++struct Budget {
++    max_entries: usize,
++    max_bytes: usize,
++    entries: AtomicUsize,
++    bytes: AtomicUsize,
++}
++
++impl Budget {
++    fn new(max_entries: usize, max_bytes: usize) -> Arc<Self> {
++        Arc::new(Self {
++            max_entries,
++            max_bytes,
++            entries: AtomicUsize::new(0),
++            bytes: AtomicUsize::new(0),
++        })
++    }
++
++    fn try_add(counter: &AtomicUsize, amount: usize, limit: usize) -> bool {
++        let mut current = counter.load(Ordering::Relaxed);
++        loop {
++            let Some(next) = current.checked_add(amount).filter(|next| *next <= limit) else {
++                return false;
++            };
++            match counter.compare_exchange_weak(current, next, Ordering::Relaxed, Ordering::Relaxed)
++            {
++                Ok(_) => return true,
++                Err(observed) => current = observed,
++            }
++        }
++    }
++
++    fn reserve(self: &Arc<Self>, bytes: usize) -> Option<Ticket> {
++        if !Self::try_add(&self.entries, 1, self.max_entries) {
++            return None;
++        }
++        if !Self::try_add(&self.bytes, bytes, self.max_bytes) {
++            self.entries.fetch_sub(1, Ordering::Relaxed);
++            return None;
++        }
++        Some(Ticket {
++            budget: self.clone(),
++            bytes,
++        })
++    }
++}
++
++/// No per-message allocation: the ticket shares its class budget. Ownership
++/// follows the message through both the channel and any receiver's peeked slot.
++#[derive(Debug)]
++struct Ticket {
++    budget: Arc<Budget>,
++    bytes: usize,
++}
++
++impl Drop for Ticket {
++    fn drop(&mut self) {
++        self.budget.bytes.fetch_sub(self.bytes, Ordering::Relaxed);
++        self.budget.entries.fetch_sub(1, Ordering::Relaxed);
++    }
++}
++
++#[derive(Debug)]
++struct QueuedRpc {
++    rpc: RpcOut,
++    ticket: Ticket,
++}
++
++impl QueuedRpc {
++    fn into_rpc(self) -> RpcOut {
++        let Self { rpc, ticket } = self;
++        drop(ticket);
++        rpc
++    }
++}
++
++type QueueReceiver = Pin<Box<Peekable<async_channel::Receiver<QueuedRpc>>>>;
++
++/// Admission failures distinguish local message sizing and channel lifecycle
++/// from aggregate queue pressure, which may indicate a slow consumer.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub(crate) enum SendErrorReason {
++    TooLarge,
++    Full,
++    Closed,
++}
++
++#[derive(Debug)]
++pub(crate) struct SendError {
++    pub(crate) rpc: RpcOut,
++    pub(crate) reason: SendErrorReason,
++}
++
++/// Priority-aware queued ownership with three independent count/byte budgets.
++/// Handler-owned in-flight protobuf/frame data is a separate bounded owner.
+ #[derive(Debug)]
+ pub(crate) struct Sender {
+-    /// Capacity of the priority channel for `Publish` messages.
+-    priority_cap: usize,
+-    len: Arc<AtomicUsize>,
+-    pub(crate) priority_sender: async_channel::Sender<RpcOut>,
+-    pub(crate) non_priority_sender: async_channel::Sender<RpcOut>,
+-    priority_receiver: async_channel::Receiver<RpcOut>,
+-    non_priority_receiver: async_channel::Receiver<RpcOut>,
++    publish_budget: Arc<Budget>,
++    control_budget: Arc<Budget>,
++    non_priority_budget: Arc<Budget>,
++    priority_sender: async_channel::Sender<QueuedRpc>,
++    non_priority_sender: async_channel::Sender<QueuedRpc>,
++    priority_receiver: async_channel::Receiver<QueuedRpc>,
++    non_priority_receiver: async_channel::Receiver<QueuedRpc>,
+ }
+
+ impl Sender {
+-    /// Create a RpcSender.
+-    pub(crate) fn new(cap: usize) -> Sender {
+-        // We intentionally do not bound the channel, as we still need to send control messages
+-        // such as `GRAFT`, `PRUNE`, `SUBSCRIBE`, and `UNSUBSCRIBE`.
+-        // That's also why we define `cap` and divide it by two,
+-        // to ensure there is capacity for both priority and non_priority messages.
++    pub(crate) fn new(cap: usize, limits: QueueLimits) -> Self {
++        // Logical reservations bound both channels plus staged receiver items.
++        // Control traffic has its own finite reserve independent of publishes.
+         let (priority_sender, priority_receiver) = async_channel::unbounded();
+-        let (non_priority_sender, non_priority_receiver) = async_channel::bounded(cap / 2);
+-        let len = Arc::new(AtomicUsize::new(0));
+-        Sender {
+-            priority_cap: cap / 2,
+-            len,
++        let (non_priority_sender, non_priority_receiver) = async_channel::unbounded();
++        Self {
++            publish_budget: Budget::new(cap / 2, limits.max_publish_bytes),
++            control_budget: Budget::new(limits.max_control_messages, limits.max_control_bytes),
++            non_priority_budget: Budget::new(cap / 2, limits.max_non_priority_bytes),
+             priority_sender,
+             non_priority_sender,
+             priority_receiver,
+@@ -64,132 +156,576 @@
+         }
+     }
+
+-    /// Create a new Receiver to the sender.
+     pub(crate) fn new_receiver(&self) -> Receiver {
+         Receiver {
+-            priority_queue_len: self.len.clone(),
+             priority: Box::pin(self.priority_receiver.clone().peekable()),
+             non_priority: Box::pin(self.non_priority_receiver.clone().peekable()),
+         }
+     }
+
+     #[allow(clippy::result_large_err)]
+-    pub(crate) fn send_message(&self, rpc: RpcOut) -> Result<(), RpcOut> {
+-        if let RpcOut::Publish { .. } = rpc {
+-            // Update number of publish message in queue.
+-            let len = self.len.load(Ordering::Relaxed);
+-            if len >= self.priority_cap {
+-                return Err(rpc);
++    pub(crate) fn send_message(&self, rpc: RpcOut) -> Result<(), SendError> {
++        let (budget, sender) = match &rpc {
++            RpcOut::Publish { .. } => (&self.publish_budget, &self.priority_sender),
++            RpcOut::Graft(_) | RpcOut::Prune(_) | RpcOut::Subscribe(_) | RpcOut::Unsubscribe(_) => {
++                (&self.control_budget, &self.priority_sender)
+             }
+-            self.len.store(len + 1, Ordering::Relaxed);
+-        }
+-        let sender = match rpc {
+-            RpcOut::Publish { .. }
+-            | RpcOut::Graft(_)
+-            | RpcOut::Prune(_)
+-            | RpcOut::Subscribe(_)
+-            | RpcOut::Unsubscribe(_) => &self.priority_sender,
+             RpcOut::Forward { .. } | RpcOut::IHave(_) | RpcOut::IWant(_) | RpcOut::IDontWant(_) => {
+-                &self.non_priority_sender
++                (&self.non_priority_budget, &self.non_priority_sender)
+             }
+         };
+-        sender.try_send(rpc).map_err(|err| err.into_inner())
+-    }
+-
+-    /// Returns the current size of the priority queue.
++        let Some(bytes) = rpc
++            .retained_bytes()
++            .filter(|bytes| *bytes <= budget.max_bytes)
++        else {
++            return Err(SendError {
++                rpc,
++                reason: SendErrorReason::TooLarge,
++            });
++        };
++        if sender.is_closed() {
++            return Err(SendError {
++                rpc,
++                reason: SendErrorReason::Closed,
++            });
++        }
++        let Some(ticket) = budget.reserve(bytes) else {
++            return Err(SendError {
++                rpc,
++                reason: if sender.is_closed() {
++                    SendErrorReason::Closed
++                } else {
++                    SendErrorReason::Full
++                },
++            });
++        };
++        sender
++            .try_send(QueuedRpc { rpc, ticket })
++            .map_err(|err| SendError {
++                rpc: err.into_inner().into_rpc(),
++                // Both physical lanes are unbounded; only closure can fail here.
++                reason: SendErrorReason::Closed,
++            })
++    }
++
++    /// All priority-lane entries, including items peeked by receivers.
+     #[cfg(feature = "metrics")]
+     pub(crate) fn priority_queue_len(&self) -> usize {
+-        self.len.load(Ordering::Relaxed)
+-    }
+-
+-    /// Returns the current size of the non-priority queue.
++        self.publish_budget
++            .entries
++            .load(Ordering::Relaxed)
++            .saturating_add(self.control_budget.entries.load(Ordering::Relaxed))
++    }
++
+     #[cfg(feature = "metrics")]
+     pub(crate) fn non_priority_queue_len(&self) -> usize {
+-        self.non_priority_sender.len()
+-    }
+-}
+-
+-/// `RpcOut` sender that is priority aware.
++        self.non_priority_budget.entries.load(Ordering::Relaxed)
++    }
++}
++
++/// A receiver retains budget ownership while inspecting staged queue entries.
+ #[derive(Debug)]
+ pub struct Receiver {
+-    /// The maximum length of the priority queue.
+-    pub(crate) priority_queue_len: Arc<AtomicUsize>,
+-    /// The priority queue receiver.
+-    pub(crate) priority: Pin<Box<Peekable<async_channel::Receiver<RpcOut>>>>,
+-    /// The non priority queue receiver.
+-    pub(crate) non_priority: Pin<Box<Peekable<async_channel::Receiver<RpcOut>>>>,
++    priority: QueueReceiver,
++    non_priority: QueueReceiver,
+ }
+
+ impl Receiver {
+-    // Peek the next message in the queues and return it if its timeout has elapsed.
+-    // Returns `None` if there aren't any more messages on the stream or none is stale.
++    /// Poll both lanes, registering wakes for arriving data and active timers.
++    /// Closed lanes end only after their staged and channel entries are drained.
+     pub(crate) fn poll_stale(&mut self, cx: &mut Context<'_>) -> Poll<Option<RpcOut>> {
+-        // Peek priority queue.
+-        let priority = match self.priority.as_mut().poll_peek_mut(cx) {
+-            Poll::Ready(Some(RpcOut::Publish {
+-                message: _,
+-                ref mut timeout,
+-            })) => {
+-                if Pin::new(timeout).poll(cx).is_ready() {
+-                    // Return the message.
+-                    let dropped = futures::ready!(self.priority.poll_next_unpin(cx))
+-                        .expect("There should be a message");
+-                    return Poll::Ready(Some(dropped));
++        let mut closed = 0;
++        for queue in [&mut self.priority, &mut self.non_priority] {
++            match queue.as_mut().poll_peek_mut(cx) {
++                Poll::Ready(Some(QueuedRpc { rpc, .. })) => {
++                    let (RpcOut::Publish { timeout, .. } | RpcOut::Forward { timeout, .. }) = rpc
++                    else {
++                        continue;
++                    };
++                    if Pin::new(timeout).poll(cx).is_ready() {
++                        let rpc = futures::ready!(queue.poll_next_unpin(cx))
++                            .expect("peeked message remains owned by this receiver");
++                        return Poll::Ready(Some(rpc.into_rpc()));
++                    }
+                 }
+-                Poll::Ready(None)
++                Poll::Ready(None) => closed += 1,
++                Poll::Pending => {}
+             }
+-            poll => poll,
+-        };
+-
+-        let non_priority = match self.non_priority.as_mut().poll_peek_mut(cx) {
+-            Poll::Ready(Some(RpcOut::Forward {
+-                message: _,
+-                ref mut timeout,
+-            })) => {
+-                if Pin::new(timeout).poll(cx).is_ready() {
+-                    // Return the message.
+-                    let dropped = futures::ready!(self.non_priority.poll_next_unpin(cx))
+-                        .expect("There should be a message");
+-                    return Poll::Ready(Some(dropped));
+-                }
+-                Poll::Ready(None)
+-            }
+-            poll => poll,
+-        };
+-
+-        match (priority, non_priority) {
+-            (Poll::Ready(None), Poll::Ready(None)) => Poll::Ready(None),
+-            _ => Poll::Pending,
+-        }
+-    }
+-
+-    /// Poll queues and return true if both are empty.
++        }
++        if closed == 2 {
++            Poll::Ready(None)
++        } else {
++            Poll::Pending
++        }
++    }
++
++    /// Pending on an open channel means empty now, and registers the next wake.
+     pub(crate) fn poll_is_empty(&mut self, cx: &mut Context<'_>) -> bool {
+-        matches!(
+-            (
+-                self.priority.as_mut().poll_peek(cx),
+-                self.non_priority.as_mut().poll_peek(cx),
+-            ),
+-            (Poll::Ready(None), Poll::Ready(None))
+-        )
++        let priority = self.priority.as_mut().poll_peek(cx);
++        let non_priority = self.non_priority.as_mut().poll_peek(cx);
++        !matches!(priority, Poll::Ready(Some(_))) && !matches!(non_priority, Poll::Ready(Some(_)))
++    }
++
++    #[cfg(test)]
++    pub(crate) fn drain_priority(&mut self) -> Vec<RpcOut> {
++        Self::drain(&mut self.priority)
++    }
++
++    #[cfg(test)]
++    pub(crate) fn drain_non_priority(&mut self) -> Vec<RpcOut> {
++        Self::drain(&mut self.non_priority)
++    }
++
++    #[cfg(test)]
++    fn drain(queue: &mut QueueReceiver) -> Vec<RpcOut> {
++        let waker = futures::task::noop_waker();
++        let mut cx = Context::from_waker(&waker);
++        let mut messages = Vec::new();
++        while let Poll::Ready(Some(message)) = queue.poll_next_unpin(&mut cx) {
++            messages.push(message.into_rpc());
++        }
++        messages
++    }
++
++    #[cfg(test)]
++    pub(crate) fn close_non_priority(&self) {
++        self.non_priority.as_ref().get_ref().get_ref().close();
+     }
+ }
+
+ impl Stream for Receiver {
+     type Item = RpcOut;
+
+-    fn poll_next(
+-        mut self: std::pin::Pin<&mut Self>,
+-        cx: &mut std::task::Context<'_>,
+-    ) -> std::task::Poll<Option<Self::Item>> {
+-        // The priority queue is first polled.
+-        if let Poll::Ready(rpc) = Pin::new(&mut self.priority).poll_next(cx) {
+-            if let Some(RpcOut::Publish { .. }) = rpc {
+-                self.priority_queue_len.fetch_sub(1, Ordering::Relaxed);
++    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<RpcOut>> {
++        let priority_closed = match self.priority.poll_next_unpin(cx) {
++            Poll::Ready(Some(rpc)) => return Poll::Ready(Some(rpc.into_rpc())),
++            Poll::Ready(None) => true,
++            Poll::Pending => false,
++        };
++        match self.non_priority.poll_next_unpin(cx) {
++            Poll::Ready(Some(rpc)) => Poll::Ready(Some(rpc.into_rpc())),
++            Poll::Ready(None) if priority_closed => Poll::Ready(None),
++            Poll::Ready(None) | Poll::Pending => Poll::Pending,
++        }
++    }
++}
++
++#[cfg(test)]
++mod logex_tests {
++    use std::time::Duration;
++
++    use futures::{executor::block_on, future::poll_fn, task::noop_waker};
++    use futures_timer::Delay;
++
++    use super::*;
++    use crate::{types::IDontWant, RawMessage, TopicHash};
++
++    fn publish() -> RpcOut {
++        RpcOut::Publish {
++            message: RawMessage {
++                source: None,
++                data: vec![1],
++                sequence_number: None,
++                topic: TopicHash::from_raw("t"),
++                signature: None,
++                key: None,
++                validated: true,
++            },
++            timeout: Delay::new(Duration::ZERO),
++        }
++    }
++
++    #[test]
++    fn logex_stale_publish_releases_queue_capacity() {
++        let sender = Sender::new(2, QueueLimits::default());
++        let mut receiver = sender.new_receiver();
++        assert!(sender.send_message(publish()).is_ok());
++        let stale = block_on(poll_fn(|cx| receiver.poll_stale(cx)));
++        assert!(matches!(stale, Some(RpcOut::Publish { .. })));
++        assert!(
++            sender.send_message(publish()).is_ok(),
++            "removing a stale publish must release its queue slot"
++        );
++    }
++
++    #[test]
++    fn logex_dropped_receiver_releases_peeked_publish_capacity() {
++        let sender = Sender::new(2, QueueLimits::default());
++        let mut receiver = sender.new_receiver();
++        assert!(sender.send_message(publish()).is_ok());
++        let waker = noop_waker();
++        let mut cx = Context::from_waker(&waker);
++        assert!(!receiver.poll_is_empty(&mut cx));
++        drop(receiver);
++        assert!(
++            sender.send_message(publish()).is_ok(),
++            "dropping a receiver's peeked publish must release its queue slot"
++        );
++    }
++
++    #[test]
++    fn logex_closed_publish_channel_does_not_charge_failed_send() {
++        let sender = Sender::new(2, QueueLimits::default());
++        sender.priority_sender.close();
++        assert!(sender.send_message(publish()).is_err());
++        assert_eq!(
++            sender.publish_budget.entries.load(Ordering::Relaxed),
++            0,
++            "a rejected publish does not occupy a queue slot"
++        );
++    }
++
++    #[test]
++    fn logex_open_empty_queues_are_empty() {
++        let sender = Sender::new(2, QueueLimits::default());
++        let mut receiver = sender.new_receiver();
++        let waker = noop_waker();
++        let mut cx = Context::from_waker(&waker);
++        assert!(
++            receiver.poll_is_empty(&mut cx),
++            "an open channel awaiting future messages has no queued messages"
++        );
++    }
++
++    #[test]
++    fn logex_closed_priority_does_not_hide_non_priority_message() {
++        let sender = Sender::new(2, QueueLimits::default());
++        let mut receiver = sender.new_receiver();
++        assert!(sender
++            .send_message(RpcOut::IDontWant(IDontWant {
++                message_ids: vec![],
++            }))
++            .is_ok());
++        sender.priority_sender.close();
++        let waker = noop_waker();
++        let mut cx = Context::from_waker(&waker);
++        assert!(matches!(
++            receiver.poll_next_unpin(&mut cx),
++            Poll::Ready(Some(RpcOut::IDontWant(_)))
++        ));
++    }
++
++    fn tiny_limits() -> QueueLimits {
++        QueueLimits {
++            max_control_messages: 1,
++            max_control_bytes: 8,
++            max_publish_bytes: 8,
++            max_non_priority_bytes: 8,
++        }
++    }
++
++    fn non_priority() -> RpcOut {
++        RpcOut::IDontWant(IDontWant {
++            message_ids: vec![],
++        })
++    }
++
++    fn usage(budget: &Budget) -> (usize, usize) {
++        (
++            budget.entries.load(Ordering::Relaxed),
++            budget.bytes.load(Ordering::Relaxed),
++        )
++    }
++
++    #[test]
++    fn logex_three_queue_budgets_are_independent_and_include_peeked_items() {
++        let sender = Sender::new(2, tiny_limits());
++        let mut first = sender.new_receiver();
++        let mut second = sender.new_receiver();
++        assert!(sender.send_message(publish()).is_ok());
++        assert!(sender
++            .send_message(RpcOut::Subscribe(TopicHash::from_raw("t")))
++            .is_ok());
++        assert!(sender.send_message(non_priority()).is_ok());
++        let waker = noop_waker();
++        let mut cx = Context::from_waker(&waker);
++        // Each receiver can take a private peeked slot, but cannot free budgets.
++        assert!(!first.poll_is_empty(&mut cx));
++        assert!(!second.poll_is_empty(&mut cx));
++        assert!(sender.send_message(publish()).is_err());
++        assert!(sender
++            .send_message(RpcOut::Unsubscribe(TopicHash::from_raw("t")))
++            .is_err());
++        assert!(sender.send_message(non_priority()).is_err());
++        assert_eq!(usage(&sender.publish_budget), (1, 2));
++        assert_eq!(usage(&sender.control_budget), (1, 1));
++        assert_eq!(usage(&sender.non_priority_budget), (1, 0));
++        drop(first);
++        assert_eq!(usage(&sender.publish_budget), (0, 0));
++        assert_eq!(usage(&sender.non_priority_budget), (0, 0));
++        // The second receiver still owns the control message it peeked.
++        assert_eq!(usage(&sender.control_budget), (1, 1));
++        assert!(sender.send_message(publish()).is_ok());
++        assert!(sender.send_message(non_priority()).is_ok());
++        drop(second);
++        assert_eq!(usage(&sender.control_budget), (0, 0));
++        let mut receiver = sender.new_receiver();
++        assert_eq!(receiver.drain_priority().len(), 1);
++        assert_eq!(receiver.drain_non_priority().len(), 1);
++        assert_eq!(usage(&sender.publish_budget), (0, 0));
++        assert_eq!(usage(&sender.non_priority_budget), (0, 0));
++    }
++
++    #[test]
++    fn logex_queue_bytes_charge_capacity_and_rollback_failed_admission() {
++        let limits = QueueLimits {
++            max_control_messages: 3,
++            max_control_bytes: 8,
++            ..tiny_limits()
++        };
++        let sender = Sender::new(2, limits);
++        let mut topic = String::with_capacity(8);
++        topic.push('t');
++        assert_eq!(topic.capacity(), 8);
++        assert!(sender
++            .send_message(RpcOut::Subscribe(TopicHash::from_raw(topic)))
++            .is_ok());
++        assert_eq!(usage(&sender.control_budget), (1, 8));
++        assert!(sender
++            .send_message(RpcOut::Subscribe(TopicHash::from_raw("x")))
++            .is_err());
++        assert_eq!(usage(&sender.control_budget), (1, 8));
++        let mut receiver = sender.new_receiver();
++        assert_eq!(receiver.drain_priority().len(), 1);
++        assert_eq!(usage(&sender.control_budget), (0, 0));
++        assert!(sender
++            .send_message(RpcOut::Unsubscribe(TopicHash::from_raw("x")))
++            .is_ok());
++        sender.priority_sender.close();
++        assert!(sender
++            .send_message(RpcOut::Subscribe(TopicHash::from_raw("y")))
++            .is_err());
++        assert_eq!(usage(&sender.control_budget), (1, 1));
++        receiver.drain_priority();
++        assert_eq!(usage(&sender.control_budget), (0, 0));
++    }
++
++    #[test]
++    fn logex_rpc_weight_includes_nested_and_spare_allocations() {
++        use crate::types::{Graft, IHave, IWant, MessageId, PeerInfo, Prune};
++        let mut ids = Vec::with_capacity(3);
++        let mut id = Vec::with_capacity(5);
++        id.push(1);
++        let expected_ids = ids.capacity() * std::mem::size_of::<MessageId>() + id.capacity();
++        ids.push(MessageId(id));
++        let mut topic = String::with_capacity(7);
++        topic.push('t');
++        let topic_bytes = topic.capacity();
++        let ihave = RpcOut::IHave(IHave {
++            topic_hash: TopicHash::from_raw(topic),
++            message_ids: ids,
++        });
++        assert_eq!(ihave.retained_bytes(), Some(expected_ids + topic_bytes));
++        let RpcOut::IHave(ihave) = ihave else {
++            unreachable!()
++        };
++        let iwant = RpcOut::IWant(IWant {
++            message_ids: ihave.message_ids,
++        });
++        assert_eq!(iwant.retained_bytes(), Some(expected_ids));
++        let RpcOut::IWant(iwant) = iwant else {
++            unreachable!()
++        };
++        assert_eq!(
++            RpcOut::IDontWant(IDontWant {
++                message_ids: iwant.message_ids
++            })
++            .retained_bytes(),
++            Some(expected_ids)
++        );
++        let peers = Vec::<PeerInfo>::with_capacity(2);
++        let expected = peers.capacity() * std::mem::size_of::<PeerInfo>() + topic_bytes;
++        let prune = RpcOut::Prune(Prune {
++            topic_hash: ihave.topic_hash,
++            peers,
++            backoff: None,
++        });
++        assert_eq!(prune.retained_bytes(), Some(expected));
++        let RpcOut::Prune(prune) = prune else {
++            unreachable!()
++        };
++        assert_eq!(
++            RpcOut::Graft(Graft {
++                topic_hash: prune.topic_hash
++            })
++            .retained_bytes(),
++            Some(topic_bytes)
++        );
++        let RpcOut::Publish {
++            mut message,
++            timeout,
++        } = publish()
++        else {
++            unreachable!()
++        };
++        message.data = Vec::with_capacity(3);
++        message.signature = Some(Vec::with_capacity(2));
++        message.key = Some(Vec::with_capacity(4));
++        let expected = message.data.capacity()
++            + message.topic.retained_bytes()
++            + message.signature.as_ref().unwrap().capacity()
++            + message.key.as_ref().unwrap().capacity();
++        let publish = RpcOut::Publish { message, timeout };
++        assert_eq!(publish.retained_bytes(), Some(expected));
++        let RpcOut::Publish { message, timeout } = publish else {
++            unreachable!()
++        };
++        assert_eq!(
++            RpcOut::Forward { message, timeout }.retained_bytes(),
++            Some(expected)
++        );
++    }
++
++    #[test]
++    fn logex_byte_budgets_reject_large_publish_and_non_priority_without_count_leaks() {
++        let limits = QueueLimits {
++            max_publish_bytes: 1,
++            max_non_priority_bytes: 1,
++            ..tiny_limits()
++        };
++        let sender = Sender::new(2, limits);
++        assert!(sender.send_message(publish()).is_err());
++        assert_eq!(usage(&sender.publish_budget), (0, 0));
++        let RpcOut::Publish { message, timeout } = publish() else {
++            unreachable!()
++        };
++        assert!(sender
++            .send_message(RpcOut::Forward { message, timeout })
++            .is_err());
++        assert_eq!(usage(&sender.non_priority_budget), (0, 0));
++        assert!(sender.send_message(non_priority()).is_ok());
++    }
++
++    #[test]
++    fn logex_dropping_last_queue_owner_releases_all_classes() {
++        let sender = Sender::new(2, tiny_limits());
++        let budgets = [
++            sender.publish_budget.clone(),
++            sender.control_budget.clone(),
++            sender.non_priority_budget.clone(),
++        ];
++        let mut receiver = sender.new_receiver();
++        assert!(sender.send_message(publish()).is_ok());
++        assert!(sender
++            .send_message(RpcOut::Subscribe(TopicHash::from_raw("t")))
++            .is_ok());
++        assert!(sender.send_message(non_priority()).is_ok());
++        let waker = noop_waker();
++        let mut cx = Context::from_waker(&waker);
++        assert!(!receiver.poll_is_empty(&mut cx));
++        drop(sender);
++        assert!(budgets.iter().all(|budget| usage(budget).0 == 1));
++        drop(receiver);
++        assert!(budgets.iter().all(|budget| usage(budget) == (0, 0)));
++    }
++
++    #[test]
++    fn logex_empty_poll_registers_wake_and_stream_waits_for_both_lanes() {
++        struct WakeCount(AtomicUsize);
++        impl futures::task::ArcWake for WakeCount {
++            fn wake_by_ref(arc_self: &Arc<Self>) {
++                arc_self.0.fetch_add(1, Ordering::Relaxed);
+             }
+-            return Poll::Ready(rpc);
+-        }
+-        // Then we poll the non priority.
+-        Pin::new(&mut self.non_priority).poll_next(cx)
+-    }
+-}
++        }
++        let sender = Sender::new(2, tiny_limits());
++        let mut receiver = sender.new_receiver();
++        let wakes = Arc::new(WakeCount(AtomicUsize::new(0)));
++        let waker = futures::task::waker(wakes.clone());
++        let mut cx = Context::from_waker(&waker);
++        assert!(receiver.poll_is_empty(&mut cx));
++        assert!(sender
++            .send_message(RpcOut::Subscribe(TopicHash::from_raw("t")))
++            .is_ok());
++        assert!(wakes.0.load(Ordering::Relaxed) > 0);
++        assert!(matches!(
++            receiver.poll_next_unpin(&mut cx),
++            Poll::Ready(Some(RpcOut::Subscribe(_)))
++        ));
++        sender.non_priority_sender.close();
++        assert!(receiver.poll_next_unpin(&mut cx).is_pending());
++        sender.priority_sender.close();
++        assert!(matches!(
++            receiver.poll_next_unpin(&mut cx),
++            Poll::Ready(None)
++        ));
++    }
++
++    #[test]
++    fn logex_checked_budget_reservation_rolls_back_on_overflow() {
++        let budget = Budget::new(2, usize::MAX);
++        let ticket = budget.reserve(usize::MAX).unwrap();
++        assert!(budget.reserve(1).is_none());
++        assert_eq!(usage(&budget), (1, usize::MAX));
++        drop(ticket);
++        assert_eq!(usage(&budget), (0, 0));
++        let ticket = budget.reserve(1).unwrap();
++        assert_eq!(usage(&budget), (1, 1));
++        drop(ticket);
++        assert_eq!(usage(&budget), (0, 0));
++    }
++
++    #[test]
++    fn logex_admission_reasons_distinguish_size_pressure_and_closed_ownership() {
++        let sender = Sender::new(
++            4,
++            QueueLimits {
++                max_publish_bytes: 3,
++                max_non_priority_bytes: 1,
++                ..tiny_limits()
++            },
++        );
++        let mut receiver = sender.new_receiver();
++        assert!(sender.send_message(publish()).is_ok());
++        let error = sender.send_message(publish()).unwrap_err();
++        assert_eq!(error.reason, SendErrorReason::Full);
++        assert!(matches!(error.rpc, RpcOut::Publish { .. }));
++        assert_eq!(usage(&sender.publish_budget), (1, 2));
++        let RpcOut::Publish { message, timeout } = publish() else {
++            unreachable!()
++        };
++        let error = sender
++            .send_message(RpcOut::Forward { message, timeout })
++            .unwrap_err();
++        assert_eq!(error.reason, SendErrorReason::TooLarge);
++        assert!(matches!(error.rpc, RpcOut::Forward { .. }));
++        assert_eq!(usage(&sender.non_priority_budget), (0, 0));
++        sender.priority_sender.close();
++        // A closed channel remains a lifecycle failure even when aggregate bytes are full.
++        let error = sender.send_message(publish()).unwrap_err();
++        assert_eq!(error.reason, SendErrorReason::Closed);
++        assert_eq!(usage(&sender.publish_budget), (1, 2));
++        receiver.drain_priority();
++        assert_eq!(usage(&sender.publish_budget), (0, 0));
++        assert_eq!(
++            sender.send_message(publish()).unwrap_err().reason,
++            SendErrorReason::Closed
++        );
++        assert_eq!(usage(&sender.publish_budget), (0, 0));
++    }
++
++    #[test]
++    fn logex_closed_non_priority_preserves_then_releases_queued_ownership() {
++        let sender = Sender::new(2, tiny_limits());
++        let mut receiver = sender.new_receiver();
++        let RpcOut::Publish { message, timeout } = publish() else {
++            unreachable!()
++        };
++        assert!(sender
++            .send_message(RpcOut::Forward { message, timeout })
++            .is_ok());
++        assert_eq!(usage(&sender.non_priority_budget), (1, 2));
++        receiver.close_non_priority();
++        let error = sender.send_message(non_priority()).unwrap_err();
++        assert_eq!(error.reason, SendErrorReason::Closed);
++        assert!(matches!(error.rpc, RpcOut::IDontWant(_)));
++        assert_eq!(usage(&sender.non_priority_budget), (1, 2));
++        let messages = receiver.drain_non_priority();
++        assert!(matches!(messages.as_slice(), [RpcOut::Forward { .. }]));
++        assert_eq!(usage(&sender.non_priority_budget), (0, 0));
++        assert_eq!(
++            sender.send_message(non_priority()).unwrap_err().reason,
++            SendErrorReason::Closed
++        );
++        assert_eq!(usage(&sender.non_priority_budget), (0, 0));
++    }
++}
 --- a/src/subscription_filter.rs
 +++ b/src/subscription_filter.rs
 @@ -23,7 +23,19 @@
@@ -2919,6 +5110,19 @@
 +        assert_eq!(disabled.try_insert_at(0, now), CacheAdmission::Full);
 +    }
 +}
+--- a/src/topic.rs
++++ b/src/topic.rs
+@@ -87,6 +87,10 @@
+     pub fn as_str(&self) -> &str {
+         &self.hash
+     }
++
++    pub(crate) fn retained_bytes(&self) -> usize {
++        self.hash.capacity()
++    }
+ }
+
+ /// A gossipsub topic.
 --- a/src/types.rs
 +++ b/src/types.rs
 @@ -19,7 +19,7 @@
@@ -3040,7 +5244,46 @@
              .field("source", &self.source)
              .field("sequence_number", &self.sequence_number)
              .field("topic", &self.topic)
-@@ -635,3 +714,90 @@
+@@ -341,6 +420,38 @@
+ }
+
+ impl RpcOut {
++    /// Dynamic allocations retained by the queued RPC. Fixed envelope and timer
++    /// metadata are bounded separately by the queue's entry limits.
++    pub(crate) fn retained_bytes(&self) -> Option<usize> {
++        fn ids_bytes(ids: &Vec<MessageId>) -> Option<usize> {
++            ids.iter().try_fold(
++                ids.capacity()
++                    .checked_mul(std::mem::size_of::<MessageId>())?,
++                |bytes, id| bytes.checked_add(id.0.capacity()),
++            )
++        }
++        match self {
++            Self::Publish { message, .. } | Self::Forward { message, .. } => message
++                .data
++                .capacity()
++                .checked_add(message.topic.retained_bytes())?
++                .checked_add(message.signature.as_ref().map_or(0, Vec::capacity))?
++                .checked_add(message.key.as_ref().map_or(0, Vec::capacity)),
++            Self::Subscribe(topic) | Self::Unsubscribe(topic) => Some(topic.retained_bytes()),
++            Self::Graft(graft) => Some(graft.topic_hash.retained_bytes()),
++            Self::Prune(prune) => prune
++                .peers
++                .capacity()
++                .checked_mul(std::mem::size_of::<PeerInfo>())?
++                .checked_add(prune.topic_hash.retained_bytes()),
++            Self::IHave(ihave) => {
++                ids_bytes(&ihave.message_ids)?.checked_add(ihave.topic_hash.retained_bytes())
++            }
++            Self::IWant(iwant) => ids_bytes(&iwant.message_ids),
++            Self::IDontWant(idontwant) => ids_bytes(&idontwant.message_ids),
++        }
++    }
++
+     /// Converts the GossipsubRPC into its protobuf format.
+     // A convenience function to avoid explicitly specifying types.
+     pub fn into_protobuf(self) -> proto::RPC {
+@@ -635,3 +746,90 @@
          f.write_str(self.as_ref())
      }
  }

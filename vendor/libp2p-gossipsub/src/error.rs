@@ -132,6 +132,8 @@ impl From<std::io::Error> for PublishError {
 /// Error associated with Config building.
 #[derive(Debug)]
 pub enum ConfigBuilderError {
+    /// Each queued-message lane requires at least one entry.
+    ConnectionHandlerQueueTooSmall,
     /// Maximum transmission size is too small.
     MaxTransmissionSizeTooSmall,
     /// History length less than history gossip length.
@@ -151,6 +153,7 @@ impl std::error::Error for ConfigBuilderError {}
 impl std::fmt::Display for ConfigBuilderError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
+            Self::ConnectionHandlerQueueTooSmall => write!(f, "Connection handler queue length must be at least two"),
             Self::MaxTransmissionSizeTooSmall => {
                 write!(f, "Maximum transmission size is too small")
             }
