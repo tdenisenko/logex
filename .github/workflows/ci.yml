@@ -61,6 +61,7 @@ jobs:
           vendor/libp2p-gossipsub/src/subscription_filter.rs
           vendor/libp2p-gossipsub/src/config.rs
           vendor/libp2p-gossipsub/src/error.rs
+          vendor/libp2p-gossipsub/src/event_queue.rs
           vendor/libp2p-gossipsub/src/gossip_promises.rs
           vendor/libp2p-gossipsub/src/lib.rs
           vendor/libp2p-gossipsub/src/mcache.rs

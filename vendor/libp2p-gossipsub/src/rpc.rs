@@ -411,6 +411,7 @@ mod logex_tests {
             max_control_bytes: 8,
             max_publish_bytes: 8,
             max_non_priority_bytes: 8,
+            ..Default::default()
         }
     }
 

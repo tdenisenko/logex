@@ -30,7 +30,7 @@ use quick_protobuf::MessageWrite;
 use serde::{Deserialize, Serialize};
 use web_time::Instant;
 
-use crate::{rpc::Sender, rpc_proto::proto, TopicHash};
+use crate::{handler::HandlerIn, rpc::Sender, rpc_proto::proto, TopicHash};
 
 /// Messages that have expired while attempting to be sent to a peer.
 #[derive(Clone, Debug, Default)]
@@ -191,6 +191,8 @@ pub(crate) struct PeerDetails {
     pub(crate) outbound: bool,
     /// Its current connections.
     pub(crate) connections: Vec<ConnectionId>,
+    /// Latest mesh keepalive state awaiting delivery to the first connection.
+    pub(crate) pending_handler_notification: Option<HandlerIn>,
     /// Subscribed topics.
     pub(crate) topics: BTreeSet<TopicHash>,
     /// The rpc sender to the connection handler(s).

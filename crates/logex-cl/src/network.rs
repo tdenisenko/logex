@@ -126,6 +126,8 @@ const GOSSIP_QUEUE_LIMITS: gossipsub::QueueLimits = gossipsub::QueueLimits {
     max_control_bytes: 256 * 1024,
     max_publish_bytes: 16 * 1024 * 1024,
     max_non_priority_bytes: 16 * 1024 * 1024,
+    max_advisory_events: 1_024,
+    max_advisory_bytes: 256 * 1024,
 };
 const P2P_BANDWIDTH_RATE_WINDOW: Duration = Duration::from_secs(15);
 const LIGHT_CLIENT_FINALITY_UPDATE_TOPIC_NAME: &str = "light_client_finality_update";
@@ -11451,6 +11453,8 @@ mod tests {
             config.queue_limits().max_non_priority_bytes,
             16 * 1024 * 1024
         );
+        assert_eq!(config.queue_limits().max_advisory_events, 1_024);
+        assert_eq!(config.queue_limits().max_advisory_bytes, 256 * 1024);
         assert_eq!(config.cache_limits().seen_entries, 16_384);
         assert_eq!(config.cache_limits().seen_bytes, 655_360);
         assert_eq!(config.cache_limits().message_bytes, 16 * 1024 * 1024);

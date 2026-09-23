@@ -146,10 +146,11 @@ impl Default for CacheLimits {
     }
 }
 
-/// Per-peer queued RPC budgets, shared by all connections to that peer.
-/// Counts include messages staged by a receiver. Bytes cover owned buffers and
-/// vector allocations, not total RSS or the handler's single in-flight frame.
-/// These limits are independent of protocol frame-size limits.
+/// Queued gossip ownership budgets. RPC limits apply per peer, shared by all
+/// connections; advisory-event limits apply across the whole behaviour.
+/// RPC counts include messages staged by a receiver. Bytes cover owned buffers
+/// and vector allocations, not total RSS or the handler's single in-flight frame.
+/// These limits are independent of protocol frame-size limits and message caches.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct QueueLimits {
     /// Reserved entries for subscriptions, GRAFT and PRUNE. Saturation closes the peer.
@@ -160,6 +161,11 @@ pub struct QueueLimits {
     pub max_publish_bytes: usize,
     /// Owned bytes for forwarded messages and IHAVE/IWANT/IDONTWANT controls.
     pub max_non_priority_bytes: usize,
+    /// Pending subscription, slow-peer and unsupported-protocol advisory events.
+    /// Excess new advisories are dropped, preserving those already queued.
+    pub max_advisory_events: usize,
+    /// Owned topic-string bytes across pending advisory events.
+    pub max_advisory_bytes: usize,
 }
 
 impl Default for QueueLimits {
@@ -169,6 +175,8 @@ impl Default for QueueLimits {
             max_control_bytes: 256 * 1024,
             max_publish_bytes: 16 * 1024 * 1024,
             max_non_priority_bytes: 16 * 1024 * 1024,
+            max_advisory_events: 1_024,
+            max_advisory_bytes: 256 * 1024,
         }
     }
 }

@@ -65,7 +65,7 @@
 
 --- a/src/behaviour/tests.rs
 +++ b/src/behaviour/tests.rs
-@@ -236,7 +236,10 @@
+@@ -236,18 +236,22 @@
          }
      };
 
@@ -77,7 +77,11 @@
      let receiver = sender.new_receiver();
      let connection_id = ConnectionId::new_unchecked(0);
      gs.connected_peers.insert(
-@@ -247,7 +250,7 @@
+         peer,
+         PeerDetails {
++            pending_handler_notification: None,
+             kind: kind.unwrap_or(PeerKind::Floodsub),
+             outbound,
              connections: vec![connection_id],
              topics: Default::default(),
              sender,
@@ -86,7 +90,7 @@
          },
      );
 
-@@ -452,10 +455,9 @@
+@@ -452,10 +456,9 @@
      // collect all the subscriptions
      let subscriptions = receivers
          .into_values()
@@ -100,7 +104,7 @@
                      collected_subscriptions += 1
                  }
              }
-@@ -513,10 +515,9 @@
+@@ -513,10 +516,9 @@
      // collect all the subscriptions
      let subscriptions = receivers
          .into_values()
@@ -114,7 +118,7 @@
                      collected_subscriptions += 1
                  }
              }
-@@ -588,21 +589,13 @@
+@@ -588,21 +590,13 @@
          let mut new_receivers = HashMap::new();
          let mut acc = 0;
 
@@ -140,7 +144,7 @@
          }
          (acc, new_receivers)
      }
-@@ -632,7 +625,10 @@
+@@ -632,18 +626,22 @@
              &address,
          )
          .unwrap();
@@ -152,7 +156,11 @@
          let receiver = sender.new_receiver();
          let connection_id = ConnectionId::new_unchecked(0);
          gs.connected_peers.insert(
-@@ -643,7 +639,7 @@
+             random_peer,
+             PeerDetails {
++                pending_handler_notification: None,
+                 kind: PeerKind::Floodsub,
+                 outbound: false,
                  connections: vec![connection_id],
                  topics: Default::default(),
                  sender,
@@ -161,7 +169,7 @@
              },
          );
          receivers.insert(random_peer, receiver);
-@@ -734,10 +730,9 @@
+@@ -734,10 +732,9 @@
      // Collect all publish messages
      let publishes = receivers
          .into_values()
@@ -175,7 +183,7 @@
                      collected_publish.push(message);
                  }
              }
-@@ -819,10 +814,9 @@
+@@ -819,10 +816,9 @@
      // Collect all publish messages
      let publishes = receivers
          .into_values()
@@ -189,7 +197,7 @@
                      collected_publish.push(message);
                  }
              }
-@@ -867,10 +861,9 @@
+@@ -867,10 +863,9 @@
      // collect all the SendEvents
      let subscriptions = receivers.into_iter().fold(
          HashMap::<PeerId, Vec<String>>::new(),
@@ -203,7 +211,12 @@
                      let mut peer_subs = collected_subscriptions.remove(&peer).unwrap_or_default();
                      peer_subs.push(topic.into_string());
                      collected_subscriptions.insert(peer, peer_subs);
-@@ -1039,8 +1032,11 @@
+@@ -1035,12 +1030,16 @@
+         gs.connected_peers.insert(
+             peer_id,
+             PeerDetails {
++                pending_handler_notification: None,
+                 kind: PeerKind::Gossipsubv1_1,
                  connections: vec![ConnectionId::new_unchecked(0)],
                  outbound: false,
                  topics: topics.clone(),
@@ -217,7 +230,7 @@
              },
          );
      }
-@@ -1103,10 +1099,9 @@
+@@ -1103,10 +1102,9 @@
      // the messages we are sending
      let sent_messages = receivers
          .into_values()
@@ -231,7 +244,7 @@
                      collected_messages.push(message)
                  }
              }
-@@ -1159,28 +1154,23 @@
+@@ -1159,28 +1157,23 @@
 
          // is the message is being sent?
          let mut message_exists = false;
@@ -271,7 +284,7 @@
          // default history_length is 5, expect no messages after shift > 5
          if shift < 5 {
              assert!(
-@@ -1217,7 +1207,7 @@
+@@ -1217,7 +1210,7 @@
 
  #[test]
  fn test_handle_iwant_msg_but_already_sent_idontwant() {
@@ -280,7 +293,7 @@
          .peer_no(20)
          .topics(Vec::new())
          .to_subscribe(true)
-@@ -1263,8 +1253,8 @@
+@@ -1263,8 +1256,8 @@
      gs.handle_iwant(&peers[1], vec![msg_id.clone()]);
 
      // Check that no messages are sent.
@@ -291,7 +304,7 @@
      });
  }
 
-@@ -1284,10 +1274,9 @@
+@@ -1284,10 +1277,9 @@
 
      // check that we sent an IWANT request for `unknown id`
      let mut iwant_exists = false;
@@ -305,7 +318,7 @@
              if message_ids
                  .iter()
                  .any(|m| *m == MessageId::new(b"unknown id"))
-@@ -1304,6 +1293,108 @@
+@@ -1304,6 +1296,108 @@
      );
  }
 
@@ -414,7 +427,7 @@
  /// tests that an event is not created when a peer shares that it has a message that
  /// we already have
  #[test]
-@@ -1462,29 +1553,13 @@
+@@ -1462,29 +1556,13 @@
  ) -> (usize, HashMap<PeerId, Receiver>) {
      let mut new_receivers = HashMap::new();
      let mut collected_messages = 0;
@@ -449,7 +462,7 @@
      }
      (collected_messages, new_receivers)
  }
-@@ -1495,21 +1570,10 @@
+@@ -1495,21 +1573,10 @@
  ) -> HashMap<PeerId, Receiver> {
      gs.events.clear();
      let mut new_receivers = HashMap::new();
@@ -475,7 +488,7 @@
      }
      new_receivers
  }
-@@ -1715,10 +1779,9 @@
+@@ -1715,10 +1782,9 @@
      };
      gs.handle_received_message(message.clone(), &local_id);
      assert_eq!(
@@ -489,7 +502,7 @@
          fwds +=1;
          }
                  }
-@@ -1859,11 +1922,10 @@
+@@ -1859,11 +1925,10 @@
      }
 
      // assert that no gossip gets sent to explicit peer
@@ -504,7 +517,7 @@
              gossips += 1;
          }
      }
-@@ -2264,10 +2326,9 @@
+@@ -2264,10 +2329,9 @@
      // Collect all publish messages
      let publishes = receivers
          .into_values()
@@ -518,7 +531,7 @@
                      collected_publish.push(message);
                  }
              }
-@@ -2750,13 +2811,9 @@
+@@ -2750,13 +2814,9 @@
          RpcOut::IHave(IHave {
              topic_hash,
              message_ids,
@@ -535,7 +548,7 @@
          }
          _ => false,
      });
-@@ -2826,10 +2883,9 @@
+@@ -2826,10 +2886,9 @@
      let sent_messages =
          receivers
              .into_iter()
@@ -549,7 +562,7 @@
                          collected_messages.push((peer_id, message));
                      }
                  }
-@@ -2913,13 +2969,9 @@
+@@ -2913,13 +2972,9 @@
 
      // check that we sent exactly one IWANT request to p2
      let (control_msgs, _) = count_control_msgs(receivers, |peer, c| match c {
@@ -566,7 +579,7 @@
          }
          _ => false,
      });
-@@ -2971,17 +3023,17 @@
+@@ -2971,17 +3026,17 @@
      gs.publish(topic, publish_data).unwrap();
 
      // Collect all publish messages
@@ -594,7 +607,7 @@
 
      // assert only published to p2
      assert_eq!(publishes.len(), 1);
-@@ -3026,17 +3078,17 @@
+@@ -3026,17 +3081,17 @@
      gs.publish(Topic::new("test"), publish_data).unwrap();
 
      // Collect all publish messages
@@ -622,7 +635,36 @@
 
      // assert only published to p2
      assert_eq!(publishes.len(), 1);
-@@ -4248,7 +4300,7 @@
+@@ -3146,12 +3201,10 @@
+         },
+     );
+
+-    // only the subscription event gets processed, the rest is dropped
+-    assert_eq!(gs.events.len(), 1);
+-    assert!(matches!(
+-        gs.events[0],
+-        ToSwarm::GenerateEvent(Event::Subscribed { .. })
+-    ));
++    // Subscription state is processed, but the duplicate adds no advisory;
++    // payload and control processing remain suppressed for the graylisted peer.
++    assert!(gs.connected_peers[&p1].topics.contains(&topics[0]));
++    assert!(gs.events.is_empty());
+
+     let control_action = ControlAction::IHave(IHave {
+         topic_hash: topics[0].clone(),
+@@ -3172,8 +3225,9 @@
+         },
+     );
+
+-    // events got processed
+-    assert!(gs.events.len() > 1);
++    // The non-graylisted peer's payload is processed despite its duplicate subscription.
++    assert!(gs.events.iter().any(|event| matches!(event,
++        ToSwarm::GenerateEvent(Event::Message { propagation_source, .. }) if *propagation_source == p2)));
+ }
+
+ #[test]
+@@ -4248,7 +4302,7 @@
 
      // create 5 peers with the same ip
      let addr = Multiaddr::from(Ipv4Addr::new(10, 1, 2, 3));
@@ -631,7 +673,7 @@
          add_peer_with_addr(&mut gs, &[], false, false, addr.clone()).0,
          add_peer_with_addr(&mut gs, &[], false, false, addr.clone()).0,
          add_peer_with_addr(&mut gs, &[], true, false, addr.clone()).0,
-@@ -4258,7 +4310,7 @@
+@@ -4258,7 +4312,7 @@
 
      // create 4 other peers with other ip
      let addr2 = Multiaddr::from(Ipv4Addr::new(10, 1, 2, 4));
@@ -640,7 +682,7 @@
          add_peer_with_addr(&mut gs, &[], false, false, addr2.clone()).0,
          add_peer_with_addr(&mut gs, &[], false, false, addr2.clone()).0,
          add_peer_with_addr(&mut gs, &[], true, false, addr2.clone()).0,
-@@ -4575,10 +4627,9 @@
+@@ -4575,10 +4629,9 @@
      }
 
      assert_eq!(
@@ -654,7 +696,7 @@
                      fwds += 1;
                  }
              }
-@@ -4990,11 +5041,10 @@
+@@ -4990,11 +5043,10 @@
      // Collect publish messages to floodsub peers
      let publishes = receivers
          .into_iter()
@@ -670,7 +712,7 @@
                  {
                      collected_publish += 1;
                  }
-@@ -5046,11 +5096,10 @@
+@@ -5046,11 +5098,10 @@
      // Collect publish messages to floodsub peers
      let publishes = receivers
          .into_iter()
@@ -686,7 +728,7 @@
                  {
                      collected_publish += 1;
                  }
-@@ -5275,10 +5324,9 @@
+@@ -5275,10 +5326,9 @@
                                    receivers: HashMap<PeerId, Receiver>|
       -> HashMap<PeerId, Receiver> {
          let new_receivers = HashMap::new();
@@ -700,7 +742,7 @@
                      gs1.on_connection_handler_event(
                          p2,
                          connection_id,
-@@ -5368,10 +5416,9 @@
+@@ -5368,10 +5418,9 @@
      assert_eq!(
          receivers
              .into_iter()
@@ -714,7 +756,7 @@
                          assert_ne!(peer_id, peers[1]);
                          idontwants += 1;
                      }
-@@ -5410,10 +5457,9 @@
+@@ -5410,10 +5459,9 @@
      assert_eq!(
          receivers
              .into_iter()
@@ -728,7 +770,7 @@
                          assert_ne!(peer_id, peers[1]);
                          idontwants += 1;
                      }
-@@ -5453,10 +5499,9 @@
+@@ -5453,10 +5501,9 @@
      assert_eq!(
          receivers
              .into_iter()
@@ -742,7 +784,7 @@
                          idontwants += 1;
                      }
                  }
-@@ -5497,14 +5542,13 @@
+@@ -5497,14 +5544,13 @@
          .unwrap();
      let message_id = gs.config.message_id(&message);
      let peer = gs.connected_peers.get_mut(&peers[2]).unwrap();
@@ -761,7 +803,7 @@
                      assert_ne!(peer_id, peers[2]);
                      fwds += 1;
                  }
-@@ -5546,7 +5590,7 @@
+@@ -5546,7 +5592,7 @@
          },
      );
      let peer = gs.connected_peers.get_mut(&peers[1]).unwrap();
@@ -770,7 +812,7 @@
  }
 
  /// Test that a node clears stale IDONTWANT messages.
-@@ -5562,12 +5606,13 @@
+@@ -5562,12 +5608,13 @@
          .create_network();
 
      let peer = gs.connected_peers.get_mut(&peers[2]).unwrap();
@@ -788,7 +830,12 @@
  }
 
  #[test]
-@@ -5593,8 +5638,8 @@
+@@ -5589,12 +5636,13 @@
+     gs.connected_peers.insert(
+         peer_id,
+         PeerDetails {
++            pending_handler_notification: None,
+             kind: PeerKind::Gossipsubv1_1,
              connections: vec![ConnectionId::new_unchecked(0)],
              outbound: false,
              topics: topics.clone(),
@@ -799,7 +846,12 @@
          },
      );
 
-@@ -5629,8 +5674,8 @@
+@@ -5625,12 +5673,13 @@
+     gs.connected_peers.insert(
+         slow_peer_id,
+         PeerDetails {
++            pending_handler_notification: None,
+             kind: PeerKind::Gossipsubv1_1,
              connections: vec![ConnectionId::new_unchecked(0)],
              outbound: false,
              topics: topics.clone(),
@@ -810,7 +862,12 @@
          },
      );
      let peer_id = PeerId::random();
-@@ -5642,8 +5687,11 @@
+@@ -5638,12 +5687,16 @@
+     gs.connected_peers.insert(
+         peer_id,
+         PeerDetails {
++            pending_handler_notification: None,
+             kind: PeerKind::Gossipsubv1_1,
              connections: vec![ConnectionId::new_unchecked(0)],
              outbound: false,
              topics: topics.clone(),
@@ -824,7 +881,12 @@
          },
      );
 
-@@ -5703,8 +5751,8 @@
+@@ -5699,12 +5752,13 @@
+     gs.connected_peers.insert(
+         slow_peer_id,
+         PeerDetails {
++            pending_handler_notification: None,
+             kind: PeerKind::Gossipsubv1_1,
              connections: vec![ConnectionId::new_unchecked(0)],
              outbound: false,
              topics: topics.clone(),
@@ -835,7 +897,12 @@
          },
      );
      peers.push(slow_peer_id);
-@@ -5720,8 +5768,11 @@
+@@ -5716,12 +5770,16 @@
+     gs.connected_peers.insert(
+         peer_id,
+         PeerDetails {
++            pending_handler_notification: None,
+             kind: PeerKind::Gossipsubv1_1,
              connections: vec![ConnectionId::new_unchecked(0)],
              outbound: false,
              topics: topics.clone(),
@@ -849,7 +916,27 @@
          },
      );
 
-@@ -5817,8 +5868,8 @@
+@@ -5767,12 +5825,12 @@
+
+     let slow_peer_failed_messages = gs
+         .events
+-        .into_iter()
++        .iter()
+         .find_map(|e| match e {
+             ToSwarm::GenerateEvent(Event::SlowPeer {
+                 peer_id,
+                 failed_messages,
+-            }) if peer_id == slow_peer_id => Some(failed_messages),
++            }) if *peer_id == slow_peer_id => Some(failed_messages),
+             _ => None,
+         })
+         .unwrap();
+@@ -5813,12 +5871,13 @@
+     gs.connected_peers.insert(
+         slow_peer_id,
+         PeerDetails {
++            pending_handler_notification: None,
+             kind: PeerKind::Gossipsubv1_1,
              connections: vec![ConnectionId::new_unchecked(0)],
              outbound: false,
              topics: topics.clone(),
@@ -860,7 +947,12 @@
          },
      );
      peers.push(slow_peer_id);
-@@ -5834,8 +5885,11 @@
+@@ -5830,12 +5889,16 @@
+     gs.connected_peers.insert(
+         peer_id,
+         PeerDetails {
++            pending_handler_notification: None,
+             kind: PeerKind::Gossipsubv1_1,
              connections: vec![ConnectionId::new_unchecked(0)],
              outbound: false,
              topics: topics.clone(),
@@ -874,7 +966,27 @@
          },
      );
 
-@@ -5911,8 +5965,8 @@
+@@ -5861,12 +5924,12 @@
+
+     let slow_peer_failed_messages = gs
+         .events
+-        .into_iter()
++        .iter()
+         .find_map(|e| match e {
+             ToSwarm::GenerateEvent(Event::SlowPeer {
+                 peer_id,
+                 failed_messages,
+-            }) if peer_id == slow_peer_id => Some(failed_messages),
++            }) if *peer_id == slow_peer_id => Some(failed_messages),
+             _ => None,
+         })
+         .unwrap();
+@@ -5907,12 +5970,13 @@
+     gs.connected_peers.insert(
+         slow_peer_id,
+         PeerDetails {
++            pending_handler_notification: None,
+             kind: PeerKind::Gossipsubv1_1,
              connections: vec![ConnectionId::new_unchecked(0)],
              outbound: false,
              topics: topics.clone(),
@@ -885,7 +997,12 @@
          },
      );
      peers.push(slow_peer_id);
-@@ -5928,8 +5982,11 @@
+@@ -5924,12 +5988,16 @@
+     gs.connected_peers.insert(
+         peer_id,
+         PeerDetails {
++            pending_handler_notification: None,
+             kind: PeerKind::Gossipsubv1_1,
              connections: vec![ConnectionId::new_unchecked(0)],
              outbound: false,
              topics: topics.clone(),
@@ -899,7 +1016,27 @@
          },
      );
 
-@@ -6010,8 +6067,8 @@
+@@ -5955,12 +6023,12 @@
+
+     let slow_peer_failed_messages = gs
+         .events
+-        .into_iter()
++        .iter()
+         .find_map(|e| match e {
+             ToSwarm::GenerateEvent(Event::SlowPeer {
+                 peer_id,
+                 failed_messages,
+-            }) if peer_id == slow_peer_id => Some(failed_messages),
++            }) if *peer_id == slow_peer_id => Some(failed_messages),
+             _ => None,
+         })
+         .unwrap();
+@@ -6006,12 +6074,13 @@
+     gs.connected_peers.insert(
+         slow_peer_id,
+         PeerDetails {
++            pending_handler_notification: None,
+             kind: PeerKind::Gossipsubv1_1,
              connections: vec![ConnectionId::new_unchecked(0)],
              outbound: false,
              topics: topics.clone(),
@@ -910,7 +1047,12 @@
          },
      );
      gs.as_peer_score_mut().add_peer(slow_peer_id);
-@@ -6024,8 +6081,11 @@
+@@ -6020,12 +6089,16 @@
+     gs.connected_peers.insert(
+         peer_id,
+         PeerDetails {
++            pending_handler_notification: None,
+             kind: PeerKind::Gossipsubv1_1,
              connections: vec![ConnectionId::new_unchecked(0)],
              outbound: false,
              topics: topics.clone(),
@@ -924,7 +1066,7 @@
          },
      );
 
-@@ -6048,7 +6108,7 @@
+@@ -6048,7 +6121,7 @@
 
      let mut gs: Behaviour = Behaviour::new(MessageAuthenticity::RandomAuthor, gs_config).unwrap();
 
@@ -933,7 +1075,7 @@
      let topic_hash = Topic::new("Test").hash();
      let publish_data = vec![2; 59];
      let raw_message = gs.build_raw_message(topic_hash, publish_data).unwrap();
-@@ -6065,17 +6125,50 @@
+@@ -6065,17 +6138,50 @@
  }
 
  #[test]
@@ -988,7 +1130,7 @@
  }
 
  /// Test that specific topic configurations are correctly applied
-@@ -6447,10 +6540,9 @@
+@@ -6447,10 +6553,9 @@
      // Collect publish messages
      let publishes = receivers
          .into_values()
@@ -1002,7 +1144,43 @@
                      collected_publish.push(message);
                  }
              }
-@@ -6787,3 +6879,921 @@
+@@ -6603,6 +6708,7 @@
+         .to_subscribe(true)
+         .gs_config(config)
+         .create_network();
++    gs.events.clear();
+
+     let data = vec![0u8; max_size + 1];
+     let raw_message = RawMessage {
+@@ -6637,9 +6743,6 @@
+         }) => {
+             assert_eq!(propagation_source, peers[0]);
+             assert_eq!(message.data.len(), max_size + 1);
+-        }
+-        ToSwarm::NotifyHandler { peer_id, .. } => {
+-            assert_eq!(peer_id, peers[0]);
+         }
+         _ => panic!("Unexpected event"),
+     }
+@@ -6707,6 +6810,7 @@
+         .to_subscribe(true)
+         .gs_config(config)
+         .create_network();
++    gs.events.clear();
+
+     let data = vec![0u8; max_size - 100];
+     let raw_message = RawMessage {
+@@ -6741,9 +6845,6 @@
+         }) => {
+             assert_eq!(propagation_source, peers[0]);
+             assert_eq!(message.data.len(), max_size - 100);
+-        }
+-        ToSwarm::NotifyHandler { peer_id, .. } => {
+-            assert_eq!(peer_id, peers[0]);
+         }
+         _ => panic!("Unexpected event"),
+     }
+@@ -6787,3 +6888,1299 @@
          _ => panic!("Unexpected event"),
      }
  }
@@ -1677,17 +1855,24 @@
 +    logex_drain_cache_test_queues(&mut receivers);
 +    let saturated = peers[0];
 +    let healthy = peers[1];
++    assert!(gs.subscribe(&Topic::new("t")).unwrap());
++    logex_drain_cache_test_queues(&mut receivers);
++    logex_deliver_subscription(
++        &mut gs,
++        saturated,
++        Topic::new("t").hash(),
++        SubscriptionAction::Subscribe,
++    );
++    assert!(gs.connected_peers[&saturated]
++        .pending_handler_notification
++        .is_some());
++    logex_drain_cache_test_queues(&mut receivers);
 +    let admitted = Topic::new("already-queued").hash();
 +    for _ in 0..2 {
 +        assert!(gs.send_message(saturated, RpcOut::Subscribe(admitted.clone())));
 +    }
-+    gs.events.push_back(ToSwarm::NotifyHandler {
-+        peer_id: saturated,
-+        handler: NotifyHandler::Any,
-+        event: HandlerIn::JoinedMesh,
-+    });
 +    // Real subscription production encounters the reserved control bound.
-+    assert!(gs.subscribe(&Topic::new("t")).unwrap());
++    assert!(gs.subscribe(&Topic::new("u")).unwrap());
 +    assert!(gs.closing_peers.contains_key(&saturated));
 +    assert!(!gs.closing_peers.contains_key(&healthy));
 +    let retained = receivers.get_mut(&saturated).unwrap().drain_priority();
@@ -1699,7 +1884,7 @@
 +        .unwrap()
 +        .drain_priority()
 +        .into_iter()
-+        .any(|rpc| matches!(rpc, RpcOut::Subscribe(topic) if topic == Topic::new("t").hash())));
++        .any(|rpc| matches!(rpc, RpcOut::Subscribe(topic) if topic == Topic::new("u").hash())));
 +    let backlog = gs.events.len();
 +    for _ in 0..4 {
 +        assert!(!gs.send_message(
@@ -1751,8 +1936,10 @@
 +        connection: libp2p_swarm::CloseConnection::All,
 +    }) if peer_id == saturated)
 +    );
-+    assert!(!gs.events.iter().any(|event| matches!(event,
-+        ToSwarm::NotifyHandler { peer_id, .. } if *peer_id == saturated)));
++    assert!(gs.connected_peers[&saturated]
++        .pending_handler_notification
++        .is_none());
++    assert!(!gs.pending_handler_peers.contains(&saturated));
 +    // Drain only the finite existing backlog, then check closure is not repeated.
 +    for _ in 0..=backlog {
 +        assert!(!matches!(
@@ -1924,6 +2111,375 @@
 +        assert!(gs.events.is_empty());
 +    }
 +}
++
++// Models permitted callback delivery before the next Behaviour poll, not a
++// reproduction of a stalled real Swarm channel. No heartbeat is forced here.
++#[test]
++fn logex_duplicate_subscribe_emits_only_membership_transition() {
++    let topic = Topic::new("allowed").hash();
++    let config = ConfigBuilder::default()
++        .heartbeat_interval(Duration::from_secs(60))
++        .build()
++        .unwrap();
++    let (mut gs, peers, _receivers, _) =
++        inject_nodes::<IdentityTransform, WhitelistSubscriptionFilter>()
++            .peer_no(1)
++            .topics(vec!["allowed".into()])
++            .subscription_filter(WhitelistSubscriptionFilter(HashSet::from([topic.clone()])))
++            .gs_config(config)
++            .create_network();
++    let peer = peers[0];
++    for action in [
++        SubscriptionAction::Subscribe,
++        SubscriptionAction::Subscribe,
++        SubscriptionAction::Subscribe,
++    ] {
++        gs.on_connection_handler_event(
++            peer,
++            ConnectionId::new_unchecked(0),
++            HandlerEvent::Message {
++                rpc: Rpc {
++                    messages: vec![],
++                    subscriptions: vec![Subscription {
++                        action,
++                        topic_hash: topic.clone(),
++                    }],
++                    control_msgs: vec![],
++                },
++                invalid_messages: vec![],
++            },
++        );
++    }
++    let mut subscribed = 0;
++    let mut cx = Context::from_waker(futures::task::noop_waker_ref());
++    for _ in 0..5 {
++        match gs.poll(&mut cx) {
++            Poll::Ready(ToSwarm::GenerateEvent(Event::Subscribed {
++                peer_id,
++                topic: observed,
++            })) if peer_id == peer && observed == topic => subscribed += 1,
++            Poll::Pending => break,
++            _ => {}
++        }
++    }
++    assert!(gs.connected_peers[&peer].topics.contains(&topic));
++    assert_eq!(
++        subscribed, 1,
++        "duplicate subscriptions are not membership transitions"
++    );
++}
++
++// Models two allowed callbacks before notification delivery, not a real
++// Swarm-channel stall. Handler state must reflect only final mesh membership.
++#[test]
++fn logex_deferred_mesh_notification_coalesces_to_final_membership() {
++    let topic = Topic::new("allowed").hash();
++    let config = ConfigBuilder::default()
++        .heartbeat_interval(Duration::from_secs(60))
++        .build()
++        .unwrap();
++    let (mut gs, peers, _receivers, _) =
++        inject_nodes::<IdentityTransform, WhitelistSubscriptionFilter>()
++            .peer_no(1)
++            .topics(vec!["allowed".into()])
++            .subscription_filter(WhitelistSubscriptionFilter(HashSet::from([topic.clone()])))
++            .gs_config(config)
++            .create_network();
++    let peer = peers[0];
++    for action in [
++        SubscriptionAction::Subscribe,
++        SubscriptionAction::Unsubscribe,
++    ] {
++        gs.on_connection_handler_event(
++            peer,
++            ConnectionId::new_unchecked(0),
++            HandlerEvent::Message {
++                rpc: Rpc {
++                    messages: vec![],
++                    subscriptions: vec![Subscription {
++                        action,
++                        topic_hash: topic.clone(),
++                    }],
++                    control_msgs: vec![],
++                },
++                invalid_messages: vec![],
++            },
++        );
++    }
++    let mut notifications = Vec::new();
++    let mut cx = Context::from_waker(futures::task::noop_waker_ref());
++    for _ in 0..5 {
++        match gs.poll(&mut cx) {
++            Poll::Ready(ToSwarm::NotifyHandler { peer_id, event, .. }) if peer_id == peer => {
++                notifications.push(event);
++            }
++            Poll::Pending => break,
++            _ => {}
++        }
++    }
++    assert!(!gs.mesh[&topic].contains(&peer));
++    assert_eq!(
++        notifications.len(),
++        1,
++        "deliver only the latest deferred handler state"
++    );
++    assert!(matches!(notifications[0], HandlerIn::LeftMesh));
++}
++
++fn logex_deliver_subscription(
++    gs: &mut Behaviour,
++    peer: PeerId,
++    topic_hash: TopicHash,
++    action: SubscriptionAction,
++) {
++    gs.on_connection_handler_event(
++        peer,
++        ConnectionId::new_unchecked(0),
++        HandlerEvent::Message {
++            rpc: Rpc {
++                messages: vec![],
++                subscriptions: vec![Subscription { action, topic_hash }],
++                control_msgs: vec![],
++            },
++            invalid_messages: vec![],
++        },
++    );
++}
++
++#[test]
++fn logex_advisory_limits_preserve_membership_and_score_and_reuse_after_poll() {
++    for (count, bytes) in [(1, 100), (10, 1)] {
++        let config = ConfigBuilder::default()
++            .heartbeat_interval(Duration::from_secs(60))
++            .queue_limits(crate::QueueLimits {
++                max_advisory_events: count,
++                max_advisory_bytes: bytes,
++                ..Default::default()
++            })
++            .build()
++            .unwrap();
++        let (mut gs, peers, _, _) = inject_nodes1()
++            .peer_no(1)
++            .scoring(Some((
++                PeerScoreParams::default(),
++                PeerScoreThresholds::default(),
++            )))
++            .gs_config(config)
++            .create_network();
++        let peer = peers[0];
++        let a = Topic::new("a").hash();
++        let b = Topic::new("b").hash();
++        let score = gs.peer_score(&peer).unwrap();
++        logex_deliver_subscription(&mut gs, peer, a.clone(), SubscriptionAction::Subscribe);
++        logex_deliver_subscription(&mut gs, peer, b.clone(), SubscriptionAction::Subscribe);
++        assert_eq!(
++            gs.connected_peers[&peer].topics,
++            BTreeSet::from([a.clone(), b.clone()])
++        );
++        assert_eq!(gs.events.len(), 1);
++        assert_eq!(gs.peer_score(&peer), Some(score));
++        assert!(gs.failed_messages.is_empty());
++        assert!(gs.closing_peers.is_empty());
++        let mut cx = Context::from_waker(futures::task::noop_waker_ref());
++        assert!(
++            matches!(gs.poll(&mut cx), Poll::Ready(ToSwarm::GenerateEvent(
++            Event::Subscribed { peer_id, topic }
++        )) if peer_id == peer && topic == a)
++        );
++        assert!(matches!(gs.poll(&mut cx), Poll::Pending));
++        // Draining the advisory reopens exactly the same bounded allocation.
++        logex_deliver_subscription(&mut gs, peer, b.clone(), SubscriptionAction::Unsubscribe);
++        assert!(!gs.connected_peers[&peer].topics.contains(&b));
++        assert!(
++            matches!(gs.poll(&mut cx), Poll::Ready(ToSwarm::GenerateEvent(
++            Event::Unsubscribed { peer_id, topic }
++        )) if peer_id == peer && topic == b)
++        );
++        assert_eq!(gs.peer_score(&peer), Some(score));
++    }
++}
++
++#[test]
++fn logex_full_advisory_queue_cannot_suppress_control_close_or_final_handler_state() {
++    let config = ConfigBuilder::default()
++        .heartbeat_interval(Duration::from_secs(60))
++        .queue_limits(crate::QueueLimits {
++            max_control_messages: 1,
++            max_advisory_events: 1,
++            max_advisory_bytes: 1,
++            ..Default::default()
++        })
++        .build()
++        .unwrap();
++    let (mut gs, peers, mut receivers, topics) = inject_nodes1()
++        .peer_no(1)
++        .topics(vec!["t".into()])
++        .gs_config(config)
++        .create_network();
++    let peer = peers[0];
++    logex_drain_cache_test_queues(&mut receivers);
++    logex_deliver_subscription(
++        &mut gs,
++        peer,
++        topics[0].clone(),
++        SubscriptionAction::Subscribe,
++    );
++    assert_eq!(gs.events.len(), 1);
++    assert_eq!(gs.pending_handler_peers.len(), 1);
++    // GRAFT from the real subscription filled control capacity. An additional
++    // local subscription must close the peer even while the advisory is full.
++    assert!(gs.subscribe(&Topic::new("u")).unwrap());
++    assert!(gs.closing_peers.contains_key(&peer));
++    assert!(gs.pending_handler_peers.is_empty());
++    assert!(gs.connected_peers[&peer]
++        .pending_handler_notification
++        .is_none());
++    let mut cx = Context::from_waker(futures::task::noop_waker_ref());
++    assert!(
++        matches!(gs.poll(&mut cx), Poll::Ready(ToSwarm::GenerateEvent(
++        Event::ControlQueueFull { peer_id }
++    )) if peer_id == peer)
++    );
++    assert!(
++        matches!(gs.poll(&mut cx), Poll::Ready(ToSwarm::CloseConnection { peer_id, .. }) if peer_id == peer)
++    );
++    assert!(matches!(
++        gs.poll(&mut cx),
++        Poll::Ready(ToSwarm::GenerateEvent(Event::Subscribed { .. }))
++    ));
++    assert!(matches!(gs.poll(&mut cx), Poll::Pending));
++}
++
++#[test]
++fn logex_pending_mesh_state_targets_replacement_first_connection_and_clears_on_disconnect() {
++    let (mut gs, peers, _, topics) = inject_nodes1()
++        .peer_no(1)
++        .topics(vec!["t".into()])
++        .gs_config(
++            ConfigBuilder::default()
++                .heartbeat_interval(Duration::from_secs(60))
++                .build()
++                .unwrap(),
++        )
++        .create_network();
++    let peer = peers[0];
++    let second = ConnectionId::new_unchecked(2);
++    let address = "/ip4/127.0.0.1/tcp/1234".parse::<Multiaddr>().unwrap();
++    let _handler = gs
++        .handle_established_inbound_connection(second, peer, &address, &address)
++        .unwrap();
++    logex_deliver_subscription(
++        &mut gs,
++        peer,
++        topics[0].clone(),
++        SubscriptionAction::Subscribe,
++    );
++    assert_eq!(gs.pending_handler_peers.len(), 1);
++    let endpoint = ConnectedPoint::Dialer {
++        address,
++        role_override: Endpoint::Dialer,
++        port_use: PortUse::Reuse,
++    };
++    gs.on_swarm_event(FromSwarm::ConnectionClosed(ConnectionClosed {
++        peer_id: peer,
++        connection_id: ConnectionId::new_unchecked(0),
++        endpoint: &endpoint,
++        remaining_established: 1,
++        cause: None,
++    }));
++    assert_eq!(gs.pending_handler_peers.len(), 1);
++    let mut cx = Context::from_waker(futures::task::noop_waker_ref());
++    assert!(
++        matches!(gs.poll(&mut cx), Poll::Ready(ToSwarm::NotifyHandler {
++        peer_id,
++        handler: NotifyHandler::One(connection),
++        event: HandlerIn::JoinedMesh,
++    }) if peer_id == peer && connection == second)
++    );
++    logex_deliver_subscription(
++        &mut gs,
++        peer,
++        topics[0].clone(),
++        SubscriptionAction::Unsubscribe,
++    );
++    assert_eq!(gs.pending_handler_peers.len(), 1);
++    gs.on_swarm_event(FromSwarm::ConnectionClosed(ConnectionClosed {
++        peer_id: peer,
++        connection_id: second,
++        endpoint: &endpoint,
++        remaining_established: 0,
++        cause: None,
++    }));
++    assert!(gs.pending_handler_peers.is_empty());
++    assert!(!gs.connected_peers.contains_key(&peer));
++    for _ in 0..3 {
++        assert!(!matches!(
++            gs.poll(&mut cx),
++            Poll::Ready(ToSwarm::NotifyHandler { .. })
++        ));
++    }
++}
++
++#[test]
++fn logex_deferred_message_events_remain_cache_bounded_with_advisories_disabled() {
++    let config = ConfigBuilder::default()
++        .heartbeat_interval(Duration::from_secs(60))
++        .message_id_fn(|message| MessageId::new(&message.data))
++        .cache_limits(crate::CacheLimits {
++            message_entries: 2,
++            ..Default::default()
++        })
++        .queue_limits(crate::QueueLimits {
++            max_advisory_events: 0,
++            max_advisory_bytes: 0,
++            ..Default::default()
++        })
++        .build()
++        .unwrap();
++    let (mut gs, peers, _, topics) = inject_nodes1()
++        .peer_no(1)
++        .topics(vec!["t".into()])
++        .gs_config(config)
++        .create_network();
++    // Three allowed callbacks before polling, with no synthetic cache shift or
++    // heartbeat while application events are pending.
++    for value in 1..=3 {
++        gs.on_connection_handler_event(
++            peers[0],
++            ConnectionId::new_unchecked(0),
++            HandlerEvent::Message {
++                rpc: Rpc {
++                    messages: vec![RawMessage {
++                        source: None,
++                        data: vec![value],
++                        sequence_number: None,
++                        topic: topics[0].clone(),
++                        signature: None,
++                        key: None,
++                        validated: true,
++                    }],
++                    subscriptions: vec![],
++                    control_msgs: vec![],
++                },
++                invalid_messages: vec![],
++            },
++        );
++    }
++    assert_eq!(gs.events.len(), 2);
++    assert_eq!(gs.mcache.usage().0, 2);
++    let mut cx = Context::from_waker(futures::task::noop_waker_ref());
++    for value in 1..=2 {
++        assert!(
++            matches!(gs.poll(&mut cx), Poll::Ready(ToSwarm::GenerateEvent(
++            Event::Message { message_id, .. }
++        )) if message_id == MessageId::new(&[value]))
++        );
++    }
++    assert!(matches!(gs.poll(&mut cx), Poll::Pending));
++    assert!(gs.mcache.contains(&MessageId::new(&[1])));
++    assert!(gs.mcache.contains(&MessageId::new(&[2])));
++    assert!(!gs.mcache.contains(&MessageId::new(&[3])));
++}
 --- a/src/behaviour.rs
 +++ b/src/behaviour.rs
 @@ -32,7 +32,6 @@
@@ -1975,7 +2531,19 @@
 
  /// Max allowed PRUNE backoff, 1 hour.
  const MAX_REMOTE_PRUNE_BACKOFF_SECONDS: u64 = 3600;
-@@ -160,6 +163,10 @@
+@@ -132,6 +135,11 @@
+ }
+
+ /// Event that can be emitted by the gossipsub behaviour.
++///
++/// Subscription, unsupported-protocol and slow-peer notices are best-effort
++/// advisories. When their configured queue capacity is full, admitted advisories
++/// remain queued and excess new advisories are omitted. Message delivery and
++/// critical control-queue closure use separate admission and ownership paths.
+ #[derive(Debug)]
+ pub enum Event {
+     /// A message has been received.
+@@ -160,6 +168,10 @@
      },
      /// A peer that does not support gossipsub has connected.
      GossipsubNotSupported { peer_id: PeerId },
@@ -1986,7 +2554,7 @@
      /// A peer is not able to download messages in time.
      SlowPeer {
          /// The peer_id
-@@ -250,6 +257,13 @@
+@@ -250,6 +262,13 @@
      }
  }
 
@@ -2000,7 +2568,15 @@
  /// Network behaviour that handles the gossipsub protocol.
  ///
  /// NOTE: Initialisation requires a [`MessageAuthenticity`] and [`Config`] instance. If
-@@ -271,13 +285,17 @@
+@@ -266,18 +285,24 @@
+     config: Config,
+
+     /// Events that need to be yielded to the outside when polling.
+-    events: VecDeque<ToSwarm<Event, HandlerIn>>,
++    events: crate::event_queue::EventQueue,
++    /// One queued identity per peer with a pending keepalive state.
++    pending_handler_peers: VecDeque<PeerId>,
+
      /// Information used for publishing messages.
      publish_config: PublishConfig,
 
@@ -2019,7 +2595,7 @@
 
      /// A set of all explicit peers. These are peers that remain connected and we unconditionally
      /// forward messages to, outside of the scoring system.
-@@ -427,13 +445,20 @@
+@@ -427,13 +452,21 @@
          // We do not allow configurations where a published message would also be rejected if it
          // were received locally.
          validate_config(&privacy, config.validation_mode())?;
@@ -2028,7 +2604,9 @@
          Ok(Behaviour {
              #[cfg(feature = "metrics")]
              metrics: None,
-             events: VecDeque::new(),
+-            events: VecDeque::new(),
++            events: crate::event_queue::EventQueue::new(*config.queue_limits()),
++            pending_handler_peers: VecDeque::new(),
 +            closing_peers: HashMap::new(),
              publish_config: privacy.into(),
 -            duplicate_cache: DuplicateCache::new(config.duplicate_cache_time()),
@@ -2041,7 +2619,7 @@
              explicit_peers: HashSet::new(),
              blacklisted_peers: HashSet::new(),
              mesh: HashMap::new(),
-@@ -444,7 +469,13 @@
+@@ -444,7 +477,13 @@
                  config.heartbeat_interval(),
                  config.backoff_slack(),
              ),
@@ -2056,7 +2634,7 @@
              heartbeat: Delay::new(config.heartbeat_interval() + config.heartbeat_initial_delay()),
              heartbeat_ticks: 0,
              px_peers: HashSet::new(),
-@@ -452,12 +483,21 @@
+@@ -452,12 +491,21 @@
              count_received_ihave: HashMap::new(),
              count_sent_iwant: HashMap::new(),
              connected_peers: HashMap::new(),
@@ -2080,7 +2658,7 @@
          })
      }
 
-@@ -609,7 +649,7 @@
+@@ -609,7 +657,7 @@
          });
 
          // Check the if the message has been published before
@@ -2089,7 +2667,7 @@
              // This message has already been seen. We don't re-publish messages that have already
              // been published on the network.
              tracing::warn!(
-@@ -617,6 +657,20 @@
+@@ -617,6 +665,20 @@
                  "Not publishing a message that has already been published"
              );
              return Err(PublishError::Duplicate);
@@ -2110,7 +2688,7 @@
          }
 
          tracing::trace!(message_id=%msg_id, "Publishing message");
-@@ -733,18 +787,19 @@
+@@ -733,18 +795,19 @@
 
          // If the message isn't a duplicate and we have sent it to some peers add it to the
          // duplicate cache and memcache.
@@ -2136,7 +2714,31 @@
          }
 
          // Send to peers we know are subscribed to the topic.
-@@ -1215,7 +1270,7 @@
+@@ -1077,8 +1140,9 @@
+                 peer_id,
+                 vec![topic_hash],
+                 &self.mesh,
+-                &mut self.events,
+-                &self.connected_peers,
++                &mut self.pending_handler_peers,
++                &mut self.connected_peers,
++                &self.closing_peers,
+             );
+         }
+
+@@ -1178,8 +1242,9 @@
+                     peer_id,
+                     topic_hash,
+                     &self.mesh,
+-                    &mut self.events,
+-                    &self.connected_peers,
++                    &mut self.pending_handler_peers,
++                    &mut self.connected_peers,
++                    &self.closing_peers,
+                 );
+             }
+         }
+@@ -1215,7 +1280,7 @@
 
          // IHAVE flood protection
          let peer_have = self.count_received_ihave.entry(*peer_id).or_insert(0);
@@ -2145,7 +2747,7 @@
          if *peer_have > self.config.max_ihave_messages() {
              tracing::debug!(
                  peer=%peer_id,
-@@ -1252,7 +1307,7 @@
+@@ -1252,7 +1317,7 @@
              }
 
              for id in ids.into_iter().filter(|id| {
@@ -2154,7 +2756,7 @@
                      return false;
                  }
 
-@@ -1272,7 +1327,7 @@
+@@ -1272,7 +1337,7 @@
          if !iwant_ids.is_empty() {
              let iasked = self.count_sent_iwant.entry(*peer_id).or_insert(0);
              let mut iask = iwant_ids.len();
@@ -2163,7 +2765,7 @@
                  iask = self.config.max_ihave_length().saturating_sub(*iasked);
              }
 
-@@ -1290,7 +1345,6 @@
+@@ -1290,7 +1355,6 @@
              iwant_ids_vec.partial_shuffle(&mut rng, iask);
 
              iwant_ids_vec.truncate(iask);
@@ -2171,7 +2773,7 @@
 
              let followup_time = Instant::now()
                  .checked_add(self.config.iwant_followup_time())
-@@ -1298,20 +1352,32 @@
+@@ -1298,20 +1362,32 @@
                      tracing::error!("Invalid iwant_followup_time using Instant::now()");
                      Instant::now()
                  });
@@ -2209,7 +2811,7 @@
          }
          tracing::trace!(peer=%peer_id, "Completed IHAVE handling for peer");
      }
-@@ -1337,11 +1403,7 @@
+@@ -1337,11 +1413,7 @@
          for id in iwant_msgs {
              // If we have it and the IHAVE count is not above the threshold,
              // forward the message.
@@ -2222,7 +2824,7 @@
                  if count > self.config.gossip_retransimission() {
                      tracing::debug!(
                          peer=%peer_id,
-@@ -1349,18 +1411,20 @@
+@@ -1349,18 +1421,20 @@
                          "IWANT: Peer has asked for message too many times; ignoring request"
                      );
                  } else {
@@ -2246,7 +2848,7 @@
                              timeout: Delay::new(self.config.forward_queue_duration()),
                          },
                      );
-@@ -1372,7 +1436,12 @@
+@@ -1372,7 +1446,12 @@
 
      /// Handles GRAFT control messages. If subscribed to the topic, adds the peer to mesh, if not,
      /// responds with PRUNE messages.
@@ -2260,7 +2862,31 @@
          tracing::debug!(peer=%peer_id, "Handling GRAFT message for peer");
 
          let mut to_prune_topics = HashSet::new();
-@@ -1608,6 +1677,10 @@
+@@ -1510,8 +1589,9 @@
+                         *peer_id,
+                         vec![&topic_hash],
+                         &self.mesh,
+-                        &mut self.events,
+-                        &self.connected_peers,
++                        &mut self.pending_handler_peers,
++                        &mut self.connected_peers,
++                        &self.closing_peers,
+                     );
+
+                     if let PeerScoreState::Active(peer_score) = &mut self.peer_score {
+@@ -1579,8 +1659,9 @@
+                     *peer_id,
+                     topic_hash,
+                     &self.mesh,
+-                    &mut self.events,
+-                    &self.connected_peers,
++                    &mut self.pending_handler_peers,
++                    &mut self.connected_peers,
++                    &self.closing_peers,
+                 );
+             }
+         }
+@@ -1608,6 +1689,10 @@
              .peer_score
              .below_threshold(peer_id, |ts| ts.accept_px_threshold);
          for (topic_hash, px, backoff) in prune_data {
@@ -2271,7 +2897,7 @@
              if self.remove_peer_from_mesh(peer_id, &topic_hash, backoff, true) {
                  #[cfg(feature = "metrics")]
                  if let Some(m) = self.metrics.as_mut() {
-@@ -1766,6 +1839,10 @@
+@@ -1766,6 +1851,10 @@
          mut raw_message: RawMessage,
          propagation_source: &PeerId,
      ) {
@@ -2282,7 +2908,7 @@
          // Record the received metric
          #[cfg(feature = "metrics")]
          if let Some(metrics) = self.metrics.as_mut() {
-@@ -1791,6 +1868,21 @@
+@@ -1791,6 +1880,21 @@
          // Calculate the message id on the transformed data.
          let msg_id = self.config.message_id(&message);
 
@@ -2304,7 +2930,7 @@
          // Broadcast IDONTWANT messages
          if raw_message.raw_protobuf_len() > self.config.idontwant_message_size_threshold() {
              let recipient_peers = self
-@@ -1815,14 +1907,7 @@
+@@ -1815,14 +1919,7 @@
              }
          }
 
@@ -2320,7 +2946,7 @@
              tracing::debug!(message_id=%msg_id, "Message already received, ignoring");
              if let PeerScoreState::Active(peer_score) = &mut self.peer_score {
                  peer_score.duplicated_message(propagation_source, &msg_id, &message.topic);
-@@ -1830,6 +1915,11 @@
+@@ -1830,6 +1927,11 @@
              self.mcache.observe_duplicate(&msg_id, propagation_source);
              return;
          }
@@ -2332,7 +2958,7 @@
 
          tracing::debug!(
              message_id=%msg_id,
-@@ -1850,9 +1940,6 @@
+@@ -1850,9 +1952,6 @@
          if let PeerScoreState::Active(peer_score) = &mut self.peer_score {
              peer_score.validate_message(propagation_source, &msg_id, &message.topic);
          }
@@ -2342,7 +2968,70 @@
 
          // Dispatch the message to the user if we are subscribed to any of the topics
          #[allow(
-@@ -2091,8 +2178,10 @@
+@@ -1967,7 +2066,8 @@
+
+             match subscription.action {
+                 SubscriptionAction::Subscribe => {
+-                    if peer.topics.insert(topic_hash.clone()) {
++                    let membership_changed = peer.topics.insert(topic_hash.clone());
++                    if membership_changed {
+                         tracing::debug!(
+                             peer=%propagation_source,
+                             topic=%topic_hash,
+@@ -2017,14 +2117,16 @@
+                             }
+                         }
+                     }
+-                    // generates a subscription event to be polled
+-                    application_event.push(ToSwarm::GenerateEvent(Event::Subscribed {
+-                        peer_id: *propagation_source,
+-                        topic: topic_hash.clone(),
+-                    }));
++                    if membership_changed {
++                        application_event.push(ToSwarm::GenerateEvent(Event::Subscribed {
++                            peer_id: *propagation_source,
++                            topic: topic_hash.clone(),
++                        }));
++                    }
+                 }
+                 SubscriptionAction::Unsubscribe => {
+-                    if peer.topics.remove(topic_hash) {
++                    let membership_changed = peer.topics.remove(topic_hash);
++                    if membership_changed {
+                         tracing::debug!(
+                             peer=%propagation_source,
+                             topic=%topic_hash,
+@@ -2038,11 +2140,12 @@
+                     }
+
+                     unsubscribed_peers.push((*propagation_source, topic_hash.clone()));
+-                    // generate an unsubscribe event to be polled
+-                    application_event.push(ToSwarm::GenerateEvent(Event::Unsubscribed {
+-                        peer_id: *propagation_source,
+-                        topic: topic_hash.clone(),
+-                    }));
++                    if membership_changed {
++                        application_event.push(ToSwarm::GenerateEvent(Event::Unsubscribed {
++                            peer_id: *propagation_source,
++                            topic: topic_hash.clone(),
++                        }));
++                    }
+                 }
+             }
+         }
+@@ -2067,8 +2170,9 @@
+                 *propagation_source,
+                 topics_joined,
+                 &self.mesh,
+-                &mut self.events,
+-                &self.connected_peers,
++                &mut self.pending_handler_peers,
++                &mut self.connected_peers,
++                &self.closing_peers,
+             );
+         }
+
+@@ -2091,8 +2195,10 @@
 
      /// Applies penalties to peers that did not respond to our IWANT requests.
      fn apply_iwant_penalties(&mut self) {
@@ -2354,7 +3043,7 @@
                  peer_score.add_penalty(&peer, count);
                  #[cfg(feature = "metrics")]
                  if let Some(metrics) = self.metrics.as_mut() {
-@@ -2106,6 +2195,10 @@
+@@ -2106,6 +2212,10 @@
      fn heartbeat(&mut self) {
          #[cfg(feature = "metrics")]
          let start = Instant::now();
@@ -2365,7 +3054,7 @@
 
          // Every heartbeat we sample the send queues to add to our metrics. We do this intentionally
          // before we add all the gossip from this heartbeat in order to gain a true measure of
-@@ -2538,15 +2631,9 @@
+@@ -2538,15 +2648,9 @@
          }
          self.failed_messages.shrink_to_fit();
 
@@ -2383,7 +3072,31 @@
          }
 
          #[cfg(feature = "metrics")]
-@@ -2767,7 +2854,7 @@
+@@ -2647,8 +2751,9 @@
+                     peer_id,
+                     vec![topic],
+                     &self.mesh,
+-                    &mut self.events,
+-                    &self.connected_peers,
++                    &mut self.pending_handler_peers,
++                    &mut self.connected_peers,
++                    &self.closing_peers,
+                 );
+             }
+             let rpc_msgs = topics.iter().map(|topic_hash| {
+@@ -2700,8 +2805,9 @@
+                     *peer_id,
+                     topic_hash,
+                     &self.mesh,
+-                    &mut self.events,
+-                    &self.connected_peers,
++                    &mut self.pending_handler_peers,
++                    &mut self.connected_peers,
++                    &self.closing_peers,
+                 );
+             }
+         }
+@@ -2767,7 +2873,7 @@
          // forward the message to peers
          for peer_id in recipient_peers.iter() {
              if let Some(peer) = self.connected_peers.get_mut(peer_id) {
@@ -2392,7 +3105,7 @@
                      tracing::debug!(%peer_id, message_id=%msg_id, "Peer doesn't want message");
                      continue;
                  }
-@@ -2882,10 +2969,13 @@
+@@ -2882,10 +2988,13 @@
      /// Send a [`RpcOut`] message to a peer.
      ///
      /// Returns `true` if sending was successful, `false` otherwise.
@@ -2409,7 +3122,7 @@
          #[cfg(feature = "metrics")]
          if let Some(m) = self.metrics.as_mut() {
              if let RpcOut::Publish { ref message, .. } | RpcOut::Forward { ref message, .. } = rpc {
-@@ -2908,9 +2998,30 @@
+@@ -2908,9 +3017,30 @@
          // Try sending the message to the connection handler.
          match peer.sender.send_message(rpc) {
              Ok(()) => true,
@@ -2442,7 +3155,7 @@
 
                  // Update failed message counter.
                  let failed_messages = self.failed_messages.entry(peer_id).or_default();
-@@ -2930,7 +3041,9 @@
+@@ -2930,7 +3060,9 @@
                      | RpcOut::Prune(_)
                      | RpcOut::Subscribe(_)
                      | RpcOut::Unsubscribe(_) => {
@@ -2453,7 +3166,7 @@
                      }
                  }
 
-@@ -2941,6 +3054,34 @@
+@@ -2941,6 +3073,60 @@
 
                  false
              }
@@ -2461,9 +3174,35 @@
 +    }
 +
 +    fn discard_peer_notifications(&mut self, peer_id: PeerId) {
-+        self.events.retain(|event| {
-+            !matches!(event, ToSwarm::NotifyHandler { peer_id: queued_peer, .. } if *queued_peer == peer_id)
-+        });
++        if let Some(peer) = self.connected_peers.get_mut(&peer_id) {
++            peer.pending_handler_notification = None;
++        }
++        // Only peer identities are scanned; message/event payloads are untouched.
++        self.pending_handler_peers
++            .retain(|pending| *pending != peer_id);
++    }
++
++    fn next_handler_notification(&mut self) -> Option<ToSwarm<Event, HandlerIn>> {
++        while let Some(peer_id) = self.pending_handler_peers.pop_front() {
++            let Some(peer) = self.connected_peers.get_mut(&peer_id) else {
++                continue;
++            };
++            let Some(event) = peer.pending_handler_notification.take() else {
++                continue;
++            };
++            if self.closing_peers.contains_key(&peer_id) {
++                continue;
++            }
++            let Some(connection_id) = peer.connections.first().copied() else {
++                continue;
++            };
++            return Some(ToSwarm::NotifyHandler {
++                peer_id,
++                event,
++                handler: NotifyHandler::One(connection_id),
++            });
++        }
++        None
 +    }
 +
 +    fn next_peer_close(&mut self) -> Option<ToSwarm<Event, HandlerIn>> {
@@ -2488,7 +3227,7 @@
          }
      }
 
-@@ -2974,6 +3115,9 @@
+@@ -2974,6 +3160,9 @@
              peer_score.add_peer(peer_id);
          }
 
@@ -2498,16 +3237,45 @@
          // Ignore connections from blacklisted peers.
          if self.blacklisted_peers.contains(&peer_id) {
              tracing::debug!(peer=%peer_id, "Ignoring connection from blacklisted peer");
-@@ -3022,7 +3166,7 @@
+@@ -3020,24 +3209,31 @@
+                     .expect("Previously established connection to peer must be present");
+                 peer.connections.remove(index);
 
-                 // If there are more connections and this peer is in a mesh, inform the first
-                 // connection handler.
+-                // If there are more connections and this peer is in a mesh, inform the first
+-                // connection handler.
 -                if !peer.connections.is_empty() {
-+                if !peer.connections.is_empty() && !self.closing_peers.contains_key(&peer_id) {
-                     for topic in &peer.topics {
-                         if let Some(mesh_peers) = self.mesh.get(topic) {
-                             if mesh_peers.contains(&peer_id) {
-@@ -3038,6 +3182,8 @@
+-                    for topic in &peer.topics {
+-                        if let Some(mesh_peers) = self.mesh.get(topic) {
+-                            if mesh_peers.contains(&peer_id) {
+-                                self.events.push_back(ToSwarm::NotifyHandler {
+-                                    peer_id,
+-                                    event: HandlerIn::JoinedMesh,
+-                                    handler: NotifyHandler::One(peer.connections[0]),
+-                                });
+-                                break;
+-                            }
+-                        }
+-                    }
++                // Only the first connection owns mesh keepalive. If it closed,
++                // carry the current state to its replacement, including any
++                // coalesced transition that had not reached the old handler.
++                if index == 0
++                    && !peer.connections.is_empty()
++                    && !self.closing_peers.contains_key(&peer_id)
++                {
++                    let in_mesh = peer.topics.iter().any(|topic| {
++                        self.mesh
++                            .get(topic)
++                            .is_some_and(|peers| peers.contains(&peer_id))
++                    });
++                    if peer.pending_handler_notification.is_none() {
++                        self.pending_handler_peers.push_back(peer_id);
++                    }
++                    peer.pending_handler_notification = Some(if in_mesh {
++                        HandlerIn::JoinedMesh
++                    } else {
++                        HandlerIn::LeftMesh
++                    });
                  }
              }
          } else {
@@ -2516,7 +3284,7 @@
              // remove from mesh, topic_peers, peer_topic and the fanout
              tracing::debug!(peer=%peer_id, "Peer disconnected");
              let Some(connected_peer) = self.connected_peers.get(&peer_id) else {
-@@ -3151,6 +3297,9 @@
+@@ -3151,6 +3347,9 @@
          _: &Multiaddr,
          _: &Multiaddr,
      ) -> Result<THandler<Self>, ConnectionDenied> {
@@ -2526,9 +3294,11 @@
          // By default we assume a peer is only a floodsub peer.
          //
          // The protocol negotiation occurs once a message is sent/received. Once this happens we
-@@ -3160,9 +3309,16 @@
+@@ -3159,10 +3358,18 @@
+         let connected_peer = self.connected_peers.entry(peer_id).or_insert(PeerDetails {
              kind: PeerKind::Floodsub,
              connections: vec![],
++            pending_handler_notification: None,
              outbound: false,
 -            sender: Sender::new(self.config.connection_handler_queue_len()),
 +            sender: Sender::new(
@@ -2545,7 +3315,7 @@
          });
          // Add the new connection
          connected_peer.connections.push(connection_id);
-@@ -3181,15 +3337,25 @@
+@@ -3181,15 +3388,26 @@
          _: Endpoint,
          _: PortUse,
      ) -> Result<THandler<Self>, ConnectionDenied> {
@@ -2555,6 +3325,7 @@
          let connected_peer = self.connected_peers.entry(peer_id).or_insert(PeerDetails {
              kind: PeerKind::Floodsub,
              connections: vec![],
++            pending_handler_notification: None,
              // Diverging from the go implementation we only want to consider a peer as outbound peer
              // if its first connection is outbound.
              outbound: !self.px_peers.contains(&peer_id),
@@ -2573,7 +3344,7 @@
          });
          // Add the new connection
          connected_peer.connections.push(connection_id);
-@@ -3206,6 +3372,9 @@
+@@ -3206,6 +3424,9 @@
          _connection_id: ConnectionId,
          handler_event: THandlerOutEvent<Self>,
      ) {
@@ -2583,7 +3354,7 @@
          match handler_event {
              HandlerEvent::PeerKind(kind) => {
                  // We have identified the protocol this peer is using
-@@ -3284,6 +3453,9 @@
+@@ -3284,6 +3505,9 @@
                  if !rpc.subscriptions.is_empty() {
                      self.handle_received_subscriptions(&rpc.subscriptions, &propagation_source);
                  }
@@ -2593,7 +3364,7 @@
 
                  // Check if peer is graylisted in which case we ignore the event
                  if let (true, _) = self
-@@ -3294,22 +3466,23 @@
+@@ -3294,22 +3518,23 @@
                      return;
                  }
 
@@ -2626,7 +3397,7 @@
                              "Invalid message from peer. Reason: {:?}",
                              validation_error,
                          );
-@@ -3375,11 +3548,7 @@
+@@ -3375,11 +3600,7 @@
                                  metrics.register_idontwant(message_ids.len());
                              }
                              for message_id in message_ids {
@@ -2639,34 +3410,119 @@
                              }
                          }
                      }
-@@ -3402,7 +3571,14 @@
+@@ -3402,6 +3623,14 @@
          &mut self,
          cx: &mut Context<'_>,
      ) -> Poll<ToSwarm<Self::ToSwarm, THandlerInEvent<Self>>> {
--        if let Some(event) = self.events.pop_front() {
 +        if let Some(event) = self.next_peer_close() {
 +            return Poll::Ready(event);
 +        }
-+        while let Some(event) = self.events.pop_front() {
-+            if matches!(&event, ToSwarm::NotifyHandler { peer_id, .. } if self.closing_peers.contains_key(peer_id))
-+            {
-+                continue;
-+            }
++        if let Some(event) = self.next_handler_notification() {
++            return Poll::Ready(event);
++        }
++        // Keep message events ahead of heartbeat: in LogEx, each queued message
++        // retains a cache owner until delivery, bounding its retained payload.
+         if let Some(event) = self.events.pop_front() {
              return Poll::Ready(event);
          }
-
-@@ -3419,6 +3595,10 @@
-         if self.heartbeat.poll_unpin(cx).is_ready() {
-             self.heartbeat();
+@@ -3421,6 +3650,13 @@
              self.heartbeat.reset(self.config.heartbeat_interval());
-+        }
-+
-+        if let Some(event) = self.next_peer_close() {
-+            return Poll::Ready(event);
          }
 
++        if let Some(event) = self.next_peer_close() {
++            return Poll::Ready(event);
++        }
++        if let Some(event) = self.next_handler_notification() {
++            return Poll::Ready(event);
++        }
++
          Poll::Pending
-@@ -3583,14 +3763,12 @@
+     }
+
+@@ -3445,11 +3681,15 @@
+     peer_id: PeerId,
+     new_topics: Vec<&TopicHash>,
+     mesh: &HashMap<TopicHash, BTreeSet<PeerId>>,
+-    events: &mut VecDeque<ToSwarm<Event, HandlerIn>>,
+-    connections: &HashMap<PeerId, PeerDetails>,
++    pending_peers: &mut VecDeque<PeerId>,
++    connections: &mut HashMap<PeerId, PeerDetails>,
++    closing_peers: &HashMap<PeerId, CloseState>,
+ ) {
+     // Ensure there is an active connection
+-    let connection_id = match connections.get(&peer_id) {
++    if closing_peers.contains_key(&peer_id) {
++        return;
++    }
++    match connections.get(&peer_id) {
+         Some(p) => p
+             .connections
+             .first()
+@@ -3473,25 +3713,25 @@
+         }
+     }
+     // This is the first mesh the peer has joined, inform the handler
+-    events.push_back(ToSwarm::NotifyHandler {
+-        peer_id,
+-        event: HandlerIn::JoinedMesh,
+-        handler: NotifyHandler::One(*connection_id),
+-    });
++    queue_handler_notification(peer_id, HandlerIn::JoinedMesh, pending_peers, connections);
+ }
+
+ /// This is called when peers are removed from a mesh. It checks if the peer exists
+-/// in any other mesh. If this is the last mesh they have joined, we return true, in order to
+-/// notify the handler to no longer maintain a connection.
++/// in any other mesh. If this was their last mesh, it queues the handler state
++/// that no longer requires keeping the connection alive.
+ fn peer_removed_from_mesh(
+     peer_id: PeerId,
+     old_topic: &TopicHash,
+     mesh: &HashMap<TopicHash, BTreeSet<PeerId>>,
+-    events: &mut VecDeque<ToSwarm<Event, HandlerIn>>,
+-    connections: &HashMap<PeerId, PeerDetails>,
++    pending_peers: &mut VecDeque<PeerId>,
++    connections: &mut HashMap<PeerId, PeerDetails>,
++    closing_peers: &HashMap<PeerId, CloseState>,
+ ) {
+     // Ensure there is an active connection
+-    let connection_id = match connections.get(&peer_id) {
++    if closing_peers.contains_key(&peer_id) {
++        return;
++    }
++    match connections.get(&peer_id) {
+         Some(p) => p
+             .connections
+             .first()
+@@ -3515,11 +3755,22 @@
+         }
+     }
+     // The peer is not in any other mesh, inform the handler
+-    events.push_back(ToSwarm::NotifyHandler {
+-        peer_id,
+-        event: HandlerIn::LeftMesh,
+-        handler: NotifyHandler::One(*connection_id),
+-    });
++    queue_handler_notification(peer_id, HandlerIn::LeftMesh, pending_peers, connections);
++}
++
++/// Mesh transitions are level-triggered: only the latest in-mesh state matters.
++fn queue_handler_notification(
++    peer_id: PeerId,
++    event: HandlerIn,
++    pending_peers: &mut VecDeque<PeerId>,
++    connections: &mut HashMap<PeerId, PeerDetails>,
++) {
++    let Some(peer) = connections.get_mut(&peer_id) else {
++        return;
++    };
++    if peer.pending_handler_notification.replace(event).is_none() {
++        pending_peers.push_back(peer_id);
++    }
+ }
+
+ /// Helper function to get a subset of random gossipsub peers for a `topic_hash`
+@@ -3583,14 +3834,12 @@
                  return Err("Published messages contain an author but incoming messages with an author will be rejected. Consider adjusting the validation or privacy settings in the config");
              }
          }
@@ -2686,7 +3542,7 @@
      }
 --- a/src/config.rs
 +++ b/src/config.rs
-@@ -96,6 +96,83 @@
+@@ -96,6 +96,91 @@
      }
  }
 
@@ -2740,10 +3596,11 @@
 +    }
 +}
 +
-+/// Per-peer queued RPC budgets, shared by all connections to that peer.
-+/// Counts include messages staged by a receiver. Bytes cover owned buffers and
-+/// vector allocations, not total RSS or the handler's single in-flight frame.
-+/// These limits are independent of protocol frame-size limits.
++/// Queued gossip ownership budgets. RPC limits apply per peer, shared by all
++/// connections; advisory-event limits apply across the whole behaviour.
++/// RPC counts include messages staged by a receiver. Bytes cover owned buffers
++/// and vector allocations, not total RSS or the handler's single in-flight frame.
++/// These limits are independent of protocol frame-size limits and message caches.
 +#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 +pub struct QueueLimits {
 +    /// Reserved entries for subscriptions, GRAFT and PRUNE. Saturation closes the peer.
@@ -2754,6 +3611,11 @@
 +    pub max_publish_bytes: usize,
 +    /// Owned bytes for forwarded messages and IHAVE/IWANT/IDONTWANT controls.
 +    pub max_non_priority_bytes: usize,
++    /// Pending subscription, slow-peer and unsupported-protocol advisory events.
++    /// Excess new advisories are dropped, preserving those already queued.
++    pub max_advisory_events: usize,
++    /// Owned topic-string bytes across pending advisory events.
++    pub max_advisory_bytes: usize,
 +}
 +
 +impl Default for QueueLimits {
@@ -2763,6 +3625,8 @@
 +            max_control_bytes: 256 * 1024,
 +            max_publish_bytes: 16 * 1024 * 1024,
 +            max_non_priority_bytes: 16 * 1024 * 1024,
++            max_advisory_events: 1_024,
++            max_advisory_bytes: 256 * 1024,
 +        }
 +    }
 +}
@@ -2770,7 +3634,7 @@
  /// Configuration parameters that define the performance of the gossipsub network.
  #[derive(Clone)]
  pub struct Config {
-@@ -110,6 +187,7 @@
+@@ -110,6 +195,7 @@
      fanout_ttl: Duration,
      check_explicit_peers_ticks: u64,
      duplicate_cache_time: Duration,
@@ -2778,7 +3642,7 @@
      validate_messages: bool,
      message_id_fn: Arc<dyn Fn(&Message) -> MessageId + Send + Sync + 'static>,
      allow_self_origin: bool,
-@@ -129,6 +207,7 @@
+@@ -129,6 +215,7 @@
      iwant_followup_time: Duration,
      published_message_ids_cache_time: Duration,
      connection_handler_queue_len: usize,
@@ -2786,7 +3650,7 @@
      connection_handler_publish_duration: Duration,
      connection_handler_forward_duration: Duration,
      idontwant_message_size_threshold: usize,
-@@ -267,12 +346,17 @@
+@@ -267,12 +354,17 @@
          self.protocol_config().max_transmit_size_for_topic(topic)
      }
 
@@ -2805,7 +3669,7 @@
      }
 
      /// When set to `true`, prevents automatic forwarding of all received messages. This setting
-@@ -449,9 +533,16 @@
+@@ -449,9 +541,16 @@
          self.published_message_ids_cache_time
      }
 
@@ -2823,7 +3687,7 @@
      }
 
      /// The duration a message to be published can wait to be sent before it is abandoned. The
-@@ -514,6 +605,7 @@
+@@ -514,6 +613,7 @@
                  fanout_ttl: Duration::from_secs(60),
                  check_explicit_peers_ticks: 300,
                  duplicate_cache_time: Duration::from_secs(60),
@@ -2831,7 +3695,7 @@
                  validate_messages: false,
                  message_id_fn: Arc::new(|message| {
                      // default message id is: source + sequence number
-@@ -548,6 +640,7 @@
+@@ -548,6 +648,7 @@
                  iwant_followup_time: Duration::from_secs(3),
                  published_message_ids_cache_time: Duration::from_secs(10),
                  connection_handler_queue_len: 5000,
@@ -2839,7 +3703,7 @@
                  connection_handler_publish_duration: Duration::from_secs(5),
                  connection_handler_forward_duration: Duration::from_secs(1),
                  idontwant_message_size_threshold: 1000,
-@@ -569,6 +662,15 @@
+@@ -569,6 +670,15 @@
  }
 
  impl ConfigBuilder {
@@ -2855,7 +3719,7 @@
      /// The protocol id prefix to negotiate this protocol (default is `/meshsub/1.1.0` and
      /// `/meshsub/1.0.0`).
      pub fn protocol_id_prefix(
-@@ -787,7 +889,7 @@
+@@ -787,7 +897,7 @@
          self
      }
 
@@ -2864,7 +3728,7 @@
      /// This settings sets the time period that messages are stored in the cache. Duplicates can be
      /// received if duplicate messages are sent at a time greater than this setting apart. The
      /// default is 1 minute.
-@@ -1017,9 +1119,19 @@
+@@ -1017,9 +1127,19 @@
          self
      }
 
@@ -2885,7 +3749,7 @@
          self
      }
 
-@@ -1094,6 +1206,10 @@
+@@ -1094,6 +1214,10 @@
      /// Constructs a [`Config`] from the given configuration and validates the settings.
      pub fn build(&self) -> Result<Config, ConfigBuilderError> {
          // check all constraints on config
@@ -2896,7 +3760,7 @@
 
          let pre_configured_topics = self.config.protocol.max_transmit_sizes.keys();
          for topic in pre_configured_topics {
-@@ -1156,6 +1272,12 @@
+@@ -1156,6 +1280,12 @@
          let _ = builder.field("heartbeat_interval", &self.heartbeat_interval);
          let _ = builder.field("fanout_ttl", &self.fanout_ttl);
          let _ = builder.field("duplicate_cache_time", &self.duplicate_cache_time);
@@ -2909,7 +3773,7 @@
          let _ = builder.field("validate_messages", &self.validate_messages);
          let _ = builder.field("allow_self_origin", &self.allow_self_origin);
          let _ = builder.field("do_px", &self.do_px);
-@@ -1203,6 +1325,26 @@
+@@ -1203,6 +1333,26 @@
      use crate::{topic::IdentityHash, Topic};
 
      #[test]
@@ -3374,7 +4238,15 @@
 +}
 --- a/src/lib.rs
 +++ b/src/lib.rs
-@@ -118,8 +118,10 @@
+@@ -98,6 +98,7 @@
+ mod behaviour;
+ mod config;
+ mod error;
++mod event_queue;
+ mod gossip_promises;
+ mod handler;
+ mod mcache;
+@@ -118,8 +119,10 @@
 
  pub use self::{
      behaviour::{Behaviour, Event, MessageAuthenticity},
@@ -4144,7 +5016,7 @@
              priority_sender,
              non_priority_sender,
              priority_receiver,
-@@ -64,132 +156,576 @@
+@@ -64,132 +156,577 @@
          }
      }
 
@@ -4494,6 +5366,7 @@
 +            max_control_bytes: 8,
 +            max_publish_bytes: 8,
 +            max_non_priority_bytes: 8,
++            ..Default::default()
 +        }
 +    }
 +
@@ -5177,6 +6050,15 @@
 
  use futures_timer::Delay;
  use hashlink::LinkedHashMap;
+@@ -30,7 +30,7 @@
+ use serde::{Deserialize, Serialize};
+ use web_time::Instant;
+
+-use crate::{rpc::Sender, rpc_proto::proto, TopicHash};
++use crate::{handler::HandlerIn, rpc::Sender, rpc_proto::proto, TopicHash};
+
+ /// Messages that have expired while attempting to be sent to a peer.
+ #[derive(Clone, Debug, Default)]
 @@ -100,6 +100,88 @@
      }
  }
@@ -5266,7 +6148,14 @@
  #[derive(Debug)]
  /// Connected peer details.
  pub(crate) struct PeerDetails {
-@@ -114,7 +196,7 @@
+@@ -109,12 +191,14 @@
+     pub(crate) outbound: bool,
+     /// Its current connections.
+     pub(crate) connections: Vec<ConnectionId>,
++    /// Latest mesh keepalive state awaiting delivery to the first connection.
++    pub(crate) pending_handler_notification: Option<HandlerIn>,
+     /// Subscribed topics.
+     pub(crate) topics: BTreeSet<TopicHash>,
      /// The rpc sender to the connection handler(s).
      pub(crate) sender: Sender,
      /// Don't send messages.
@@ -5275,7 +6164,7 @@
  }
 
  /// Describes the types of peers that can exist in the gossipsub context.
-@@ -219,10 +301,7 @@
+@@ -219,10 +303,7 @@
  impl fmt::Debug for Message {
      fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
          f.debug_struct("Message")
@@ -5287,7 +6176,7 @@
              .field("source", &self.source)
              .field("sequence_number", &self.sequence_number)
              .field("topic", &self.topic)
-@@ -341,6 +420,38 @@
+@@ -341,6 +422,38 @@
  }
 
  impl RpcOut {
@@ -5326,7 +6215,7 @@
      /// Converts the GossipsubRPC into its protobuf format.
      // A convenience function to avoid explicitly specifying types.
      pub fn into_protobuf(self) -> proto::RPC {
-@@ -635,3 +746,90 @@
+@@ -635,3 +748,90 @@
          f.write_str(self.as_ref())
      }
  }
@@ -5415,5 +6304,188 @@
 +            assert!(!overflow.insert_at(MessageId::new(&[1]), now));
 +            assert_eq!(overflow.retained_len(), 0);
 +        }
++    }
++}
+--- /dev/null
++++ b/src/event_queue.rs
+@@ -0,0 +1,180 @@
++//! Bounded advisory retention without charging cache-owned message delivery again.
++//!
++//! Handler keepalive notifications and critical close notifications have separate
++//! owners. Message events retain their cache owner until delivery in LogEx's
++//! polling/validation flow; optional PX/explicit-peer dial actions are not used
++//! by LogEx. This queue's budget covers only best-effort application advisories.
++
++use std::collections::VecDeque;
++
++use libp2p_swarm::ToSwarm;
++
++use crate::{handler::HandlerIn, Event, QueueLimits};
++
++pub(crate) struct EventQueue {
++    events: VecDeque<ToSwarm<Event, HandlerIn>>,
++    max_advisory_events: usize,
++    max_advisory_bytes: usize,
++    advisory_events: usize,
++    advisory_bytes: usize,
++}
++
++impl EventQueue {
++    pub(crate) fn new(limits: QueueLimits) -> Self {
++        Self {
++            events: VecDeque::new(),
++            max_advisory_events: limits.max_advisory_events,
++            max_advisory_bytes: limits.max_advisory_bytes,
++            advisory_events: 0,
++            advisory_bytes: 0,
++        }
++    }
++
++    /// Preserve admitted events and decline excess new advisories. Other event
++    /// classes keep their existing ownership and admission paths.
++    pub(crate) fn push_back(&mut self, event: ToSwarm<Event, HandlerIn>) -> bool {
++        if let Some(bytes) = advisory_bytes(&event) {
++            if self.advisory_events >= self.max_advisory_events {
++                return false;
++            }
++            let Some(next_bytes) = self
++                .advisory_bytes
++                .checked_add(bytes)
++                .filter(|next| *next <= self.max_advisory_bytes)
++            else {
++                return false;
++            };
++            self.advisory_events += 1;
++            self.advisory_bytes = next_bytes;
++        }
++        self.events.push_back(event);
++        true
++    }
++
++    pub(crate) fn pop_front(&mut self) -> Option<ToSwarm<Event, HandlerIn>> {
++        let event = self.events.pop_front()?;
++        if let Some(bytes) = advisory_bytes(&event) {
++            self.advisory_events -= 1;
++            self.advisory_bytes -= bytes;
++        }
++        Some(event)
++    }
++
++    pub(crate) fn len(&self) -> usize {
++        self.events.len()
++    }
++
++    #[cfg(test)]
++    pub(crate) fn is_empty(&self) -> bool {
++        self.events.is_empty()
++    }
++
++    #[cfg(test)]
++    pub(crate) fn clear(&mut self) {
++        self.events.clear();
++        self.advisory_events = 0;
++        self.advisory_bytes = 0;
++    }
++
++    #[cfg(test)]
++    pub(crate) fn iter(&self) -> impl Iterator<Item = &ToSwarm<Event, HandlerIn>> {
++        self.events.iter()
++    }
++}
++
++#[cfg(test)]
++impl std::ops::Index<usize> for EventQueue {
++    type Output = ToSwarm<Event, HandlerIn>;
++
++    fn index(&self, index: usize) -> &Self::Output {
++        &self.events[index]
++    }
++}
++
++fn advisory_bytes(event: &ToSwarm<Event, HandlerIn>) -> Option<usize> {
++    match event {
++        ToSwarm::GenerateEvent(
++            Event::Subscribed { topic, .. } | Event::Unsubscribed { topic, .. },
++        ) => Some(topic.retained_bytes()),
++        ToSwarm::GenerateEvent(Event::GossipsubNotSupported { .. } | Event::SlowPeer { .. }) => {
++            Some(0)
++        }
++        _ => None,
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use libp2p_identity::PeerId;
++
++    use super::*;
++    use crate::TopicHash;
++
++    fn subscribed(topic: String) -> ToSwarm<Event, HandlerIn> {
++        ToSwarm::GenerateEvent(Event::Subscribed {
++            peer_id: PeerId::random(),
++            topic: TopicHash::from_raw(topic),
++        })
++    }
++
++    #[test]
++    fn logex_event_advisory_budget_preserves_order_and_recovers_after_delivery() {
++        let mut events = EventQueue::new(QueueLimits {
++            max_advisory_events: 2,
++            max_advisory_bytes: 2,
++            ..Default::default()
++        });
++        assert!(events.push_back(subscribed("a".into())));
++        assert!(events.push_back(subscribed("b".into())));
++        assert!(!events.push_back(subscribed("c".into())));
++        assert!(matches!(events.pop_front(), Some(ToSwarm::GenerateEvent(
++            Event::Subscribed { topic, .. }
++        )) if topic.as_str() == "a"));
++        assert!(events.push_back(subscribed("c".into())));
++        for expected in ["b", "c"] {
++            assert!(matches!(events.pop_front(), Some(ToSwarm::GenerateEvent(
++                Event::Subscribed { topic, .. }
++            )) if topic.as_str() == expected));
++        }
++        assert_eq!((events.advisory_events, events.advisory_bytes), (0, 0));
++    }
++
++    #[test]
++    fn logex_event_advisory_bytes_include_spare_topic_capacity() {
++        let mut topic = String::with_capacity(32);
++        topic.push('a');
++        let capacity = topic.capacity();
++        let mut events = EventQueue::new(QueueLimits {
++            max_advisory_events: 4,
++            max_advisory_bytes: capacity,
++            ..Default::default()
++        });
++        assert!(events.push_back(subscribed(topic)));
++        assert!(!events.push_back(subscribed("b".into())));
++        assert_eq!(
++            (events.advisory_events, events.advisory_bytes),
++            (1, capacity)
++        );
++        events.clear();
++        assert_eq!((events.advisory_events, events.advisory_bytes), (0, 0));
++        assert!(events.push_back(subscribed("b".into())));
++    }
++
++    #[test]
++    fn logex_event_fixed_advisories_still_consume_entries() {
++        let mut events = EventQueue::new(QueueLimits {
++            max_advisory_events: 1,
++            max_advisory_bytes: 0,
++            ..Default::default()
++        });
++        let advisory = || {
++            ToSwarm::GenerateEvent(Event::GossipsubNotSupported {
++                peer_id: PeerId::random(),
++            })
++        };
++        assert!(events.push_back(advisory()));
++        assert!(!events.push_back(advisory()));
++        assert!(events.pop_front().is_some());
++        assert!(events.push_back(advisory()));
 +    }
 +}
