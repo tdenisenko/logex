@@ -4,7 +4,7 @@
 //! completion cannot be supplied separately from the blocks actually consumed.
 //! Anchors come from the retained consensus store. Every completion must still
 //! be admitted against one current snapshot immediately before publication.
-//! Replacement staging verifies files and derived indexes without publication.
+//! Staging verifies files and indexes before journaled catalog publication.
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::Path,
@@ -17,8 +17,9 @@ use logex_index::{IndexBuildProfile, IndexBuilder};
 use logex_storage::{
     NullBitmap,
     native::{
-        InspectionLimits, RepairCandidateVerifier, RepairOwnershipPlan, RepairReadLimits,
-        SegmentDescriptor, StagedRepairCandidate, VerifiedRepairCandidate,
+        InspectionLimits, PendingRepair, RepairCandidateVerifier, RepairOwnershipPlan,
+        RepairPublication, RepairReadLimits, SegmentDescriptor, StagedRepairCandidate,
+        VerifiedRepairCandidate,
     },
 };
 use logex_types::{LogRow, Source};
@@ -433,18 +434,7 @@ impl<'a> ReconstructedRepair<'a> {
             })?;
         let build = || {
             let staged = segment.proof.stage(destination, &segment.rows, limits)?;
-            check_active(self.deadline, &self.cancellation)?;
-            let dir = staged.segment_dir();
-            IndexBuilder::build_indexes(&dir, profile)?;
-            check_active(self.deadline, &self.cancellation)?;
-            staged.verify()?;
-            ensure_repair!(
-                !IndexBuilder::indexes_missing(&dir, profile)?,
-                Local,
-                "repair stage is missing a required derived index"
-            );
-            check_active(self.deadline, &self.cancellation)?;
-            Ok(staged)
+            self.finish_stage(staged, profile)
         };
         build().map_err(|error: eyre::Report| {
             let error = error.wrap_err(format!(
@@ -459,6 +449,86 @@ impl<'a> ReconstructedRepair<'a> {
         })
     }
 
+    fn finish_stage(
+        &self,
+        staged: StagedRepairCandidate<'a>,
+        profile: IndexBuildProfile,
+    ) -> Result<StagedRepairCandidate<'a>> {
+        check_active(self.deadline, &self.cancellation)?;
+        let dir = staged.segment_dir();
+        // Rebuild from verified columns on resume as well. A matching checkpoint
+        // alone does not establish the integrity of every retained index payload.
+        IndexBuilder::build_indexes(&dir, profile)?;
+        check_active(self.deadline, &self.cancellation)?;
+        staged.verify()?;
+        IndexBuilder::verify_indexes(&dir, profile)?;
+        check_active(self.deadline, &self.cancellation)?;
+        Ok(staged)
+    }
+
+    /// Stage under the transaction's reserved new ID. The transaction must be
+    /// created under this reconstruction's original directory owner.
+    pub fn stage_publication_segment(
+        &self,
+        publication: &mut RepairPublication<'a>,
+        segment_id: u64,
+        limits: InspectionLimits,
+        profile: IndexBuildProfile,
+    ) -> Result<StagedRepairCandidate<'a>> {
+        check_active(self.deadline, &self.cancellation)?;
+        ensure_repair!(
+            std::ptr::eq(publication.plan(), self.plan),
+            InvalidInput,
+            "repair publication belongs to another reconstruction plan"
+        );
+        let segment = self
+            .segments
+            .iter()
+            .find(|s| s.descriptor().id == segment_id)
+            .ok_or_else(|| {
+                failure(
+                    RepairFetchErrorKind::InvalidInput,
+                    eyre::eyre!("segment is outside completed reconstruction"),
+                )
+            })?;
+        let mut build = || {
+            let staged = publication.stage_candidate(&segment.proof, &segment.rows, limits)?;
+            self.finish_stage(staged, profile)
+        };
+        build().map_err(local_publication_error)
+    }
+
+    /// Prepare outside the consensus lock, admit the complete transcript once,
+    /// and switch catalogs under that guard. After commit, finish quarantine even
+    /// if cancellation arrives: a committed catalog is never rolled back. Errors
+    /// retain durable evidence for explicit same-owner recovery.
+    pub fn publish_replacements(
+        &self,
+        publication: RepairPublication<'a>,
+        stages: Vec<StagedRepairCandidate<'a>>,
+        consensus: &ConsensusStore,
+        limits: InspectionLimits,
+        profile: IndexBuildProfile,
+    ) -> Result<std::path::PathBuf> {
+        check_active(self.deadline, &self.cancellation)?;
+        ensure_repair!(
+            std::ptr::eq(publication.plan(), self.plan),
+            InvalidInput,
+            "repair publication belongs to another reconstruction plan"
+        );
+        let prepared = publication
+            .prepare(stages, |dir| IndexBuilder::verify_indexes(dir, profile))
+            .map_err(|error| local_publication_error(error.into()))?;
+        let committed = self.with_current_anchors(consensus, || {
+            prepared
+                .commit()
+                .map_err(|error| local_publication_error(error.into()))
+        })?;
+        committed
+            .finish(limits, |dir| IndexBuilder::verify_indexes(dir, profile))
+            .map_err(|error| local_publication_error(error.into()))
+    }
+
     /// Admit one synchronous operation only while every completion anchor is
     /// current under one consensus snapshot. Prepare and verify staging before
     /// calling; keep the existing storage owner throughout. The callback must not
@@ -467,6 +537,8 @@ impl<'a> ReconstructedRepair<'a> {
     /// Cancellation and deadline are checked again after acquiring that snapshot,
     /// immediately before the callback. Cancellation after admission cannot undo
     /// its writes; the callback must finish or leave recoverable journal evidence.
+    /// Publication includes synchronous directory/file barriers while holding the
+    /// guard; its duration is not limited to the final catalog rename.
     /// Empty transcripts are valid only for the already-proven empty range union
     /// and make no chain claim. This is not finality or cross-file durability.
     pub fn with_current_anchors<R>(
@@ -493,6 +565,44 @@ impl<'a> ReconstructedRepair<'a> {
                     ),
                 )
             })?
+    }
+}
+
+/// Complete quarantine after an already-committed catalog switch. Primary data
+/// is verified first by storage; damaged derived indexes can be rebuilt locally.
+/// This operation needs no new chain admission and never rolls back the catalog.
+pub fn finish_pending_publication(
+    pending: PendingRepair,
+    limits: InspectionLimits,
+    profile: IndexBuildProfile,
+) -> Result<std::path::PathBuf> {
+    pending
+        .finish(limits, |dir| {
+            match IndexBuilder::verify_indexes(dir, profile) {
+                Ok(()) => Ok(()),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::InvalidData
+                            | std::io::ErrorKind::NotFound
+                            | std::io::ErrorKind::UnexpectedEof
+                    ) =>
+                {
+                    IndexBuilder::build_indexes(dir, profile)?;
+                    IndexBuilder::verify_indexes(dir, profile)
+                }
+                Err(error) => Err(error),
+            }
+        })
+        .map_err(|error| local_publication_error(error.into()))
+}
+
+fn local_publication_error(error: eyre::Report) -> eyre::Report {
+    let error = error.wrap_err("prepare or publish offline repair replacements");
+    if error.downcast_ref::<super::RepairFetchError>().is_some() {
+        error
+    } else {
+        failure(RepairFetchErrorKind::Local, error)
     }
 }
 

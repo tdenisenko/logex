@@ -163,6 +163,244 @@ fn stage_limits() -> InspectionLimits {
     }
 }
 
+async fn reconstruct_for_publication<'a>(
+    plan: &'a RepairOwnershipPlan,
+    logged: &[u64],
+    store: &ConsensusStore,
+    cancellation: CancellationToken,
+) -> ReconstructedRepair<'a> {
+    let (mut source, _) = fixture_with_logs(logged);
+    let mut reconstruction =
+        RepairReconstruction::new(plan, limits(), fetching(), cancellation).unwrap();
+    while reconstruction
+        .fetch_next_range(&mut source, store)
+        .await
+        .unwrap()
+    {}
+    reconstruction.finish().unwrap()
+}
+
+#[tokio::test]
+async fn journaled_publication_preserves_split_owners_empty_blocks_and_indexes() {
+    for logged in [&[][..], &[0, 2, 3][..]] {
+        let rows = original_rows(logged).await;
+        let tmp = write(&rows, 3, &[]);
+        let report = inspect(tmp.path());
+        let before = report.catalog.clone();
+        let seeds: Vec<_> = before.segments.iter().map(|s| s.id).collect();
+        let originals: Vec<_> = seeds
+            .iter()
+            .map(|&id| {
+                let path = StorageCatalogPaths::new(tmp.path().to_owned()).segment_dir(id);
+                (id, tree(&path))
+            })
+            .collect();
+        let (_, headers) = fixture_with_logs(logged);
+        let (_directory, store) = consensus(&[anchor(&headers[3])]);
+        let quarantine = {
+            let plan = plan(report, &seeds);
+            let mut publication = plan.begin_publication(0).unwrap();
+            let rebuilt =
+                reconstruct_for_publication(&plan, logged, &store, CancellationToken::new()).await;
+            if !logged.is_empty() {
+                assert_eq!(
+                    plan.block_ranges(),
+                    &[(headers[0].number, headers[3].number)]
+                );
+                assert_eq!(
+                    rebuilt
+                        .completions()
+                        .iter()
+                        .map(RepairCompletion::delivered_blocks)
+                        .sum::<u64>(),
+                    4
+                );
+            }
+            let stages = plan
+                .segment_ids()
+                .iter()
+                .map(|&id| {
+                    rebuilt
+                        .stage_publication_segment(
+                            &mut publication,
+                            id,
+                            stage_limits(),
+                            IndexBuildProfile::All,
+                        )
+                        .unwrap()
+                })
+                .collect();
+            rebuilt
+                .publish_replacements(
+                    publication,
+                    stages,
+                    &store,
+                    stage_limits(),
+                    IndexBuildProfile::All,
+                )
+                .unwrap()
+        };
+        for (id, retained) in originals {
+            assert_eq!(tree(&quarantine.join(format!("s_{id:016}"))), retained);
+        }
+        let report = inspect(tmp.path());
+        assert_eq!(report.catalog.state, before.state);
+        assert_eq!(report.catalog.anchors, before.anchors);
+        assert_eq!(
+            report.catalog.next_segment_id,
+            before.next_segment_id + seeds.len() as u64
+        );
+        let mut actual = Vec::new();
+        for descriptor in &report.catalog.segments {
+            assert!(descriptor.id >= before.next_segment_id);
+            let dir = StorageCatalogPaths::new(tmp.path().to_owned()).segment_dir(descriptor.id);
+            IndexBuilder::verify_indexes(&dir, IndexBuildProfile::All).unwrap();
+            let reader = logex_storage::SegmentReader::open(&dir).unwrap();
+            let ids: Vec<_> = (0..descriptor.row_count as u32).collect();
+            actual.extend(reader.read_log_rows(Some(&ids)).unwrap());
+        }
+        assert_eq!(actual, rows);
+        drop(report);
+        drop(
+            NativeStorage::open(NativeStorageConfig {
+                data_dir: tmp.path().to_owned(),
+                hot_target_rows: 3,
+                ..Default::default()
+            })
+            .unwrap(),
+        );
+        assert!(!tmp.path().join("repair.journal").exists());
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn publication_requires_current_anchors_and_active_reconstruction_before_switch() {
+    for cause in 0..3 {
+        let logged = [0, 2, 3];
+        let rows = original_rows(&logged).await;
+        let tmp = write(&rows, 100, &[]);
+        let report = inspect(tmp.path());
+        let seed = report.catalog.active_hot_segment.unwrap();
+        let catalog_before = fs::read(tmp.path().join("catalog.json")).unwrap();
+        let original_dir = StorageCatalogPaths::new(tmp.path().to_owned()).segment_dir(seed);
+        let original_before = tree(&original_dir);
+        let (_, headers) = fixture_with_logs(&logged);
+        let (_directory, store) = consensus(&[anchor(&headers[3])]);
+        {
+            let plan = plan(report, &[seed]);
+            let mut publication = plan.begin_publication(0).unwrap();
+            let cancellation = CancellationToken::new();
+            let rebuilt =
+                reconstruct_for_publication(&plan, &logged, &store, cancellation.clone()).await;
+            let staged = rebuilt
+                .stage_publication_segment(
+                    &mut publication,
+                    seed,
+                    stage_limits(),
+                    IndexBuildProfile::All,
+                )
+                .unwrap();
+            match cause {
+                0 => store.replace_anchors(Vec::new()).unwrap(),
+                1 => cancellation.cancel(),
+                _ => tokio::time::advance(Duration::from_secs(60)).await,
+            }
+            let error = rebuilt
+                .publish_replacements(
+                    publication,
+                    vec![staged],
+                    &store,
+                    stage_limits(),
+                    IndexBuildProfile::All,
+                )
+                .unwrap_err();
+            assert_eq!(
+                kind(&error),
+                match cause {
+                    0 => RepairFetchErrorKind::Unavailable,
+                    1 => RepairFetchErrorKind::Cancelled,
+                    _ => RepairFetchErrorKind::Deadline,
+                }
+            );
+        }
+        assert_eq!(
+            fs::read(tmp.path().join("catalog.json")).unwrap(),
+            catalog_before
+        );
+        assert_eq!(tree(&original_dir), original_before);
+        let pending = logex_storage::native::inspect_pending_repair(tmp.path())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            pending.state(),
+            logex_storage::native::RepairCatalogState::BeforePublication
+        );
+    }
+}
+
+#[tokio::test]
+async fn committed_repair_finishes_after_restart_and_rebuilds_missing_derived_index() {
+    let logged = [0, 2, 3];
+    let rows = original_rows(&logged).await;
+    let tmp = write(&rows, 100, &[]);
+    let report = inspect(tmp.path());
+    let seed = report.catalog.active_hot_segment.unwrap();
+    let new_id = report.catalog.next_segment_id;
+    let (_, headers) = fixture_with_logs(&logged);
+    let (_directory, store) = consensus(&[anchor(&headers[3])]);
+    {
+        let plan = plan(report, &[seed]);
+        let mut publication = plan.begin_publication(0).unwrap();
+        let rebuilt =
+            reconstruct_for_publication(&plan, &logged, &store, CancellationToken::new()).await;
+        let stage = rebuilt
+            .stage_publication_segment(
+                &mut publication,
+                seed,
+                stage_limits(),
+                IndexBuildProfile::All,
+            )
+            .unwrap();
+        let prepared = publication
+            .prepare(vec![stage], |dir| {
+                IndexBuilder::verify_indexes(dir, IndexBuildProfile::All)
+            })
+            .unwrap();
+        // Simulate interruption after the durable switch and before quarantine.
+        let committed = rebuilt
+            .with_current_anchors(&store, || Ok(prepared.commit()?))
+            .unwrap();
+        drop(committed);
+    }
+    let catalog_after = fs::read(tmp.path().join("catalog.json")).unwrap();
+    let replacement = StorageCatalogPaths::new(tmp.path().to_owned()).segment_dir(new_id);
+    fs::remove_file(replacement.join("indexes/block_number.bptree")).unwrap();
+    store.replace_anchors(Vec::new()).unwrap();
+    let pending = logex_storage::native::inspect_pending_repair(tmp.path())
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        pending.state(),
+        logex_storage::native::RepairCatalogState::AfterPublication
+    );
+    let quarantine =
+        finish_pending_publication(pending, stage_limits(), IndexBuildProfile::All).unwrap();
+    assert!(quarantine.join(format!("s_{seed:016}")).is_dir());
+    assert_eq!(
+        fs::read(tmp.path().join("catalog.json")).unwrap(),
+        catalog_after
+    );
+    IndexBuilder::verify_indexes(&replacement, IndexBuildProfile::All).unwrap();
+    drop(
+        NativeStorage::open(NativeStorageConfig {
+            data_dir: tmp.path().to_owned(),
+            hot_target_rows: 100,
+            ..Default::default()
+        })
+        .unwrap(),
+    );
+}
+
 #[tokio::test]
 async fn reconstruction_staging_builds_bound_indexes_without_publishing() {
     let (mut source, headers) = fixture_with_logs(&[0, 2, 3]);

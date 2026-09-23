@@ -92,7 +92,18 @@ pub fn inspect_primary_data(
 ) -> io::Result<PrimaryDataInspection> {
     let owner = DataDirectoryLock::acquire_existing(path)
         .map_err(|error| contextual("acquire inspection ownership", path, error))?;
-    let paths = StorageCatalogPaths::new(path.to_owned());
+    inspect_owned(
+        owner,
+        StorageCatalogPaths::new(std::path::absolute(path)?),
+        limits,
+    )
+}
+
+pub(super) fn inspect_owned(
+    owner: DataDirectoryLock,
+    paths: StorageCatalogPaths,
+    limits: InspectionLimits,
+) -> io::Result<PrimaryDataInspection> {
     let catalog = NativeStorageCatalog::load_existing(&paths)
         .map_err(|error| contextual("read existing catalog", &paths.catalog_path(), error))?;
     super::storage::verify_recent_headers(&catalog.state).map_err(|error| {
@@ -157,6 +168,7 @@ pub(super) fn recovery_prerequisites(
     }
     let mut recovery_prerequisites = Vec::new();
     for (relative, empty_regular_allowed) in [
+        (super::repair::journal::JOURNAL_FILE, false),
         ("wal/recovery.json", false),
         ("wal/ingestion.json", false),
         ("wal/pending.wal", true),
@@ -188,7 +200,7 @@ fn incomplete(stage: &'static str, path: &Path, error: io::Error) -> PrimaryData
     }
 }
 
-fn inspect_segment(
+pub(super) fn inspect_segment(
     path: &Path,
     descriptor: &SegmentDescriptor,
     limits: InspectionLimits,

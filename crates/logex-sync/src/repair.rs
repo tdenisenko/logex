@@ -1,16 +1,20 @@
-//! Finite repair fetching, reconstruction and staging without storage publication.
+//! Finite verified reconstruction and journaled offline repair publication.
 //!
 //! The low-level fetcher requires an authentic execution anchor from its caller;
 //! the anchor type alone does not prove consensus provenance or finality. The
 //! reconstruction assembler selects retained anchors from ConsensusStore and can
-//! admit its whole transcript against one current snapshot. A separate coordinator
-//! must durably bind verified staged replacements and complete block coverage,
-//! including empty blocks, before publishing a repaired catalog.
+//! admit its whole transcript against one current snapshot. Replacement publication
+//! prepares durable verified trees before that admission, switches one catalog under
+//! the guard and then finishes quarantine. Existing coverage, including empty-block
+//! progress, remains unchanged. CLI, maintenance status and worker lifecycle wiring
+//! are separate callers of this exclusive offline operation.
 //!
 //! Cancellation drops local waits, not already queued network requests. The owning
 //! network runtime remains responsible for transport timeout/teardown and may persist
-//! its ordinary peer cache. Explicit staging writes fresh caller-reserved trees;
-//! it does not publish repair data, sync state or notifications to the live dataset.
+//! its ordinary peer cache. Staging uses journal-reserved new IDs. Publication
+//! requires the existing directory owner; normal ingestion and queries remain
+//! paused. Cancellation before admission cannot publish replacements; cancellation
+//! after commit cannot undo the catalog and does not interrupt quarantine completion.
 //! CPU validation is synchronous and bounded by caller work limits. Deadline and
 //! cancellation are observed between finite CPU steps, not hard CPU preemption; a
 //! coordinator needing runtime responsiveness must provide appropriate worker ownership.
@@ -583,6 +587,7 @@ impl RepairFetcher {
 mod reconstruction;
 pub use reconstruction::{
     ReconstructedRepair, ReconstructedSegment, RepairReconstruction, RepairReconstructionLimits,
+    finish_pending_publication,
 };
 
 #[cfg(test)]

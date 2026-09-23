@@ -1,13 +1,20 @@
-//! Ownership planning, exact reconstruction checks and private replacement staging.
+//! Ownership planning, exact reconstruction and journaled offline publication.
 //!
 //! A successful check preserves published local contents; it does not prove
 //! chain membership or block completeness. Staging independently checks encoded
-//! primary data; the coordinator must retain authenticated fetch transcripts,
-//! reverify the final artifact identities and guard journaled publication.
+//! primary data; the sync coordinator retains authenticated fetch transcripts
+//! and guards the catalog switch. Pending journal evidence blocks ordinary open
+//! until explicit repair resumption completes original-artifact quarantine.
 mod input;
+pub(super) mod journal;
 mod overlap;
+pub(super) mod publication;
 mod staging;
 pub use input::{RepairReadLimits, RepairRowInput};
+pub use publication::{
+    CommittedRepairPublication, PendingRepair, PreparedRepairPublication, RepairCatalogState,
+    RepairPublication, inspect_pending_repair,
+};
 pub use staging::StagedRepairCandidate;
 
 use std::{collections::BTreeMap, io};
@@ -42,6 +49,9 @@ pub struct RepairOwnershipPlan {
     selection: overlap::Selection,
     selected: BTreeMap<u64, usize>,
     limits: RepairPlanLimits,
+    seeds: Vec<u64>,
+    pending: Option<journal::RepairJournal>,
+    publication_active: std::sync::atomic::AtomicBool,
 }
 
 impl PrimaryDataInspection {
@@ -55,6 +65,15 @@ impl PrimaryDataInspection {
         segment_ids: &[u64],
         limits: RepairPlanLimits,
     ) -> io::Result<RepairOwnershipPlan> {
+        self.into_repair_plan_with_journal(segment_ids, limits, None)
+    }
+
+    fn into_repair_plan_with_journal(
+        self,
+        segment_ids: &[u64],
+        limits: RepairPlanLimits,
+        pending: Option<journal::RepairJournal>,
+    ) -> io::Result<RepairOwnershipPlan> {
         // Inspection fields are public reports. Re-read authoritative metadata
         // under the same owner instead of trusting a caller-modified report.
         let catalog = NativeStorageCatalog::load_existing(&self.paths)?;
@@ -64,7 +83,17 @@ impl PrimaryDataInspection {
             ));
         }
         super::storage::verify_recent_headers(&catalog.state)?;
-        if !inspection::recovery_prerequisites(&self.paths, &catalog)?.is_empty() {
+        let mut prerequisites = inspection::recovery_prerequisites(&self.paths, &catalog)?;
+        if let Some(journal) = &pending {
+            journal.validate()?;
+            if catalog != journal.before {
+                return Err(invalid(
+                    "repair resumption requires the exact original catalog",
+                ));
+            }
+            prerequisites.retain(|path| *path != self.paths.root().join(journal::JOURNAL_FILE));
+        }
+        if !prerequisites.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
                 "verified WAL or reorg recovery is required before segment repair planning",
@@ -88,6 +117,9 @@ impl PrimaryDataInspection {
             selection,
             selected,
             limits,
+            seeds: segment_ids.to_vec(),
+            pending,
+            publication_active: std::sync::atomic::AtomicBool::new(false),
         })
     }
 }
