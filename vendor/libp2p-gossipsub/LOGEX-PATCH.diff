@@ -1002,7 +1002,7 @@
                      collected_publish.push(message);
                  }
              }
-@@ -6787,3 +6879,900 @@
+@@ -6787,3 +6879,921 @@
          _ => panic!("Unexpected event"),
      }
  }
@@ -1801,7 +1801,10 @@
 +    assert!(gs.closing_peers.contains_key(&peer));
 +    assert!(gs
 +        .handle_established_inbound_connection(next, peer, &address, &address)
-+        .is_err());
++        .err()
++        .expect("connection must be denied while the peer is closing")
++        .downcast_ref::<crate::ControlQueueFull>()
++        .is_some());
 +    assert!(gs
 +        .handle_established_outbound_connection(
 +            next,
@@ -1810,7 +1813,10 @@
 +            Endpoint::Dialer,
 +            PortUse::Reuse
 +        )
-+        .is_err());
++        .err()
++        .expect("connection must be denied while the peer is closing")
++        .downcast_ref::<crate::ControlQueueFull>()
++        .is_some());
 +    let endpoint = ConnectedPoint::Dialer {
 +        address: address.clone(),
 +        role_override: Endpoint::Dialer,
@@ -1827,7 +1833,22 @@
 +    assert_eq!(gs.connected_peers[&peer].connections, vec![second]);
 +    assert!(gs
 +        .handle_established_inbound_connection(next, peer, &address, &address)
-+        .is_err());
++        .err()
++        .expect("connection must be denied while the peer is closing")
++        .downcast_ref::<crate::ControlQueueFull>()
++        .is_some());
++    assert!(gs
++        .handle_established_outbound_connection(
++            next,
++            peer,
++            &address,
++            Endpoint::Dialer,
++            PortUse::Reuse,
++        )
++        .err()
++        .expect("outbound connection must remain denied after partial closure")
++        .downcast_ref::<crate::ControlQueueFull>()
++        .is_some());
 +    gs.on_swarm_event(FromSwarm::ConnectionClosed(ConnectionClosed {
 +        peer_id: peer,
 +        connection_id: second,
@@ -1913,7 +1934,7 @@
  use libp2p_core::{
      multiaddr::Protocol::{Ip4, Ip6},
      transport::PortUse,
-@@ -61,15 +60,15 @@
+@@ -61,28 +60,32 @@
      mcache::MessageCache,
      peer_score::{PeerScore, PeerScoreParams, PeerScoreState, PeerScoreThresholds, RejectReason},
      protocol::SIGNING_PREFIX,
@@ -1932,8 +1953,11 @@
 +        MessageId, PeerDetails, PeerInfo, PeerKind, Prune, RawMessage, RpcOut, Subscription,
          SubscriptionAction,
      },
-     FailedMessages, PublishError, SubscriptionError, TopicScoreParams, ValidationError,
-@@ -78,11 +77,14 @@
+-    FailedMessages, PublishError, SubscriptionError, TopicScoreParams, ValidationError,
++    ControlQueueFull, FailedMessages, PublishError, SubscriptionError, TopicScoreParams,
++    ValidationError,
+ };
+
  #[cfg(test)]
  mod tests;
 
@@ -1951,7 +1975,7 @@
 
  /// Max allowed PRUNE backoff, 1 hour.
  const MAX_REMOTE_PRUNE_BACKOFF_SECONDS: u64 = 3600;
-@@ -160,6 +162,10 @@
+@@ -160,6 +163,10 @@
      },
      /// A peer that does not support gossipsub has connected.
      GossipsubNotSupported { peer_id: PeerId },
@@ -1962,7 +1986,7 @@
      /// A peer is not able to download messages in time.
      SlowPeer {
          /// The peer_id
-@@ -250,6 +256,13 @@
+@@ -250,6 +257,13 @@
      }
  }
 
@@ -1976,7 +2000,7 @@
  /// Network behaviour that handles the gossipsub protocol.
  ///
  /// NOTE: Initialisation requires a [`MessageAuthenticity`] and [`Config`] instance. If
-@@ -271,13 +284,17 @@
+@@ -271,13 +285,17 @@
      /// Information used for publishing messages.
      publish_config: PublishConfig,
 
@@ -1995,7 +2019,7 @@
 
      /// A set of all explicit peers. These are peers that remain connected and we unconditionally
      /// forward messages to, outside of the scoring system.
-@@ -427,13 +444,20 @@
+@@ -427,13 +445,20 @@
          // We do not allow configurations where a published message would also be rejected if it
          // were received locally.
          validate_config(&privacy, config.validation_mode())?;
@@ -2017,7 +2041,7 @@
              explicit_peers: HashSet::new(),
              blacklisted_peers: HashSet::new(),
              mesh: HashMap::new(),
-@@ -444,7 +468,13 @@
+@@ -444,7 +469,13 @@
                  config.heartbeat_interval(),
                  config.backoff_slack(),
              ),
@@ -2032,7 +2056,7 @@
              heartbeat: Delay::new(config.heartbeat_interval() + config.heartbeat_initial_delay()),
              heartbeat_ticks: 0,
              px_peers: HashSet::new(),
-@@ -452,12 +482,21 @@
+@@ -452,12 +483,21 @@
              count_received_ihave: HashMap::new(),
              count_sent_iwant: HashMap::new(),
              connected_peers: HashMap::new(),
@@ -2056,7 +2080,7 @@
          })
      }
 
-@@ -609,7 +648,7 @@
+@@ -609,7 +649,7 @@
          });
 
          // Check the if the message has been published before
@@ -2065,7 +2089,7 @@
              // This message has already been seen. We don't re-publish messages that have already
              // been published on the network.
              tracing::warn!(
-@@ -617,6 +656,20 @@
+@@ -617,6 +657,20 @@
                  "Not publishing a message that has already been published"
              );
              return Err(PublishError::Duplicate);
@@ -2086,7 +2110,7 @@
          }
 
          tracing::trace!(message_id=%msg_id, "Publishing message");
-@@ -733,18 +786,19 @@
+@@ -733,18 +787,19 @@
 
          // If the message isn't a duplicate and we have sent it to some peers add it to the
          // duplicate cache and memcache.
@@ -2112,7 +2136,7 @@
          }
 
          // Send to peers we know are subscribed to the topic.
-@@ -1215,7 +1269,7 @@
+@@ -1215,7 +1270,7 @@
 
          // IHAVE flood protection
          let peer_have = self.count_received_ihave.entry(*peer_id).or_insert(0);
@@ -2121,7 +2145,7 @@
          if *peer_have > self.config.max_ihave_messages() {
              tracing::debug!(
                  peer=%peer_id,
-@@ -1252,7 +1306,7 @@
+@@ -1252,7 +1307,7 @@
              }
 
              for id in ids.into_iter().filter(|id| {
@@ -2130,7 +2154,7 @@
                      return false;
                  }
 
-@@ -1272,7 +1326,7 @@
+@@ -1272,7 +1327,7 @@
          if !iwant_ids.is_empty() {
              let iasked = self.count_sent_iwant.entry(*peer_id).or_insert(0);
              let mut iask = iwant_ids.len();
@@ -2139,7 +2163,7 @@
                  iask = self.config.max_ihave_length().saturating_sub(*iasked);
              }
 
-@@ -1290,7 +1344,6 @@
+@@ -1290,7 +1345,6 @@
              iwant_ids_vec.partial_shuffle(&mut rng, iask);
 
              iwant_ids_vec.truncate(iask);
@@ -2147,7 +2171,7 @@
 
              let followup_time = Instant::now()
                  .checked_add(self.config.iwant_followup_time())
-@@ -1298,20 +1351,32 @@
+@@ -1298,20 +1352,32 @@
                      tracing::error!("Invalid iwant_followup_time using Instant::now()");
                      Instant::now()
                  });
@@ -2185,7 +2209,7 @@
          }
          tracing::trace!(peer=%peer_id, "Completed IHAVE handling for peer");
      }
-@@ -1337,11 +1402,7 @@
+@@ -1337,11 +1403,7 @@
          for id in iwant_msgs {
              // If we have it and the IHAVE count is not above the threshold,
              // forward the message.
@@ -2198,7 +2222,7 @@
                  if count > self.config.gossip_retransimission() {
                      tracing::debug!(
                          peer=%peer_id,
-@@ -1349,18 +1410,20 @@
+@@ -1349,18 +1411,20 @@
                          "IWANT: Peer has asked for message too many times; ignoring request"
                      );
                  } else {
@@ -2222,7 +2246,7 @@
                              timeout: Delay::new(self.config.forward_queue_duration()),
                          },
                      );
-@@ -1372,7 +1435,12 @@
+@@ -1372,7 +1436,12 @@
 
      /// Handles GRAFT control messages. If subscribed to the topic, adds the peer to mesh, if not,
      /// responds with PRUNE messages.
@@ -2236,7 +2260,7 @@
          tracing::debug!(peer=%peer_id, "Handling GRAFT message for peer");
 
          let mut to_prune_topics = HashSet::new();
-@@ -1608,6 +1676,10 @@
+@@ -1608,6 +1677,10 @@
              .peer_score
              .below_threshold(peer_id, |ts| ts.accept_px_threshold);
          for (topic_hash, px, backoff) in prune_data {
@@ -2247,7 +2271,7 @@
              if self.remove_peer_from_mesh(peer_id, &topic_hash, backoff, true) {
                  #[cfg(feature = "metrics")]
                  if let Some(m) = self.metrics.as_mut() {
-@@ -1766,6 +1838,10 @@
+@@ -1766,6 +1839,10 @@
          mut raw_message: RawMessage,
          propagation_source: &PeerId,
      ) {
@@ -2258,7 +2282,7 @@
          // Record the received metric
          #[cfg(feature = "metrics")]
          if let Some(metrics) = self.metrics.as_mut() {
-@@ -1791,6 +1867,21 @@
+@@ -1791,6 +1868,21 @@
          // Calculate the message id on the transformed data.
          let msg_id = self.config.message_id(&message);
 
@@ -2280,7 +2304,7 @@
          // Broadcast IDONTWANT messages
          if raw_message.raw_protobuf_len() > self.config.idontwant_message_size_threshold() {
              let recipient_peers = self
-@@ -1815,14 +1906,7 @@
+@@ -1815,14 +1907,7 @@
              }
          }
 
@@ -2296,7 +2320,7 @@
              tracing::debug!(message_id=%msg_id, "Message already received, ignoring");
              if let PeerScoreState::Active(peer_score) = &mut self.peer_score {
                  peer_score.duplicated_message(propagation_source, &msg_id, &message.topic);
-@@ -1830,6 +1914,11 @@
+@@ -1830,6 +1915,11 @@
              self.mcache.observe_duplicate(&msg_id, propagation_source);
              return;
          }
@@ -2308,7 +2332,7 @@
 
          tracing::debug!(
              message_id=%msg_id,
-@@ -1850,9 +1939,6 @@
+@@ -1850,9 +1940,6 @@
          if let PeerScoreState::Active(peer_score) = &mut self.peer_score {
              peer_score.validate_message(propagation_source, &msg_id, &message.topic);
          }
@@ -2318,7 +2342,7 @@
 
          // Dispatch the message to the user if we are subscribed to any of the topics
          #[allow(
-@@ -2091,8 +2177,10 @@
+@@ -2091,8 +2178,10 @@
 
      /// Applies penalties to peers that did not respond to our IWANT requests.
      fn apply_iwant_penalties(&mut self) {
@@ -2330,7 +2354,7 @@
                  peer_score.add_penalty(&peer, count);
                  #[cfg(feature = "metrics")]
                  if let Some(metrics) = self.metrics.as_mut() {
-@@ -2106,6 +2194,10 @@
+@@ -2106,6 +2195,10 @@
      fn heartbeat(&mut self) {
          #[cfg(feature = "metrics")]
          let start = Instant::now();
@@ -2341,7 +2365,7 @@
 
          // Every heartbeat we sample the send queues to add to our metrics. We do this intentionally
          // before we add all the gossip from this heartbeat in order to gain a true measure of
-@@ -2538,15 +2630,9 @@
+@@ -2538,15 +2631,9 @@
          }
          self.failed_messages.shrink_to_fit();
 
@@ -2359,7 +2383,7 @@
          }
 
          #[cfg(feature = "metrics")]
-@@ -2767,7 +2853,7 @@
+@@ -2767,7 +2854,7 @@
          // forward the message to peers
          for peer_id in recipient_peers.iter() {
              if let Some(peer) = self.connected_peers.get_mut(peer_id) {
@@ -2368,7 +2392,7 @@
                      tracing::debug!(%peer_id, message_id=%msg_id, "Peer doesn't want message");
                      continue;
                  }
-@@ -2882,10 +2968,13 @@
+@@ -2882,10 +2969,13 @@
      /// Send a [`RpcOut`] message to a peer.
      ///
      /// Returns `true` if sending was successful, `false` otherwise.
@@ -2385,7 +2409,7 @@
          #[cfg(feature = "metrics")]
          if let Some(m) = self.metrics.as_mut() {
              if let RpcOut::Publish { ref message, .. } | RpcOut::Forward { ref message, .. } = rpc {
-@@ -2908,9 +2997,30 @@
+@@ -2908,9 +2998,30 @@
          // Try sending the message to the connection handler.
          match peer.sender.send_message(rpc) {
              Ok(()) => true,
@@ -2418,7 +2442,7 @@
 
                  // Update failed message counter.
                  let failed_messages = self.failed_messages.entry(peer_id).or_default();
-@@ -2930,7 +3040,9 @@
+@@ -2930,7 +3041,9 @@
                      | RpcOut::Prune(_)
                      | RpcOut::Subscribe(_)
                      | RpcOut::Unsubscribe(_) => {
@@ -2429,7 +2453,7 @@
                      }
                  }
 
-@@ -2941,6 +3053,34 @@
+@@ -2941,6 +3054,34 @@
 
                  false
              }
@@ -2464,7 +2488,7 @@
          }
      }
 
-@@ -2974,6 +3114,9 @@
+@@ -2974,6 +3115,9 @@
              peer_score.add_peer(peer_id);
          }
 
@@ -2474,7 +2498,7 @@
          // Ignore connections from blacklisted peers.
          if self.blacklisted_peers.contains(&peer_id) {
              tracing::debug!(peer=%peer_id, "Ignoring connection from blacklisted peer");
-@@ -3022,7 +3165,7 @@
+@@ -3022,7 +3166,7 @@
 
                  // If there are more connections and this peer is in a mesh, inform the first
                  // connection handler.
@@ -2483,7 +2507,7 @@
                      for topic in &peer.topics {
                          if let Some(mesh_peers) = self.mesh.get(topic) {
                              if mesh_peers.contains(&peer_id) {
-@@ -3038,6 +3181,8 @@
+@@ -3038,6 +3182,8 @@
                  }
              }
          } else {
@@ -2492,19 +2516,17 @@
              // remove from mesh, topic_peers, peer_topic and the fanout
              tracing::debug!(peer=%peer_id, "Peer disconnected");
              let Some(connected_peer) = self.connected_peers.get(&peer_id) else {
-@@ -3151,6 +3296,11 @@
+@@ -3151,6 +3297,9 @@
          _: &Multiaddr,
          _: &Multiaddr,
      ) -> Result<THandler<Self>, ConnectionDenied> {
 +        if self.closing_peers.contains_key(&peer_id) {
-+            return Err(ConnectionDenied::new(std::io::Error::other(
-+                "gossip control queue closure is still pending",
-+            )));
++            return Err(ConnectionDenied::new(ControlQueueFull));
 +        }
          // By default we assume a peer is only a floodsub peer.
          //
          // The protocol negotiation occurs once a message is sent/received. Once this happens we
-@@ -3160,9 +3310,16 @@
+@@ -3160,9 +3309,16 @@
              kind: PeerKind::Floodsub,
              connections: vec![],
              outbound: false,
@@ -2523,14 +2545,12 @@
          });
          // Add the new connection
          connected_peer.connections.push(connection_id);
-@@ -3181,15 +3338,27 @@
+@@ -3181,15 +3337,25 @@
          _: Endpoint,
          _: PortUse,
      ) -> Result<THandler<Self>, ConnectionDenied> {
 +        if self.closing_peers.contains_key(&peer_id) {
-+            return Err(ConnectionDenied::new(std::io::Error::other(
-+                "gossip control queue closure is still pending",
-+            )));
++            return Err(ConnectionDenied::new(ControlQueueFull));
 +        }
          let connected_peer = self.connected_peers.entry(peer_id).or_insert(PeerDetails {
              kind: PeerKind::Floodsub,
@@ -2553,7 +2573,7 @@
          });
          // Add the new connection
          connected_peer.connections.push(connection_id);
-@@ -3206,6 +3375,9 @@
+@@ -3206,6 +3372,9 @@
          _connection_id: ConnectionId,
          handler_event: THandlerOutEvent<Self>,
      ) {
@@ -2563,7 +2583,7 @@
          match handler_event {
              HandlerEvent::PeerKind(kind) => {
                  // We have identified the protocol this peer is using
-@@ -3284,6 +3456,9 @@
+@@ -3284,6 +3453,9 @@
                  if !rpc.subscriptions.is_empty() {
                      self.handle_received_subscriptions(&rpc.subscriptions, &propagation_source);
                  }
@@ -2573,7 +2593,7 @@
 
                  // Check if peer is graylisted in which case we ignore the event
                  if let (true, _) = self
-@@ -3294,22 +3469,23 @@
+@@ -3294,22 +3466,23 @@
                      return;
                  }
 
@@ -2606,7 +2626,7 @@
                              "Invalid message from peer. Reason: {:?}",
                              validation_error,
                          );
-@@ -3375,11 +3551,7 @@
+@@ -3375,11 +3548,7 @@
                                  metrics.register_idontwant(message_ids.len());
                              }
                              for message_id in message_ids {
@@ -2619,7 +2639,7 @@
                              }
                          }
                      }
-@@ -3402,7 +3574,14 @@
+@@ -3402,7 +3571,14 @@
          &mut self,
          cx: &mut Context<'_>,
      ) -> Poll<ToSwarm<Self::ToSwarm, THandlerInEvent<Self>>> {
@@ -2635,7 +2655,7 @@
              return Poll::Ready(event);
          }
 
-@@ -3419,6 +3598,10 @@
+@@ -3419,6 +3595,10 @@
          if self.heartbeat.poll_unpin(cx).is_ready() {
              self.heartbeat();
              self.heartbeat.reset(self.config.heartbeat_interval());
@@ -2646,7 +2666,7 @@
          }
 
          Poll::Pending
-@@ -3583,14 +3766,12 @@
+@@ -3583,14 +3763,12 @@
                  return Err("Published messages contain an author but incoming messages with an author will be rejected. Consider adjusting the validation or privacy settings in the config");
              }
          }
@@ -2918,7 +2938,26 @@
              .message_id_fn(message_id_plain_function)
 --- a/src/error.rs
 +++ b/src/error.rs
-@@ -27,6 +27,8 @@
+@@ -22,11 +22,27 @@
+
+ use libp2p_identity::SigningError;
+
++/// A peer connection was denied while local control-queue recovery is pending.
++///
++/// This is a local capacity decision, not a transport or peer-validation failure.
++#[derive(Debug)]
++pub struct ControlQueueFull;
++
++impl std::fmt::Display for ControlQueueFull {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        f.write_str("gossip control queue closure is still pending")
++    }
++}
++
++impl std::error::Error for ControlQueueFull {}
++
+ /// Error associated with publishing a gossipsub message.
+ #[derive(Debug)]
  pub enum PublishError {
      /// This message has already been published.
      Duplicate,
@@ -2927,7 +2966,7 @@
      /// An error occurred whilst signing the message.
      SigningError(SigningError),
      /// No peers are currently subscribed to receive messages on this topic.
-@@ -130,6 +132,8 @@
+@@ -130,6 +146,8 @@
  /// Error associated with Config building.
  #[derive(Debug)]
  pub enum ConfigBuilderError {
@@ -2936,7 +2975,7 @@
      /// Maximum transmission size is too small.
      MaxTransmissionSizeTooSmall,
      /// History length less than history gossip length.
-@@ -149,6 +153,7 @@
+@@ -149,6 +167,7 @@
  impl std::fmt::Display for ConfigBuilderError {
      fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
          match self {
@@ -3335,15 +3374,19 @@
 +}
 --- a/src/lib.rs
 +++ b/src/lib.rs
-@@ -118,7 +118,7 @@
+@@ -118,8 +118,10 @@
 
  pub use self::{
      behaviour::{Behaviour, Event, MessageAuthenticity},
 -    config::{Config, ConfigBuilder, ValidationMode, Version},
+-    error::{ConfigBuilderError, PublishError, SubscriptionError, ValidationError},
 +    config::{CacheLimits, Config, ConfigBuilder, QueueLimits, ValidationMode, Version},
-     error::{ConfigBuilderError, PublishError, SubscriptionError, ValidationError},
++    error::{
++        ConfigBuilderError, ControlQueueFull, PublishError, SubscriptionError, ValidationError,
++    },
      peer_score::{
          score_parameter_decay, score_parameter_decay_with_base, PeerScoreParams,
+         PeerScoreThresholds, TopicScoreParams,
 --- a/src/mcache.rs
 +++ b/src/mcache.rs
 @@ -21,7 +21,6 @@

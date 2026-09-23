@@ -71,7 +71,8 @@ use crate::{
         MessageId, PeerDetails, PeerInfo, PeerKind, Prune, RawMessage, RpcOut, Subscription,
         SubscriptionAction,
     },
-    FailedMessages, PublishError, SubscriptionError, TopicScoreParams, ValidationError,
+    ControlQueueFull, FailedMessages, PublishError, SubscriptionError, TopicScoreParams,
+    ValidationError,
 };
 
 #[cfg(test)]
@@ -3297,9 +3298,7 @@ where
         _: &Multiaddr,
     ) -> Result<THandler<Self>, ConnectionDenied> {
         if self.closing_peers.contains_key(&peer_id) {
-            return Err(ConnectionDenied::new(std::io::Error::other(
-                "gossip control queue closure is still pending",
-            )));
+            return Err(ConnectionDenied::new(ControlQueueFull));
         }
         // By default we assume a peer is only a floodsub peer.
         //
@@ -3339,9 +3338,7 @@ where
         _: PortUse,
     ) -> Result<THandler<Self>, ConnectionDenied> {
         if self.closing_peers.contains_key(&peer_id) {
-            return Err(ConnectionDenied::new(std::io::Error::other(
-                "gossip control queue closure is still pending",
-            )));
+            return Err(ConnectionDenied::new(ControlQueueFull));
         }
         let connected_peer = self.connected_peers.entry(peer_id).or_insert(PeerDetails {
             kind: PeerKind::Floodsub,

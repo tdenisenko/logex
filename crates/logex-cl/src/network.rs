@@ -2799,6 +2799,17 @@ impl ConsensusNetwork {
                 ));
                 if let Some(peer_id) = peer_id {
                     self.dialing_peers.remove(&peer_id);
+                    if matches!(&error, DialError::Denied { cause }
+                        if cause.downcast_ref::<gossipsub::ControlQueueFull>().is_some())
+                    {
+                        // Swarm can deliver an admission denial while a blocked
+                        // handler notification delays the gossip overload event.
+                        self.handle_gossip_control_overload(peer_id);
+                        return;
+                    }
+                    if self.handle_local_connection_limit(peer_id, &error) {
+                        return;
+                    }
                     self.clear_pending_requests_for_peer(peer_id);
                     if self.closing_peers.contains(&peer_id)
                         && matches!(&error, DialError::Denied { .. })
@@ -3038,16 +3049,7 @@ impl ConsensusNetwork {
                 }
             }
             gossipsub::Event::ControlQueueFull { peer_id } => {
-                // Gossipsub emits this before its close-all action. Release
-                // application request ownership now so late responses/failures
-                // cannot blame the peer for our local queue pressure.
-                self.closing_peers.insert(peer_id);
-                self.clear_pending_requests_for_peer(peer_id);
-                self.last_peer_policy_event = Some(format!(
-                    "{} policy=local_control_overload action=reconnect",
-                    self.peer_context(peer_id)
-                ));
-                tracing::info!(%peer_id, "closing consensus peer after local gossip control queue overload");
+                self.handle_gossip_control_overload(peer_id);
             }
             gossipsub::Event::Subscribed { peer_id, topic } => {
                 tracing::debug!(%peer_id, topic = %topic, "consensus peer subscribed to gossip topic");
@@ -3056,6 +3058,20 @@ impl ConsensusNetwork {
                 tracing::debug!(%peer_id, topic = %topic, "consensus peer unsubscribed from gossip topic");
             }
             _ => {}
+        }
+    }
+
+    fn handle_gossip_control_overload(&mut self, peer_id: PeerId) {
+        // Either local admission denial or the explicit event can arrive first.
+        // Release application ownership without issuing another transport close.
+        let newly_closing = self.closing_peers.insert(peer_id);
+        self.clear_pending_requests_for_peer(peer_id);
+        if newly_closing {
+            self.last_peer_policy_event = Some(format!(
+                "{} policy=local_control_overload action=reconnect",
+                self.peer_context(peer_id)
+            ));
+            tracing::info!(%peer_id, "closing consensus peer after local gossip control queue overload");
         }
     }
 
@@ -4783,6 +4799,21 @@ impl ConsensusNetwork {
             .record(payload_bytes, Instant::now());
     }
 
+    /// Connection admission capacity is local, not a peer transport failure.
+    /// A refused extra dial does not invalidate work on an established connection.
+    fn handle_local_connection_limit(&mut self, peer: PeerId, error: &DialError) -> bool {
+        if !matches!(error, DialError::Denied { cause }
+            if cause.downcast_ref::<libp2p::connection_limits::Exceeded>().is_some())
+        {
+            return false;
+        }
+        self.dialing_peers.remove(&peer);
+        if !self.connected_peers.contains(&peer) || self.closing_peers.contains(&peer) {
+            self.clear_pending_requests_for_peer(peer);
+        }
+        true
+    }
+
     fn ensure_connected(&mut self, peer: PeerId, addrs: Vec<Multiaddr>) {
         let bootstrap_needed = self.consensus.light_client_status().bootstrap.is_none();
         let addrs = self
@@ -4820,6 +4851,9 @@ impl ConsensusNetwork {
             }
             Err(error) => {
                 tracing::debug!(%peer, %error, "failed to start consensus libp2p dial");
+                if self.handle_local_connection_limit(peer, &error) {
+                    return;
+                }
                 let ignored_for_run = self.record_dial_error(peer, &error);
                 if !ignored_for_run
                     && !matches!(
@@ -11024,6 +11058,269 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn gossip_control_pending_limit_dial_start_is_neutral() {
+        let temp = TempDir::new().unwrap();
+        let (mut network, _) = request_lifecycle_fixture(&temp);
+        let limits = network.swarm.behaviour_mut().connection_limits.limits_mut();
+        *limits = limits.clone().with_max_pending_outgoing(Some(0));
+        let peer = PeerId::random();
+        network.peer_lifecycle.entry(peer).or_default();
+        network.ensure_request(peer, RpcRequestKind::LightClientUpdatesByRange);
+        assert!(!network.pending_requests.is_empty());
+        // Zero available pending slots rejects synchronously, before transport
+        // dialing. No Swarm poll or socket operation is needed.
+        network.ensure_connected(peer, vec!["/ip4/127.0.0.1/tcp/19003".parse().unwrap()]);
+        assert!(network.pending_requests.is_empty());
+        assert!(network.pending_peer_kinds.is_empty());
+        assert!(network.pending_light_client_range_requests.is_empty());
+        assert!(!network.dialing_peers.contains(&peer));
+        assert!(!network.closing_peers.contains(&peer));
+        assert_eq!(network.peer_lifecycle[&peer].transport_failures, 0);
+        assert!(!network.peer_lifecycle[&peer].ignored_for_run);
+    }
+
+    #[tokio::test]
+    async fn gossip_control_combined_limit_denial_preserves_established_requests() {
+        for overloaded in [false, true] {
+            let temp = TempDir::new().unwrap();
+            let (mut network, _) = request_lifecycle_fixture(&temp);
+            let mut config = gossipsub::ConfigBuilder::from(build_gossip_config().unwrap());
+            if overloaded {
+                config.queue_limits(gossipsub::QueueLimits {
+                    max_control_messages: 1,
+                    ..GOSSIP_QUEUE_LIMITS
+                });
+            }
+            let topics = supported_gossip_fork_digests()
+                .flat_map(|digest| {
+                    let topics = build_gossip_topics(digest);
+                    [
+                        topics.finality_update.hash(),
+                        topics.optimistic_update.hash(),
+                    ]
+                })
+                .collect();
+            let mut gossip = gossipsub::Behaviour::new_with_subscription_filter_and_transform(
+                gossipsub::MessageAuthenticity::Anonymous,
+                config.build().unwrap(),
+                gossipsub::WhitelistSubscriptionFilter(topics),
+                GossipSizeGuard,
+            )
+            .unwrap();
+            gossip
+                .subscribe(&network.gossip_topics.finality_update)
+                .unwrap();
+            gossip
+                .subscribe(&network.gossip_topics.optimistic_update)
+                .unwrap();
+            network.swarm.behaviour_mut().gossip = gossip;
+
+            let peer = PeerId::random();
+            let address: libp2p::Multiaddr = "/memory/1".parse().unwrap();
+            let connection = libp2p::swarm::ConnectionId::new_unchecked(21);
+            let endpoint = ConnectedPoint::Listener {
+                local_addr: address.clone(),
+                send_back_addr: address.clone(),
+            };
+            // Exercise the actual derived order, including connection_limits.
+            // Keep the handler unpolled so initial subscriptions remain queued.
+            let _handler = network
+                .swarm
+                .behaviour_mut()
+                .handle_established_inbound_connection(connection, peer, &address, &address)
+                .unwrap();
+            network.swarm.behaviour_mut().on_swarm_event(
+                libp2p::swarm::FromSwarm::ConnectionEstablished(
+                    libp2p::swarm::behaviour::ConnectionEstablished {
+                        peer_id: peer,
+                        connection_id: connection,
+                        endpoint: &endpoint,
+                        failed_addresses: &[],
+                        other_established: 0,
+                    },
+                ),
+            );
+            network.connected_peers.insert(peer);
+            network.peer_lifecycle.entry(peer).or_default();
+            network.ensure_request(peer, RpcRequestKind::LightClientUpdatesByRange);
+            let request = *network.pending_requests.keys().next().unwrap();
+            let cause = match network
+                .swarm
+                .behaviour_mut()
+                .handle_established_outbound_connection(
+                    libp2p::swarm::ConnectionId::new_unchecked(22),
+                    peer,
+                    &address,
+                    libp2p::core::Endpoint::Dialer,
+                    libp2p::core::transport::PortUse::Reuse,
+                ) {
+                Err(cause) => cause,
+                Ok(_) => panic!("production per-peer connection limit must reject overlap"),
+            };
+            assert!(
+                cause
+                    .downcast_ref::<libp2p::connection_limits::Exceeded>()
+                    .is_some()
+            );
+            assert!(
+                cause
+                    .downcast_ref::<gossipsub::ControlQueueFull>()
+                    .is_none()
+            );
+            network.handle_swarm_event(SwarmEvent::OutgoingConnectionError {
+                peer_id: Some(peer),
+                connection_id: libp2p::swarm::ConnectionId::new_unchecked(22),
+                error: DialError::Denied { cause },
+            });
+            assert_eq!(network.peer_lifecycle[&peer].transport_failures, 0);
+            assert!(network.pending_requests.contains_key(&request));
+            assert!(network.pending_peer_kinds.contains(&(peer, request.kind)));
+            assert!(
+                network
+                    .pending_light_client_range_requests
+                    .contains_key(&request)
+            );
+            assert!(!network.closing_peers.contains(&peer));
+            if overloaded {
+                let waker = futures::task::noop_waker();
+                let mut context = std::task::Context::from_waker(&waker);
+                let event = match network.swarm.behaviour_mut().gossip.poll(&mut context) {
+                    std::task::Poll::Ready(libp2p::swarm::ToSwarm::GenerateEvent(
+                        event @ gossipsub::Event::ControlQueueFull { .. },
+                    )) => event,
+                    _ => panic!("initial subscriptions must saturate one control slot"),
+                };
+                network.handle_gossip_event(event);
+                assert!(network.closing_peers.contains(&peer));
+                assert!(network.pending_requests.is_empty());
+                assert!(network.pending_peer_kinds.is_empty());
+                assert!(network.pending_light_client_range_requests.is_empty());
+                assert_eq!(network.peer_lifecycle[&peer].transport_failures, 0);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn gossip_control_denial_before_notification_is_neutral() {
+        let temp = TempDir::new().unwrap();
+        let (mut network, _) = request_lifecycle_fixture(&temp);
+        let peer = PeerId::random();
+        network.connected_peers.insert(peer);
+        network.peer_lifecycle.entry(peer).or_default();
+        network.ensure_request(peer, RpcRequestKind::LightClientUpdatesByRange);
+        assert!(!network.pending_requests.is_empty());
+
+        // A real, unpolled handler owns one queued subscription. The second
+        // subscription saturates critical controls before Behaviour can emit its
+        // application notification (as with Swarm's blocked NotifyHandler).
+        let config = gossipsub::ConfigBuilder::default()
+            .validation_mode(gossipsub::ValidationMode::Anonymous)
+            .queue_limits(gossipsub::QueueLimits {
+                max_control_messages: 1,
+                ..Default::default()
+            })
+            .build()
+            .unwrap();
+        let mut gossip: gossipsub::Behaviour =
+            gossipsub::Behaviour::new(gossipsub::MessageAuthenticity::Anonymous, config).unwrap();
+        let address = "/memory/1".parse().unwrap();
+        let connection = libp2p::swarm::ConnectionId::new_unchecked(11);
+        let _handler = gossip
+            .handle_established_inbound_connection(connection, peer, &address, &address)
+            .unwrap();
+        gossip
+            .subscribe(&gossipsub::IdentTopic::new("one"))
+            .unwrap();
+        gossip
+            .subscribe(&gossipsub::IdentTopic::new("two"))
+            .unwrap();
+        let cause = match gossip.handle_established_outbound_connection(
+            libp2p::swarm::ConnectionId::new_unchecked(12),
+            peer,
+            &address,
+            libp2p::core::Endpoint::Dialer,
+            libp2p::core::transport::PortUse::Reuse,
+        ) {
+            Err(cause) => cause,
+            Ok(_) => panic!("saturated peer must deny overlapping establishment"),
+        };
+        assert!(
+            cause
+                .downcast_ref::<gossipsub::ControlQueueFull>()
+                .is_some()
+        );
+        assert!(!network.closing_peers.contains(&peer));
+        network.handle_swarm_event(SwarmEvent::OutgoingConnectionError {
+            peer_id: Some(peer),
+            connection_id: libp2p::swarm::ConnectionId::new_unchecked(12),
+            error: DialError::Denied { cause },
+        });
+        assert_eq!(network.peer_lifecycle[&peer].transport_failures, 0);
+        assert_eq!(network.peer_lifecycle[&peer].rpc_failures, 0);
+        assert!(network.closing_peers.contains(&peer));
+        assert!(network.pending_requests.is_empty());
+        assert!(network.pending_peer_kinds.is_empty());
+        assert!(network.pending_light_client_range_requests.is_empty());
+        // Later notification is idempotent, not a new failure or close request.
+        let waker = futures::task::noop_waker();
+        let mut context = std::task::Context::from_waker(&waker);
+        let event = match gossip.poll(&mut context) {
+            std::task::Poll::Ready(libp2p::swarm::ToSwarm::GenerateEvent(
+                event @ gossipsub::Event::ControlQueueFull { .. },
+            )) => event,
+            _ => panic!("pending overload notification must precede close"),
+        };
+        network.handle_gossip_event(event);
+        assert!(network.closing_peers.contains(&peer));
+        assert_eq!(network.peer_lifecycle[&peer].transport_failures, 0);
+    }
+
+    #[tokio::test]
+    async fn gossip_control_denial_preserves_unrelated_dial_error_policy() {
+        let temp = TempDir::new().unwrap();
+        let (mut network, _) = request_lifecycle_fixture(&temp);
+        let ordinary = PeerId::random();
+        network.handle_swarm_event(SwarmEvent::OutgoingConnectionError {
+            peer_id: Some(ordinary),
+            connection_id: libp2p::swarm::ConnectionId::new_unchecked(1),
+            error: DialError::Denied {
+                cause: libp2p::swarm::ConnectionDenied::new(io::Error::other(
+                    "unrelated local policy",
+                )),
+            },
+        });
+        assert_eq!(network.peer_lifecycle[&ordinary].transport_failures, 1);
+        assert!(!network.closing_peers.contains(&ordinary));
+
+        let closing = PeerId::random();
+        network.closing_peers.insert(closing);
+        network.handle_swarm_event(SwarmEvent::OutgoingConnectionError {
+            peer_id: Some(closing),
+            connection_id: libp2p::swarm::ConnectionId::new_unchecked(2),
+            error: DialError::Transport(vec![(
+                "/ip4/127.0.0.1/tcp/19001".parse().unwrap(),
+                libp2p::core::transport::TransportError::Other(io::Error::new(
+                    io::ErrorKind::ConnectionRefused,
+                    "finite refused connection fixture",
+                )),
+            )]),
+        });
+        assert_eq!(network.peer_lifecycle[&closing].transport_failures, 1);
+        assert!(network.closing_peers.contains(&closing));
+        let wrong_identity = PeerId::random();
+        network.closing_peers.insert(wrong_identity);
+        network.handle_swarm_event(SwarmEvent::OutgoingConnectionError {
+            peer_id: Some(wrong_identity),
+            connection_id: libp2p::swarm::ConnectionId::new_unchecked(3),
+            error: DialError::WrongPeerId {
+                obtained: PeerId::random(),
+                address: "/ip4/127.0.0.1/tcp/19002".parse().unwrap(),
+            },
+        });
+        assert!(network.peer_lifecycle[&wrong_identity].ignored_for_run);
+    }
+
+    #[tokio::test]
     async fn gossip_control_overload_releases_requests_and_preserves_close_attribution() {
         let temp = TempDir::new().unwrap();
         let (mut network, update) = request_lifecycle_fixture(&temp);
@@ -11109,9 +11406,7 @@ mod tests {
             peer_id: Some(peer),
             connection_id: libp2p::swarm::ConnectionId::new_unchecked(3),
             error: DialError::Denied {
-                cause: libp2p::swarm::ConnectionDenied::new(io::Error::other(
-                    "gossip control queue closure is still pending",
-                )),
+                cause: libp2p::swarm::ConnectionDenied::new(gossipsub::ControlQueueFull),
             },
         });
         assert!(network.closing_peers.contains(&peer));

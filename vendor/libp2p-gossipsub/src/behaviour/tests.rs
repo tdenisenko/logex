@@ -7674,7 +7674,10 @@ fn logex_control_overflow_blocks_new_connections_until_final_disconnect() {
     assert!(gs.closing_peers.contains_key(&peer));
     assert!(gs
         .handle_established_inbound_connection(next, peer, &address, &address)
-        .is_err());
+        .err()
+        .expect("connection must be denied while the peer is closing")
+        .downcast_ref::<crate::ControlQueueFull>()
+        .is_some());
     assert!(gs
         .handle_established_outbound_connection(
             next,
@@ -7683,7 +7686,10 @@ fn logex_control_overflow_blocks_new_connections_until_final_disconnect() {
             Endpoint::Dialer,
             PortUse::Reuse
         )
-        .is_err());
+        .err()
+        .expect("connection must be denied while the peer is closing")
+        .downcast_ref::<crate::ControlQueueFull>()
+        .is_some());
     let endpoint = ConnectedPoint::Dialer {
         address: address.clone(),
         role_override: Endpoint::Dialer,
@@ -7700,7 +7706,22 @@ fn logex_control_overflow_blocks_new_connections_until_final_disconnect() {
     assert_eq!(gs.connected_peers[&peer].connections, vec![second]);
     assert!(gs
         .handle_established_inbound_connection(next, peer, &address, &address)
-        .is_err());
+        .err()
+        .expect("connection must be denied while the peer is closing")
+        .downcast_ref::<crate::ControlQueueFull>()
+        .is_some());
+    assert!(gs
+        .handle_established_outbound_connection(
+            next,
+            peer,
+            &address,
+            Endpoint::Dialer,
+            PortUse::Reuse,
+        )
+        .err()
+        .expect("outbound connection must remain denied after partial closure")
+        .downcast_ref::<crate::ControlQueueFull>()
+        .is_some());
     gs.on_swarm_event(FromSwarm::ConnectionClosed(ConnectionClosed {
         peer_id: peer,
         connection_id: second,

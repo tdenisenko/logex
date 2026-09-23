@@ -22,6 +22,20 @@
 
 use libp2p_identity::SigningError;
 
+/// A peer connection was denied while local control-queue recovery is pending.
+///
+/// This is a local capacity decision, not a transport or peer-validation failure.
+#[derive(Debug)]
+pub struct ControlQueueFull;
+
+impl std::fmt::Display for ControlQueueFull {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("gossip control queue closure is still pending")
+    }
+}
+
+impl std::error::Error for ControlQueueFull {}
+
 /// Error associated with publishing a gossipsub message.
 #[derive(Debug)]
 pub enum PublishError {

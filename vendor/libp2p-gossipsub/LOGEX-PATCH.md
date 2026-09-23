@@ -29,7 +29,8 @@ patched vendor Rust files because this package is excluded from the workspace.
 The published normalized manifest omitted the upstream `quickcheck` test
 edge. The local manifest restores it at 1.0.3; its standalone lockfile also adds
 env_logger 0.8.4 and uses lock format 4, without changing earlier locked versions.
-The retained upstream integration `smoke` target additionally requires additional
-test support (`libp2p-swarm-test`) omitted from the published manifest; it is not part of the standalone library gate.
+The retained upstream integration `smoke` target requires test support
+(`libp2p-swarm-test`) omitted from the published manifest; it is not part of the
+standalone library gate.
 The original sources, manifest and lockfile are recoverable from the inventory
 and complete diff. The library tests and strict library Clippy remain required.
