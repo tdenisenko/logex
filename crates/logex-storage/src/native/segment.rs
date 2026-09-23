@@ -550,6 +550,33 @@ pub(crate) fn write_bundled_rows(
     write_bundled_rows_with_callback(segment_dir, rows, || Ok(())).map(|(columns, ())| columns)
 }
 
+/// Encode an exclusively new staging segment without adopting or removing files.
+/// The caller owns the staging parent and supplies independently verified flags.
+pub(super) fn write_repair_bundle(
+    segment_dir: &Path,
+    rows: &[LogRow],
+    canonical: &NullBitmap,
+) -> std::io::Result<EncodedColumns> {
+    let count = u64::try_from(rows.len()).map_err(std::io::Error::other)?;
+    if count > u64::from(u32::MAX) || canonical.len() != count {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "repair rows exceed addressing or differ from canonical flags",
+        ));
+    }
+    fs::create_dir(segment_dir)?;
+    fs::create_dir(segment_dir.join("columns"))?;
+    let mut output = PageOutput::new(segment_dir);
+    output.bundle = Some((BundleWriter::create(&segment_dir.join(BUNDLE_PATH))?, count));
+    output.canonical = Some(canonical.clone());
+    output.append_canonical(0)?;
+    let columns = write_compacted_values(&output, rows)?;
+    Ok(EncodedColumns {
+        columns,
+        bundle: output.finish()?,
+    })
+}
+
 /// Only new historical bundles may overlap hashing with column encoding. Check
 /// the exact empty origin before any directory creation or replacement.
 pub(crate) fn write_new_historical_bundle(
@@ -1330,22 +1357,7 @@ fn persist_manifest(
     let segment_dir = paths.segment_dir(descriptor.id);
     fs::create_dir_all(&segment_dir)?;
 
-    let manifest = SegmentManifest {
-        column_bundle: descriptor.column_bundle.clone(),
-        format_version: super::catalog::STORAGE_FORMAT_VERSION,
-        segment_id: descriptor.id,
-        source_namespace: descriptor.source_namespace,
-        source_commitment: descriptor.source_commitment,
-        generation: descriptor.generation,
-        kind: descriptor.kind,
-        min_block: descriptor.min_block,
-        max_block: descriptor.max_block,
-        min_timestamp: descriptor.min_timestamp,
-        max_timestamp: descriptor.max_timestamp,
-        row_count: descriptor.row_count,
-        canonical_rows_path: "canonical.bitmap".to_owned(),
-        columns,
-    };
+    let manifest = manifest_with_columns(descriptor, columns);
 
     let path = paths.segment_manifest_path(descriptor.id);
     let json = serde_json::to_vec(&manifest).map_err(std::io::Error::other)?;
@@ -1361,6 +1373,28 @@ fn persist_manifest(
             durability::publish_tree_ordered(&segment_dir, &path, &json, &paths.catalog_path())
         }
         Publication::Durable => durability::publish_tree(&segment_dir, &path, &json),
+    }
+}
+
+pub(super) fn manifest_with_columns(
+    descriptor: &SegmentDescriptor,
+    columns: Vec<ColumnDescriptor>,
+) -> SegmentManifest {
+    SegmentManifest {
+        column_bundle: descriptor.column_bundle.clone(),
+        format_version: super::catalog::STORAGE_FORMAT_VERSION,
+        segment_id: descriptor.id,
+        source_namespace: descriptor.source_namespace,
+        source_commitment: descriptor.source_commitment,
+        generation: descriptor.generation,
+        kind: descriptor.kind,
+        min_block: descriptor.min_block,
+        max_block: descriptor.max_block,
+        min_timestamp: descriptor.min_timestamp,
+        max_timestamp: descriptor.max_timestamp,
+        row_count: descriptor.row_count,
+        canonical_rows_path: "canonical.bitmap".to_owned(),
+        columns,
     }
 }
 
@@ -2029,6 +2063,16 @@ where
         previous.map(|p| p.entries.clone()).unwrap_or_default()
     };
     let mut offset = previous.map_or(0, |p| p.encoded_bytes);
+
+    // A new empty bundled column still owns a zero-length data stream. Raw
+    // columns get an empty file above; without this equivalent bundle entry,
+    // a complete empty replacement would fail the reader's schema check.
+    if row_count == 0
+        && previous.is_none()
+        && let Some((bundle, _)) = &output.bundle
+    {
+        bundle.append_data(stream_id(&data_rel)?, &[])?;
+    }
 
     let mut start = 0usize;
     while start < row_count {

@@ -4,17 +4,21 @@
 //! completion cannot be supplied separately from the blocks actually consumed.
 //! Anchors come from the retained consensus store. Every completion must still
 //! be admitted against one current snapshot immediately before publication.
-//! These objects do not verify staged files or implement durable publication.
-use std::collections::{BTreeMap, BTreeSet};
+//! Replacement staging verifies files and derived indexes without publication.
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::Path,
+};
 
 use alloy_primitives::B256;
 use eyre::{Result, WrapErr};
 use logex_cl::ConsensusStore;
+use logex_index::{IndexBuildProfile, IndexBuilder};
 use logex_storage::{
     NullBitmap,
     native::{
-        RepairCandidateVerifier, RepairOwnershipPlan, RepairReadLimits, SegmentDescriptor,
-        VerifiedRepairCandidate,
+        InspectionLimits, RepairCandidateVerifier, RepairOwnershipPlan, RepairReadLimits,
+        SegmentDescriptor, StagedRepairCandidate, VerifiedRepairCandidate,
     },
 };
 use logex_types::{LogRow, Source};
@@ -324,8 +328,8 @@ impl<'a> RepairReconstruction<'a> {
     }
 
     /// Check complete block coverage and exact original segments before returning
-    /// immutable rows and canonical flags. Staging, index rebuilding and journal
-    /// publication remain separate work. The result retains the operation lifetime
+    /// immutable rows and canonical flags. Explicit staging and journaled
+    /// publication follow separately. The result retains the operation lifetime
     /// for a fresh current-anchor and cancellation check at publication admission.
     pub fn finish(self) -> Result<ReconstructedRepair<'a>> {
         ensure_repair!(
@@ -381,8 +385,8 @@ impl<'a> RepairReconstruction<'a> {
 }
 
 /// Exact local equivalence and complete fetch transcripts, under the original
-/// directory owner. The caller remains responsible for staged-file verification
-/// and durable publication inside a fresh current-anchor admission.
+/// directory owner. Stage replacements explicitly, then retain final artifact
+/// verification and durable publication inside a fresh current-anchor admission.
 #[derive(Debug)]
 pub struct ReconstructedRepair<'a> {
     plan: &'a RepairOwnershipPlan,
@@ -392,7 +396,7 @@ pub struct ReconstructedRepair<'a> {
     cancellation: CancellationToken,
 }
 
-impl ReconstructedRepair<'_> {
+impl<'a> ReconstructedRepair<'a> {
     pub fn plan(&self) -> &RepairOwnershipPlan {
         self.plan
     }
@@ -401,6 +405,58 @@ impl ReconstructedRepair<'_> {
     }
     pub fn completions(&self) -> &[RepairCompletion] {
         &self.completions
+    }
+
+    /// Build one provisional replacement and its selected derived indexes.
+    /// Run on the maintenance worker under the retained original directory owner.
+    /// The caller reserves a fresh destination beneath an existing staging parent
+    /// and accounts for disk headroom/journal recovery before invoking this step.
+    /// Failed stages are retained. This does not allocate final catalog identities
+    /// or replace the fresh whole-transcript admission required at publication.
+    pub fn stage_segment(
+        &self,
+        segment_id: u64,
+        destination: &Path,
+        limits: InspectionLimits,
+        profile: IndexBuildProfile,
+    ) -> Result<StagedRepairCandidate<'a>> {
+        check_active(self.deadline, &self.cancellation)?;
+        let segment = self
+            .segments
+            .iter()
+            .find(|segment| segment.descriptor().id == segment_id)
+            .ok_or_else(|| {
+                failure(
+                    RepairFetchErrorKind::InvalidInput,
+                    eyre::eyre!("segment is not part of the completed repair reconstruction"),
+                )
+            })?;
+        let build = || {
+            let staged = segment.proof.stage(destination, &segment.rows, limits)?;
+            check_active(self.deadline, &self.cancellation)?;
+            let dir = staged.segment_dir();
+            IndexBuilder::build_indexes(&dir, profile)?;
+            check_active(self.deadline, &self.cancellation)?;
+            staged.verify()?;
+            ensure_repair!(
+                !IndexBuilder::indexes_missing(&dir, profile)?,
+                Local,
+                "repair stage is missing a required derived index"
+            );
+            check_active(self.deadline, &self.cancellation)?;
+            Ok(staged)
+        };
+        build().map_err(|error: eyre::Report| {
+            let error = error.wrap_err(format!(
+                "stage repair segment {segment_id} at {}",
+                destination.display()
+            ));
+            if error.downcast_ref::<super::RepairFetchError>().is_some() {
+                error
+            } else {
+                failure(RepairFetchErrorKind::Local, error)
+            }
+        })
     }
 
     /// Admit one synchronous operation only while every completion anchor is

@@ -29,5 +29,5 @@ pub use inspection::{
 };
 pub use repair::{
     RepairCandidateVerifier, RepairOwnershipPlan, RepairPlanLimits, RepairReadLimits,
-    RepairRowInput, VerifiedRepairCandidate,
+    RepairRowInput, StagedRepairCandidate, VerifiedRepairCandidate,
 };

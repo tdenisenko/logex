@@ -12,14 +12,14 @@ use std::{
     time::SystemTime,
 };
 
-fn inspection_limits() -> InspectionLimits {
+pub(super) fn inspection_limits() -> InspectionLimits {
     InspectionLimits {
         max_segment_rows: 100,
         max_retained_artifact_bytes: 16 * 1024 * 1024,
         max_decoded_payload_bytes: 1024 * 1024,
     }
 }
-fn limits() -> RepairPlanLimits {
+pub(super) fn limits() -> RepairPlanLimits {
     RepairPlanLimits {
         max_segments: 20,
         max_blocks: 100,
@@ -52,7 +52,11 @@ fn rows() -> Vec<LogRow> {
         })
         .collect()
 }
-fn fixture(bundled: bool, target: u64, noncanonical: bool) -> (tempfile::TempDir, Vec<LogRow>) {
+pub(super) fn fixture(
+    bundled: bool,
+    target: u64,
+    noncanonical: bool,
+) -> (tempfile::TempDir, Vec<LogRow>) {
     let tmp = tempfile::tempdir().unwrap();
     let data = rows();
     let mut storage = NativeStorage::open(NativeStorageConfig {
@@ -73,10 +77,10 @@ fn fixture(bundled: bool, target: u64, noncanonical: bool) -> (tempfile::TempDir
     drop(storage);
     (tmp, data)
 }
-fn inspect(path: &Path) -> PrimaryDataInspection {
+pub(super) fn inspect(path: &Path) -> PrimaryDataInspection {
     inspect_primary_data(path, inspection_limits()).unwrap()
 }
-fn data_id(report: &PrimaryDataInspection) -> u64 {
+pub(super) fn data_id(report: &PrimaryDataInspection) -> u64 {
     report
         .catalog
         .segments
