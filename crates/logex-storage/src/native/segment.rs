@@ -1396,8 +1396,8 @@ pub(crate) fn compact_ingest_segment(
     }
 
     let segment_dir = paths.segment_dir(descriptor.id);
-    fs::create_dir_all(segment_dir.join("columns"))?;
     verify_raw_segment_files_complete(descriptor, &segment_dir)?;
+    fs::create_dir_all(segment_dir.join("columns"))?;
 
     let output = PageOutput::new(&segment_dir);
     let columns = thread::scope(|scope| {
@@ -2176,7 +2176,7 @@ fn verify_raw_bitmap_file(
                 "canonical row-count mismatch",
             ));
         }
-        return Ok(());
+        return metadata.validate_payload_reader(&mut file);
     }
     let mut len_bytes = [0u8; 8];
     file.read_exact(&mut len_bytes).map_err(|error| {
@@ -2505,6 +2505,47 @@ mod tests {
             ),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn canonical_bitmap_integrity_bit_corruption_prevents_raw_compaction() {
+        let tmp = TempDir::new().unwrap();
+        let paths = StorageCatalogPaths::new(tmp.path().to_owned());
+        let config = super::super::catalog::NativeStorageConfig {
+            data_dir: tmp.path().to_owned(),
+            ..Default::default()
+        };
+        let (mut catalog, _) =
+            super::super::catalog::NativeStorageCatalog::open_or_create(&config).unwrap();
+        let mut descriptor = catalog.allocate_segment(SegmentKind::Sealed).unwrap();
+        let dir = paths.segment_dir(descriptor.id);
+        let rows = &descending_rows()[..50];
+        apply_rows_to_descriptor(&mut descriptor, rows);
+        write_native_raw(&dir, rows, &descriptor);
+        persist_segment_manifest(&paths, &descriptor).unwrap();
+        let path = dir.join("canonical.bitmap");
+        let mut bytes = fs::read(&path).unwrap();
+        bytes[crate::column::CANONICAL_PREFIX_BYTES + 1] ^= 1 << 2;
+        fs::write(&path, bytes).unwrap();
+        let before: std::collections::BTreeMap<_, _> = fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| {
+                let path = entry.unwrap().path();
+                let bytes = fs::read(&path).unwrap();
+                (path, bytes)
+            })
+            .collect();
+
+        let result = compact_segment(&paths, &descriptor);
+        assert!(
+            result.is_err(),
+            "compaction must reject changed canonical bits"
+        );
+        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), before.len());
+        for (path, bytes) in before {
+            assert_eq!(fs::read(path).unwrap(), bytes);
+        }
     }
 
     #[test]

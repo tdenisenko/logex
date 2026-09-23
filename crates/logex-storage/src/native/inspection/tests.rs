@@ -236,6 +236,38 @@ fn inspection_interior_logical_damage_is_not_hidden_by_boundary_rows() {
 }
 
 #[test]
+fn inspection_canonical_bitmap_integrity_bit_corruption_is_not_commitment_verified() {
+    let tmp = fixture(false);
+    let paths = StorageCatalogPaths::new(tmp.path().to_owned());
+    let catalog = NativeStorageCatalog::load_existing(&paths).unwrap();
+    let descriptor = catalog
+        .segments
+        .iter()
+        .find(|segment| segment.row_count != 0)
+        .unwrap();
+    let path = paths.segment_dir(descriptor.id).join("canonical.bitmap");
+    let mut bytes = fs::read(&path).unwrap();
+    // Change one real row's status in this disposable fixture, retaining the
+    // original envelope, length and logical row commitment.
+    bytes[crate::column::CANONICAL_PREFIX_BYTES + 1] ^= 1 << 2;
+    fs::write(path, bytes).unwrap();
+    let before = tree(tmp.path());
+    let report = inspect_primary_data(tmp.path(), limits()).unwrap();
+    assert!(
+        matches!(
+            data_segment(&report).disposition,
+            PrimaryDataDisposition::Incomplete {
+                kind: io::ErrorKind::InvalidData,
+                ..
+            }
+        ),
+        "changed row status must fail integrity inspection: {:?}",
+        data_segment(&report).disposition
+    );
+    assert_eq!(tree(tmp.path()), before);
+}
+
+#[test]
 fn inspection_missing_committed_artifact_is_incomplete_and_preserved() {
     let tmp = fixture(false);
     let paths = StorageCatalogPaths::new(tmp.path().to_owned());

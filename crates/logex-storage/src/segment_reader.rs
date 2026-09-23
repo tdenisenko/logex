@@ -2525,8 +2525,8 @@ mod tests {
                 let path = dir.join("canonical.bitmap");
                 let mut bytes = fs::read(&path).unwrap();
                 bytes[9] = 1;
-                let crc = crc32fast::hash(&bytes[..128]);
-                bytes[128..132].copy_from_slice(&crc.to_le_bytes());
+                let crc = crc32fast::hash(&bytes[..132]);
+                bytes[132..136].copy_from_slice(&crc.to_le_bytes());
                 fs::write(path, bytes).unwrap();
                 assert_eq!(
                     SegmentReader::open(&dir).unwrap_err().kind(),
