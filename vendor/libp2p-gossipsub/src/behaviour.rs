@@ -135,6 +135,11 @@ impl MessageAuthenticity {
 }
 
 /// Event that can be emitted by the gossipsub behaviour.
+///
+/// Subscription, unsupported-protocol and slow-peer notices are best-effort
+/// advisories. When their configured queue capacity is full, admitted advisories
+/// remain queued and excess new advisories are omitted. Message delivery and
+/// critical control-queue closure use separate admission and ownership paths.
 #[derive(Debug)]
 pub enum Event {
     /// A message has been received.
@@ -280,7 +285,11 @@ pub struct Behaviour<D = IdentityTransform, F = AllowAllSubscriptionFilter> {
     config: Config,
 
     /// Events that need to be yielded to the outside when polling.
-    events: VecDeque<ToSwarm<Event, HandlerIn>>,
+    events: crate::event_queue::EventQueue,
+    /// One queued identity per peer with a pending keepalive state.
+    pending_handler_peers: VecDeque<PeerId>,
+    /// Alternate regular events and keepalive state when both await delivery.
+    prefer_handler_notification: bool,
 
     /// Information used for publishing messages.
     publish_config: PublishConfig,
@@ -450,7 +459,9 @@ where
         Ok(Behaviour {
             #[cfg(feature = "metrics")]
             metrics: None,
-            events: VecDeque::new(),
+            events: crate::event_queue::EventQueue::new(*config.queue_limits()),
+            pending_handler_peers: VecDeque::new(),
+            prefer_handler_notification: true,
             closing_peers: HashMap::new(),
             publish_config: privacy.into(),
             duplicate_cache: DuplicateCache::with_limits(
@@ -1132,8 +1143,9 @@ where
                 peer_id,
                 vec![topic_hash],
                 &self.mesh,
-                &mut self.events,
-                &self.connected_peers,
+                &mut self.pending_handler_peers,
+                &mut self.connected_peers,
+                &self.closing_peers,
             );
         }
 
@@ -1233,8 +1245,9 @@ where
                     peer_id,
                     topic_hash,
                     &self.mesh,
-                    &mut self.events,
-                    &self.connected_peers,
+                    &mut self.pending_handler_peers,
+                    &mut self.connected_peers,
+                    &self.closing_peers,
                 );
             }
         }
@@ -1579,8 +1592,9 @@ where
                         *peer_id,
                         vec![&topic_hash],
                         &self.mesh,
-                        &mut self.events,
-                        &self.connected_peers,
+                        &mut self.pending_handler_peers,
+                        &mut self.connected_peers,
+                        &self.closing_peers,
                     );
 
                     if let PeerScoreState::Active(peer_score) = &mut self.peer_score {
@@ -1648,8 +1662,9 @@ where
                     *peer_id,
                     topic_hash,
                     &self.mesh,
-                    &mut self.events,
-                    &self.connected_peers,
+                    &mut self.pending_handler_peers,
+                    &mut self.connected_peers,
+                    &self.closing_peers,
                 );
             }
         }
@@ -2054,7 +2069,8 @@ where
 
             match subscription.action {
                 SubscriptionAction::Subscribe => {
-                    if peer.topics.insert(topic_hash.clone()) {
+                    let membership_changed = peer.topics.insert(topic_hash.clone());
+                    if membership_changed {
                         tracing::debug!(
                             peer=%propagation_source,
                             topic=%topic_hash,
@@ -2104,14 +2120,16 @@ where
                             }
                         }
                     }
-                    // generates a subscription event to be polled
-                    application_event.push(ToSwarm::GenerateEvent(Event::Subscribed {
-                        peer_id: *propagation_source,
-                        topic: topic_hash.clone(),
-                    }));
+                    if membership_changed {
+                        application_event.push(ToSwarm::GenerateEvent(Event::Subscribed {
+                            peer_id: *propagation_source,
+                            topic: topic_hash.clone(),
+                        }));
+                    }
                 }
                 SubscriptionAction::Unsubscribe => {
-                    if peer.topics.remove(topic_hash) {
+                    let membership_changed = peer.topics.remove(topic_hash);
+                    if membership_changed {
                         tracing::debug!(
                             peer=%propagation_source,
                             topic=%topic_hash,
@@ -2125,11 +2143,12 @@ where
                     }
 
                     unsubscribed_peers.push((*propagation_source, topic_hash.clone()));
-                    // generate an unsubscribe event to be polled
-                    application_event.push(ToSwarm::GenerateEvent(Event::Unsubscribed {
-                        peer_id: *propagation_source,
-                        topic: topic_hash.clone(),
-                    }));
+                    if membership_changed {
+                        application_event.push(ToSwarm::GenerateEvent(Event::Unsubscribed {
+                            peer_id: *propagation_source,
+                            topic: topic_hash.clone(),
+                        }));
+                    }
                 }
             }
         }
@@ -2154,8 +2173,9 @@ where
                 *propagation_source,
                 topics_joined,
                 &self.mesh,
-                &mut self.events,
-                &self.connected_peers,
+                &mut self.pending_handler_peers,
+                &mut self.connected_peers,
+                &self.closing_peers,
             );
         }
 
@@ -2734,8 +2754,9 @@ where
                     peer_id,
                     vec![topic],
                     &self.mesh,
-                    &mut self.events,
-                    &self.connected_peers,
+                    &mut self.pending_handler_peers,
+                    &mut self.connected_peers,
+                    &self.closing_peers,
                 );
             }
             let rpc_msgs = topics.iter().map(|topic_hash| {
@@ -2787,8 +2808,9 @@ where
                     *peer_id,
                     topic_hash,
                     &self.mesh,
-                    &mut self.events,
-                    &self.connected_peers,
+                    &mut self.pending_handler_peers,
+                    &mut self.connected_peers,
+                    &self.closing_peers,
                 );
             }
         }
@@ -3058,9 +3080,54 @@ where
     }
 
     fn discard_peer_notifications(&mut self, peer_id: PeerId) {
-        self.events.retain(|event| {
-            !matches!(event, ToSwarm::NotifyHandler { peer_id: queued_peer, .. } if *queued_peer == peer_id)
-        });
+        if let Some(peer) = self.connected_peers.get_mut(&peer_id) {
+            peer.pending_handler_notification = None;
+        }
+        // Only peer identities are scanned; message/event payloads are untouched.
+        self.pending_handler_peers
+            .retain(|pending| *pending != peer_id);
+    }
+
+    fn next_regular_event(&mut self) -> Option<ToSwarm<Event, HandlerIn>> {
+        // While Swarm waits to deliver a handler notification it can receive
+        // further callbacks. New mesh state must not repeatedly overtake an
+        // already queued message when handler delivery becomes available again.
+        if self.prefer_handler_notification {
+            if let Some(event) = self.next_handler_notification() {
+                self.prefer_handler_notification = false;
+                return Some(event);
+            }
+        }
+        if let Some(event) = self.events.pop_front() {
+            self.prefer_handler_notification = true;
+            return Some(event);
+        }
+        let event = self.next_handler_notification()?;
+        self.prefer_handler_notification = false;
+        Some(event)
+    }
+
+    fn next_handler_notification(&mut self) -> Option<ToSwarm<Event, HandlerIn>> {
+        while let Some(peer_id) = self.pending_handler_peers.pop_front() {
+            let Some(peer) = self.connected_peers.get_mut(&peer_id) else {
+                continue;
+            };
+            let Some(event) = peer.pending_handler_notification.take() else {
+                continue;
+            };
+            if self.closing_peers.contains_key(&peer_id) {
+                continue;
+            }
+            let Some(connection_id) = peer.connections.first().copied() else {
+                continue;
+            };
+            return Some(ToSwarm::NotifyHandler {
+                peer_id,
+                event,
+                handler: NotifyHandler::One(connection_id),
+            });
+        }
+        None
     }
 
     fn next_peer_close(&mut self) -> Option<ToSwarm<Event, HandlerIn>> {
@@ -3164,21 +3231,26 @@ where
                     .expect("Previously established connection to peer must be present");
                 peer.connections.remove(index);
 
-                // If there are more connections and this peer is in a mesh, inform the first
-                // connection handler.
-                if !peer.connections.is_empty() && !self.closing_peers.contains_key(&peer_id) {
-                    for topic in &peer.topics {
-                        if let Some(mesh_peers) = self.mesh.get(topic) {
-                            if mesh_peers.contains(&peer_id) {
-                                self.events.push_back(ToSwarm::NotifyHandler {
-                                    peer_id,
-                                    event: HandlerIn::JoinedMesh,
-                                    handler: NotifyHandler::One(peer.connections[0]),
-                                });
-                                break;
-                            }
-                        }
+                // Only the first connection owns mesh keepalive. If it closed,
+                // carry the current state to its replacement, including any
+                // coalesced transition that had not reached the old handler.
+                if index == 0
+                    && !peer.connections.is_empty()
+                    && !self.closing_peers.contains_key(&peer_id)
+                {
+                    let in_mesh = peer.topics.iter().any(|topic| {
+                        self.mesh
+                            .get(topic)
+                            .is_some_and(|peers| peers.contains(&peer_id))
+                    });
+                    if peer.pending_handler_notification.is_none() {
+                        self.pending_handler_peers.push_back(peer_id);
                     }
+                    peer.pending_handler_notification = Some(if in_mesh {
+                        HandlerIn::JoinedMesh
+                    } else {
+                        HandlerIn::LeftMesh
+                    });
                 }
             }
         } else {
@@ -3308,6 +3380,7 @@ where
         let connected_peer = self.connected_peers.entry(peer_id).or_insert(PeerDetails {
             kind: PeerKind::Floodsub,
             connections: vec![],
+            pending_handler_notification: None,
             outbound: false,
             sender: Sender::new(
                 self.config.connection_handler_queue_len(),
@@ -3343,6 +3416,7 @@ where
         let connected_peer = self.connected_peers.entry(peer_id).or_insert(PeerDetails {
             kind: PeerKind::Floodsub,
             connections: vec![],
+            pending_handler_notification: None,
             // Diverging from the go implementation we only want to consider a peer as outbound peer
             // if its first connection is outbound.
             outbound: !self.px_peers.contains(&peer_id),
@@ -3574,11 +3648,9 @@ where
         if let Some(event) = self.next_peer_close() {
             return Poll::Ready(event);
         }
-        while let Some(event) = self.events.pop_front() {
-            if matches!(&event, ToSwarm::NotifyHandler { peer_id, .. } if self.closing_peers.contains_key(peer_id))
-            {
-                continue;
-            }
+        // Keep message events ahead of heartbeat: in LogEx, each queued message
+        // retains a cache owner until delivery, bounding its retained payload.
+        if let Some(event) = self.next_regular_event() {
             return Poll::Ready(event);
         }
 
@@ -3598,6 +3670,9 @@ where
         }
 
         if let Some(event) = self.next_peer_close() {
+            return Poll::Ready(event);
+        }
+        if let Some(event) = self.next_regular_event() {
             return Poll::Ready(event);
         }
 
@@ -3625,11 +3700,15 @@ fn peer_added_to_mesh(
     peer_id: PeerId,
     new_topics: Vec<&TopicHash>,
     mesh: &HashMap<TopicHash, BTreeSet<PeerId>>,
-    events: &mut VecDeque<ToSwarm<Event, HandlerIn>>,
-    connections: &HashMap<PeerId, PeerDetails>,
+    pending_peers: &mut VecDeque<PeerId>,
+    connections: &mut HashMap<PeerId, PeerDetails>,
+    closing_peers: &HashMap<PeerId, CloseState>,
 ) {
     // Ensure there is an active connection
-    let connection_id = match connections.get(&peer_id) {
+    if closing_peers.contains_key(&peer_id) {
+        return;
+    }
+    match connections.get(&peer_id) {
         Some(p) => p
             .connections
             .first()
@@ -3653,25 +3732,25 @@ fn peer_added_to_mesh(
         }
     }
     // This is the first mesh the peer has joined, inform the handler
-    events.push_back(ToSwarm::NotifyHandler {
-        peer_id,
-        event: HandlerIn::JoinedMesh,
-        handler: NotifyHandler::One(*connection_id),
-    });
+    queue_handler_notification(peer_id, HandlerIn::JoinedMesh, pending_peers, connections);
 }
 
 /// This is called when peers are removed from a mesh. It checks if the peer exists
-/// in any other mesh. If this is the last mesh they have joined, we return true, in order to
-/// notify the handler to no longer maintain a connection.
+/// in any other mesh. If this was their last mesh, it queues the handler state
+/// that no longer requires keeping the connection alive.
 fn peer_removed_from_mesh(
     peer_id: PeerId,
     old_topic: &TopicHash,
     mesh: &HashMap<TopicHash, BTreeSet<PeerId>>,
-    events: &mut VecDeque<ToSwarm<Event, HandlerIn>>,
-    connections: &HashMap<PeerId, PeerDetails>,
+    pending_peers: &mut VecDeque<PeerId>,
+    connections: &mut HashMap<PeerId, PeerDetails>,
+    closing_peers: &HashMap<PeerId, CloseState>,
 ) {
     // Ensure there is an active connection
-    let connection_id = match connections.get(&peer_id) {
+    if closing_peers.contains_key(&peer_id) {
+        return;
+    }
+    match connections.get(&peer_id) {
         Some(p) => p
             .connections
             .first()
@@ -3695,11 +3774,22 @@ fn peer_removed_from_mesh(
         }
     }
     // The peer is not in any other mesh, inform the handler
-    events.push_back(ToSwarm::NotifyHandler {
-        peer_id,
-        event: HandlerIn::LeftMesh,
-        handler: NotifyHandler::One(*connection_id),
-    });
+    queue_handler_notification(peer_id, HandlerIn::LeftMesh, pending_peers, connections);
+}
+
+/// Mesh transitions are level-triggered: only the latest in-mesh state matters.
+fn queue_handler_notification(
+    peer_id: PeerId,
+    event: HandlerIn,
+    pending_peers: &mut VecDeque<PeerId>,
+    connections: &mut HashMap<PeerId, PeerDetails>,
+) {
+    let Some(peer) = connections.get_mut(&peer_id) else {
+        return;
+    };
+    if peer.pending_handler_notification.replace(event).is_none() {
+        pending_peers.push_back(peer_id);
+    }
 }
 
 /// Helper function to get a subset of random gossipsub peers for a `topic_hash`

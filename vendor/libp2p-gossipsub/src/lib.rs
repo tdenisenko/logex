@@ -98,6 +98,7 @@ mod backoff;
 mod behaviour;
 mod config;
 mod error;
+mod event_queue;
 mod gossip_promises;
 mod handler;
 mod mcache;

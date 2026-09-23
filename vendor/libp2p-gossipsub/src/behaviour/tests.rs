@@ -245,6 +245,7 @@ where
     gs.connected_peers.insert(
         peer,
         PeerDetails {
+            pending_handler_notification: None,
             kind: kind.unwrap_or(PeerKind::Floodsub),
             outbound,
             connections: vec![connection_id],
@@ -634,6 +635,7 @@ fn test_join() {
         gs.connected_peers.insert(
             random_peer,
             PeerDetails {
+                pending_handler_notification: None,
                 kind: PeerKind::Floodsub,
                 outbound: false,
                 connections: vec![connection_id],
@@ -1028,6 +1030,7 @@ fn test_get_random_peers() {
         gs.connected_peers.insert(
             peer_id,
             PeerDetails {
+                pending_handler_notification: None,
                 kind: PeerKind::Gossipsubv1_1,
                 connections: vec![ConnectionId::new_unchecked(0)],
                 outbound: false,
@@ -3198,12 +3201,10 @@ fn test_ignore_rpc_from_peers_below_graylist_threshold() {
         },
     );
 
-    // only the subscription event gets processed, the rest is dropped
-    assert_eq!(gs.events.len(), 1);
-    assert!(matches!(
-        gs.events[0],
-        ToSwarm::GenerateEvent(Event::Subscribed { .. })
-    ));
+    // Subscription state is processed, but the duplicate adds no advisory;
+    // payload and control processing remain suppressed for the graylisted peer.
+    assert!(gs.connected_peers[&p1].topics.contains(&topics[0]));
+    assert!(gs.events.is_empty());
 
     let control_action = ControlAction::IHave(IHave {
         topic_hash: topics[0].clone(),
@@ -3224,8 +3225,9 @@ fn test_ignore_rpc_from_peers_below_graylist_threshold() {
         },
     );
 
-    // events got processed
-    assert!(gs.events.len() > 1);
+    // The non-graylisted peer's payload is processed despite its duplicate subscription.
+    assert!(gs.events.iter().any(|event| matches!(event,
+        ToSwarm::GenerateEvent(Event::Message { propagation_source, .. }) if *propagation_source == p2)));
 }
 
 #[test]
@@ -5634,6 +5636,7 @@ fn test_all_queues_full() {
     gs.connected_peers.insert(
         peer_id,
         PeerDetails {
+            pending_handler_notification: None,
             kind: PeerKind::Gossipsubv1_1,
             connections: vec![ConnectionId::new_unchecked(0)],
             outbound: false,
@@ -5670,6 +5673,7 @@ fn test_slow_peer_returns_failed_publish() {
     gs.connected_peers.insert(
         slow_peer_id,
         PeerDetails {
+            pending_handler_notification: None,
             kind: PeerKind::Gossipsubv1_1,
             connections: vec![ConnectionId::new_unchecked(0)],
             outbound: false,
@@ -5683,6 +5687,7 @@ fn test_slow_peer_returns_failed_publish() {
     gs.connected_peers.insert(
         peer_id,
         PeerDetails {
+            pending_handler_notification: None,
             kind: PeerKind::Gossipsubv1_1,
             connections: vec![ConnectionId::new_unchecked(0)],
             outbound: false,
@@ -5747,6 +5752,7 @@ fn test_slow_peer_returns_failed_ihave_handling() {
     gs.connected_peers.insert(
         slow_peer_id,
         PeerDetails {
+            pending_handler_notification: None,
             kind: PeerKind::Gossipsubv1_1,
             connections: vec![ConnectionId::new_unchecked(0)],
             outbound: false,
@@ -5764,6 +5770,7 @@ fn test_slow_peer_returns_failed_ihave_handling() {
     gs.connected_peers.insert(
         peer_id,
         PeerDetails {
+            pending_handler_notification: None,
             kind: PeerKind::Gossipsubv1_1,
             connections: vec![ConnectionId::new_unchecked(0)],
             outbound: false,
@@ -5818,12 +5825,12 @@ fn test_slow_peer_returns_failed_ihave_handling() {
 
     let slow_peer_failed_messages = gs
         .events
-        .into_iter()
+        .iter()
         .find_map(|e| match e {
             ToSwarm::GenerateEvent(Event::SlowPeer {
                 peer_id,
                 failed_messages,
-            }) if peer_id == slow_peer_id => Some(failed_messages),
+            }) if *peer_id == slow_peer_id => Some(failed_messages),
             _ => None,
         })
         .unwrap();
@@ -5864,6 +5871,7 @@ fn test_slow_peer_returns_failed_iwant_handling() {
     gs.connected_peers.insert(
         slow_peer_id,
         PeerDetails {
+            pending_handler_notification: None,
             kind: PeerKind::Gossipsubv1_1,
             connections: vec![ConnectionId::new_unchecked(0)],
             outbound: false,
@@ -5881,6 +5889,7 @@ fn test_slow_peer_returns_failed_iwant_handling() {
     gs.connected_peers.insert(
         peer_id,
         PeerDetails {
+            pending_handler_notification: None,
             kind: PeerKind::Gossipsubv1_1,
             connections: vec![ConnectionId::new_unchecked(0)],
             outbound: false,
@@ -5915,12 +5924,12 @@ fn test_slow_peer_returns_failed_iwant_handling() {
 
     let slow_peer_failed_messages = gs
         .events
-        .into_iter()
+        .iter()
         .find_map(|e| match e {
             ToSwarm::GenerateEvent(Event::SlowPeer {
                 peer_id,
                 failed_messages,
-            }) if peer_id == slow_peer_id => Some(failed_messages),
+            }) if *peer_id == slow_peer_id => Some(failed_messages),
             _ => None,
         })
         .unwrap();
@@ -5961,6 +5970,7 @@ fn test_slow_peer_returns_failed_forward() {
     gs.connected_peers.insert(
         slow_peer_id,
         PeerDetails {
+            pending_handler_notification: None,
             kind: PeerKind::Gossipsubv1_1,
             connections: vec![ConnectionId::new_unchecked(0)],
             outbound: false,
@@ -5978,6 +5988,7 @@ fn test_slow_peer_returns_failed_forward() {
     gs.connected_peers.insert(
         peer_id,
         PeerDetails {
+            pending_handler_notification: None,
             kind: PeerKind::Gossipsubv1_1,
             connections: vec![ConnectionId::new_unchecked(0)],
             outbound: false,
@@ -6012,12 +6023,12 @@ fn test_slow_peer_returns_failed_forward() {
 
     let slow_peer_failed_messages = gs
         .events
-        .into_iter()
+        .iter()
         .find_map(|e| match e {
             ToSwarm::GenerateEvent(Event::SlowPeer {
                 peer_id,
                 failed_messages,
-            }) if peer_id == slow_peer_id => Some(failed_messages),
+            }) if *peer_id == slow_peer_id => Some(failed_messages),
             _ => None,
         })
         .unwrap();
@@ -6063,6 +6074,7 @@ fn test_slow_peer_is_downscored_on_publish() {
     gs.connected_peers.insert(
         slow_peer_id,
         PeerDetails {
+            pending_handler_notification: None,
             kind: PeerKind::Gossipsubv1_1,
             connections: vec![ConnectionId::new_unchecked(0)],
             outbound: false,
@@ -6077,6 +6089,7 @@ fn test_slow_peer_is_downscored_on_publish() {
     gs.connected_peers.insert(
         peer_id,
         PeerDetails {
+            pending_handler_notification: None,
             kind: PeerKind::Gossipsubv1_1,
             connections: vec![ConnectionId::new_unchecked(0)],
             outbound: false,
@@ -6695,6 +6708,7 @@ fn test_validation_error_message_size_too_large_topic_specific() {
         .to_subscribe(true)
         .gs_config(config)
         .create_network();
+    gs.events.clear();
 
     let data = vec![0u8; max_size + 1];
     let raw_message = RawMessage {
@@ -6729,9 +6743,6 @@ fn test_validation_error_message_size_too_large_topic_specific() {
         }) => {
             assert_eq!(propagation_source, peers[0]);
             assert_eq!(message.data.len(), max_size + 1);
-        }
-        ToSwarm::NotifyHandler { peer_id, .. } => {
-            assert_eq!(peer_id, peers[0]);
         }
         _ => panic!("Unexpected event"),
     }
@@ -6799,6 +6810,7 @@ fn test_validation_message_size_within_topic_specific() {
         .to_subscribe(true)
         .gs_config(config)
         .create_network();
+    gs.events.clear();
 
     let data = vec![0u8; max_size - 100];
     let raw_message = RawMessage {
@@ -6833,9 +6845,6 @@ fn test_validation_message_size_within_topic_specific() {
         }) => {
             assert_eq!(propagation_source, peers[0]);
             assert_eq!(message.data.len(), max_size - 100);
-        }
-        ToSwarm::NotifyHandler { peer_id, .. } => {
-            assert_eq!(peer_id, peers[0]);
         }
         _ => panic!("Unexpected event"),
     }
@@ -7550,17 +7559,24 @@ fn logex_control_overflow_preserves_admitted_work_and_closes_only_saturated_peer
     logex_drain_cache_test_queues(&mut receivers);
     let saturated = peers[0];
     let healthy = peers[1];
+    assert!(gs.subscribe(&Topic::new("t")).unwrap());
+    logex_drain_cache_test_queues(&mut receivers);
+    logex_deliver_subscription(
+        &mut gs,
+        saturated,
+        Topic::new("t").hash(),
+        SubscriptionAction::Subscribe,
+    );
+    assert!(gs.connected_peers[&saturated]
+        .pending_handler_notification
+        .is_some());
+    logex_drain_cache_test_queues(&mut receivers);
     let admitted = Topic::new("already-queued").hash();
     for _ in 0..2 {
         assert!(gs.send_message(saturated, RpcOut::Subscribe(admitted.clone())));
     }
-    gs.events.push_back(ToSwarm::NotifyHandler {
-        peer_id: saturated,
-        handler: NotifyHandler::Any,
-        event: HandlerIn::JoinedMesh,
-    });
     // Real subscription production encounters the reserved control bound.
-    assert!(gs.subscribe(&Topic::new("t")).unwrap());
+    assert!(gs.subscribe(&Topic::new("u")).unwrap());
     assert!(gs.closing_peers.contains_key(&saturated));
     assert!(!gs.closing_peers.contains_key(&healthy));
     let retained = receivers.get_mut(&saturated).unwrap().drain_priority();
@@ -7572,7 +7588,7 @@ fn logex_control_overflow_preserves_admitted_work_and_closes_only_saturated_peer
         .unwrap()
         .drain_priority()
         .into_iter()
-        .any(|rpc| matches!(rpc, RpcOut::Subscribe(topic) if topic == Topic::new("t").hash())));
+        .any(|rpc| matches!(rpc, RpcOut::Subscribe(topic) if topic == Topic::new("u").hash())));
     let backlog = gs.events.len();
     for _ in 0..4 {
         assert!(!gs.send_message(
@@ -7624,8 +7640,10 @@ fn logex_control_overflow_preserves_admitted_work_and_closes_only_saturated_peer
         connection: libp2p_swarm::CloseConnection::All,
     }) if peer_id == saturated)
     );
-    assert!(!gs.events.iter().any(|event| matches!(event,
-        ToSwarm::NotifyHandler { peer_id, .. } if *peer_id == saturated)));
+    assert!(gs.connected_peers[&saturated]
+        .pending_handler_notification
+        .is_none());
+    assert!(!gs.pending_handler_peers.contains(&saturated));
     // Drain only the finite existing backlog, then check closure is not repeated.
     for _ in 0..=backlog {
         assert!(!matches!(
@@ -7796,4 +7814,456 @@ fn logex_oversized_queued_messages_do_not_penalize_an_idle_peer() {
         assert!(!gs.closing_peers.contains_key(&peer));
         assert!(gs.events.is_empty());
     }
+}
+
+// Models permitted callback delivery before the next Behaviour poll, not a
+// reproduction of a stalled real Swarm channel. No heartbeat is forced here.
+#[test]
+fn logex_duplicate_subscribe_emits_only_membership_transition() {
+    let topic = Topic::new("allowed").hash();
+    let config = ConfigBuilder::default()
+        .heartbeat_interval(Duration::from_secs(60))
+        .build()
+        .unwrap();
+    let (mut gs, peers, _receivers, _) =
+        inject_nodes::<IdentityTransform, WhitelistSubscriptionFilter>()
+            .peer_no(1)
+            .topics(vec!["allowed".into()])
+            .subscription_filter(WhitelistSubscriptionFilter(HashSet::from([topic.clone()])))
+            .gs_config(config)
+            .create_network();
+    let peer = peers[0];
+    for action in [
+        SubscriptionAction::Subscribe,
+        SubscriptionAction::Subscribe,
+        SubscriptionAction::Subscribe,
+    ] {
+        gs.on_connection_handler_event(
+            peer,
+            ConnectionId::new_unchecked(0),
+            HandlerEvent::Message {
+                rpc: Rpc {
+                    messages: vec![],
+                    subscriptions: vec![Subscription {
+                        action,
+                        topic_hash: topic.clone(),
+                    }],
+                    control_msgs: vec![],
+                },
+                invalid_messages: vec![],
+            },
+        );
+    }
+    let mut subscribed = 0;
+    let mut cx = Context::from_waker(futures::task::noop_waker_ref());
+    for _ in 0..5 {
+        match gs.poll(&mut cx) {
+            Poll::Ready(ToSwarm::GenerateEvent(Event::Subscribed {
+                peer_id,
+                topic: observed,
+            })) if peer_id == peer && observed == topic => subscribed += 1,
+            Poll::Pending => break,
+            _ => {}
+        }
+    }
+    assert!(gs.connected_peers[&peer].topics.contains(&topic));
+    assert_eq!(
+        subscribed, 1,
+        "duplicate subscriptions are not membership transitions"
+    );
+}
+
+// Models two allowed callbacks before notification delivery, not a real
+// Swarm-channel stall. Handler state must reflect only final mesh membership.
+#[test]
+fn logex_deferred_mesh_notification_coalesces_to_final_membership() {
+    let topic = Topic::new("allowed").hash();
+    let config = ConfigBuilder::default()
+        .heartbeat_interval(Duration::from_secs(60))
+        .build()
+        .unwrap();
+    let (mut gs, peers, _receivers, _) =
+        inject_nodes::<IdentityTransform, WhitelistSubscriptionFilter>()
+            .peer_no(1)
+            .topics(vec!["allowed".into()])
+            .subscription_filter(WhitelistSubscriptionFilter(HashSet::from([topic.clone()])))
+            .gs_config(config)
+            .create_network();
+    let peer = peers[0];
+    for action in [
+        SubscriptionAction::Subscribe,
+        SubscriptionAction::Unsubscribe,
+    ] {
+        gs.on_connection_handler_event(
+            peer,
+            ConnectionId::new_unchecked(0),
+            HandlerEvent::Message {
+                rpc: Rpc {
+                    messages: vec![],
+                    subscriptions: vec![Subscription {
+                        action,
+                        topic_hash: topic.clone(),
+                    }],
+                    control_msgs: vec![],
+                },
+                invalid_messages: vec![],
+            },
+        );
+    }
+    let mut notifications = Vec::new();
+    let mut cx = Context::from_waker(futures::task::noop_waker_ref());
+    for _ in 0..5 {
+        match gs.poll(&mut cx) {
+            Poll::Ready(ToSwarm::NotifyHandler { peer_id, event, .. }) if peer_id == peer => {
+                notifications.push(event);
+            }
+            Poll::Pending => break,
+            _ => {}
+        }
+    }
+    assert!(!gs.mesh[&topic].contains(&peer));
+    assert_eq!(
+        notifications.len(),
+        1,
+        "deliver only the latest deferred handler state"
+    );
+    assert!(matches!(notifications[0], HandlerIn::LeftMesh));
+}
+
+fn logex_deliver_subscription(
+    gs: &mut Behaviour,
+    peer: PeerId,
+    topic_hash: TopicHash,
+    action: SubscriptionAction,
+) {
+    gs.on_connection_handler_event(
+        peer,
+        ConnectionId::new_unchecked(0),
+        HandlerEvent::Message {
+            rpc: Rpc {
+                messages: vec![],
+                subscriptions: vec![Subscription { action, topic_hash }],
+                control_msgs: vec![],
+            },
+            invalid_messages: vec![],
+        },
+    );
+}
+
+#[test]
+fn logex_advisory_limits_preserve_membership_and_score_and_reuse_after_poll() {
+    for (count, bytes) in [(1, 100), (10, 1)] {
+        let config = ConfigBuilder::default()
+            .heartbeat_interval(Duration::from_secs(60))
+            .queue_limits(crate::QueueLimits {
+                max_advisory_events: count,
+                max_advisory_bytes: bytes,
+                ..Default::default()
+            })
+            .build()
+            .unwrap();
+        let (mut gs, peers, _, _) = inject_nodes1()
+            .peer_no(1)
+            .scoring(Some((
+                PeerScoreParams::default(),
+                PeerScoreThresholds::default(),
+            )))
+            .gs_config(config)
+            .create_network();
+        let peer = peers[0];
+        let a = Topic::new("a").hash();
+        let b = Topic::new("b").hash();
+        let score = gs.peer_score(&peer).unwrap();
+        logex_deliver_subscription(&mut gs, peer, a.clone(), SubscriptionAction::Subscribe);
+        logex_deliver_subscription(&mut gs, peer, b.clone(), SubscriptionAction::Subscribe);
+        assert_eq!(
+            gs.connected_peers[&peer].topics,
+            BTreeSet::from([a.clone(), b.clone()])
+        );
+        assert_eq!(gs.events.len(), 1);
+        assert_eq!(gs.peer_score(&peer), Some(score));
+        assert!(gs.failed_messages.is_empty());
+        assert!(gs.closing_peers.is_empty());
+        let mut cx = Context::from_waker(futures::task::noop_waker_ref());
+        assert!(
+            matches!(gs.poll(&mut cx), Poll::Ready(ToSwarm::GenerateEvent(
+            Event::Subscribed { peer_id, topic }
+        )) if peer_id == peer && topic == a)
+        );
+        assert!(matches!(gs.poll(&mut cx), Poll::Pending));
+        // Draining the advisory reopens exactly the same bounded allocation.
+        logex_deliver_subscription(&mut gs, peer, b.clone(), SubscriptionAction::Unsubscribe);
+        assert!(!gs.connected_peers[&peer].topics.contains(&b));
+        assert!(
+            matches!(gs.poll(&mut cx), Poll::Ready(ToSwarm::GenerateEvent(
+            Event::Unsubscribed { peer_id, topic }
+        )) if peer_id == peer && topic == b)
+        );
+        assert_eq!(gs.peer_score(&peer), Some(score));
+    }
+}
+
+#[test]
+fn logex_full_advisory_queue_cannot_suppress_control_close_or_final_handler_state() {
+    let config = ConfigBuilder::default()
+        .heartbeat_interval(Duration::from_secs(60))
+        .queue_limits(crate::QueueLimits {
+            max_control_messages: 1,
+            max_advisory_events: 1,
+            max_advisory_bytes: 1,
+            ..Default::default()
+        })
+        .build()
+        .unwrap();
+    let (mut gs, peers, mut receivers, topics) = inject_nodes1()
+        .peer_no(1)
+        .topics(vec!["t".into()])
+        .gs_config(config)
+        .create_network();
+    let peer = peers[0];
+    logex_drain_cache_test_queues(&mut receivers);
+    logex_deliver_subscription(
+        &mut gs,
+        peer,
+        topics[0].clone(),
+        SubscriptionAction::Subscribe,
+    );
+    assert_eq!(gs.events.len(), 1);
+    assert_eq!(gs.pending_handler_peers.len(), 1);
+    // GRAFT from the real subscription filled control capacity. An additional
+    // local subscription must close the peer even while the advisory is full.
+    assert!(gs.subscribe(&Topic::new("u")).unwrap());
+    assert!(gs.closing_peers.contains_key(&peer));
+    assert!(gs.pending_handler_peers.is_empty());
+    assert!(gs.connected_peers[&peer]
+        .pending_handler_notification
+        .is_none());
+    let mut cx = Context::from_waker(futures::task::noop_waker_ref());
+    assert!(
+        matches!(gs.poll(&mut cx), Poll::Ready(ToSwarm::GenerateEvent(
+        Event::ControlQueueFull { peer_id }
+    )) if peer_id == peer)
+    );
+    assert!(
+        matches!(gs.poll(&mut cx), Poll::Ready(ToSwarm::CloseConnection { peer_id, .. }) if peer_id == peer)
+    );
+    assert!(matches!(
+        gs.poll(&mut cx),
+        Poll::Ready(ToSwarm::GenerateEvent(Event::Subscribed { .. }))
+    ));
+    assert!(matches!(gs.poll(&mut cx), Poll::Pending));
+}
+
+#[test]
+fn logex_pending_mesh_state_targets_replacement_first_connection_and_clears_on_disconnect() {
+    let (mut gs, peers, _, topics) = inject_nodes1()
+        .peer_no(1)
+        .topics(vec!["t".into()])
+        .gs_config(
+            ConfigBuilder::default()
+                .heartbeat_interval(Duration::from_secs(60))
+                .build()
+                .unwrap(),
+        )
+        .create_network();
+    let peer = peers[0];
+    let second = ConnectionId::new_unchecked(2);
+    let address = "/ip4/127.0.0.1/tcp/1234".parse::<Multiaddr>().unwrap();
+    let _handler = gs
+        .handle_established_inbound_connection(second, peer, &address, &address)
+        .unwrap();
+    logex_deliver_subscription(
+        &mut gs,
+        peer,
+        topics[0].clone(),
+        SubscriptionAction::Subscribe,
+    );
+    assert_eq!(gs.pending_handler_peers.len(), 1);
+    let endpoint = ConnectedPoint::Dialer {
+        address,
+        role_override: Endpoint::Dialer,
+        port_use: PortUse::Reuse,
+    };
+    gs.on_swarm_event(FromSwarm::ConnectionClosed(ConnectionClosed {
+        peer_id: peer,
+        connection_id: ConnectionId::new_unchecked(0),
+        endpoint: &endpoint,
+        remaining_established: 1,
+        cause: None,
+    }));
+    assert_eq!(gs.pending_handler_peers.len(), 1);
+    let mut cx = Context::from_waker(futures::task::noop_waker_ref());
+    assert!(
+        matches!(gs.poll(&mut cx), Poll::Ready(ToSwarm::NotifyHandler {
+        peer_id,
+        handler: NotifyHandler::One(connection),
+        event: HandlerIn::JoinedMesh,
+    }) if peer_id == peer && connection == second)
+    );
+    logex_deliver_subscription(
+        &mut gs,
+        peer,
+        topics[0].clone(),
+        SubscriptionAction::Unsubscribe,
+    );
+    assert_eq!(gs.pending_handler_peers.len(), 1);
+    gs.on_swarm_event(FromSwarm::ConnectionClosed(ConnectionClosed {
+        peer_id: peer,
+        connection_id: second,
+        endpoint: &endpoint,
+        remaining_established: 0,
+        cause: None,
+    }));
+    assert!(gs.pending_handler_peers.is_empty());
+    assert!(!gs.connected_peers.contains_key(&peer));
+    for _ in 0..3 {
+        assert!(!matches!(
+            gs.poll(&mut cx),
+            Poll::Ready(ToSwarm::NotifyHandler { .. })
+        ));
+    }
+}
+
+#[test]
+fn logex_deferred_message_events_remain_cache_bounded_with_advisories_disabled() {
+    let config = ConfigBuilder::default()
+        .heartbeat_interval(Duration::from_secs(60))
+        .message_id_fn(|message| MessageId::new(&message.data))
+        .cache_limits(crate::CacheLimits {
+            message_entries: 2,
+            ..Default::default()
+        })
+        .queue_limits(crate::QueueLimits {
+            max_advisory_events: 0,
+            max_advisory_bytes: 0,
+            ..Default::default()
+        })
+        .build()
+        .unwrap();
+    let (mut gs, peers, _, topics) = inject_nodes1()
+        .peer_no(1)
+        .topics(vec!["t".into()])
+        .gs_config(config)
+        .create_network();
+    // Three allowed callbacks before polling, with no synthetic cache shift or
+    // heartbeat while application events are pending.
+    for value in 1..=3 {
+        gs.on_connection_handler_event(
+            peers[0],
+            ConnectionId::new_unchecked(0),
+            HandlerEvent::Message {
+                rpc: Rpc {
+                    messages: vec![RawMessage {
+                        source: None,
+                        data: vec![value],
+                        sequence_number: None,
+                        topic: topics[0].clone(),
+                        signature: None,
+                        key: None,
+                        validated: true,
+                    }],
+                    subscriptions: vec![],
+                    control_msgs: vec![],
+                },
+                invalid_messages: vec![],
+            },
+        );
+    }
+    assert_eq!(gs.events.len(), 2);
+    assert_eq!(gs.mcache.usage().0, 2);
+    let mut cx = Context::from_waker(futures::task::noop_waker_ref());
+    for value in 1..=2 {
+        assert!(
+            matches!(gs.poll(&mut cx), Poll::Ready(ToSwarm::GenerateEvent(
+            Event::Message { message_id, .. }
+        )) if message_id == MessageId::new(&[value]))
+        );
+    }
+    assert!(matches!(gs.poll(&mut cx), Poll::Pending));
+    assert!(gs.mcache.contains(&MessageId::new(&[1])));
+    assert!(gs.mcache.contains(&MessageId::new(&[2])));
+    assert!(!gs.mcache.contains(&MessageId::new(&[3])));
+}
+// Models a permitted Swarm schedule: after Behaviour yields a handler notice,
+// blocked handoff allows a pool callback to update mesh membership. The next
+// Behaviour poll occurs after that old handoff succeeds. This exercises the
+// schedule with callbacks, not a real stalled Swarm channel or forced heartbeat.
+#[test]
+fn logex_pending_handler_notifications_share_service_with_queued_messages() {
+    let config = ConfigBuilder::default()
+        .heartbeat_interval(Duration::from_secs(60))
+        .build()
+        .unwrap();
+    let (mut gs, peers, _receivers, topics) = inject_nodes1()
+        .peer_no(1)
+        .topics(vec!["t".into()])
+        .gs_config(config)
+        .create_network();
+    let peer = peers[0];
+    let topic = topics[0].clone();
+    assert!(gs.events.is_empty());
+    assert!(gs.pending_handler_peers.is_empty());
+    gs.on_connection_handler_event(
+        peer,
+        ConnectionId::new_unchecked(0),
+        HandlerEvent::Message {
+            rpc: Rpc {
+                messages: vec![RawMessage {
+                    source: None,
+                    data: vec![1],
+                    sequence_number: None,
+                    topic: topic.clone(),
+                    signature: None,
+                    key: None,
+                    validated: true,
+                }],
+                subscriptions: vec![],
+                control_msgs: vec![],
+            },
+            invalid_messages: vec![],
+        },
+    );
+    logex_deliver_subscription(&mut gs, peer, topic.clone(), SubscriptionAction::Subscribe);
+    let mut cx = Context::from_waker(futures::task::noop_waker_ref());
+    assert!(
+        matches!(gs.poll(&mut cx), Poll::Ready(ToSwarm::NotifyHandler {
+        peer_id,
+        event: HandlerIn::JoinedMesh,
+        ..
+    }) if peer_id == peer)
+    );
+    // A real subscription transition arrives while the yielded JoinedMesh
+    // notification is awaiting handoff; the application Message is still queued.
+    logex_deliver_subscription(
+        &mut gs,
+        peer,
+        topic.clone(),
+        SubscriptionAction::Unsubscribe,
+    );
+    assert!(
+        matches!(gs.poll(&mut cx), Poll::Ready(ToSwarm::GenerateEvent(
+        Event::Message { propagation_source, message, .. }
+    )) if propagation_source == peer && message.data == vec![1]),
+        "new pending mesh state must not overtake the already waiting Message"
+    );
+    assert!(
+        matches!(gs.poll(&mut cx), Poll::Ready(ToSwarm::NotifyHandler {
+        peer_id,
+        event: HandlerIn::LeftMesh,
+        ..
+    }) if peer_id == peer)
+    );
+    assert!(
+        matches!(gs.poll(&mut cx), Poll::Ready(ToSwarm::GenerateEvent(
+        Event::Subscribed { peer_id, topic: observed }
+    )) if peer_id == peer && observed == topic)
+    );
+    assert!(
+        matches!(gs.poll(&mut cx), Poll::Ready(ToSwarm::GenerateEvent(
+        Event::Unsubscribed { peer_id, topic: observed }
+    )) if peer_id == peer && observed == topic)
+    );
+    assert!(matches!(gs.poll(&mut cx), Poll::Pending));
+    assert!(gs.events.is_empty());
+    assert!(gs.pending_handler_peers.is_empty());
 }
