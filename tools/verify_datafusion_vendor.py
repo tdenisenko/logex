@@ -40,8 +40,8 @@ PACKAGES = (
         modified={
             PurePosixPath("Cargo.lock"): "9c251863c193ed1c83b1e63ccc6765b553fc3cf4687464377e1b4bbc8d3cf1eb",
             PurePosixPath("Cargo.toml"): "0e8db4bae3efe861d432bb895baefb868a7fba6f0d4f7dc5ee65bde05bbe4d61",
-            PurePosixPath("src/behaviour.rs"): "b9a60021a34786d6949ed6bb392096f8cb595f2abd5dc2964f75e9124ed5e56d",
-            PurePosixPath("src/behaviour/tests.rs"): "fcc74eb84936f4b81ff1d2e059e93bf093d047969c0b6b84cdd52dddb1ee9c4f",
+            PurePosixPath("src/behaviour.rs"): "85ad2a972ff60409adef58bf3e879150d36be641c542a16239111e430878e34a",
+            PurePosixPath("src/behaviour/tests.rs"): "93da7b8cd42603f42e0215224463eeeaf8b5057ea802835e6d66eacfe294beac",
             PurePosixPath("src/config.rs"): "ba4012b755d2815600fe7aceac6c544e64371d444b81d9501c1a50d23bd4c4bd",
             PurePosixPath("src/error.rs"): "5441c555813be3bd9690a7ca78887b7ce4b43de5d44c2b88e158b4787c767b01",
             PurePosixPath("src/gossip_promises.rs"): "19b3309b949ea2c2da200fffa09aaa35327a1350e90f6fa1de0aff2e9e628ed2",
@@ -55,7 +55,7 @@ PACKAGES = (
             PurePosixPath("src/topic.rs"): "cbfc7410a2f01d8f0b5477c40084397b8a9f7a79300861a2e44a63fe6d5c21da",
             PurePosixPath("src/types.rs"): "70f62528b88a70c801c8b6cf291bab0fcde4e08350d00a8fab3837e85a216ad8",
         },
-        patch_checksum="cec95c710623f73aef350d017fe979bab66672d6fb627c2f9852a695330ab9b8",
+        patch_checksum="bb1fa258f5028520a0e5fa481766159246dee73b6924444e9ca578212576b02e",
         added={
             PurePosixPath("src/event_queue.rs"): "b0dbaf2c61970e7b78a65e9d53298b2e90ad76e2081e7f7453ea5e0523dddbb7",
         },

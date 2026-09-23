@@ -8184,3 +8184,86 @@ fn logex_deferred_message_events_remain_cache_bounded_with_advisories_disabled()
     assert!(gs.mcache.contains(&MessageId::new(&[2])));
     assert!(!gs.mcache.contains(&MessageId::new(&[3])));
 }
+// Models a permitted Swarm schedule: after Behaviour yields a handler notice,
+// blocked handoff allows a pool callback to update mesh membership. The next
+// Behaviour poll occurs after that old handoff succeeds. This exercises the
+// schedule with callbacks, not a real stalled Swarm channel or forced heartbeat.
+#[test]
+fn logex_pending_handler_notifications_share_service_with_queued_messages() {
+    let config = ConfigBuilder::default()
+        .heartbeat_interval(Duration::from_secs(60))
+        .build()
+        .unwrap();
+    let (mut gs, peers, _receivers, topics) = inject_nodes1()
+        .peer_no(1)
+        .topics(vec!["t".into()])
+        .gs_config(config)
+        .create_network();
+    let peer = peers[0];
+    let topic = topics[0].clone();
+    assert!(gs.events.is_empty());
+    assert!(gs.pending_handler_peers.is_empty());
+    gs.on_connection_handler_event(
+        peer,
+        ConnectionId::new_unchecked(0),
+        HandlerEvent::Message {
+            rpc: Rpc {
+                messages: vec![RawMessage {
+                    source: None,
+                    data: vec![1],
+                    sequence_number: None,
+                    topic: topic.clone(),
+                    signature: None,
+                    key: None,
+                    validated: true,
+                }],
+                subscriptions: vec![],
+                control_msgs: vec![],
+            },
+            invalid_messages: vec![],
+        },
+    );
+    logex_deliver_subscription(&mut gs, peer, topic.clone(), SubscriptionAction::Subscribe);
+    let mut cx = Context::from_waker(futures::task::noop_waker_ref());
+    assert!(
+        matches!(gs.poll(&mut cx), Poll::Ready(ToSwarm::NotifyHandler {
+        peer_id,
+        event: HandlerIn::JoinedMesh,
+        ..
+    }) if peer_id == peer)
+    );
+    // A real subscription transition arrives while the yielded JoinedMesh
+    // notification is awaiting handoff; the application Message is still queued.
+    logex_deliver_subscription(
+        &mut gs,
+        peer,
+        topic.clone(),
+        SubscriptionAction::Unsubscribe,
+    );
+    assert!(
+        matches!(gs.poll(&mut cx), Poll::Ready(ToSwarm::GenerateEvent(
+        Event::Message { propagation_source, message, .. }
+    )) if propagation_source == peer && message.data == vec![1]),
+        "new pending mesh state must not overtake the already waiting Message"
+    );
+    assert!(
+        matches!(gs.poll(&mut cx), Poll::Ready(ToSwarm::NotifyHandler {
+        peer_id,
+        event: HandlerIn::LeftMesh,
+        ..
+    }) if peer_id == peer)
+    );
+    assert!(
+        matches!(gs.poll(&mut cx), Poll::Ready(ToSwarm::GenerateEvent(
+        Event::Subscribed { peer_id, topic: observed }
+    )) if peer_id == peer && observed == topic)
+    );
+    assert!(
+        matches!(gs.poll(&mut cx), Poll::Ready(ToSwarm::GenerateEvent(
+        Event::Unsubscribed { peer_id, topic: observed }
+    )) if peer_id == peer && observed == topic)
+    );
+    assert!(matches!(gs.poll(&mut cx), Poll::Pending));
+    assert!(gs.events.is_empty());
+    assert!(gs.pending_handler_peers.is_empty());
+}

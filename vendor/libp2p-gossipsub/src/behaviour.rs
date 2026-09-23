@@ -288,6 +288,8 @@ pub struct Behaviour<D = IdentityTransform, F = AllowAllSubscriptionFilter> {
     events: crate::event_queue::EventQueue,
     /// One queued identity per peer with a pending keepalive state.
     pending_handler_peers: VecDeque<PeerId>,
+    /// Alternate regular events and keepalive state when both await delivery.
+    prefer_handler_notification: bool,
 
     /// Information used for publishing messages.
     publish_config: PublishConfig,
@@ -459,6 +461,7 @@ where
             metrics: None,
             events: crate::event_queue::EventQueue::new(*config.queue_limits()),
             pending_handler_peers: VecDeque::new(),
+            prefer_handler_notification: true,
             closing_peers: HashMap::new(),
             publish_config: privacy.into(),
             duplicate_cache: DuplicateCache::with_limits(
@@ -3085,6 +3088,25 @@ where
             .retain(|pending| *pending != peer_id);
     }
 
+    fn next_regular_event(&mut self) -> Option<ToSwarm<Event, HandlerIn>> {
+        // While Swarm waits to deliver a handler notification it can receive
+        // further callbacks. New mesh state must not repeatedly overtake an
+        // already queued message when handler delivery becomes available again.
+        if self.prefer_handler_notification {
+            if let Some(event) = self.next_handler_notification() {
+                self.prefer_handler_notification = false;
+                return Some(event);
+            }
+        }
+        if let Some(event) = self.events.pop_front() {
+            self.prefer_handler_notification = true;
+            return Some(event);
+        }
+        let event = self.next_handler_notification()?;
+        self.prefer_handler_notification = false;
+        Some(event)
+    }
+
     fn next_handler_notification(&mut self) -> Option<ToSwarm<Event, HandlerIn>> {
         while let Some(peer_id) = self.pending_handler_peers.pop_front() {
             let Some(peer) = self.connected_peers.get_mut(&peer_id) else {
@@ -3626,12 +3648,9 @@ where
         if let Some(event) = self.next_peer_close() {
             return Poll::Ready(event);
         }
-        if let Some(event) = self.next_handler_notification() {
-            return Poll::Ready(event);
-        }
         // Keep message events ahead of heartbeat: in LogEx, each queued message
         // retains a cache owner until delivery, bounding its retained payload.
-        if let Some(event) = self.events.pop_front() {
+        if let Some(event) = self.next_regular_event() {
             return Poll::Ready(event);
         }
 
@@ -3653,7 +3672,7 @@ where
         if let Some(event) = self.next_peer_close() {
             return Poll::Ready(event);
         }
-        if let Some(event) = self.next_handler_notification() {
+        if let Some(event) = self.next_regular_event() {
             return Poll::Ready(event);
         }
 
