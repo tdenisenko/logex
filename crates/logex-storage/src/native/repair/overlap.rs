@@ -1,16 +1,21 @@
-//! Pure selection of potentially shared block owners, not proof of block
-//! completeness, chain membership, provenance or permission to replace data.
+//! Freeze fetch ranges from explicit seeds, then select intersecting owners.
+//! Selection alone proves neither block coverage nor replacement authority.
 use std::{collections::BTreeSet, io};
 
 use super::super::catalog::{NativeStorageCatalog, SegmentDescriptor};
-use super::RepairOwnershipGroup as Group;
+
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct Selection {
+    pub(super) segment_ids: Vec<u64>,
+    pub(super) block_ranges: Vec<(u64, u64)>,
+}
 
 pub(super) fn select(
     catalog: &NativeStorageCatalog,
     selected_ids: &[u64],
     max_segments: usize,
     max_blocks: u64,
-) -> io::Result<Vec<Group>> {
+) -> io::Result<Selection> {
     select_segments(&catalog.segments, selected_ids, max_segments, max_blocks)
 }
 
@@ -21,7 +26,7 @@ fn invalid(message: &'static str) -> io::Error {
 fn block_count(start: u64, end: u64) -> io::Result<u64> {
     end.checked_sub(start)
         .and_then(|span| span.checked_add(1))
-        .ok_or_else(|| invalid("repair overlap range is inverted or its inclusive size overflows"))
+        .ok_or_else(|| invalid("repair inclusive block count overflows"))
 }
 
 fn select_segments(
@@ -29,7 +34,7 @@ fn select_segments(
     selected_ids: &[u64],
     max_segments: usize,
     max_blocks: u64,
-) -> io::Result<Vec<Group>> {
+) -> io::Result<Selection> {
     if selected_ids.len() > max_segments {
         return Err(invalid("repair selection exceeds segment budget"));
     }
@@ -40,83 +45,78 @@ fn select_segments(
         }
     }
     let mut seen = BTreeSet::new();
-    let mut intervals = Vec::new();
-    let mut empty = Vec::new();
+    let mut ranges = Vec::new();
     for segment in segments {
         if !seen.insert(segment.id) {
             return Err(invalid("duplicate catalog segment ID"));
         }
         match (segment.row_count, segment.min_block, segment.max_block) {
-            (0, None, None) => {
+            (0, None, None) => {}
+            (0, _, _) => return Err(invalid("empty segment has block bounds")),
+            (_, Some(start), Some(end)) if start <= end => {
                 if seeds.contains(&segment.id) {
-                    if empty.len() >= max_segments {
-                        return Err(invalid("repair overlap exceeds segment budget"));
-                    }
-                    empty.push(segment.id);
+                    ranges.push((start, end));
                 }
             }
-            (0, _, _) => return Err(invalid("empty segment has block bounds")),
-            (_, Some(start), Some(end)) => {
-                block_count(start, end)?;
-                intervals.push((start, segment.id, end));
+            _ => {
+                return Err(invalid(
+                    "nonempty segment has missing or inverted block bounds",
+                ));
             }
-            _ => return Err(invalid("nonempty segment lacks block bounds")),
         }
     }
     if !seeds.is_subset(&seen) {
         return Err(invalid("unknown repair segment selection"));
     }
-    intervals.sort_unstable();
-    empty.sort_unstable();
-
-    // Plans borrow positions, not descriptors or payload. Check the cumulative
-    // selected closure before allocating any output segment-ID vectors.
-    let mut plans = Vec::new();
-    let mut segment_count = empty.len();
-    if segment_count > max_segments {
-        return Err(invalid("repair overlap exceeds segment budget"));
+    ranges.sort_unstable();
+    let mut block_ranges: Vec<(u64, u64)> = Vec::new();
+    for (start, end) in ranges {
+        if let Some(last) = block_ranges.last_mut()
+            && (start <= last.1 || last.1.checked_add(1) == Some(start))
+        {
+            last.1 = last.1.max(end);
+        } else {
+            block_ranges.push((start, end));
+        }
     }
     let mut blocks = 0u64;
-    let mut first = 0;
-    while first < intervals.len() {
-        let (start, id, mut end) = intervals[first];
-        let mut selected = seeds.contains(&id);
-        let mut next = first + 1;
-        while next < intervals.len() && intervals[next].0 <= end {
-            end = end.max(intervals[next].2);
-            selected |= seeds.contains(&intervals[next].1);
-            next += 1;
+    for &(start, end) in &block_ranges {
+        blocks = blocks
+            .checked_add(block_count(start, end)?)
+            .ok_or_else(|| invalid("repair block count overflow"))?;
+        if blocks > max_blocks {
+            return Err(invalid("repair selection exceeds block budget"));
         }
-        let component_blocks = block_count(start, end)?;
-        if selected {
-            segment_count = segment_count
-                .checked_add(next - first)
-                .ok_or_else(|| invalid("repair overlap segment count overflow"))?;
-            blocks = blocks
-                .checked_add(component_blocks)
-                .ok_or_else(|| invalid("repair overlap block count overflow"))?;
-            if segment_count > max_segments || blocks > max_blocks {
-                return Err(invalid("repair overlap exceeds work budget"));
+    }
+
+    let mut owners = Vec::new();
+    for segment in segments {
+        let key = match (segment.min_block, segment.max_block) {
+            (Some(start), Some(end)) => {
+                // Normalized ranges are ordered and disjoint. Skip those ending
+                // before this owner, then test only the first remaining range.
+                let next = block_ranges.partition_point(|&(_, range_end)| range_end < start);
+                if block_ranges
+                    .get(next)
+                    .is_none_or(|&(range_start, _)| range_start > end)
+                {
+                    continue;
+                }
+                (false, start, segment.id, end)
             }
-            plans.push((first, next, start, end));
+            _ if seeds.contains(&segment.id) => (true, 0, segment.id, 0),
+            _ => continue,
+        };
+        if owners.len() >= max_segments {
+            return Err(invalid("repair selection exceeds segment budget"));
         }
-        first = next;
+        owners.push(key);
     }
-    let mut groups = Vec::new();
-    for (first, next, start, end) in plans {
-        groups.push(Group {
-            segment_ids: intervals[first..next].iter().map(|entry| entry.1).collect(),
-            range: Some((start, end)),
-        });
-    }
-    // Empty segments have no range sort key: put them last, ordered by ID.
-    for id in empty {
-        groups.push(Group {
-            segment_ids: vec![id],
-            range: None,
-        });
-    }
-    Ok(groups)
+    owners.sort_unstable();
+    Ok(Selection {
+        segment_ids: owners.into_iter().map(|(_, _, id, _)| id).collect(),
+        block_ranges,
+    })
 }
 
 #[cfg(test)]
@@ -144,28 +144,58 @@ mod tests {
     }
 
     #[test]
-    fn transitive_nested_overlap_selects_whole_component_not_neighbors() {
-        let mut input = vec![
-            segment(7, Some((30, 40))),
-            segment(3, Some((8, 12))),
-            segment(1, Some((1, 5))),
-            segment(2, Some((5, 9))),
-            segment(4, Some((6, 7))),
-            segment(5, Some((13, 20))),
+    fn explicit_ranges_do_not_expand_through_healthy_neighbors() {
+        let input = vec![
+            segment(4, Some((13, 14))),
+            segment(2, Some((11, 12))),
+            segment(1, Some((10, 11))),
+            segment(3, Some((12, 13))),
         ];
-        let expected = vec![Group {
-            segment_ids: vec![1, 2, 4, 3],
-            range: Some((1, 12)),
-        }];
-        assert_eq!(select_segments(&input, &[4], 4, 12).unwrap(), expected);
-        input.reverse();
-        assert_eq!(select_segments(&input, &[3, 1], 4, 12).unwrap(), expected);
-        assert!(select_segments(&input, &[4], 3, 12).is_err());
-        assert!(select_segments(&input, &[4], 4, 11).is_err());
+        assert_eq!(
+            select_segments(&input, &[2], 3, 2).unwrap(),
+            Selection {
+                segment_ids: vec![1, 2, 3],
+                block_ranges: vec![(11, 12)]
+            }
+        );
+        assert!(select_segments(&input, &[2], 2, 2).is_err());
+        assert!(select_segments(&input, &[2], 3, 1).is_err());
     }
 
     #[test]
-    fn empty_and_extreme_ranges_have_exact_cumulative_budgets() {
+    fn disjoint_seed_union_counts_shared_owner_once_without_filling_gap() {
+        let input = vec![
+            segment(9, Some((0, u64::MAX))),
+            segment(3, Some((20, 22))),
+            segment(1, Some((2, 4))),
+            segment(2, Some((4, 6))),
+            segment(4, Some((7, 8))),
+        ];
+        let expected = Selection {
+            segment_ids: vec![9, 1, 2, 4, 3],
+            block_ranges: vec![(2, 8), (20, 22)],
+        };
+        assert_eq!(
+            select_segments(&input, &[3, 4, 2, 1], 5, 10).unwrap(),
+            expected
+        );
+        let mut reversed = input.clone();
+        reversed.reverse();
+        assert_eq!(
+            select_segments(&reversed, &[1, 2, 4, 3], 5, 10).unwrap(),
+            expected
+        );
+        assert!(select_segments(&input, &[1, 2, 4, 3], 4, 10).is_err());
+        assert!(select_segments(&input, &[1, 2, 4, 3], 5, 9).is_err());
+        // A broad valid healthy owner does not contribute its span to fetch work.
+        assert_eq!(
+            select_segments(&input, &[3], 2, 3).unwrap().block_ranges,
+            vec![(20, 22)]
+        );
+    }
+
+    #[test]
+    fn empty_extreme_and_overflow_cases_are_checked() {
         let input = vec![
             segment(9, None),
             segment(2, Some((u64::MAX, u64::MAX))),
@@ -174,29 +204,27 @@ mod tests {
         ];
         assert_eq!(
             select_segments(&input, &[9, 2, 1, 8], 4, 2).unwrap(),
-            vec![
-                Group {
-                    segment_ids: vec![1],
-                    range: Some((0, 0))
-                },
-                Group {
-                    segment_ids: vec![2],
-                    range: Some((u64::MAX, u64::MAX))
-                },
-                Group {
-                    segment_ids: vec![8],
-                    range: None
-                },
-                Group {
-                    segment_ids: vec![9],
-                    range: None
-                },
-            ]
+            Selection {
+                segment_ids: vec![1, 2, 8, 9],
+                block_ranges: vec![(0, 0), (u64::MAX, u64::MAX)]
+            }
         );
         assert!(select_segments(&input, &[1, 2], 2, 1).is_err());
         assert!(select_segments(&input, &[8], 0, 0).is_err());
-        assert_eq!(select_segments(&input, &[8], 1, 0).unwrap()[0].range, None);
-        assert!(select_segments(&input, &[], 0, 0).unwrap().is_empty());
+        assert_eq!(
+            select_segments(&input, &[8], 1, 0).unwrap(),
+            Selection {
+                segment_ids: vec![8],
+                block_ranges: vec![]
+            }
+        );
+        assert_eq!(
+            select_segments(&input, &[], 0, 0).unwrap(),
+            Selection {
+                segment_ids: vec![],
+                block_ranges: vec![]
+            }
+        );
         assert!(select_segments(&[segment(1, Some((0, u64::MAX)))], &[1], 1, u64::MAX).is_err());
         assert!(
             select_segments(
@@ -210,10 +238,24 @@ mod tests {
             )
             .is_err()
         );
+        assert_eq!(
+            select_segments(
+                &[
+                    segment(1, Some((u64::MAX - 1, u64::MAX - 1))),
+                    segment(2, Some((u64::MAX, u64::MAX)))
+                ],
+                &[1, 2],
+                2,
+                2
+            )
+            .unwrap()
+            .block_ranges,
+            vec![(u64::MAX - 1, u64::MAX)]
+        );
     }
 
     #[test]
-    fn malformed_catalog_and_selection_are_rejected_even_when_disconnected() {
+    fn malformed_disconnected_catalog_and_seed_ids_are_rejected() {
         let good = segment(1, Some((1, 2)));
         assert!(select_segments(std::slice::from_ref(&good), &[2], 5, 5).is_err());
         assert!(select_segments(std::slice::from_ref(&good), &[1, 1], 5, 5).is_err());
@@ -223,7 +265,8 @@ mod tests {
         let mut empty_bounds = segment(2, Some((4, 5)));
         empty_bounds.row_count = 0;
         for bad in [missing, empty_bounds, segment(2, Some((5, 4)))] {
-            assert!(select_segments(&[good.clone(), bad], &[1], 5, 5).is_err());
+            assert!(select_segments(&[good.clone(), bad.clone()], &[1], 5, 5).is_err());
+            assert!(select_segments(&[good.clone(), bad], &[], 5, 5).is_err());
         }
     }
 }

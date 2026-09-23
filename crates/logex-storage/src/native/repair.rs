@@ -15,13 +15,13 @@ use super::{
 };
 use crate::{NullBitmap, SegmentReader, commitment::PrefixState, row_bounds::RowBounds};
 
-/// Work limits for the selected overlap closure and each candidate segment.
+/// Work limits for the affected block ranges and each candidate segment.
 /// These do not bound the already-loaded catalog, caller-owned input batches,
 /// total allocations or process RSS. Candidates retain one canonical bitmap.
 #[derive(Debug, Clone, Copy)]
 pub struct RepairPlanLimits {
     pub max_segments: usize,
-    /// Total inclusive block count across selected overlap components.
+    /// Total inclusive block count in the union of explicit seed ranges.
     pub max_blocks: u64,
     pub max_segment_rows: u64,
     pub max_canonical_artifact_bytes: u64,
@@ -29,38 +29,22 @@ pub struct RepairPlanLimits {
     pub max_candidate_data_bytes: u64,
 }
 
-/// All catalog segments connected by intersecting inclusive block ranges.
-/// Adjacency alone does not connect groups. Empty segments have no range.
-#[derive(Debug, PartialEq, Eq)]
-pub struct RepairOwnershipGroup {
-    segment_ids: Vec<u64>,
-    range: Option<(u64, u64)>,
-}
-
-impl RepairOwnershipGroup {
-    pub fn segment_ids(&self) -> &[u64] {
-        &self.segment_ids
-    }
-
-    /// Necessary replacement range, not evidence of complete block coverage.
-    pub fn block_range(&self) -> Option<(u64, u64)> {
-        self.range
-    }
-}
-
 /// Retains the inspection's exclusive directory owner without dropping and
 /// reacquiring it. Original descriptors, progress and chain anchors are immutable.
 #[derive(Debug)]
 pub struct RepairOwnershipPlan {
     inspection: PrimaryDataInspection,
-    groups: Vec<RepairOwnershipGroup>,
+    selection: overlap::Selection,
     selected: BTreeMap<u64, usize>,
     limits: RepairPlanLimits,
 }
 
 impl PrimaryDataInspection {
-    /// Select complete overlap components without modifying any files. Selection
-    /// is explicit: an inspection error or resource limit is not proof of damage.
+    /// Select every owner of the explicit seed block ranges without modifying
+    /// files. Healthy neighbors do not expand the affected ranges: their other
+    /// rows must be verified and preserved locally. Unavailable carry-forward
+    /// evidence blocks reconstruction or requires an explicitly revised plan.
+    /// An inspection error or resource limit alone is not proof of damage.
     pub fn into_repair_plan(
         self,
         segment_ids: &[u64],
@@ -81,16 +65,14 @@ impl PrimaryDataInspection {
                 "verified WAL or reorg recovery is required before segment repair planning",
             ));
         }
-        let groups = overlap::select(
+        let selection = overlap::select(
             &catalog,
             segment_ids,
             limits.max_segments,
             limits.max_blocks,
         )?;
-        let mut selected: BTreeMap<_, _> = groups
-            .iter()
-            .flat_map(|group| group.segment_ids.iter().map(|&id| (id, 0)))
-            .collect();
+        let mut selected: BTreeMap<_, _> =
+            selection.segment_ids.iter().map(|&id| (id, 0)).collect();
         for (index, segment) in catalog.segments.iter().enumerate() {
             if let Some(position) = selected.get_mut(&segment.id) {
                 *position = index;
@@ -98,7 +80,7 @@ impl PrimaryDataInspection {
         }
         Ok(RepairOwnershipPlan {
             inspection: self,
-            groups,
+            selection,
             selected,
             limits,
         })
@@ -110,8 +92,17 @@ impl RepairOwnershipPlan {
         &self.inspection.catalog
     }
 
-    pub fn groups(&self) -> &[RepairOwnershipGroup] {
-        &self.groups
+    /// Unique owners intersecting the affected ranges, plus explicit empty
+    /// seeds. Every selected segment still needs an exact whole-segment check.
+    pub fn segment_ids(&self) -> &[u64] {
+        &self.selection.segment_ids
+    }
+
+    /// Sorted disjoint inclusive seed ranges, without gaps added by healthy
+    /// neighbors. These are reconstruction inputs, not evidence of completeness
+    /// or permission to insert fetched rows absent from the original segments.
+    pub fn block_ranges(&self) -> &[(u64, u64)] {
+        &self.selection.block_ranges
     }
 
     /// Start a streaming check in original physical row order. Only canonical
@@ -314,3 +305,6 @@ fn invalid(message: &'static str) -> io::Error {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod range_tests;
