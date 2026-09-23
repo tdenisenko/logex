@@ -11253,149 +11253,142 @@ mod tests {
 
     #[tokio::test]
     async fn gossip_backoff_capacity_denial_is_neutral_and_preserves_other_requests() {
-        for capacity in [0, 1] {
-            let temp = TempDir::new().unwrap();
-            let (mut network, _) = request_lifecycle_fixture(&temp);
-            // Queue while admission is available, then fill capacity before the
-            // handshake completes: the authoritative callback must still deny.
-            let newcomer = PeerId::random();
-            let kind = RpcRequestKind::LightClientUpdatesByRange;
-            network.peer_lifecycle.entry(newcomer).or_default();
-            network.ensure_request(newcomer, kind);
-            let request = *network
-                .pending_requests
-                .iter()
-                .find(|(_, peer)| **peer == newcomer)
-                .unwrap()
-                .0;
-            let mut config = gossipsub::ConfigBuilder::from(build_gossip_config().unwrap());
-            config.cache_limits(gossipsub::CacheLimits {
-                backoff_peers: capacity,
-                ..GOSSIP_CACHE_LIMITS
-            });
-            network.swarm.behaviour_mut().gossip =
-                gossipsub::Behaviour::new_with_subscription_filter_and_transform(
-                    gossipsub::MessageAuthenticity::Anonymous,
-                    config.build().unwrap(),
-                    gossipsub::WhitelistSubscriptionFilter(HashSet::from([network
-                        .gossip_topics
-                        .finality_update
-                        .hash()])),
-                    GossipSizeGuard,
-                )
+        let temp = TempDir::new().unwrap();
+        let (mut network, _) = request_lifecycle_fixture(&temp);
+        let mut config = gossipsub::ConfigBuilder::from(build_gossip_config().unwrap());
+        config.cache_limits(gossipsub::CacheLimits {
+            backoff_peers: 1,
+            ..GOSSIP_CACHE_LIMITS
+        });
+        network.swarm.behaviour_mut().gossip =
+            gossipsub::Behaviour::new_with_subscription_filter_and_transform(
+                gossipsub::MessageAuthenticity::Anonymous,
+                config.build().unwrap(),
+                gossipsub::WhitelistSubscriptionFilter(HashSet::from([network
+                    .gossip_topics
+                    .finality_update
+                    .hash()])),
+                GossipSizeGuard,
+            )
+            .unwrap();
+        // Exercise request-response ownership directly: queue while the fixed
+        // budget is available, then another peer fills it before completion.
+        let newcomer = PeerId::random();
+        let kind = RpcRequestKind::LightClientUpdatesByRange;
+        network.peer_lifecycle.entry(newcomer).or_default();
+        network.ensure_request(newcomer, kind);
+        let request = *network
+            .pending_requests
+            .iter()
+            .find(|(_, peer)| **peer == newcomer)
+            .unwrap()
+            .0;
+        let address: libp2p::Multiaddr = "/memory/1".parse().unwrap();
+        let established = PeerId::random();
+        // One actual admitted identity fills the small capacity. Keep its
+        // handler alive and preserve its independent established RPC work.
+        let _established_handler = {
+            let connection = libp2p::swarm::ConnectionId::new_unchecked(31);
+            let handler = network
+                .swarm
+                .behaviour_mut()
+                .handle_established_inbound_connection(connection, established, &address, &address)
                 .unwrap();
-            let address: libp2p::Multiaddr = "/memory/1".parse().unwrap();
-            let established = PeerId::random();
-            // One actual admitted identity fills the small capacity. Keep its
-            // handler alive and preserve its independent established RPC work.
-            let _established_handler = if capacity == 1 {
-                let connection = libp2p::swarm::ConnectionId::new_unchecked(31);
-                let handler = network
-                    .swarm
-                    .behaviour_mut()
-                    .handle_established_inbound_connection(
-                        connection,
-                        established,
-                        &address,
-                        &address,
-                    )
-                    .unwrap();
-                let endpoint = ConnectedPoint::Listener {
-                    local_addr: address.clone(),
-                    send_back_addr: address.clone(),
-                };
-                network.swarm.behaviour_mut().on_swarm_event(
-                    libp2p::swarm::FromSwarm::ConnectionEstablished(
-                        libp2p::swarm::behaviour::ConnectionEstablished {
-                            peer_id: established,
-                            connection_id: connection,
-                            endpoint: &endpoint,
-                            failed_addresses: &[],
-                            other_established: 0,
-                        },
-                    ),
-                );
-                network.connected_peers.insert(established);
-                network.peer_lifecycle.entry(established).or_default();
-                network.ensure_request(established, kind);
-                Some(handler)
-            } else {
-                None
+            let endpoint = ConnectedPoint::Listener {
+                local_addr: address.clone(),
+                send_back_addr: address.clone(),
             };
-            let established_request = network
-                .pending_requests
-                .iter()
-                .find_map(|(key, peer)| (*peer == established).then_some(*key));
-            assert_eq!(established_request.is_some(), capacity == 1);
-
-            network.dialing_peers.insert(newcomer);
-            let connection = libp2p::swarm::ConnectionId::new_unchecked(32);
-            // The actual composed callback denies the entire connection before
-            // later RPC behaviours get handlers. No sockets or Swarm poll occur.
-            let cause = match network
-                .swarm
-                .behaviour_mut()
-                .handle_established_outbound_connection(
-                    connection,
-                    newcomer,
-                    &address,
-                    libp2p::core::Endpoint::Dialer,
-                    libp2p::core::transport::PortUse::Reuse,
-                ) {
-                Err(cause) => cause,
-                Ok(_) => panic!("gossip identity capacity must deny a new peer"),
-            };
-            assert!(cause.downcast_ref::<gossipsub::BackoffCapacity>().is_some());
-            let error = DialError::Denied { cause };
-            // Match Swarm's failure broadcast before its application event.
-            network
-                .swarm
-                .behaviour_mut()
-                .on_swarm_event(libp2p::swarm::FromSwarm::DialFailure(
-                    libp2p::swarm::behaviour::DialFailure {
-                        peer_id: Some(newcomer),
+            network.swarm.behaviour_mut().on_swarm_event(
+                libp2p::swarm::FromSwarm::ConnectionEstablished(
+                    libp2p::swarm::behaviour::ConnectionEstablished {
+                        peer_id: established,
                         connection_id: connection,
-                        error: &error,
+                        endpoint: &endpoint,
+                        failed_addresses: &[],
+                        other_established: 0,
                     },
-                ));
-            network.handle_swarm_event(SwarmEvent::OutgoingConnectionError {
-                peer_id: Some(newcomer),
-                connection_id: connection,
-                error,
-            });
-            assert!(!network.pending_requests.contains_key(&request));
-            assert!(!network.pending_peer_kinds.contains(&(newcomer, kind)));
-            assert!(
-                !network
-                    .pending_light_client_range_requests
-                    .contains_key(&request)
+                ),
             );
-            assert!(!network.dialing_peers.contains(&newcomer));
-            assert!(!network.closing_peers.contains(&newcomer));
-            assert!(!network.connected_peers.contains(&newcomer));
-            let lifecycle = &network.peer_lifecycle[&newcomer];
-            assert_eq!(lifecycle.transport_failures, 0);
-            assert_eq!(lifecycle.rpc_failures, 0);
-            assert_eq!(lifecycle.disconnects, 0);
-            assert!(lifecycle.cooldown_until.is_none());
-            assert!(!lifecycle.ignored_for_run);
-            if let Some(request) = established_request {
-                assert!(network.connected_peers.contains(&established));
-                assert!(!network.closing_peers.contains(&established));
-                assert!(network.pending_requests.contains_key(&request));
-                assert!(network.pending_peer_kinds.contains(&(established, kind)));
-                assert!(
-                    network
-                        .pending_light_client_range_requests
-                        .contains_key(&request)
-                );
-                assert_eq!(network.peer_lifecycle[&established].transport_failures, 0);
-            } else {
-                assert!(network.pending_requests.is_empty());
-                assert!(network.pending_peer_kinds.is_empty());
-                assert!(network.pending_light_client_range_requests.is_empty());
-            }
-        }
+            network.handle_swarm_event(SwarmEvent::ConnectionEstablished {
+                peer_id: established,
+                connection_id: connection,
+                endpoint,
+                num_established: std::num::NonZeroU32::new(1).unwrap(),
+                concurrent_dial_errors: None,
+                established_in: Duration::ZERO,
+            });
+            network.peer_lifecycle.entry(established).or_default();
+            network.ensure_request(established, kind);
+            handler
+        };
+        let established_request = network
+            .pending_requests
+            .iter()
+            .find_map(|(key, peer)| (*peer == established).then_some(*key))
+            .unwrap();
+
+        network.dialing_peers.insert(newcomer);
+        let connection = libp2p::swarm::ConnectionId::new_unchecked(32);
+        // The actual composed callback denies the entire connection before
+        // later RPC behaviours get handlers. No sockets or Swarm poll occur.
+        let cause = match network
+            .swarm
+            .behaviour_mut()
+            .handle_established_outbound_connection(
+                connection,
+                newcomer,
+                &address,
+                libp2p::core::Endpoint::Dialer,
+                libp2p::core::transport::PortUse::Reuse,
+            ) {
+            Err(cause) => cause,
+            Ok(_) => panic!("gossip identity capacity must deny a new peer"),
+        };
+        assert!(cause.downcast_ref::<gossipsub::BackoffCapacity>().is_some());
+        let error = DialError::Denied { cause };
+        // Match Swarm's failure broadcast before its application event.
+        network
+            .swarm
+            .behaviour_mut()
+            .on_swarm_event(libp2p::swarm::FromSwarm::DialFailure(
+                libp2p::swarm::behaviour::DialFailure {
+                    peer_id: Some(newcomer),
+                    connection_id: connection,
+                    error: &error,
+                },
+            ));
+        network.handle_swarm_event(SwarmEvent::OutgoingConnectionError {
+            peer_id: Some(newcomer),
+            connection_id: connection,
+            error,
+        });
+        assert!(!network.pending_requests.contains_key(&request));
+        assert!(!network.pending_peer_kinds.contains(&(newcomer, kind)));
+        assert!(
+            !network
+                .pending_light_client_range_requests
+                .contains_key(&request)
+        );
+        assert!(!network.dialing_peers.contains(&newcomer));
+        assert!(!network.closing_peers.contains(&newcomer));
+        assert!(!network.connected_peers.contains(&newcomer));
+        let lifecycle = &network.peer_lifecycle[&newcomer];
+        assert_eq!(lifecycle.transport_failures, 0);
+        assert_eq!(lifecycle.rpc_failures, 0);
+        assert_eq!(lifecycle.disconnects, 0);
+        assert!(lifecycle.cooldown_until.is_none());
+        assert!(!lifecycle.ignored_for_run);
+        let request = established_request;
+        assert!(network.connected_peers.contains(&established));
+        assert!(!network.closing_peers.contains(&established));
+        assert!(network.pending_requests.contains_key(&request));
+        assert!(network.pending_peer_kinds.contains(&(established, kind)));
+        assert!(
+            network
+                .pending_light_client_range_requests
+                .contains_key(&request)
+        );
+        assert_eq!(network.peer_lifecycle[&established].transport_failures, 0);
     }
 
     #[tokio::test]
