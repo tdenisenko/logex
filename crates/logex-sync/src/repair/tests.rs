@@ -6,16 +6,16 @@ use reth_ethereum_primitives::BlockBody as EthereumBody;
 use std::collections::BTreeMap;
 
 #[derive(Default)]
-struct Scripted {
+pub(super) struct Scripted {
     headers: BTreeMap<B256, Header>,
     payloads: BTreeMap<B256, (EthereumBody, Vec<ReceiptWithBloom<LogexReceipt>>)>,
     header_calls: Vec<(B256, u64)>,
-    body_calls: Vec<u64>,
+    pub(super) body_calls: Vec<u64>,
     receipt_calls: Vec<u64>,
     partial: bool,
     empty_headers: bool,
     overlong_headers: bool,
-    pending_headers: bool,
+    pub(super) pending_headers: bool,
     pending_body: bool,
     pending_receipts: bool,
     wrong_body: bool,
@@ -93,13 +93,17 @@ impl RepairSource for Scripted {
     }
 }
 
-fn fixture() -> (Scripted, Vec<Header>) {
+pub(super) fn fixture() -> (Scripted, Vec<Header>) {
+    fixture_with_logs(&[2])
+}
+
+pub(super) fn fixture_with_logs(logged_blocks: &[u64]) -> (Scripted, Vec<Header>) {
     let mut source = Scripted::default();
     let mut headers: Vec<Header> = Vec::new();
     for index in 0..4 {
         let mut body = EthereumBody::default();
         let mut receipts = Vec::new();
-        if index == 1 || index == 2 {
+        if index == 1 || index == 2 || logged_blocks.contains(&index) {
             // A no-log transaction precedes two logging transactions, preserving
             // transaction positions independently of row count.
             for tx_index in 0..3 {
@@ -114,7 +118,7 @@ fn fixture() -> (Scripted, Vec<Header>) {
                 );
                 let receipt = LogexReceipt {
                     cumulative_gas_used: (tx_index + 1) * 21_000,
-                    logs: if index == 2 && tx_index > 0 {
+                    logs: if logged_blocks.contains(&index) && tx_index > 0 {
                         vec![Log {
                             address: Address::repeat_byte(7),
                             data: LogData::new_unchecked(
@@ -155,7 +159,7 @@ fn fixture() -> (Scripted, Vec<Header>) {
     }
     (source, headers)
 }
-fn anchor(header: &Header) -> ExecutionAnchor {
+pub(super) fn anchor(header: &Header) -> ExecutionAnchor {
     ExecutionAnchor {
         beacon_root: B256::repeat_byte(1),
         beacon_slot: 10,
@@ -164,7 +168,7 @@ fn anchor(header: &Header) -> ExecutionAnchor {
         receipts_root: header.receipts_root,
     }
 }
-fn limits() -> RepairFetchLimits {
+pub(super) fn limits() -> RepairFetchLimits {
     RepairFetchLimits {
         header_page_size: 2,
         max_headers: 8,

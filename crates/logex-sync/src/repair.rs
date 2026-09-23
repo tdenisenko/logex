@@ -577,5 +577,10 @@ impl RepairFetcher {
     }
 }
 
+mod reconstruction;
+pub use reconstruction::{
+    ReconstructedRepair, ReconstructedSegment, RepairReconstruction, RepairReconstructionLimits,
+};
+
 #[cfg(test)]
 mod tests;

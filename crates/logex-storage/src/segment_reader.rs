@@ -844,6 +844,82 @@ impl SegmentReader {
         self.materialize_log_rows(row_ids, None)
     }
 
+    /// Preflight only the fixed repair routing columns. No data payload or
+    /// companion data-length column is read. The reader must be offline-projected
+    /// to these columns under the maintenance directory owner.
+    pub(crate) fn repair_routing_preflight(&mut self, limit: u64) -> io::Result<()> {
+        const COLUMNS: [(&str, u64); 4] = [
+            ("block_number", 8),
+            ("block_hash", 32),
+            ("log_index", 4),
+            ("source", 1),
+        ];
+        let mut total = 0u64;
+        let mut charge = |bytes: u64| -> io::Result<()> {
+            total = total
+                .checked_add(bytes)
+                .filter(|&sum| sum <= limit)
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "repair routing artifacts exceed byte budget",
+                    )
+                })?;
+            Ok(())
+        };
+        if let Some(bundle) = self.artifacts.bundle() {
+            charge(u64::from(bundle.reference().chain_bytes))?;
+            for (name, _) in COLUMNS {
+                let descriptor = self.compacted_column(name).ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "missing bundled routing column")
+                })?;
+                charge(self.artifacts.len(&descriptor.data_path)?)?;
+                let index = descriptor.page_index_path.as_ref().ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "missing routing page index")
+                })?;
+                charge(self.artifacts.len(index)?)?;
+                charge(crate::page::PAGE_INDEX_HEADER_BYTES as u64)?;
+            }
+        } else {
+            // Capture lengths before full raw reads, including the separately
+            // captured canonical envelope. Subsequent reads reject length changes.
+            for bytes in self.artifacts.inspection_artifact_lengths()? {
+                charge(bytes)?;
+            }
+        }
+        let rows = self.read_row_count()?;
+        for (name, width) in COLUMNS {
+            if let Some(descriptor) = self.compacted_column(name) {
+                self.read_compacted_page_index(descriptor, None)?;
+                continue;
+            }
+            let path = raw_column_path(name);
+            let bytes = self
+                .artifacts
+                .read_range(path, 0..ColumnFileHeader::SIZE as u64)?;
+            let header = ColumnFileHeader::read_from(&bytes).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "invalid raw routing header")
+            })?;
+            let expected = rows
+                .checked_mul(width)
+                .and_then(|bytes| bytes.checked_add(ColumnFileHeader::SIZE as u64))
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "raw routing size overflow")
+                })?;
+            if header.version != crate::column::COLUMN_VERSION
+                || header.compression != 0
+                || header.row_count != rows
+                || self.artifacts.len(path)? != expected
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "raw routing shape differs from captured rows",
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Screen a locked offline inspection before row IDs, retained raw buffers,
     /// or data payloads are materialized. These caller-supplied allowances are
     /// not query limits or a total RSS bound. Decoded bytes include page framing.

@@ -3,7 +3,9 @@
 //! A successful check preserves published local contents; it does not prove
 //! chain membership or block completeness. The repair coordinator must still
 //! authenticate fetched blocks, verify staged artifacts and guard publication.
+mod input;
 mod overlap;
+pub use input::{RepairReadLimits, RepairRowInput};
 
 use std::{collections::BTreeMap, io};
 
