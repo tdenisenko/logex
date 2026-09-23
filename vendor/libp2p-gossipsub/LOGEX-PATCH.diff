@@ -342,7 +342,7 @@
 +}
 --- a/src/behaviour/tests.rs
 +++ b/src/behaviour/tests.rs
-@@ -172,6 +172,339 @@
+@@ -172,6 +172,340 @@
 
  fn inject_nodes1() -> InjectNodes<IdentityTransform, AllowAllSubscriptionFilter> {
      InjectNodes::<IdentityTransform, AllowAllSubscriptionFilter>::default()
@@ -434,17 +434,6 @@
 +        let (handler, _) = logex_backoff_admit(&mut gs, peer, connection, outbound).unwrap();
 +        assert_eq!(gs.connected_peers[&peer].connections, vec![connection]);
 +
-+        // A failure for an attempt that never reached this behaviour is harmless.
-+        logex_backoff_sibling_denial(&mut gs, peer, ConnectionId::new_unchecked(90_002), outbound);
-+        assert_eq!(gs.connected_peers[&peer].connections, vec![connection]);
-+        logex_backoff_sibling_denial(
-+            &mut gs,
-+            PeerId::random(),
-+            ConnectionId::new_unchecked(90_003),
-+            outbound,
-+        );
-+        assert_eq!(gs.connected_peers.len(), 1);
-+
 +        drop(handler); // The derived sibling callback drops earlier handlers on error.
 +        logex_backoff_sibling_denial(&mut gs, peer, connection, outbound);
 +        assert!(
@@ -497,6 +486,18 @@
 +            failed_addresses: &[],
 +            other_established: 0,
 +        }));
++        // A different attempt can fail before reaching gossip while this first
++        // connection is established. Its failure must not disturb the owner.
++        logex_backoff_sibling_denial(&mut gs, peer, ConnectionId::new_unchecked(90_002), outbound);
++        assert_eq!(gs.connected_peers[&peer].connections, vec![first]);
++        logex_backoff_sibling_denial(
++            &mut gs,
++            PeerId::random(),
++            ConnectionId::new_unchecked(90_003),
++            outbound,
++        );
++        assert_eq!(gs.connected_peers.len(), 1);
++
 +        let topic = Topic::new("allowed").hash();
 +        gs.handle_received_subscriptions(
 +            &[Subscription {
@@ -682,7 +683,7 @@
  }
 
  // helper functions for testing
-@@ -236,18 +569,25 @@
+@@ -236,18 +570,25 @@
          }
      };
 
@@ -710,7 +711,7 @@
          },
      );
 
-@@ -452,10 +792,9 @@
+@@ -452,10 +793,9 @@
      // collect all the subscriptions
      let subscriptions = receivers
          .into_values()
@@ -724,7 +725,7 @@
                      collected_subscriptions += 1
                  }
              }
-@@ -513,10 +852,9 @@
+@@ -513,10 +853,9 @@
      // collect all the subscriptions
      let subscriptions = receivers
          .into_values()
@@ -738,7 +739,7 @@
                      collected_subscriptions += 1
                  }
              }
-@@ -588,21 +926,13 @@
+@@ -588,21 +927,13 @@
          let mut new_receivers = HashMap::new();
          let mut acc = 0;
 
@@ -764,7 +765,7 @@
          }
          (acc, new_receivers)
      }
-@@ -632,18 +962,22 @@
+@@ -632,18 +963,22 @@
              &address,
          )
          .unwrap();
@@ -789,7 +790,7 @@
              },
          );
          receivers.insert(random_peer, receiver);
-@@ -734,10 +1068,9 @@
+@@ -734,10 +1069,9 @@
      // Collect all publish messages
      let publishes = receivers
          .into_values()
@@ -803,7 +804,7 @@
                      collected_publish.push(message);
                  }
              }
-@@ -819,10 +1152,9 @@
+@@ -819,10 +1153,9 @@
      // Collect all publish messages
      let publishes = receivers
          .into_values()
@@ -817,7 +818,7 @@
                      collected_publish.push(message);
                  }
              }
-@@ -867,10 +1199,9 @@
+@@ -867,10 +1200,9 @@
      // collect all the SendEvents
      let subscriptions = receivers.into_iter().fold(
          HashMap::<PeerId, Vec<String>>::new(),
@@ -831,7 +832,7 @@
                      let mut peer_subs = collected_subscriptions.remove(&peer).unwrap_or_default();
                      peer_subs.push(topic.into_string());
                      collected_subscriptions.insert(peer, peer_subs);
-@@ -1035,12 +1366,16 @@
+@@ -1035,12 +1367,16 @@
          gs.connected_peers.insert(
              peer_id,
              PeerDetails {
@@ -850,7 +851,7 @@
              },
          );
      }
-@@ -1103,10 +1438,9 @@
+@@ -1103,10 +1439,9 @@
      // the messages we are sending
      let sent_messages = receivers
          .into_values()
@@ -864,7 +865,7 @@
                      collected_messages.push(message)
                  }
              }
-@@ -1159,28 +1493,23 @@
+@@ -1159,28 +1494,23 @@
 
          // is the message is being sent?
          let mut message_exists = false;
@@ -904,7 +905,7 @@
          // default history_length is 5, expect no messages after shift > 5
          if shift < 5 {
              assert!(
-@@ -1217,7 +1546,7 @@
+@@ -1217,7 +1547,7 @@
 
  #[test]
  fn test_handle_iwant_msg_but_already_sent_idontwant() {
@@ -913,7 +914,7 @@
          .peer_no(20)
          .topics(Vec::new())
          .to_subscribe(true)
-@@ -1263,8 +1592,8 @@
+@@ -1263,8 +1593,8 @@
      gs.handle_iwant(&peers[1], vec![msg_id.clone()]);
 
      // Check that no messages are sent.
@@ -924,7 +925,7 @@
      });
  }
 
-@@ -1284,10 +1613,9 @@
+@@ -1284,10 +1614,9 @@
 
      // check that we sent an IWANT request for `unknown id`
      let mut iwant_exists = false;
@@ -938,7 +939,7 @@
              if message_ids
                  .iter()
                  .any(|m| *m == MessageId::new(b"unknown id"))
-@@ -1304,6 +1632,108 @@
+@@ -1304,6 +1633,108 @@
      );
  }
 
@@ -1047,7 +1048,7 @@
  /// tests that an event is not created when a peer shares that it has a message that
  /// we already have
  #[test]
-@@ -1462,29 +1892,13 @@
+@@ -1462,29 +1893,13 @@
  ) -> (usize, HashMap<PeerId, Receiver>) {
      let mut new_receivers = HashMap::new();
      let mut collected_messages = 0;
@@ -1082,7 +1083,7 @@
      }
      (collected_messages, new_receivers)
  }
-@@ -1495,21 +1909,10 @@
+@@ -1495,21 +1910,10 @@
  ) -> HashMap<PeerId, Receiver> {
      gs.events.clear();
      let mut new_receivers = HashMap::new();
@@ -1108,7 +1109,7 @@
      }
      new_receivers
  }
-@@ -1715,10 +2118,9 @@
+@@ -1715,10 +2119,9 @@
      };
      gs.handle_received_message(message.clone(), &local_id);
      assert_eq!(
@@ -1122,7 +1123,7 @@
          fwds +=1;
          }
                  }
-@@ -1859,11 +2261,10 @@
+@@ -1859,11 +2262,10 @@
      }
 
      // assert that no gossip gets sent to explicit peer
@@ -1137,7 +1138,7 @@
              gossips += 1;
          }
      }
-@@ -2264,10 +2665,9 @@
+@@ -2264,10 +2666,9 @@
      // Collect all publish messages
      let publishes = receivers
          .into_values()
@@ -1151,7 +1152,7 @@
                      collected_publish.push(message);
                  }
              }
-@@ -2750,13 +3150,9 @@
+@@ -2750,13 +3151,9 @@
          RpcOut::IHave(IHave {
              topic_hash,
              message_ids,
@@ -1168,7 +1169,7 @@
          }
          _ => false,
      });
-@@ -2826,10 +3222,9 @@
+@@ -2826,10 +3223,9 @@
      let sent_messages =
          receivers
              .into_iter()
@@ -1182,7 +1183,7 @@
                          collected_messages.push((peer_id, message));
                      }
                  }
-@@ -2913,13 +3308,9 @@
+@@ -2913,13 +3309,9 @@
 
      // check that we sent exactly one IWANT request to p2
      let (control_msgs, _) = count_control_msgs(receivers, |peer, c| match c {
@@ -1199,7 +1200,7 @@
          }
          _ => false,
      });
-@@ -2971,17 +3362,17 @@
+@@ -2971,17 +3363,17 @@
      gs.publish(topic, publish_data).unwrap();
 
      // Collect all publish messages
@@ -1227,7 +1228,7 @@
 
      // assert only published to p2
      assert_eq!(publishes.len(), 1);
-@@ -3026,17 +3417,17 @@
+@@ -3026,17 +3418,17 @@
      gs.publish(Topic::new("test"), publish_data).unwrap();
 
      // Collect all publish messages
@@ -1255,7 +1256,7 @@
 
      // assert only published to p2
      assert_eq!(publishes.len(), 1);
-@@ -3146,12 +3537,10 @@
+@@ -3146,12 +3538,10 @@
          },
      );
 
@@ -1272,7 +1273,7 @@
 
      let control_action = ControlAction::IHave(IHave {
          topic_hash: topics[0].clone(),
-@@ -3172,8 +3561,9 @@
+@@ -3172,8 +3562,9 @@
          },
      );
 
@@ -1284,7 +1285,7 @@
  }
 
  #[test]
-@@ -4248,7 +4638,7 @@
+@@ -4248,7 +4639,7 @@
 
      // create 5 peers with the same ip
      let addr = Multiaddr::from(Ipv4Addr::new(10, 1, 2, 3));
@@ -1293,7 +1294,7 @@
          add_peer_with_addr(&mut gs, &[], false, false, addr.clone()).0,
          add_peer_with_addr(&mut gs, &[], false, false, addr.clone()).0,
          add_peer_with_addr(&mut gs, &[], true, false, addr.clone()).0,
-@@ -4258,7 +4648,7 @@
+@@ -4258,7 +4649,7 @@
 
      // create 4 other peers with other ip
      let addr2 = Multiaddr::from(Ipv4Addr::new(10, 1, 2, 4));
@@ -1302,7 +1303,7 @@
          add_peer_with_addr(&mut gs, &[], false, false, addr2.clone()).0,
          add_peer_with_addr(&mut gs, &[], false, false, addr2.clone()).0,
          add_peer_with_addr(&mut gs, &[], true, false, addr2.clone()).0,
-@@ -4575,10 +4965,9 @@
+@@ -4575,10 +4966,9 @@
      }
 
      assert_eq!(
@@ -1316,7 +1317,7 @@
                      fwds += 1;
                  }
              }
-@@ -4990,11 +5379,10 @@
+@@ -4990,11 +5380,10 @@
      // Collect publish messages to floodsub peers
      let publishes = receivers
          .into_iter()
@@ -1332,7 +1333,7 @@
                  {
                      collected_publish += 1;
                  }
-@@ -5046,11 +5434,10 @@
+@@ -5046,11 +5435,10 @@
      // Collect publish messages to floodsub peers
      let publishes = receivers
          .into_iter()
@@ -1348,7 +1349,7 @@
                  {
                      collected_publish += 1;
                  }
-@@ -5275,10 +5662,9 @@
+@@ -5275,10 +5663,9 @@
                                    receivers: HashMap<PeerId, Receiver>|
       -> HashMap<PeerId, Receiver> {
          let new_receivers = HashMap::new();
@@ -1362,7 +1363,7 @@
                      gs1.on_connection_handler_event(
                          p2,
                          connection_id,
-@@ -5368,10 +5754,9 @@
+@@ -5368,10 +5755,9 @@
      assert_eq!(
          receivers
              .into_iter()
@@ -1376,7 +1377,7 @@
                          assert_ne!(peer_id, peers[1]);
                          idontwants += 1;
                      }
-@@ -5410,10 +5795,9 @@
+@@ -5410,10 +5796,9 @@
      assert_eq!(
          receivers
              .into_iter()
@@ -1390,7 +1391,7 @@
                          assert_ne!(peer_id, peers[1]);
                          idontwants += 1;
                      }
-@@ -5453,10 +5837,9 @@
+@@ -5453,10 +5838,9 @@
      assert_eq!(
          receivers
              .into_iter()
@@ -1404,7 +1405,7 @@
                          idontwants += 1;
                      }
                  }
-@@ -5497,14 +5880,13 @@
+@@ -5497,14 +5881,13 @@
          .unwrap();
      let message_id = gs.config.message_id(&message);
      let peer = gs.connected_peers.get_mut(&peers[2]).unwrap();
@@ -1423,7 +1424,7 @@
                      assert_ne!(peer_id, peers[2]);
                      fwds += 1;
                  }
-@@ -5546,7 +5928,7 @@
+@@ -5546,7 +5929,7 @@
          },
      );
      let peer = gs.connected_peers.get_mut(&peers[1]).unwrap();
@@ -1432,7 +1433,7 @@
  }
 
  /// Test that a node clears stale IDONTWANT messages.
-@@ -5562,12 +5944,13 @@
+@@ -5562,12 +5945,13 @@
          .create_network();
 
      let peer = gs.connected_peers.get_mut(&peers[2]).unwrap();
@@ -1450,7 +1451,7 @@
  }
 
  #[test]
-@@ -5589,12 +5972,13 @@
+@@ -5589,12 +5973,13 @@
      gs.connected_peers.insert(
          peer_id,
          PeerDetails {
@@ -1466,7 +1467,7 @@
          },
      );
 
-@@ -5625,12 +6009,13 @@
+@@ -5625,12 +6010,13 @@
      gs.connected_peers.insert(
          slow_peer_id,
          PeerDetails {
@@ -1482,7 +1483,7 @@
          },
      );
      let peer_id = PeerId::random();
-@@ -5638,12 +6023,16 @@
+@@ -5638,12 +6024,16 @@
      gs.connected_peers.insert(
          peer_id,
          PeerDetails {
@@ -1501,7 +1502,7 @@
          },
      );
 
-@@ -5699,12 +6088,13 @@
+@@ -5699,12 +6089,13 @@
      gs.connected_peers.insert(
          slow_peer_id,
          PeerDetails {
@@ -1517,7 +1518,7 @@
          },
      );
      peers.push(slow_peer_id);
-@@ -5716,12 +6106,16 @@
+@@ -5716,12 +6107,16 @@
      gs.connected_peers.insert(
          peer_id,
          PeerDetails {
@@ -1536,7 +1537,7 @@
          },
      );
 
-@@ -5767,12 +6161,12 @@
+@@ -5767,12 +6162,12 @@
 
      let slow_peer_failed_messages = gs
          .events
@@ -1551,7 +1552,7 @@
              _ => None,
          })
          .unwrap();
-@@ -5813,12 +6207,13 @@
+@@ -5813,12 +6208,13 @@
      gs.connected_peers.insert(
          slow_peer_id,
          PeerDetails {
@@ -1567,7 +1568,7 @@
          },
      );
      peers.push(slow_peer_id);
-@@ -5830,12 +6225,16 @@
+@@ -5830,12 +6226,16 @@
      gs.connected_peers.insert(
          peer_id,
          PeerDetails {
@@ -1586,7 +1587,7 @@
          },
      );
 
-@@ -5861,12 +6260,12 @@
+@@ -5861,12 +6261,12 @@
 
      let slow_peer_failed_messages = gs
          .events
@@ -1601,7 +1602,7 @@
              _ => None,
          })
          .unwrap();
-@@ -5907,12 +6306,13 @@
+@@ -5907,12 +6307,13 @@
      gs.connected_peers.insert(
          slow_peer_id,
          PeerDetails {
@@ -1617,7 +1618,7 @@
          },
      );
      peers.push(slow_peer_id);
-@@ -5924,12 +6324,16 @@
+@@ -5924,12 +6325,16 @@
      gs.connected_peers.insert(
          peer_id,
          PeerDetails {
@@ -1636,7 +1637,7 @@
          },
      );
 
-@@ -5955,12 +6359,12 @@
+@@ -5955,12 +6360,12 @@
 
      let slow_peer_failed_messages = gs
          .events
@@ -1651,7 +1652,7 @@
              _ => None,
          })
          .unwrap();
-@@ -6006,12 +6410,13 @@
+@@ -6006,12 +6411,13 @@
      gs.connected_peers.insert(
          slow_peer_id,
          PeerDetails {
@@ -1667,7 +1668,7 @@
          },
      );
      gs.as_peer_score_mut().add_peer(slow_peer_id);
-@@ -6020,12 +6425,16 @@
+@@ -6020,12 +6426,16 @@
      gs.connected_peers.insert(
          peer_id,
          PeerDetails {
@@ -1686,7 +1687,7 @@
          },
      );
 
-@@ -6048,7 +6457,7 @@
+@@ -6048,7 +6458,7 @@
 
      let mut gs: Behaviour = Behaviour::new(MessageAuthenticity::RandomAuthor, gs_config).unwrap();
 
@@ -1695,7 +1696,7 @@
      let topic_hash = Topic::new("Test").hash();
      let publish_data = vec![2; 59];
      let raw_message = gs.build_raw_message(topic_hash, publish_data).unwrap();
-@@ -6065,17 +6474,50 @@
+@@ -6065,17 +6475,50 @@
  }
 
  #[test]
@@ -1750,7 +1751,7 @@
  }
 
  /// Test that specific topic configurations are correctly applied
-@@ -6447,10 +6889,9 @@
+@@ -6447,10 +6890,9 @@
      // Collect publish messages
      let publishes = receivers
          .into_values()
@@ -1764,7 +1765,7 @@
                      collected_publish.push(message);
                  }
              }
-@@ -6603,6 +7044,7 @@
+@@ -6603,6 +7045,7 @@
          .to_subscribe(true)
          .gs_config(config)
          .create_network();
@@ -1772,7 +1773,7 @@
 
      let data = vec![0u8; max_size + 1];
      let raw_message = RawMessage {
-@@ -6637,9 +7079,6 @@
+@@ -6637,9 +7080,6 @@
          }) => {
              assert_eq!(propagation_source, peers[0]);
              assert_eq!(message.data.len(), max_size + 1);
@@ -1782,7 +1783,7 @@
          }
          _ => panic!("Unexpected event"),
      }
-@@ -6707,6 +7146,7 @@
+@@ -6707,6 +7147,7 @@
          .to_subscribe(true)
          .gs_config(config)
          .create_network();
@@ -1790,7 +1791,7 @@
 
      let data = vec![0u8; max_size - 100];
      let raw_message = RawMessage {
-@@ -6741,9 +7181,6 @@
+@@ -6741,9 +7182,6 @@
          }) => {
              assert_eq!(propagation_source, peers[0]);
              assert_eq!(message.data.len(), max_size - 100);
@@ -1800,7 +1801,7 @@
          }
          _ => panic!("Unexpected event"),
      }
-@@ -6787,3 +7224,1767 @@
+@@ -6787,3 +7225,1767 @@
          _ => panic!("Unexpected event"),
      }
  }

@@ -260,17 +260,6 @@ fn logex_backoff_sibling_denial_releases_first_connection() {
         let (handler, _) = logex_backoff_admit(&mut gs, peer, connection, outbound).unwrap();
         assert_eq!(gs.connected_peers[&peer].connections, vec![connection]);
 
-        // A failure for an attempt that never reached this behaviour is harmless.
-        logex_backoff_sibling_denial(&mut gs, peer, ConnectionId::new_unchecked(90_002), outbound);
-        assert_eq!(gs.connected_peers[&peer].connections, vec![connection]);
-        logex_backoff_sibling_denial(
-            &mut gs,
-            PeerId::random(),
-            ConnectionId::new_unchecked(90_003),
-            outbound,
-        );
-        assert_eq!(gs.connected_peers.len(), 1);
-
         drop(handler); // The derived sibling callback drops earlier handlers on error.
         logex_backoff_sibling_denial(&mut gs, peer, connection, outbound);
         assert!(
@@ -323,6 +312,18 @@ fn logex_backoff_sibling_denial_preserves_established_connection() {
             failed_addresses: &[],
             other_established: 0,
         }));
+        // A different attempt can fail before reaching gossip while this first
+        // connection is established. Its failure must not disturb the owner.
+        logex_backoff_sibling_denial(&mut gs, peer, ConnectionId::new_unchecked(90_002), outbound);
+        assert_eq!(gs.connected_peers[&peer].connections, vec![first]);
+        logex_backoff_sibling_denial(
+            &mut gs,
+            PeerId::random(),
+            ConnectionId::new_unchecked(90_003),
+            outbound,
+        );
+        assert_eq!(gs.connected_peers.len(), 1);
+
         let topic = Topic::new("allowed").hash();
         gs.handle_received_subscriptions(
             &[Subscription {
