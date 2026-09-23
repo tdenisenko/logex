@@ -71,6 +71,9 @@ jobs:
           vendor/libp2p-gossipsub/src/topic.rs
           vendor/libp2p-gossipsub/src/handler.rs
 
+      - name: Check patched connection-limit formatting
+        run: rustfmt --check --edition 2021 --config skip_children=true vendor/libp2p-connection-limits/src/lib.rs
+
       - name: Check patched aggregate formatting
         run: >-
           rustfmt --check --edition 2021
@@ -121,6 +124,13 @@ jobs:
           CARGO_TARGET_DIR: target/gossipsub-regressions
         run: cargo test --manifest-path vendor/libp2p-gossipsub/Cargo.toml --lib logex_ --locked
 
+      - name: Check pinned connection-limit library tests
+        env:
+          CARGO_TARGET_DIR: target/connection-limits-regressions
+        run: |
+          cargo test --manifest-path vendor/libp2p-connection-limits/Cargo.toml --lib --locked
+          cargo test --manifest-path vendor/libp2p-connection-limits/Cargo.toml --doc --locked
+
       - name: Verify external-volume lifecycle with disposable Linux images
         run: |
           cargo build -p logex-node --example volume_probe --locked
@@ -158,6 +168,13 @@ jobs:
         env:
           CARGO_TARGET_DIR: target/gossipsub-regressions
         run: cargo test --manifest-path vendor/libp2p-gossipsub/Cargo.toml --lib logex_ --locked
+
+      - name: Check pinned connection-limit library tests
+        env:
+          CARGO_TARGET_DIR: target/connection-limits-regressions
+        run: |
+          cargo test --manifest-path vendor/libp2p-connection-limits/Cargo.toml --lib --locked
+          cargo test --manifest-path vendor/libp2p-connection-limits/Cargo.toml --doc --locked
 
   release:
     name: Release Build

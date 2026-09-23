@@ -1,0 +1,20 @@
+LogEx connection-limits patch provenance
+
+Published package: libp2p-connection-limits 0.6.0
+Archive SHA-256: a18b8b607cf3bfa2f8c57db9c7d8569a315d5cc0a282e6bfd5ebfc0a9840b2a0
+Upstream VCS: 7b9a558e3188eaf20a14bd8388d5e9b6e2aa9a23
+
+All six published files, including original manifests, lockfile, source license
+notice and changelog, are retained. LOGEX-UPSTREAM-SHA256 records original bytes;
+LOGEX-PATCH.diff records the complete local change. The shared vendor verifier
+checks source provenance offline. Implementation and validation summaries live
+in the implementation pull request.
+
+The normalized published manifest omitted the original test dependencies
+libp2p-swarm-derive, libp2p-swarm-test and quickcheck. They are restored as
+pinned development dependencies so the original library tests and finite LogEx
+connection-lifecycle controls can run together. Production dependencies and
+public limits/errors are unchanged.
+
+The original property-test generator uses a private QuickCheck method; the
+local test-only adaptation chooses from the same values through its public API.
