@@ -318,16 +318,62 @@ impl ConsensusStore {
         anchor: &ExecutionAnchor,
         publish: impl FnOnce() -> R,
     ) -> Option<R> {
-        let snapshot = self.inner.lock().unwrap();
-        if selected_lineage_pending(&snapshot, Some(anchor.block_number)) {
+        self.with_current_anchors(std::slice::from_ref(anchor), publish)
+    }
+
+    /// Choose the nearest materialized anchor covering an inclusive block range.
+    /// The header budget includes the anchor and the bridge down to `first_block`.
+    /// This uses current ingestion admission, not a finality guarantee: a selected
+    /// head ahead of materialization does not by itself disqualify retained anchors.
+    pub fn nearest_current_anchor(
+        &self,
+        first_block: u64,
+        last_block: u64,
+        max_headers: u64,
+    ) -> Option<ExecutionAnchor> {
+        if first_block > last_block {
             return None;
         }
+        let snapshot = self.inner.lock().unwrap();
         let records = &snapshot.ordered_anchors;
-        let index = records
-            .binary_search_by_key(&anchor.block_number, |record| record.anchor.block_number)
-            .ok()?;
-        if records[index].anchor != *anchor {
+        let index = records.partition_point(|record| record.anchor.block_number < last_block);
+        let anchor = records.get(index)?.anchor;
+        let headers = anchor
+            .block_number
+            .checked_sub(first_block)?
+            .checked_add(1)?;
+        if headers > max_headers || selected_lineage_pending(&snapshot, Some(anchor.block_number)) {
             return None;
+        }
+        Some(anchor)
+    }
+
+    /// Admit all materialized anchors against one snapshot before calling once.
+    /// Repeated anchors and an empty slice are allowed. This retains the existing
+    /// ahead-of-materialization policy; it proves neither finality nor ancestry
+    /// under an unmaterialized higher selected head.
+    ///
+    /// Acquire execution storage ownership before calling. Prepare data before
+    /// admission: the synchronous callback holds the consensus lock and must not
+    /// await or call consensus APIs, peer caches, subscribers or progress callbacks.
+    /// This serializes selection admission, not cross-file durability.
+    pub fn with_current_anchors<R>(
+        &self,
+        anchors: &[ExecutionAnchor],
+        publish: impl FnOnce() -> R,
+    ) -> Option<R> {
+        let snapshot = self.inner.lock().unwrap();
+        let records = &snapshot.ordered_anchors;
+        for anchor in anchors {
+            if selected_lineage_pending(&snapshot, Some(anchor.block_number)) {
+                return None;
+            }
+            let index = records
+                .binary_search_by_key(&anchor.block_number, |record| record.anchor.block_number)
+                .ok()?;
+            if records[index].anchor != *anchor {
+                return None;
+            }
         }
         Some(publish())
     }
@@ -3742,6 +3788,98 @@ mod tests {
     }
 
     #[test]
+    fn repair_anchor_selection_checks_nearest_range_and_bridge_budget() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ConsensusStore::open(
+            directory.path(),
+            Some("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        )
+        .unwrap();
+        assert_eq!(store.nearest_current_anchor(98, 100, 3), None);
+        let first = test_anchor(100);
+        let next = test_anchor(105);
+        store.replace_anchors(vec![first, next]).unwrap();
+        assert_eq!(store.nearest_current_anchor(98, 100, 3), Some(first.anchor));
+        assert_eq!(store.nearest_current_anchor(98, 100, 2), None);
+        assert_eq!(store.nearest_current_anchor(98, 101, 8), Some(next.anchor));
+        assert_eq!(store.nearest_current_anchor(98, 101, 7), None);
+        assert_eq!(store.nearest_current_anchor(105, 105, 1), Some(next.anchor));
+        assert_eq!(store.nearest_current_anchor(105, 105, 0), None);
+        assert_eq!(store.nearest_current_anchor(106, 105, 10), None);
+        assert_eq!(store.nearest_current_anchor(106, 106, 10), None);
+        let extreme = test_anchor(u64::MAX);
+        store.replace_anchors(vec![extreme]).unwrap();
+        assert_eq!(store.nearest_current_anchor(0, u64::MAX, u64::MAX), None);
+        assert_eq!(
+            store.nearest_current_anchor(1, u64::MAX, u64::MAX),
+            Some(extreme.anchor)
+        );
+        assert_eq!(
+            store.nearest_current_anchor(u64::MAX, u64::MAX, 1),
+            Some(extreme.anchor)
+        );
+    }
+
+    #[test]
+    fn repair_anchor_batch_admission_checks_all_identities_before_callback() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ConsensusStore::open(
+            directory.path(),
+            Some("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        )
+        .unwrap();
+        let first = test_anchor(100);
+        let second = test_anchor(105);
+        store.replace_anchors(vec![first, second]).unwrap();
+        let anchors = [first.anchor, second.anchor, first.anchor];
+        let calls = std::cell::Cell::new(0);
+        assert_eq!(
+            store.with_current_anchors(&anchors, || {
+                assert!(store.inner.try_lock().is_err());
+                calls.set(calls.get() + 1);
+                7
+            }),
+            Some(7)
+        );
+        assert_eq!(calls.get(), 1);
+        assert_eq!(
+            store.with_current_anchors(&[], || {
+                assert!(store.inner.try_lock().is_err());
+                8
+            }),
+            Some(8)
+        );
+        let mut metadata = second;
+        metadata.finalized = true;
+        metadata.parent_beacon_root = Some(B256::repeat_byte(9));
+        store.replace_anchors(vec![first, metadata]).unwrap();
+        assert_eq!(store.with_current_anchors(&anchors, || 9), Some(9));
+        for field in 0..5 {
+            let mut changed = second;
+            match field {
+                0 => changed.anchor.block_number += 1,
+                1 => changed.anchor.block_hash = B256::repeat_byte(17),
+                2 => changed.anchor.beacon_root = B256::repeat_byte(18),
+                3 => changed.anchor.beacon_slot += 1,
+                _ => changed.anchor.receipts_root = B256::repeat_byte(19),
+            }
+            store.replace_anchors(vec![first, changed]).unwrap();
+            assert!(
+                store
+                    .with_current_anchors(&anchors, || panic!("changed batch admitted"))
+                    .is_none()
+            );
+        }
+        // An otherwise compatible suffix cannot hide a removed first anchor.
+        store.replace_anchors(vec![second]).unwrap();
+        assert!(
+            store
+                .with_current_anchors(&anchors, || panic!("missing batch admitted"))
+                .is_none()
+        );
+    }
+
+    #[test]
     fn selection_publication_reuses_pending_lineage_and_ahead_progress_rules() {
         let slot = recent_cache_fixture_slot();
         let fixture = light_client::test_cached_light_client_fixture(slot);
@@ -3770,6 +3908,14 @@ mod tests {
         };
         for height in [99, 100] {
             select(height);
+            assert_eq!(store.nearest_current_anchor(98, 100, 3), None);
+            assert!(
+                store
+                    .with_current_anchors(&[old.anchor, old.anchor], || panic!(
+                        "pending batch admitted"
+                    ))
+                    .is_none()
+            );
             assert!(
                 store
                     .with_current_anchor(&old.anchor, || panic!("pending selection admitted"))
@@ -3777,6 +3923,11 @@ mod tests {
             );
         }
         select(105);
+        assert_eq!(store.nearest_current_anchor(98, 100, 3), Some(old.anchor));
+        assert_eq!(
+            store.with_current_anchors(&[old.anchor, old.anchor], || true),
+            Some(true)
+        );
         // Preserve existing liveness policy, not a claim of ancestry to the
         // unmaterialized higher selected head.
         assert_eq!(store.with_current_anchor(&old.anchor, || true), Some(true));
@@ -3789,6 +3940,12 @@ mod tests {
             }])
             .unwrap();
         assert_eq!(store.with_current_anchor(&selected, || true), Some(true));
+        assert_eq!(store.nearest_current_anchor(98, 100, 3), Some(selected));
+        assert!(
+            store
+                .with_current_anchors(&[selected, old.anchor], || panic!("mixed branch admitted"))
+                .is_none()
+        );
         assert!(
             store
                 .with_current_anchor(&old.anchor, || panic!("old branch admitted"))
