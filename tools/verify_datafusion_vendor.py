@@ -52,9 +52,9 @@ PACKAGES = (
         modified={
             PurePosixPath("Cargo.lock"): "9c251863c193ed1c83b1e63ccc6765b553fc3cf4687464377e1b4bbc8d3cf1eb",
             PurePosixPath("Cargo.toml"): "0e8db4bae3efe861d432bb895baefb868a7fba6f0d4f7dc5ee65bde05bbe4d61",
-            PurePosixPath("src/behaviour.rs"): "85ad2a972ff60409adef58bf3e879150d36be641c542a16239111e430878e34a",
-            PurePosixPath("src/behaviour/tests.rs"): "93da7b8cd42603f42e0215224463eeeaf8b5057ea802835e6d66eacfe294beac",
-            PurePosixPath("src/config.rs"): "ba4012b755d2815600fe7aceac6c544e64371d444b81d9501c1a50d23bd4c4bd",
+            PurePosixPath("src/behaviour.rs"): "7f104920e0e90504b54aa4f5184b6fb38164de0798b57b15ca6ea7818d4c174c",
+            PurePosixPath("src/behaviour/tests.rs"): "bd00310bde46245ba61c662c08b088d52626552c17d72c0d851493f084bbb6b4",
+            PurePosixPath("src/config.rs"): "a8952d6b9c12cf688a5a4fec00ce60113c528126aca702e9fe3a3d6d15fa594d",
             PurePosixPath("src/error.rs"): "5441c555813be3bd9690a7ca78887b7ce4b43de5d44c2b88e158b4787c767b01",
             PurePosixPath("src/gossip_promises.rs"): "19b3309b949ea2c2da200fffa09aaa35327a1350e90f6fa1de0aff2e9e628ed2",
             PurePosixPath("src/handler.rs"): "01da20f3633c1f32c1af2e3e2f29bf07cf83c16bfe40674198a01d9a42f6442b",
@@ -67,7 +67,7 @@ PACKAGES = (
             PurePosixPath("src/topic.rs"): "cbfc7410a2f01d8f0b5477c40084397b8a9f7a79300861a2e44a63fe6d5c21da",
             PurePosixPath("src/types.rs"): "70f62528b88a70c801c8b6cf291bab0fcde4e08350d00a8fab3837e85a216ad8",
         },
-        patch_checksum="bb1fa258f5028520a0e5fa481766159246dee73b6924444e9ca578212576b02e",
+        patch_checksum="37c206b4509a3d86e1a2e7e8588d96cde1b21621b5c2ac366908d23afa50dc1d",
         added={
             PurePosixPath("src/event_queue.rs"): "b0dbaf2c61970e7b78a65e9d53298b2e90ad76e2081e7f7453ea5e0523dddbb7",
         },

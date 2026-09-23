@@ -118,6 +118,7 @@ const GOSSIP_CACHE_LIMITS: gossipsub::CacheLimits = gossipsub::CacheLimits {
     promise_entries: 4_096,
     promise_bytes: 4_096 * 20,
     promise_peer_associations: 8_192,
+    ihave_peers: 4_096,
     idontwant_entries_per_peer: 1_024,
     idontwant_bytes_per_peer: 1_024 * 20,
 };

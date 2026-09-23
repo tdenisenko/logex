@@ -121,6 +121,10 @@ pub struct CacheLimits {
     pub promise_bytes: usize,
     /// Outstanding message/peer request pairs.
     pub promise_peer_associations: usize,
+    /// Distinct peers with IHAVE/IWANT counters within one heartbeat interval.
+    /// Counters survive reconnects. Excess new peers' IHAVEs are ignored until
+    /// the next heartbeat; already admitted peers keep their existing quotas.
+    pub ihave_peers: usize,
     /// Suppression IDs retained for each connected peer.
     pub idontwant_entries_per_peer: usize,
     /// Owned suppression-ID bytes for each connected peer.
@@ -140,6 +144,7 @@ impl Default for CacheLimits {
             promise_entries: 8_192,
             promise_bytes: 1024 * 1024,
             promise_peer_associations: 65_536,
+            ihave_peers: 16_384,
             idontwant_entries_per_peer: 10_000,
             idontwant_bytes_per_peer: 1024 * 1024,
         }
@@ -163,6 +168,8 @@ pub struct QueueLimits {
     pub max_non_priority_bytes: usize,
     /// Pending subscription, slow-peer and unsupported-protocol advisory events.
     /// Excess new advisories are dropped, preserving those already queued.
+    /// Also bounds a separate set of peer failure summaries awaiting heartbeat
+    /// publication; dropping a summary does not suppress scoring or metrics.
     pub max_advisory_events: usize,
     /// Owned topic-string bytes across pending advisory events.
     pub max_advisory_bytes: usize,

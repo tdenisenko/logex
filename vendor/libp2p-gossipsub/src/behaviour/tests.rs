@@ -8267,3 +8267,388 @@ fn logex_pending_handler_notifications_share_service_with_queued_messages() {
     assert!(gs.events.is_empty());
     assert!(gs.pending_handler_peers.is_empty());
 }
+
+// Unit controls drive real Behaviour admission and FromSwarm/handler callbacks.
+// They model permitted callback ordering, not socket or transport execution.
+fn logex_heartbeat_connect(
+    gs: &mut Behaviour,
+    peer: PeerId,
+    connection: ConnectionId,
+) -> (Handler, Receiver) {
+    let address = "/memory/1234".parse::<Multiaddr>().unwrap();
+    gs.handle_pending_inbound_connection(connection, &address, &address)
+        .unwrap();
+    let handler = gs
+        .handle_established_inbound_connection(connection, peer, &address, &address)
+        .unwrap();
+    let endpoint = ConnectedPoint::Listener {
+        local_addr: address.clone(),
+        send_back_addr: address,
+    };
+    gs.on_swarm_event(FromSwarm::ConnectionEstablished(ConnectionEstablished {
+        peer_id: peer,
+        connection_id: connection,
+        endpoint: &endpoint,
+        failed_addresses: &[],
+        other_established: 0,
+    }));
+    gs.on_connection_handler_event(
+        peer,
+        connection,
+        HandlerEvent::PeerKind(PeerKind::Gossipsubv1_2),
+    );
+    let mut receiver = gs.connected_peers[&peer].sender.new_receiver();
+    receiver.drain_priority(); // Connection setup SUBSCRIBE only.
+    (handler, receiver)
+}
+
+fn logex_heartbeat_disconnect(gs: &mut Behaviour, peer: &PeerId) {
+    let connections = &gs.connected_peers[peer].connections;
+    assert_eq!(connections.len(), 1);
+    let connection_id = connections[0];
+    let address = "/memory/1234".parse::<Multiaddr>().unwrap();
+    let endpoint = ConnectedPoint::Listener {
+        local_addr: address.clone(),
+        send_back_addr: address,
+    };
+    gs.on_swarm_event(FromSwarm::ConnectionClosed(ConnectionClosed {
+        peer_id: *peer,
+        connection_id,
+        endpoint: &endpoint,
+        remaining_established: 0,
+        cause: None,
+    }));
+}
+
+fn logex_heartbeat_advertise(
+    gs: &mut Behaviour,
+    peer: PeerId,
+    connection: ConnectionId,
+    topic: &TopicHash,
+    id: u8,
+) {
+    gs.on_connection_handler_event(
+        peer,
+        connection,
+        HandlerEvent::Message {
+            rpc: Rpc {
+                messages: vec![],
+                subscriptions: vec![],
+                control_msgs: vec![ControlAction::IHave(IHave {
+                    topic_hash: topic.clone(),
+                    message_ids: vec![MessageId::new(&[id])],
+                })],
+            },
+            invalid_messages: vec![],
+        },
+    );
+}
+
+fn logex_heartbeat_drain_events(gs: &mut Behaviour) -> Vec<ToSwarm<Event, HandlerIn>> {
+    let mut result = Vec::new();
+    let mut cx = Context::from_waker(futures::task::noop_waker_ref());
+    for _ in 0..16 {
+        match gs.poll(&mut cx) {
+            Poll::Ready(event) => result.push(event),
+            Poll::Pending => return result,
+        }
+    }
+    panic!("finite fixture did not drain before maintenance");
+}
+
+#[test]
+fn logex_ihave_owner_cap_preserves_reconnect_quota_and_heartbeat_reuses_capacity() {
+    let config = ConfigBuilder::default()
+        .heartbeat_interval(Duration::from_secs(60))
+        .heartbeat_initial_delay(Duration::from_secs(60))
+        .max_ihave_messages(2)
+        .cache_limits(crate::CacheLimits {
+            ihave_peers: 1,
+            ..Default::default()
+        })
+        .build()
+        .unwrap();
+    let (mut gs, _, _, topics) = inject_nodes1()
+        .topics(vec!["t".into()])
+        .gs_config(config)
+        .create_network();
+    let a = PeerId::random();
+    let b = PeerId::random();
+    let c = PeerId::random();
+    let first = ConnectionId::new_unchecked(101);
+    let second = ConnectionId::new_unchecked(102);
+    let third = ConnectionId::new_unchecked(103);
+    let (handler_a, mut receiver_a) = logex_heartbeat_connect(&mut gs, a, first);
+    logex_heartbeat_advertise(&mut gs, a, first, &topics[0], 1);
+    logex_heartbeat_advertise(&mut gs, a, first, &topics[0], 2);
+    assert_eq!(
+        receiver_a.drain_non_priority().len(),
+        2,
+        "existing owner still admitted when the owner cap is full"
+    );
+    assert_eq!(gs.count_received_ihave.get(&a), Some(&2));
+    assert_eq!(gs.count_sent_iwant.get(&a), Some(&2));
+    logex_heartbeat_disconnect(&mut gs, &a);
+    drop(handler_a);
+    let (handler_b, mut receiver_b) = logex_heartbeat_connect(&mut gs, b, second);
+    logex_heartbeat_advertise(&mut gs, b, second, &topics[0], 3);
+    assert!(receiver_b.drain_non_priority().is_empty());
+    logex_heartbeat_disconnect(&mut gs, &b);
+    drop(handler_b);
+    let (_handler_c, mut receiver_c) = logex_heartbeat_connect(&mut gs, c, third);
+    logex_heartbeat_advertise(&mut gs, c, third, &topics[0], 4);
+    assert!(receiver_c.drain_non_priority().is_empty());
+    assert_eq!(gs.count_received_ihave.len(), 1);
+    assert_eq!(gs.count_sent_iwant.len(), 1);
+    let reconnected = ConnectionId::new_unchecked(104);
+    let (_handler_a, mut receiver_a) = logex_heartbeat_connect(&mut gs, a, reconnected);
+    logex_heartbeat_advertise(&mut gs, a, reconnected, &topics[0], 5);
+    assert_eq!(gs.count_received_ihave.get(&a), Some(&3));
+    assert_eq!(gs.count_sent_iwant.get(&a), Some(&2));
+    assert!(
+        receiver_a.drain_non_priority().is_empty(),
+        "reconnect cannot reset the heartbeat quota"
+    );
+    logex_heartbeat_drain_events(&mut gs);
+    // Model scheduled maintenance only once ordinary poll has no queued work.
+    gs.heartbeat();
+    assert!(gs.count_received_ihave.is_empty());
+    assert!(gs.count_sent_iwant.is_empty());
+    logex_heartbeat_drain_events(&mut gs);
+    logex_heartbeat_advertise(&mut gs, c, third, &topics[0], 6);
+    assert_eq!(gs.count_received_ihave.get(&c), Some(&1));
+    assert_eq!(gs.count_sent_iwant.get(&c), Some(&1));
+    assert_eq!(receiver_c.drain_non_priority().len(), 1);
+}
+
+#[test]
+fn logex_full_promises_and_unsent_iwant_do_not_create_zero_sent_owners() {
+    let config = ConfigBuilder::default()
+        .heartbeat_interval(Duration::from_secs(60))
+        .heartbeat_initial_delay(Duration::from_secs(60))
+        .validation_mode(ValidationMode::Anonymous)
+        .validate_messages()
+        .message_id_fn(|message| MessageId::new(&message.data))
+        .cache_limits(crate::CacheLimits {
+            ihave_peers: 2,
+            promise_entries: 1,
+            ..Default::default()
+        })
+        .build()
+        .unwrap();
+    let mut gs = Behaviour::new(MessageAuthenticity::Anonymous, config).unwrap();
+    let topic = Topic::new("t");
+    gs.subscribe(&topic).unwrap();
+    let topics = [topic.hash()];
+    let a = PeerId::random();
+    let b = PeerId::random();
+    let first = ConnectionId::new_unchecked(201);
+    let second = ConnectionId::new_unchecked(202);
+    let (_handler_a, mut receiver_a) = logex_heartbeat_connect(&mut gs, a, first);
+    let (_handler_b, mut receiver_b) = logex_heartbeat_connect(&mut gs, b, second);
+    logex_heartbeat_advertise(&mut gs, a, first, &topics[0], 1);
+    assert_eq!(receiver_a.drain_non_priority().len(), 1);
+    logex_heartbeat_advertise(&mut gs, b, second, &topics[0], 2);
+    assert_eq!(gs.count_received_ihave.len(), 2);
+    assert_eq!(gs.count_sent_iwant.len(), 1);
+    assert!(!gs.count_sent_iwant.contains_key(&b));
+    assert!(receiver_b.drain_non_priority().is_empty());
+    // A real delivered message releases the outstanding request before checking
+    // the failed-send case, without directly changing promise ownership.
+    gs.on_connection_handler_event(
+        a,
+        first,
+        HandlerEvent::Message {
+            rpc: Rpc {
+                messages: vec![RawMessage {
+                    source: None,
+                    data: vec![1],
+                    sequence_number: None,
+                    topic: topics[0].clone(),
+                    signature: None,
+                    key: None,
+                    validated: false,
+                }],
+                subscriptions: vec![],
+                control_msgs: vec![],
+            },
+            invalid_messages: vec![],
+        },
+    );
+    assert!(!gs.gossip_promises.contains(&MessageId::new(&[1])));
+    logex_heartbeat_drain_events(&mut gs);
+    receiver_b.close_non_priority();
+    logex_heartbeat_advertise(&mut gs, b, second, &topics[0], 3);
+    assert!(!gs.count_sent_iwant.contains_key(&b));
+    assert!(!gs.gossip_promises.contains(&MessageId::new(&[3])));
+}
+
+fn logex_heartbeat_forward(topic: &TopicHash) -> RpcOut {
+    RpcOut::Forward {
+        message: RawMessage {
+            source: None,
+            data: vec![1],
+            sequence_number: None,
+            topic: topic.clone(),
+            signature: None,
+            key: None,
+            validated: true,
+        },
+        timeout: Delay::new(Duration::ZERO),
+    }
+}
+
+#[test]
+fn logex_failed_summary_cap_preserves_scoring_reconnect_and_heartbeat_reuse() {
+    let config = ConfigBuilder::default()
+        .heartbeat_interval(Duration::from_secs(60))
+        .heartbeat_initial_delay(Duration::from_secs(60))
+        .connection_handler_queue_len(2)
+        .queue_limits(crate::QueueLimits {
+            max_advisory_events: 1,
+            ..Default::default()
+        })
+        .build()
+        .unwrap();
+    let (mut gs, _, _, topics) = inject_nodes1()
+        .topics(vec!["t".into()])
+        .scoring(Some((
+            PeerScoreParams::default(),
+            PeerScoreThresholds::default(),
+        )))
+        .gs_config(config)
+        .create_network();
+    let a = PeerId::random();
+    let b = PeerId::random();
+    let first = ConnectionId::new_unchecked(301);
+    let second = ConnectionId::new_unchecked(302);
+    let (handler_a, mut receiver_a) = logex_heartbeat_connect(&mut gs, a, first);
+    let (_handler_b, mut receiver_b) = logex_heartbeat_connect(&mut gs, b, second);
+    // Fill the independently bounded advisory queue using a real transition.
+    gs.on_connection_handler_event(
+        a,
+        first,
+        HandlerEvent::Message {
+            rpc: Rpc {
+                messages: vec![],
+                subscriptions: vec![Subscription {
+                    action: SubscriptionAction::Subscribe,
+                    topic_hash: Topic::new("advisory").hash(),
+                }],
+                control_msgs: vec![],
+            },
+            invalid_messages: vec![],
+        },
+    );
+    assert_eq!(gs.events.len(), 1);
+    assert!(gs.send_message(a, logex_heartbeat_forward(&topics[0])));
+    assert!(!gs.send_message(a, logex_heartbeat_forward(&topics[0])));
+    assert_eq!(gs.failed_messages.len(), 1);
+    assert_eq!(gs.failed_messages[&a].forward, 1);
+    let score_before = gs.peer_score(&b).unwrap();
+    assert!(gs.send_message(b, logex_heartbeat_forward(&topics[0])));
+    assert!(!gs.send_message(b, logex_heartbeat_forward(&topics[0])));
+    assert!(!gs.failed_messages.contains_key(&b));
+    assert!(
+        gs.peer_score(&b).unwrap() < score_before,
+        "summary capacity must not suppress scoring"
+    );
+    // Deliver the handler's timeout callback for the actual admitted RPC.
+    let dropped_a = receiver_a.drain_non_priority().pop().unwrap();
+    gs.on_connection_handler_event(a, first, HandlerEvent::MessageDropped(dropped_a));
+    let score_before_drop = gs.peer_score(&b).unwrap();
+    let dropped_b = receiver_b.drain_non_priority().pop().unwrap();
+    gs.on_connection_handler_event(b, second, HandlerEvent::MessageDropped(dropped_b));
+    assert!(gs.peer_score(&b).unwrap() < score_before_drop);
+    assert_eq!(gs.failed_messages.len(), 1);
+    assert_eq!(gs.failed_messages[&a].forward, 2);
+    assert_eq!(gs.failed_messages[&a].timeout, 1);
+    logex_heartbeat_disconnect(&mut gs, &a);
+    drop(handler_a);
+    let reconnected = ConnectionId::new_unchecked(303);
+    let (_handler_a, mut receiver_a) = logex_heartbeat_connect(&mut gs, a, reconnected);
+    assert_eq!(gs.failed_messages[&a].forward, 2);
+    assert!(gs.send_message(a, logex_heartbeat_forward(&topics[0])));
+    let dropped = receiver_a.drain_non_priority().pop().unwrap();
+    gs.on_connection_handler_event(a, reconnected, HandlerEvent::MessageDropped(dropped));
+    assert_eq!(gs.failed_messages[&a].forward, 3);
+    assert_eq!(gs.failed_messages[&a].timeout, 2);
+    logex_heartbeat_drain_events(&mut gs);
+    gs.heartbeat();
+    assert!(gs.failed_messages.is_empty());
+    let emitted = logex_heartbeat_drain_events(&mut gs);
+    assert!(emitted.iter().any(|event| matches!(event,
+        ToSwarm::GenerateEvent(Event::SlowPeer { peer_id, failed_messages })
+            if *peer_id == a && failed_messages.forward == 3 && failed_messages.timeout == 2)));
+    assert!(gs.send_message(b, logex_heartbeat_forward(&topics[0])));
+    let dropped = receiver_b.drain_non_priority().pop().unwrap();
+    gs.on_connection_handler_event(b, second, HandlerEvent::MessageDropped(dropped));
+    assert_eq!(gs.failed_messages.len(), 1);
+    assert_eq!(gs.failed_messages[&b].timeout, 1);
+}
+
+#[test]
+fn logex_zero_heartbeat_budgets_preserve_message_delivery_and_queue_outcomes() {
+    let config = ConfigBuilder::default()
+        .heartbeat_interval(Duration::from_secs(60))
+        .heartbeat_initial_delay(Duration::from_secs(60))
+        .validation_mode(ValidationMode::Anonymous)
+        .validate_messages()
+        .message_id_fn(|message| MessageId::new(&message.data))
+        .connection_handler_queue_len(2)
+        .cache_limits(crate::CacheLimits {
+            ihave_peers: 0,
+            ..Default::default()
+        })
+        .queue_limits(crate::QueueLimits {
+            max_advisory_events: 0,
+            ..Default::default()
+        })
+        .build()
+        .unwrap();
+    let mut gs = Behaviour::new(MessageAuthenticity::Anonymous, config).unwrap();
+    let topic = Topic::new("t");
+    gs.subscribe(&topic).unwrap();
+    let peer = PeerId::random();
+    let connection = ConnectionId::new_unchecked(401);
+    let (_handler, mut receiver) = logex_heartbeat_connect(&mut gs, peer, connection);
+    logex_heartbeat_advertise(&mut gs, peer, connection, &topic.hash(), 7);
+    assert!(gs.count_received_ihave.is_empty());
+    assert!(gs.count_sent_iwant.is_empty());
+    assert!(!gs.gossip_promises.contains(&MessageId::new(&[7])));
+    assert!(receiver.drain_non_priority().is_empty());
+
+    // Ordinary gossip delivery does not require IHAVE bookkeeping admission.
+    gs.on_connection_handler_event(
+        peer,
+        connection,
+        HandlerEvent::Message {
+            rpc: Rpc {
+                messages: vec![RawMessage {
+                    source: None,
+                    data: vec![7],
+                    sequence_number: None,
+                    topic: topic.hash(),
+                    signature: None,
+                    key: None,
+                    validated: false,
+                }],
+                subscriptions: vec![],
+                control_msgs: vec![],
+            },
+            invalid_messages: vec![],
+        },
+    );
+    let delivered = logex_heartbeat_drain_events(&mut gs);
+    assert!(delivered.iter().any(|event| matches!(event,
+        ToSwarm::GenerateEvent(Event::Message { message, .. }) if message.data == [7])));
+
+    assert!(matches!(gs.peer_score, PeerScoreState::Disabled));
+    assert!(gs.send_message(peer, logex_heartbeat_forward(&topic.hash())));
+    assert!(!gs.send_message(peer, logex_heartbeat_forward(&topic.hash())));
+    let dropped = receiver.drain_non_priority().pop().unwrap();
+    gs.on_connection_handler_event(peer, connection, HandlerEvent::MessageDropped(dropped));
+    assert!(gs.failed_messages.is_empty());
+    assert!(gs.closing_peers.is_empty());
+    assert!(gs.send_message(peer, logex_heartbeat_forward(&topic.hash())));
+}

@@ -346,7 +346,8 @@ pub struct Behaviour<D = IdentityTransform, F = AllowAllSubscriptionFilter> {
     /// promises.
     peer_score: PeerScoreState,
 
-    /// Counts the number of `IHAVE` received from each peer since the last heartbeat.
+    /// Counts the number of `IHAVE` received from each admitted peer since the last
+    /// heartbeat. Retained across disconnects so reconnecting cannot reset a quota.
     count_received_ihave: HashMap<PeerId, usize>,
 
     /// Counts the number of `IWANT` that we sent the each peer since the last heartbeat.
@@ -368,7 +369,7 @@ pub struct Behaviour<D = IdentityTransform, F = AllowAllSubscriptionFilter> {
     #[cfg(feature = "metrics")]
     metrics: Option<Metrics>,
 
-    /// Tracks the numbers of failed messages per peer-id.
+    /// Bounded summaries of failed messages per peer, published at heartbeat.
     failed_messages: HashMap<PeerId, FailedMessages>,
 
     /// Tracks recently sent `IWANT` messages and checks if peers respond to them.
@@ -1281,6 +1282,14 @@ where
             return;
         }
 
+        // Retain admitted counters until heartbeat, including across reconnects.
+        // Ignore excess new owners before creating promises or scheduling work.
+        if self.count_received_ihave.len() >= self.config.cache_limits().ihave_peers
+            && !self.count_received_ihave.contains_key(peer_id)
+        {
+            return;
+        }
+
         // IHAVE flood protection
         let peer_have = self.count_received_ihave.entry(*peer_id).or_insert(0);
         *peer_have = peer_have.saturating_add(1);
@@ -1338,10 +1347,10 @@ where
         }
 
         if !iwant_ids.is_empty() {
-            let iasked = self.count_sent_iwant.entry(*peer_id).or_insert(0);
+            let iasked = self.count_sent_iwant.get(peer_id).copied().unwrap_or(0);
             let mut iask = iwant_ids.len();
-            if iask > self.config.max_ihave_length().saturating_sub(*iasked) {
-                iask = self.config.max_ihave_length().saturating_sub(*iasked);
+            if iask > self.config.max_ihave_length().saturating_sub(iasked) {
+                iask = self.config.max_ihave_length().saturating_sub(iasked);
             }
 
             // Send the list of IWANT control messages
@@ -3045,27 +3054,28 @@ where
                 // Sending failed because the channel is full.
                 tracing::warn!(peer=%peer_id, "Gossip message queue full");
 
-                // Update failed message counter.
-                let failed_messages = self.failed_messages.entry(peer_id).or_default();
-                match rpc {
-                    RpcOut::Publish { .. } => {
-                        failed_messages.priority += 1;
-                        failed_messages.publish += 1;
-                    }
-                    RpcOut::Forward { .. } => {
-                        failed_messages.non_priority += 1;
-                        failed_messages.forward += 1;
-                    }
-                    RpcOut::IWant(_) | RpcOut::IHave(_) | RpcOut::IDontWant(_) => {
-                        failed_messages.non_priority += 1;
-                    }
-                    RpcOut::Graft(_)
-                    | RpcOut::Prune(_)
-                    | RpcOut::Subscribe(_)
-                    | RpcOut::Unsubscribe(_) => {
-                        unreachable!(
-                            "critical control saturation is handled before message scoring"
-                        )
+                // Summary capacity does not suppress the existing score update.
+                if let Some(failed_messages) = self.failed_message_summary(peer_id) {
+                    match rpc {
+                        RpcOut::Publish { .. } => {
+                            failed_messages.priority += 1;
+                            failed_messages.publish += 1;
+                        }
+                        RpcOut::Forward { .. } => {
+                            failed_messages.non_priority += 1;
+                            failed_messages.forward += 1;
+                        }
+                        RpcOut::IWant(_) | RpcOut::IHave(_) | RpcOut::IDontWant(_) => {
+                            failed_messages.non_priority += 1;
+                        }
+                        RpcOut::Graft(_)
+                        | RpcOut::Prune(_)
+                        | RpcOut::Subscribe(_)
+                        | RpcOut::Unsubscribe(_) => {
+                            unreachable!(
+                                "critical control saturation is handled before message scoring"
+                            )
+                        }
                     }
                 }
 
@@ -3077,6 +3087,17 @@ where
                 false
             }
         }
+    }
+
+    /// Summaries and queued advisory events have separate, finite allowances.
+    /// Existing summaries remain available for aggregation until heartbeat.
+    fn failed_message_summary(&mut self, peer_id: PeerId) -> Option<&mut FailedMessages> {
+        if self.failed_messages.len() >= self.config.queue_limits().max_advisory_events
+            && !self.failed_messages.contains_key(&peer_id)
+        {
+            return None;
+        }
+        Some(self.failed_messages.entry(peer_id).or_default())
     }
 
     fn discard_peer_notifications(&mut self, peer_id: PeerId) {
@@ -3487,17 +3508,18 @@ where
                     peer_score.failed_message_slow_peer(&propagation_source);
                 }
 
-                // Keep track of expired messages for the application layer.
-                let failed_messages = self.failed_messages.entry(propagation_source).or_default();
-                failed_messages.timeout += 1;
-                match rpc {
-                    RpcOut::Publish { .. } => {
-                        failed_messages.publish += 1;
+                // Retain a bounded application summary without suppressing metrics.
+                if let Some(failed_messages) = self.failed_message_summary(propagation_source) {
+                    failed_messages.timeout += 1;
+                    match rpc {
+                        RpcOut::Publish { .. } => {
+                            failed_messages.publish += 1;
+                        }
+                        RpcOut::Forward { .. } => {
+                            failed_messages.forward += 1;
+                        }
+                        _ => {}
                     }
-                    RpcOut::Forward { .. } => {
-                        failed_messages.forward += 1;
-                    }
-                    _ => {}
                 }
 
                 // Record metrics on the failure.
