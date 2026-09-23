@@ -68,6 +68,7 @@ pub struct SegmentInspection {
 #[derive(Debug)]
 pub struct PrimaryDataInspection {
     _owner: DataDirectoryLock,
+    pub(super) paths: StorageCatalogPaths,
     pub catalog: NativeStorageCatalog,
     pub recovery_prerequisites: Vec<PathBuf>,
     pub segments: Vec<SegmentInspection>,
@@ -97,6 +98,46 @@ pub fn inspect_primary_data(
     super::storage::verify_recent_headers(&catalog.state).map_err(|error| {
         contextual("verify catalog header window", &paths.catalog_path(), error)
     })?;
+    let recovery_prerequisites = recovery_prerequisites(&paths, &catalog)?;
+    let segments = catalog
+        .segments
+        .iter()
+        .map(|descriptor| {
+            let role = if catalog.active_hot_segment == Some(descriptor.id) {
+                InspectedSegmentRole::ActiveHot
+            } else if catalog.active_historical_segment == Some(descriptor.id) {
+                InspectedSegmentRole::ActiveHistorical
+            } else {
+                debug_assert_eq!(descriptor.kind, SegmentKind::Sealed);
+                InspectedSegmentRole::CompletedSealed
+            };
+            let disposition = if recovery_prerequisites.is_empty() {
+                inspect_segment(&paths.segment_dir(descriptor.id), descriptor, limits)
+            } else {
+                PrimaryDataDisposition::RecoveryRequired
+            };
+            SegmentInspection {
+                id: descriptor.id,
+                role,
+                disposition,
+            }
+        })
+        .collect();
+    Ok(PrimaryDataInspection {
+        _owner: owner,
+        paths,
+        catalog,
+        recovery_prerequisites,
+        segments,
+        derived_indexes_inspected: false,
+    })
+}
+
+pub(super) fn recovery_prerequisites(
+    paths: &StorageCatalogPaths,
+    catalog: &NativeStorageCatalog,
+) -> io::Result<Vec<PathBuf>> {
+    let path = paths.root();
     for (directory, optional) in [(path.join("segments"), false), (path.join("wal"), true)] {
         match std::fs::symlink_metadata(&directory) {
             Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
@@ -135,37 +176,7 @@ pub fn inspect_primary_data(
     if catalog.state.canonical_reorg.is_some() {
         recovery_prerequisites.push(paths.catalog_path());
     }
-    let segments = catalog
-        .segments
-        .iter()
-        .map(|descriptor| {
-            let role = if catalog.active_hot_segment == Some(descriptor.id) {
-                InspectedSegmentRole::ActiveHot
-            } else if catalog.active_historical_segment == Some(descriptor.id) {
-                InspectedSegmentRole::ActiveHistorical
-            } else {
-                debug_assert_eq!(descriptor.kind, SegmentKind::Sealed);
-                InspectedSegmentRole::CompletedSealed
-            };
-            let disposition = if recovery_prerequisites.is_empty() {
-                inspect_segment(&paths.segment_dir(descriptor.id), descriptor, limits)
-            } else {
-                PrimaryDataDisposition::RecoveryRequired
-            };
-            SegmentInspection {
-                id: descriptor.id,
-                role,
-                disposition,
-            }
-        })
-        .collect();
-    Ok(PrimaryDataInspection {
-        _owner: owner,
-        catalog,
-        recovery_prerequisites,
-        segments,
-        derived_indexes_inspected: false,
-    })
+    Ok(recovery_prerequisites)
 }
 
 fn incomplete(stage: &'static str, path: &Path, error: io::Error) -> PrimaryDataDisposition {
@@ -249,7 +260,10 @@ fn invalid(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
 
-fn verify_identity(reader: &SegmentReader, descriptor: &SegmentDescriptor) -> io::Result<()> {
+pub(super) fn verify_identity(
+    reader: &SegmentReader,
+    descriptor: &SegmentDescriptor,
+) -> io::Result<()> {
     if reader
         .captured_manifest_identity()
         .is_some_and(|identity| identity != (descriptor.id, descriptor.kind))
