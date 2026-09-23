@@ -15,10 +15,10 @@ const SOURCE_UPDATING: u8 = 1;
 const SOURCE_PREFIX_REWRITE: u8 = 2;
 const SOURCE_COMMITTED: u8 = 3;
 const CANONICAL_ENVELOPE_MAGIC: &[u8; 8] = b"LXCAN001";
-const CANONICAL_ENVELOPE_VERSION: u8 = 3;
+const CANONICAL_ENVELOPE_VERSION: u8 = 4;
 const CANONICAL_PENDING: u8 = 1;
 const CANONICAL_COMMITTED: u8 = 2;
-const CANONICAL_ENVELOPE_HEADER: usize = 132;
+const CANONICAL_ENVELOPE_HEADER: usize = 136;
 pub(crate) const CANONICAL_PREFIX_BYTES: usize = CANONICAL_ENVELOPE_HEADER + 8;
 
 #[cfg(test)]
@@ -386,7 +386,9 @@ impl From<SourceIdentity> for SourceBinding {
 }
 
 /// Raw canonical metadata is separate from the generic and bundled bitmap formats.
-/// The CRC covers the version, publication state, source binding and row boundary.
+/// Header CRC protects publication metadata and the expected payload CRC. The
+/// latter covers exact serialized bitmap and restart-state bytes; metadata-only
+/// capture deliberately defers that full-payload check until consumption.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct RawCanonicalMetadata {
     pub(crate) previous: Option<(u64, Commitment)>,
@@ -396,6 +398,7 @@ pub(crate) struct RawCanonicalMetadata {
     pub(crate) rows: u64,
     offset: usize,
     state_len: u32,
+    payload_checksum: Option<u32>,
 }
 
 impl RawCanonicalMetadata {
@@ -428,10 +431,21 @@ impl RawCanonicalMetadata {
                 rows,
                 offset: 0,
                 state_len: 0,
+                payload_checksum: None,
             });
         }
         // A reserved magic prefix is always an envelope; corruption never falls
         // back to interpreting those bytes as a legacy row count.
+        if let Some(&version) = prefix.get(8)
+            && version != CANONICAL_ENVELOPE_VERSION
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "unsupported canonical envelope version {version}; expected {CANONICAL_ENVELOPE_VERSION}; original data preserved, no automatic migration"
+                ),
+            ));
+        }
         let header = CANONICAL_ENVELOPE_HEADER;
         if prefix.get(8) != Some(&CANONICAL_ENVELOPE_VERSION)
             || prefix.len() < header + 8
@@ -480,6 +494,9 @@ impl RawCanonicalMetadata {
             rows,
             offset: header,
             state_len,
+            payload_checksum: Some(u32::from_le_bytes(
+                prefix[128..132].try_into().map_err(|_| invalid())?,
+            )),
         })
     }
 
@@ -583,13 +600,76 @@ impl RawCanonicalMetadata {
         Ok(())
     }
 
-    pub(crate) fn bitmap(self, bytes: &[u8]) -> io::Result<NullBitmap> {
+    fn validate_payload_bytes(self, bytes: &[u8]) -> io::Result<()> {
         if Self::parse(bytes, bytes.len() as u64)? != self {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "captured canonical metadata changed",
             ));
         }
+        if let Some(expected) = self.payload_checksum {
+            self.validate_exact_len(bytes.len() as u64)?;
+            let payload = bytes.get(self.offset..).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "truncated canonical payload")
+            })?;
+            if crc32fast::hash(payload) != expected {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "canonical payload checksum mismatch",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Verify the complete physical bound payload with fixed scratch space.
+    /// Metadata capture remains prefix-only; maintenance calls this before any
+    /// source writes. Legacy unbound bitmaps have no checksum and retain their
+    /// existing structural contract. This establishes local byte integrity, not
+    /// consensus authentication. The reader position is unspecified on return.
+    pub(crate) fn validate_payload_reader(self, reader: &mut (impl Read + Seek)) -> io::Result<()> {
+        let file_len = reader.seek(SeekFrom::End(0))?;
+        reader.seek(SeekFrom::Start(0))?;
+        let mut prefix = [0u8; CANONICAL_PREFIX_BYTES];
+        let prefix_len =
+            usize::try_from(file_len.min(CANONICAL_PREFIX_BYTES as u64)).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "canonical prefix length overflow",
+                )
+            })?;
+        reader.read_exact(&mut prefix[..prefix_len])?;
+        if Self::parse(&prefix[..prefix_len], file_len)? != self {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "captured canonical metadata changed",
+            ));
+        }
+        if let Some(expected) = self.payload_checksum {
+            self.validate_exact_len(file_len)?;
+            reader.seek(SeekFrom::Start(self.offset as u64))?;
+            let mut remaining = file_len - self.offset as u64;
+            let mut checksum = crc32fast::Hasher::new();
+            let mut scratch = [0u8; 64 * 1024];
+            while remaining != 0 {
+                let count = remaining.min(scratch.len() as u64) as usize;
+                reader.read_exact(&mut scratch[..count])?;
+                checksum.update(&scratch[..count]);
+                remaining -= count as u64;
+            }
+            let mut extra = [0u8; 1];
+            if reader.read(&mut extra)? != 0 || checksum.finalize() != expected {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "canonical payload checksum or length mismatch",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn bitmap(self, bytes: &[u8]) -> io::Result<NullBitmap> {
+        self.validate_payload_bytes(bytes)?;
         let end = self.bitmap_end()?;
         NullBitmap::read_from(bytes.get(self.offset..end).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidData, "truncated canonical bitmap")
@@ -609,14 +689,10 @@ impl RawCanonicalMetadata {
             })
     }
 
-    /// Writers validate the bounded restart state; readers only need the fixed header.
+    /// Verify payload integrity before trusting the bounded restart state.
+    /// Metadata-only capture does not call this full-body path.
     pub(crate) fn resume_state(self, bytes: &[u8]) -> io::Result<Option<PrefixState>> {
-        if Self::parse(bytes, bytes.len() as u64)? != self {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "captured canonical metadata changed",
-            ));
-        }
+        self.validate_payload_bytes(bytes)?;
         match (self.binding, self.commitment, self.state_len) {
             (_, None, 0) => Ok(None),
             (Some(binding), Some(root), len) if len != 0 => {
@@ -720,8 +796,13 @@ fn write_raw_canonical_state(
             header[92..124].copy_from_slice(root.as_slice());
         }
         header[124..128].copy_from_slice(&(encoded_state.len() as u32).to_le_bytes());
-        let checksum = crc32fast::hash(&header[..128]);
-        header[128..132].copy_from_slice(&checksum.to_le_bytes());
+        let mut payload_checksum = crc32fast::Hasher::new();
+        payload_checksum.update(&bitmap.len().to_le_bytes());
+        payload_checksum.update(&bitmap.bits);
+        payload_checksum.update(&encoded_state);
+        header[128..132].copy_from_slice(&payload_checksum.finalize().to_le_bytes());
+        let checksum = crc32fast::hash(&header[..132]);
+        header[132..136].copy_from_slice(&checksum.to_le_bytes());
         writer.write_all(&header)?;
     }
     bitmap.write_to(writer)?;
@@ -741,8 +822,8 @@ fn write_canonical_with_missing_restart_state(
     write_raw_canonical(&mut bytes, bitmap, Some(binding), None, None)?;
     bytes[50] = 1;
     bytes[51..83].copy_from_slice(commitment.as_slice());
-    let checksum = crc32fast::hash(&bytes[..128]);
-    bytes[128..132].copy_from_slice(&checksum.to_le_bytes());
+    let checksum = crc32fast::hash(&bytes[..132]);
+    bytes[132..136].copy_from_slice(&checksum.to_le_bytes());
     writer.write_all(&bytes)
 }
 
@@ -2336,10 +2417,10 @@ mod tests {
         assert!(read_canonical_bitmap(&legacy, Some(binding)).is_err());
         let oversized = u64::from(u32::MAX) + 1;
         bytes[42..50].copy_from_slice(&oversized.to_le_bytes());
-        bytes[132..140].copy_from_slice(&oversized.to_le_bytes());
-        let crc = crc32fast::hash(&bytes[..128]);
-        bytes[128..132].copy_from_slice(&crc.to_le_bytes());
-        assert!(RawCanonicalMetadata::parse(&bytes, 140 + oversized.div_ceil(8)).is_err());
+        bytes[136..144].copy_from_slice(&oversized.to_le_bytes());
+        let crc = crc32fast::hash(&bytes[..132]);
+        bytes[132..136].copy_from_slice(&crc.to_le_bytes());
+        assert!(RawCanonicalMetadata::parse(&bytes, 144 + oversized.div_ceil(8)).is_err());
     }
 
     #[test]
@@ -2362,6 +2443,262 @@ mod tests {
             assert!(write_raw_canonical(&mut bytes, &bitmap, owner, root, prefix).is_err());
             assert!(bytes.is_empty());
         }
+    }
+
+    fn corrupt_real_canonical_bit(dir: &Path) -> (Vec<u8>, RawCanonicalMetadata) {
+        let path = dir.join("canonical.bitmap");
+        let mut bytes = fs::read(&path).unwrap();
+        let metadata = RawCanonicalMetadata::parse(&bytes, bytes.len() as u64).unwrap();
+        assert!(metadata.bitmap(&bytes).unwrap().is_present(0));
+        // Change a real row bit, preserving envelope, row count, file length,
+        // logical row commitment and restart state exactly.
+        bytes[metadata.offset + 8] ^= 1;
+        fs::write(path, &bytes).unwrap();
+        assert_eq!(
+            RawCanonicalMetadata::parse(&bytes[..CANONICAL_PREFIX_BYTES], bytes.len() as u64)
+                .unwrap(),
+            metadata
+        );
+        (bytes, metadata)
+    }
+
+    #[test]
+    fn canonical_bitmap_integrity_bit_corruption_is_rejected_by_actual_reader() {
+        let tmp = tempfile::tempdir().unwrap();
+        ColumnFile::write_batch(tmp.path(), &[row(), row()]).unwrap();
+        let (bytes, _) = corrupt_real_canonical_bit(tmp.path());
+        let reader = crate::SegmentReader::open(tmp.path()).unwrap();
+        let result = reader.read_canonical();
+        assert!(
+            matches!(result, Err(ref error) if error.kind() == io::ErrorKind::InvalidData),
+            "same-length real-row canonical bit corruption must fail actual reader"
+        );
+        assert_eq!(
+            fs::read(tmp.path().join("canonical.bitmap")).unwrap(),
+            bytes
+        );
+    }
+
+    #[test]
+    fn canonical_bitmap_integrity_bit_corruption_is_rejected_by_resume_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        ColumnFile::write_batch(tmp.path(), &[row(), row()]).unwrap();
+        let (bytes, metadata) = corrupt_real_canonical_bit(tmp.path());
+        let result = metadata.resume_state(&bytes);
+        assert!(
+            matches!(result, Err(ref error) if error.kind() == io::ErrorKind::InvalidData),
+            "restart state must not authenticate a corrupted canonical payload"
+        );
+    }
+
+    #[test]
+    fn canonical_bitmap_integrity_bit_corruption_prevents_append_before_column_changes() {
+        let tmp = tempfile::tempdir().unwrap();
+        ColumnFile::write_batch(tmp.path(), &[row(), row()]).unwrap();
+        let (bytes, _) = corrupt_real_canonical_bit(tmp.path());
+        let address_before = fs::read(tmp.path().join("address.col")).unwrap();
+        let result = ColumnFile::append_batch(tmp.path(), &[row()], 2);
+        assert!(
+            matches!(result, Err(ref error) if error.kind() == io::ErrorKind::InvalidData),
+            "append must reject a corrupted canonical prefix"
+        );
+        assert_eq!(
+            fs::read(tmp.path().join("address.col")).unwrap(),
+            address_before
+        );
+        assert_eq!(
+            fs::read(tmp.path().join("canonical.bitmap")).unwrap(),
+            bytes
+        );
+    }
+
+    #[test]
+    fn canonical_bitmap_integrity_bit_corruption_prevents_canonical_replacement() {
+        let tmp = tempfile::tempdir().unwrap();
+        ColumnFile::write_batch(tmp.path(), &[row(), row()]).unwrap();
+        let mut replacement = crate::SegmentReader::open(tmp.path())
+            .unwrap()
+            .read_canonical()
+            .unwrap();
+        replacement.set(1, false);
+        let (bytes, _) = corrupt_real_canonical_bit(tmp.path());
+        let binding = read_source_binding(tmp.path()).unwrap().unwrap();
+        let owner = SourceWriteGuard::acquire_bound(
+            tmp.path(),
+            binding.namespace,
+            binding.generation,
+            binding.segment_id,
+        )
+        .unwrap();
+        let result = ColumnFile::replace_canonical_bitmap_owned(tmp.path(), &replacement, &owner);
+        assert!(
+            matches!(result, Err(ref error) if error.kind() == io::ErrorKind::InvalidData),
+            "canonical update must not carry forward or conceal a corrupt payload"
+        );
+        assert_eq!(
+            fs::read(tmp.path().join("canonical.bitmap")).unwrap(),
+            bytes
+        );
+    }
+
+    #[test]
+    fn canonical_bitmap_integrity_checks_stored_padding_and_restart_bytes_before_use() {
+        let tmp = tempfile::tempdir().unwrap();
+        ColumnFile::write_batch(tmp.path(), &[row(), row()]).unwrap();
+        let bytes = fs::read(tmp.path().join("canonical.bitmap")).unwrap();
+        let metadata =
+            RawCanonicalMetadata::parse(&bytes[..CANONICAL_PREFIX_BYTES], bytes.len() as u64)
+                .unwrap();
+        assert_eq!(bytes[8], 4);
+        assert_eq!(metadata.offset, 136);
+        metadata
+            .validate_payload_reader(&mut io::Cursor::new(&bytes))
+            .unwrap();
+        assert!(metadata.bitmap(&bytes).unwrap().is_present(0));
+        assert_eq!(
+            metadata.resume_state(&bytes).unwrap().unwrap().row_count(),
+            2
+        );
+        for (offset, mask) in [(metadata.offset + 8, 0x80), (bytes.len() - 1, 1)] {
+            let mut corrupt = bytes.clone();
+            corrupt[offset] ^= mask;
+            // Unused padding must be checked before NullBitmap normalizes it.
+            // Restart bytes must also be checked by bitmap-only consumers.
+            assert_eq!(
+                RawCanonicalMetadata::parse(
+                    &corrupt[..CANONICAL_PREFIX_BYTES],
+                    corrupt.len() as u64
+                )
+                .unwrap(),
+                metadata
+            );
+            assert_eq!(
+                metadata.bitmap(&corrupt).unwrap_err().kind(),
+                io::ErrorKind::InvalidData
+            );
+            assert_eq!(
+                metadata.resume_state(&corrupt).unwrap_err().kind(),
+                io::ErrorKind::InvalidData
+            );
+            assert_eq!(
+                metadata
+                    .validate_payload_reader(&mut io::Cursor::new(corrupt))
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::InvalidData
+            );
+        }
+    }
+
+    #[test]
+    fn canonical_bitmap_integrity_stream_checks_metadata_and_exact_payload_length() {
+        let tmp = tempfile::tempdir().unwrap();
+        ColumnFile::write_batch(tmp.path(), &[row()]).unwrap();
+        let bytes = fs::read(tmp.path().join("canonical.bitmap")).unwrap();
+        let metadata = RawCanonicalMetadata::parse(&bytes, bytes.len() as u64).unwrap();
+        for mode in 0..4 {
+            let mut corrupt = bytes.clone();
+            match mode {
+                0 => {
+                    corrupt.pop();
+                }
+                1 => corrupt.push(0),
+                2 => corrupt[metadata.offset] ^= 1,
+                _ => {
+                    corrupt[128] ^= 1;
+                    let header_crc = crc32fast::hash(&corrupt[..132]);
+                    corrupt[132..136].copy_from_slice(&header_crc.to_le_bytes());
+                }
+            }
+            assert_eq!(
+                metadata
+                    .validate_payload_reader(&mut io::Cursor::new(corrupt))
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::InvalidData
+            );
+        }
+    }
+
+    #[test]
+    fn canonical_bitmap_integrity_rejects_old_bound_version_without_guessing_migration() {
+        let binding = SourceBinding {
+            namespace: [7; 16],
+            generation: 1,
+            segment_id: 2,
+        };
+        let mut bitmap = NullBitmap::new();
+        bitmap.push(false);
+        let mut bytes = Vec::new();
+        write_raw_canonical(&mut bytes, &bitmap, Some(binding), None, None).unwrap();
+        bytes[8] = 3;
+        let header_crc = crc32fast::hash(&bytes[..132]);
+        bytes[132..136].copy_from_slice(&header_crc.to_le_bytes());
+        assert_eq!(
+            RawCanonicalMetadata::parse(&bytes, bytes.len() as u64)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+        // Bare unbound bitmaps remain the explicit legacy/generic representation;
+        // neither their byte shape nor this API invents payload-checksum evidence.
+        let mut legacy = Vec::new();
+        write_raw_canonical(&mut legacy, &bitmap, None, None, None).unwrap();
+        let metadata = RawCanonicalMetadata::parse(&legacy, legacy.len() as u64).unwrap();
+        assert!(metadata.payload_checksum.is_none());
+        metadata
+            .validate_payload_reader(&mut io::Cursor::new(&legacy))
+            .unwrap();
+        assert!(!metadata.bitmap(&legacy).unwrap().is_present(0));
+    }
+
+    #[test]
+    fn canonical_bitmap_integrity_stream_handles_empty_and_multiple_chunks() {
+        let binding = SourceBinding {
+            namespace: [7; 16],
+            generation: 1,
+            segment_id: 2,
+        };
+        let empty_state = PrefixState::empty(binding.namespace);
+        for state in [None, Some(&empty_state)] {
+            let mut bytes = Vec::new();
+            write_raw_canonical(
+                &mut bytes,
+                &NullBitmap::new(),
+                Some(binding),
+                state.map(PrefixState::commitment),
+                state,
+            )
+            .unwrap();
+            let metadata = RawCanonicalMetadata::parse(&bytes, bytes.len() as u64).unwrap();
+            metadata
+                .validate_payload_reader(&mut io::Cursor::new(&bytes))
+                .unwrap();
+            assert_eq!(metadata.bitmap(&bytes).unwrap().len(), 0);
+            assert_eq!(metadata.resume_state(&bytes).unwrap().as_ref(), state);
+        }
+
+        // A normal large segment's bitmap crosses the maintenance read buffer.
+        // Construct only that small bitmap, without allocating any log rows.
+        let mut bitmap = NullBitmap::new();
+        for row in 0..(64 * 1024 * 8 + 17) {
+            bitmap.push(row % 3 != 0);
+        }
+        let mut bytes = Vec::new();
+        write_raw_canonical(&mut bytes, &bitmap, Some(binding), None, None).unwrap();
+        let metadata = RawCanonicalMetadata::parse(&bytes, bytes.len() as u64).unwrap();
+        metadata
+            .validate_payload_reader(&mut io::Cursor::new(&bytes))
+            .unwrap();
+        assert_eq!(metadata.bitmap(&bytes).unwrap().len(), bitmap.len());
+        bytes[CANONICAL_PREFIX_BYTES + 64 * 1024] ^= 1;
+        assert_eq!(
+            metadata
+                .validate_payload_reader(&mut io::Cursor::new(bytes))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
     }
 
     #[test]
