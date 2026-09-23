@@ -12,9 +12,10 @@ use logex_types::LogRow;
 use super::super::{inspection, segment};
 
 /// A verified staging snapshot retaining the original exclusive storage owner.
-/// Its original ID and generation-zero bundle describe a provisional tree only.
-/// Final identity allocation, journal ownership, disk headroom, publication and
-/// quarantine belong to the coordinator. Any later metadata transformation must
+/// Standalone staging retains the original ID; a repair transaction reserves a
+/// new ID before encoding. Both use a fresh generation-zero bundle. Journal
+/// ownership, disk headroom, publication and quarantine belong to the coordinator.
+/// Any later metadata transformation must
 /// be verified again, including its index bindings.
 ///
 /// Artifacts are retained on drop or failure. A returned handle is not permission
@@ -22,11 +23,11 @@ use super::super::{inspection, segment};
 /// fetch transcript against current consensus before committing a journaled repair.
 #[derive(Debug)]
 pub struct StagedRepairCandidate<'a> {
-    source: VerifiedRepairCandidate<'a>,
-    paths: StorageCatalogPaths,
-    descriptor: SegmentDescriptor,
-    manifest: SegmentManifest,
-    limits: InspectionLimits,
+    pub(super) source: VerifiedRepairCandidate<'a>,
+    pub(super) paths: StorageCatalogPaths,
+    pub(super) descriptor: SegmentDescriptor,
+    pub(super) manifest: SegmentManifest,
+    pub(super) limits: InspectionLimits,
 }
 
 impl<'a> VerifiedRepairCandidate<'a> {
@@ -42,6 +43,16 @@ impl<'a> VerifiedRepairCandidate<'a> {
         destination: &Path,
         rows: &[LogRow],
         limits: InspectionLimits,
+    ) -> io::Result<StagedRepairCandidate<'a>> {
+        self.stage_as(destination, rows, limits, self.descriptor().id)
+    }
+
+    pub(super) fn stage_as(
+        &self,
+        destination: &Path,
+        rows: &[LogRow],
+        limits: InspectionLimits,
+        replacement_id: u64,
     ) -> io::Result<StagedRepairCandidate<'a>> {
         if self.descriptor().row_count > limits.max_segment_rows {
             return Err(io::Error::new(
@@ -60,6 +71,10 @@ impl<'a> VerifiedRepairCandidate<'a> {
             let paths = StorageCatalogPaths::new(destination.clone());
             fs::create_dir(paths.segments_dir())?;
             let mut descriptor = source.descriptor().clone();
+            descriptor.id = replacement_id;
+            descriptor.relative_path =
+                std::path::PathBuf::from("segments").join(format!("s_{replacement_id:016}"));
+            descriptor.manifest_relative_path = descriptor.relative_path.join("segment.json");
             descriptor.generation = 0;
             let columns = segment::write_repair_bundle(
                 &paths.segment_dir(descriptor.id),
@@ -96,7 +111,7 @@ impl StagedRepairCandidate<'_> {
         self.paths.segment_dir(self.descriptor.id)
     }
 
-    /// Provisional metadata for this staging tree, not a catalog allocation.
+    /// Unpublished metadata; only the repair transaction reserves a catalog ID.
     pub fn descriptor(&self) -> &SegmentDescriptor {
         &self.descriptor
     }

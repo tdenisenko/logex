@@ -28,6 +28,7 @@ pub use inspection::{
     SegmentInspection, inspect_primary_data,
 };
 pub use repair::{
-    RepairCandidateVerifier, RepairOwnershipPlan, RepairPlanLimits, RepairReadLimits,
-    RepairRowInput, StagedRepairCandidate, VerifiedRepairCandidate,
+    CommittedRepairPublication, PendingRepair, PreparedRepairPublication, RepairCandidateVerifier,
+    RepairCatalogState, RepairOwnershipPlan, RepairPlanLimits, RepairPublication, RepairReadLimits,
+    RepairRowInput, StagedRepairCandidate, VerifiedRepairCandidate, inspect_pending_repair,
 };

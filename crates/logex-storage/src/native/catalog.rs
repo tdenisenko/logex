@@ -415,7 +415,7 @@ impl NativeStorageCatalog {
         encode_frame(&metadata, &self.state.recent_headers)
     }
 
-    fn decode(bytes: &[u8]) -> io::Result<Self> {
+    pub(super) fn decode(bytes: &[u8]) -> io::Result<Self> {
         if bytes.len() as u64 > MAX_CATALOG_BYTES {
             return Err(invalid_catalog("catalog exceeds the 64 MiB format limit"));
         }
@@ -501,7 +501,7 @@ impl NativeStorageCatalog {
         Ok(hint.active_hot_segment)
     }
 
-    fn validate(&self) -> io::Result<()> {
+    pub(super) fn validate(&self) -> io::Result<()> {
         let mut ids = std::collections::BTreeSet::new();
         if self.format_version != CATALOG_FORMAT_VERSION || self.hot_target_rows == 0 {
             return Err(io::Error::new(

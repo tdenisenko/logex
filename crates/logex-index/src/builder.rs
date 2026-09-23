@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::{self, Read};
 use std::path::Path;
 
 use logex_storage::{IndexBuildCheckpoint, IndexReadCheckpoint, SegmentReader};
@@ -19,6 +20,51 @@ pub enum IndexBuildProfile {
 pub struct IndexBuilder;
 
 impl IndexBuilder {
+    /// Verify every required published artifact without rebuilding or modifying it.
+    /// Holds the checkpoint's read lock while streaming all logical bytes through
+    /// the bound reader's page checks. This verifies derived-file integrity, not
+    /// the semantic correspondence of index entries to authenticated source rows.
+    /// The caller must retain storage ownership for offline source stability.
+    pub fn verify_indexes(partition_dir: &Path, profile: IndexBuildProfile) -> io::Result<()> {
+        let reader = SegmentReader::open_projected(partition_dir, &[])?;
+        let checkpoint = IndexReadCheckpoint::open(partition_dir, &reader)?.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "index checkpoint is missing or stale",
+            )
+        })?;
+        let mut scratch = [0u8; 16 * 1024];
+        for name in Self::required_index_files(profile) {
+            let expected = checkpoint.artifact_id(name).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("index checkpoint lacks {name}"),
+                )
+            })?;
+            let result = (|| {
+                let mut file =
+                    IndexFile::open_bound(&partition_dir.join("indexes").join(name), expected)?;
+                let mut remaining = file.logical_len();
+                while remaining != 0 {
+                    let count = remaining.min(scratch.len() as u64) as usize;
+                    file.read_exact(&mut scratch[..count])?;
+                    remaining -= count as u64;
+                }
+                if file.read(&mut scratch[..1])? != 0 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "index exceeds logical length",
+                    ));
+                }
+                Ok(())
+            })();
+            result.map_err(|error: io::Error| {
+                io::Error::new(error.kind(), format!("verify index {name}: {error}"))
+            })?;
+        }
+        Ok(())
+    }
+
     pub fn indexes_missing(
         partition_dir: &Path,
         profile: IndexBuildProfile,
@@ -466,6 +512,111 @@ mod tests {
                 source: Source::Receipt,
             },
         ]
+    }
+
+    type VerificationTree =
+        std::collections::BTreeMap<std::path::PathBuf, (std::time::SystemTime, Option<Vec<u8>>)>;
+
+    fn verification_tree(path: &Path) -> VerificationTree {
+        fn visit(root: &Path, path: &Path, entries: &mut VerificationTree) {
+            let metadata = fs::metadata(path).unwrap();
+            entries.insert(
+                path.strip_prefix(root).unwrap().to_owned(),
+                (
+                    metadata.modified().unwrap(),
+                    metadata.is_file().then(|| fs::read(path).unwrap()),
+                ),
+            );
+            if metadata.is_dir() {
+                for entry in fs::read_dir(path).unwrap() {
+                    visit(root, &entry.unwrap().path(), entries);
+                }
+            }
+        }
+        let mut entries = std::collections::BTreeMap::new();
+        visit(path, path, &mut entries);
+        entries
+    }
+
+    #[test]
+    fn verify_indexes_requires_profile_artifacts_without_writes() {
+        let dir = TempDir::new().unwrap();
+        ColumnFile::write_batch(dir.path(), &make_test_rows()).unwrap();
+        let before = verification_tree(dir.path());
+        assert!(IndexBuilder::verify_indexes(dir.path(), IndexBuildProfile::All).is_err());
+        assert_eq!(verification_tree(dir.path()), before);
+        IndexBuilder::build_all_indexes(dir.path()).unwrap();
+        let before = verification_tree(dir.path());
+        for profile in [
+            IndexBuildProfile::All,
+            IndexBuildProfile::LogQuery,
+            IndexBuildProfile::Erc20Transfer,
+        ] {
+            IndexBuilder::verify_indexes(dir.path(), profile).unwrap();
+        }
+        assert_eq!(verification_tree(dir.path()), before);
+        fs::remove_file(dir.path().join("indexes/address.bptree")).unwrap();
+        let before = verification_tree(dir.path());
+        assert!(IndexBuilder::verify_indexes(dir.path(), IndexBuildProfile::All).is_err());
+        IndexBuilder::verify_indexes(dir.path(), IndexBuildProfile::LogQuery).unwrap();
+        assert_eq!(verification_tree(dir.path()), before);
+    }
+
+    #[test]
+    fn verify_indexes_checks_interior_pages_and_footer_beyond_header_identity() {
+        let dir = TempDir::new().unwrap();
+        let prototype = make_test_rows().remove(0);
+        let rows: Vec<_> = (0u32..512)
+            .map(|index| {
+                let mut row = prototype.clone();
+                let mut address = [0; 20];
+                address[16..].copy_from_slice(&index.to_be_bytes());
+                row.address = Address::from(address);
+                row.log_index = index;
+                row
+            })
+            .collect();
+        ColumnFile::write_batch(dir.path(), &rows).unwrap();
+        IndexBuilder::build_all_indexes(dir.path()).unwrap();
+        let path = dir.path().join("indexes/address.bptree");
+        let original = fs::read(&path).unwrap();
+        let logical = IndexFile::open(&path).unwrap().logical_len() as usize;
+        // Current protected envelope uses a 48-byte header and 4096-byte pages.
+        let header = 48;
+        let page = 4096;
+        assert!(logical > page * 2);
+        for offset in [header + page + 8, original.len() - 1] {
+            let mut damaged = original.clone();
+            damaged[offset] ^= 0x80;
+            fs::write(&path, damaged).unwrap();
+            assert!(!IndexBuilder::indexes_missing(dir.path(), IndexBuildProfile::All).unwrap());
+            let before = verification_tree(dir.path());
+            let error =
+                IndexBuilder::verify_indexes(dir.path(), IndexBuildProfile::All).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+            assert_eq!(verification_tree(dir.path()), before);
+            fs::write(&path, &original).unwrap();
+        }
+        IndexBuilder::verify_indexes(dir.path(), IndexBuildProfile::All).unwrap();
+    }
+
+    #[test]
+    fn verify_indexes_rejects_replaced_binding_and_stale_checkpoint() {
+        let dir = TempDir::new().unwrap();
+        let rows = make_test_rows();
+        ColumnFile::write_batch(dir.path(), &rows).unwrap();
+        IndexBuilder::build_all_indexes(dir.path()).unwrap();
+        let path = dir.path().join("indexes/address.bptree");
+        let original = fs::read(&path).unwrap();
+        fs::copy(dir.path().join("indexes/timestamp.bptree"), &path).unwrap();
+        let before = verification_tree(dir.path());
+        assert!(IndexBuilder::verify_indexes(dir.path(), IndexBuildProfile::All).is_err());
+        assert_eq!(verification_tree(dir.path()), before);
+        fs::write(path, original).unwrap();
+        ColumnFile::write_batch(dir.path(), &rows[..1]).unwrap();
+        let before = verification_tree(dir.path());
+        assert!(IndexBuilder::verify_indexes(dir.path(), IndexBuildProfile::All).is_err());
+        assert_eq!(verification_tree(dir.path()), before);
     }
 
     #[test]

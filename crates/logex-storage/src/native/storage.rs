@@ -266,6 +266,7 @@ impl NativeStorage {
     pub fn open(config: NativeStorageConfig) -> std::io::Result<Self> {
         durability::create_dir_all(&config.data_dir)?;
         let directory_lock = Arc::new(DataDirectoryLock::acquire_existing(&config.data_dir)?);
+        super::repair::publication::require_no_pending_repair(&config.data_dir)?;
         let (catalog, paths) = NativeStorageCatalog::open_or_create(&config)?;
         verify_recent_headers(&catalog.state)?;
         let wal = WriteAheadLog::open(config.data_dir.join("wal").join("pending.wal"))?;
