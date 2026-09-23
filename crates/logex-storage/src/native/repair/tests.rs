@@ -85,8 +85,8 @@ fn data_id(report: &PrimaryDataInspection) -> u64 {
         .unwrap()
         .id
 }
-type Tree = BTreeMap<PathBuf, (SystemTime, Option<Vec<u8>>)>;
-fn tree(root: &Path) -> Tree {
+pub(super) type Tree = BTreeMap<PathBuf, (SystemTime, Option<Vec<u8>>)>;
+pub(super) fn tree(root: &Path) -> Tree {
     fn walk(root: &Path, p: &Path, out: &mut Tree) {
         let m = fs::metadata(p).unwrap();
         out.insert(
@@ -317,9 +317,8 @@ fn repair_real_row_splits_expand_only_overlapping_owners() {
         .collect();
     assert_eq!(owners.len(), 2);
     let plan = report.into_repair_plan(&owners[..1], limits()).unwrap();
-    assert_eq!(plan.groups().len(), 1);
-    assert_eq!(plan.groups()[0].block_range(), Some((10, 10)));
-    assert_eq!(plan.groups()[0].segment_ids(), owners.as_slice());
+    assert_eq!(plan.block_ranges(), &[(10, 10)]);
+    assert_eq!(plan.segment_ids(), owners.as_slice());
 }
 
 #[test]
@@ -336,7 +335,7 @@ fn repair_empty_segment_has_no_invented_block_coverage() {
     let catalog = report.catalog.clone();
     let id = catalog.segments[0].id;
     let plan = report.into_repair_plan(&[id], limits()).unwrap();
-    assert_eq!(plan.groups()[0].block_range(), None);
+    assert!(plan.block_ranges().is_empty());
     plan.begin_candidate(id).unwrap().finish().unwrap();
     assert_eq!(plan.catalog(), &catalog);
     assert_eq!(tree(tmp.path()), before);
@@ -368,9 +367,7 @@ fn repair_zero_log_progress_is_preserved_without_inventing_segment_range() {
     let original = report.catalog.clone();
     let ids: Vec<_> = original.segments.iter().map(|s| s.id).collect();
     let plan = report.into_repair_plan(&ids, limits()).unwrap();
-    for group in plan.groups() {
-        assert_eq!(group.block_range(), None);
-    }
+    assert!(plan.block_ranges().is_empty());
     assert_eq!(plan.catalog(), &original);
     assert_eq!(tree(tmp.path()), before);
 }
@@ -422,7 +419,7 @@ fn repair_missing_or_corrupt_canonical_evidence_blocks_candidate_without_writes(
 }
 
 #[test]
-fn repair_candidate_cannot_escape_selected_component() {
+fn repair_candidate_cannot_escape_selected_owners() {
     let (tmp, _) = fixture(false, 1, false);
     let report = inspect(tmp.path());
     let selected = report
