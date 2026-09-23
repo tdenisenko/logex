@@ -27,6 +27,7 @@ class Package:
     modified: dict[PurePosixPath, str]
     patch_checksum: str
     added: dict[PurePosixPath, str] = field(default_factory=dict)
+    provenance_note: PurePosixPath = PurePosixPath("LOGEX-PATCH.md")
 
     @property
     def directory(self) -> Path:
@@ -34,6 +35,17 @@ class Package:
 
 
 PACKAGES = (
+    Package(
+        name="libp2p-connection-limits",
+        inventory_checksum="54fcaffc6672e5d0c25eb32c003ea55580a132df050cf3f9873254a31611d359",
+        modified={
+            PurePosixPath("Cargo.lock"): "a848809e1e66f58f3d073ac78d0b1a52abc42e381489de114498adb73b0202f0",
+            PurePosixPath("Cargo.toml"): "3592d7289da62ffced42d25be9940d229a18a79ea860dbfd0d042460bbe1103d",
+            PurePosixPath("src/lib.rs"): "71e9d25db2cf796c01072e59738f2d48d7eeeee4c966ac653b47c5b48d7d48ff",
+        },
+        patch_checksum="f40b0048f48bbc5d82735dbd36bf49665a235139dddbc72cb91496fa1311f4dd",
+        provenance_note=PurePosixPath("LOGEX-PATCH.txt"),
+    ),
     Package(
         name="libp2p-gossipsub",
         inventory_checksum="795183902927a7de54e1f7927d0038f0758420d365f92f357908b3d62fe47289",
@@ -233,6 +245,11 @@ def verify_package(package: Package) -> int:
     for path, checksum in package.modified.items():
         validate_checksum(checksum, f"{package.name} reviewed file {path}")
     validate_checksum(package.patch_checksum, f"{package.name} patch diff")
+    if package.provenance_note not in {
+        PurePosixPath("LOGEX-PATCH.md"),
+        PurePosixPath("LOGEX-PATCH.txt"),
+    }:
+        raise ValueError(f"{package.name} has an unsupported provenance note path")
 
     expected = read_inventory(package)
     for path, checksum in package.added.items():
@@ -243,10 +260,14 @@ def verify_package(package: Package) -> int:
             or path == PurePosixPath(".")
             or path in expected
             or path in ADDITIONS
+            or path == package.provenance_note
         ):
             raise ValueError(f"{package.name} invalid added file path: {path}")
         validate_checksum(checksum, f"{package.name} reviewed added file {path}")
-    permitted = set(expected) | set(ADDITIONS) | set(package.added)
+    metadata = (set(ADDITIONS) - {PurePosixPath("LOGEX-PATCH.md")}) | {
+        package.provenance_note
+    }
+    permitted = set(expected) | metadata | set(package.added)
     actual = actual_files(package)
     if actual != permitted:
         missing = sorted(str(path) for path in permitted - actual)
