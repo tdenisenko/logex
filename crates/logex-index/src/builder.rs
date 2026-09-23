@@ -16,6 +16,40 @@ pub enum IndexBuildProfile {
     Erc20Transfer,
 }
 
+/// Failure to verify published derived indexes within a logical payload budget.
+#[derive(Debug)]
+pub enum IndexVerificationError {
+    Io(io::Error),
+    LimitExceeded { required: u64, limit: u64 },
+}
+
+impl std::fmt::Display for IndexVerificationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Io(error) => write!(f, "{error}"),
+            Self::LimitExceeded { required, limit } => write!(
+                f,
+                "required index logical payload bytes {required} exceed limit {limit}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for IndexVerificationError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(error) => Some(error),
+            Self::LimitExceeded { .. } => None,
+        }
+    }
+}
+
+impl From<io::Error> for IndexVerificationError {
+    fn from(error: io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
 /// Builds per-partition indexes from column data.
 pub struct IndexBuilder;
 
@@ -26,6 +60,56 @@ impl IndexBuilder {
     /// the semantic correspondence of index entries to authenticated source rows.
     /// The caller must retain storage ownership for offline source stability.
     pub fn verify_indexes(partition_dir: &Path, profile: IndexBuildProfile) -> io::Result<()> {
+        match Self::verify_indexes_inner(partition_dir, profile, None) {
+            Ok(()) => Ok(()),
+            Err(IndexVerificationError::Io(error)) => Err(error),
+            Err(IndexVerificationError::LimitExceeded { .. }) => {
+                unreachable!("unbounded verification has no payload limit")
+            }
+        }
+    }
+
+    /// Verify required published artifacts with a cumulative logical payload cap.
+    /// The cap does not bound physical I/O, memory, or elapsed time: opening a file
+    /// can prefetch bytes before its logical length is known. Each artifact is
+    /// charged before its payload is streamed. `required` is the cumulative size
+    /// through the first artifact that exceeds the cap, not a full inventory.
+    ///
+    /// This offline operation requires retained storage ownership. Symlink and
+    /// non-ordinary index paths are rejected; ownership must prevent path changes
+    /// between these checks and opens. Checkpoint contention retains the existing
+    /// missing/stale checkpoint error; this operation never waits or rebuilds.
+    pub fn verify_indexes_with_limit(
+        partition_dir: &Path,
+        profile: IndexBuildProfile,
+        max_total_logical_bytes: u64,
+    ) -> Result<(), IndexVerificationError> {
+        Self::verify_indexes_inner(partition_dir, profile, Some(max_total_logical_bytes))
+    }
+
+    fn verify_indexes_inner(
+        partition_dir: &Path,
+        profile: IndexBuildProfile,
+        limit: Option<u64>,
+    ) -> Result<(), IndexVerificationError> {
+        let index_dir = partition_dir.join("indexes");
+        if limit.is_some() {
+            require_ordinary_index_path(&index_dir, true)?;
+            let marker = index_dir.join("index-checkpoint");
+            match require_ordinary_index_path(&marker, false) {
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                result => result?,
+            }
+            // An absent/stale checkpoint still permits local rebuilding. Check
+            // existing output paths before taking that early return, so callers
+            // cannot mistake an unsupported target for a missing derived cache.
+            for name in Self::required_index_files(profile) {
+                match require_ordinary_index_path(&index_dir.join(name), false) {
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    result => result?,
+                }
+            }
+        }
         let reader = SegmentReader::open_projected(partition_dir, &[])?;
         let checkpoint = IndexReadCheckpoint::open(partition_dir, &reader)?.ok_or_else(|| {
             io::Error::new(
@@ -34,6 +118,7 @@ impl IndexBuilder {
             )
         })?;
         let mut scratch = [0u8; 16 * 1024];
+        let mut total = 0u64;
         for name in Self::required_index_files(profile) {
             let expected = checkpoint.artifact_id(name).ok_or_else(|| {
                 io::Error::new(
@@ -41,10 +126,27 @@ impl IndexBuilder {
                     format!("index checkpoint lacks {name}"),
                 )
             })?;
-            let result = (|| {
-                let mut file =
-                    IndexFile::open_bound(&partition_dir.join("indexes").join(name), expected)?;
+            let result = (|| -> Result<(), IndexVerificationError> {
+                let path = index_dir.join(name);
+                if limit.is_some() {
+                    require_ordinary_index_path(&path, false)?;
+                }
+                let mut file = IndexFile::open_bound(&path, expected)?;
                 let mut remaining = file.logical_len();
+                if let Some(limit) = limit {
+                    total = total.checked_add(remaining).ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "index logical byte sum overflow",
+                        )
+                    })?;
+                    if total > limit {
+                        return Err(IndexVerificationError::LimitExceeded {
+                            required: total,
+                            limit,
+                        });
+                    }
+                }
                 while remaining != 0 {
                     let count = remaining.min(scratch.len() as u64) as usize;
                     file.read_exact(&mut scratch[..count])?;
@@ -54,12 +156,17 @@ impl IndexBuilder {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
                         "index exceeds logical length",
-                    ));
+                    )
+                    .into());
                 }
                 Ok(())
             })();
-            result.map_err(|error: io::Error| {
-                io::Error::new(error.kind(), format!("verify index {name}: {error}"))
+            result.map_err(|error| match error {
+                IndexVerificationError::Io(error) => IndexVerificationError::Io(io::Error::new(
+                    error.kind(),
+                    format!("verify index {name}: {error}"),
+                )),
+                error => error,
             })?;
         }
         Ok(())
@@ -428,6 +535,22 @@ impl IndexBuilder {
     }
 }
 
+fn require_ordinary_index_path(path: &Path, directory: bool) -> io::Result<()> {
+    let kind = fs::symlink_metadata(path)?.file_type();
+    if (directory && kind.is_dir()) || (!directory && kind.is_file()) {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!(
+                "index path is not an ordinary {}: {}",
+                if directory { "directory" } else { "file" },
+                path.display()
+            ),
+        ))
+    }
+}
+
 /// Each builder must cover the same captured row boundary before zipping
 /// columns or converting ordinal row positions into the bitmap's u32 IDs.
 pub(crate) fn validate_source_rows(
@@ -536,6 +659,112 @@ mod tests {
         let mut entries = std::collections::BTreeMap::new();
         visit(path, path, &mut entries);
         entries
+    }
+
+    #[test]
+    fn bounded_verification_charges_exact_and_cumulative_payloads_without_writes() {
+        let dir = TempDir::new().unwrap();
+        ColumnFile::write_batch(dir.path(), &make_test_rows()).unwrap();
+        IndexBuilder::build_all_indexes(dir.path()).unwrap();
+        for profile in [IndexBuildProfile::Erc20Transfer, IndexBuildProfile::All] {
+            let lengths: Vec<_> = IndexBuilder::required_index_files(profile)
+                .iter()
+                .map(|name| {
+                    IndexFile::open(&dir.path().join("indexes").join(name))
+                        .unwrap()
+                        .logical_len()
+                })
+                .collect();
+            let total: u64 = lengths.iter().sum();
+            assert!(total > 0);
+            let before = verification_tree(dir.path());
+            IndexBuilder::verify_indexes_with_limit(dir.path(), profile, total).unwrap();
+            assert!(matches!(
+                IndexBuilder::verify_indexes_with_limit(dir.path(), profile, total - 1),
+                Err(IndexVerificationError::LimitExceeded { required, limit })
+                    if required == total && limit == total - 1
+            ));
+            if lengths.len() > 1 {
+                assert!(matches!(
+                    IndexBuilder::verify_indexes_with_limit(dir.path(), profile, lengths[0]),
+                    Err(IndexVerificationError::LimitExceeded { required, limit })
+                        if required == lengths[0] + lengths[1] && limit == lengths[0]
+                ));
+            }
+            assert_eq!(verification_tree(dir.path()), before);
+        }
+    }
+
+    #[test]
+    fn bounded_verification_preserves_missing_and_corrupt_artifact_errors() {
+        let dir = TempDir::new().unwrap();
+        ColumnFile::write_batch(dir.path(), &make_test_rows()).unwrap();
+        IndexBuilder::build_all_indexes(dir.path()).unwrap();
+        let path = dir.path().join("indexes/address.bptree");
+        let original = fs::read(&path).unwrap();
+        fs::remove_file(&path).unwrap();
+        let before = verification_tree(dir.path());
+        assert!(matches!(
+            IndexBuilder::verify_indexes_with_limit(dir.path(), IndexBuildProfile::All, u64::MAX),
+            Err(IndexVerificationError::Io(error)) if error.kind() == io::ErrorKind::NotFound
+        ));
+        assert_eq!(verification_tree(dir.path()), before);
+        let mut damaged = original;
+        *damaged.last_mut().unwrap() ^= 0x80;
+        fs::write(&path, damaged).unwrap();
+        let before = verification_tree(dir.path());
+        assert!(matches!(
+            IndexBuilder::verify_indexes_with_limit(dir.path(), IndexBuildProfile::All, u64::MAX),
+            Err(IndexVerificationError::Io(error)) if error.kind() == io::ErrorKind::InvalidData
+        ));
+        assert_eq!(verification_tree(dir.path()), before);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_verification_rejects_symlink_and_nonordinary_index_paths() {
+        for name in [
+            "indexes",
+            "indexes/index-checkpoint",
+            "indexes/address.bptree",
+        ] {
+            let dir = TempDir::new().unwrap();
+            ColumnFile::write_batch(dir.path(), &make_test_rows()).unwrap();
+            IndexBuilder::build_all_indexes(dir.path()).unwrap();
+            let path = dir.path().join(name);
+            let retained = dir.path().join("retained");
+            fs::rename(&path, &retained).unwrap();
+            std::os::unix::fs::symlink(&retained, &path).unwrap();
+            let before = verification_tree(dir.path());
+            assert!(matches!(
+                IndexBuilder::verify_indexes_with_limit(dir.path(), IndexBuildProfile::All, u64::MAX),
+                Err(IndexVerificationError::Io(error)) if error.kind() == io::ErrorKind::Unsupported
+            ));
+            assert_eq!(verification_tree(dir.path()), before);
+            // The existing unbounded API still follows ordinary symlink targets.
+            IndexBuilder::verify_indexes(dir.path(), IndexBuildProfile::All).unwrap();
+            if name == "indexes/address.bptree" {
+                fs::remove_file(dir.path().join("indexes/index-checkpoint")).unwrap();
+                let before = verification_tree(dir.path());
+                assert!(matches!(
+                    IndexBuilder::verify_indexes_with_limit(dir.path(), IndexBuildProfile::All, u64::MAX),
+                    Err(IndexVerificationError::Io(error)) if error.kind() == io::ErrorKind::Unsupported
+                ));
+                assert_eq!(verification_tree(dir.path()), before);
+            }
+        }
+        let dir = TempDir::new().unwrap();
+        ColumnFile::write_batch(dir.path(), &make_test_rows()).unwrap();
+        IndexBuilder::build_all_indexes(dir.path()).unwrap();
+        let path = dir.path().join("indexes/address.bptree");
+        fs::remove_file(&path).unwrap();
+        fs::create_dir(&path).unwrap();
+        let before = verification_tree(dir.path());
+        assert!(matches!(
+            IndexBuilder::verify_indexes_with_limit(dir.path(), IndexBuildProfile::All, u64::MAX),
+            Err(IndexVerificationError::Io(error)) if error.kind() == io::ErrorKind::Unsupported
+        ));
+        assert_eq!(verification_tree(dir.path()), before);
     }
 
     #[test]

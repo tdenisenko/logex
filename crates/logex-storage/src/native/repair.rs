@@ -13,7 +13,7 @@ mod staging;
 pub use input::{RepairReadLimits, RepairRowInput};
 pub use publication::{
     CommittedRepairPublication, PendingRepair, PreparedRepairPublication, RepairCatalogState,
-    RepairPublication, inspect_pending_repair,
+    RepairInspection, RepairPublication, inspect_pending_repair, inspect_repair,
 };
 pub use staging::StagedRepairCandidate;
 

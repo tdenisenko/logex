@@ -8,7 +8,7 @@ mod index_file;
 mod transfer_bloom;
 
 pub use btree::{BTreeIndex, BTreeIndexReader};
-pub use builder::{IndexBuildProfile, IndexBuilder};
+pub use builder::{IndexBuildProfile, IndexBuilder, IndexVerificationError};
 pub use composite::{CompositeIndexBuilder, CompositeQuery};
 pub use transfer_bloom::{
     ERC20_EVENTS_BLOOM_FILE, Erc20EventBloom, Erc20EventBloomReader, TRANSFER_BLOOM_FILE,
