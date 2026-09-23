@@ -18,7 +18,7 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-//! This implements a time-based LRU cache for checking gossipsub message duplicates.
+//! Time-based caches with fixed insertion deadlines for gossipsub state.
 
 use std::{
     collections::{
@@ -42,8 +42,7 @@ struct ExpiringElement<Element> {
 }
 
 pub(crate) struct TimeCache<Key, Value> {
-    /// Mapping a key to its value together with its latest expire time (can be updated through
-    /// reinserts).
+    /// Mapping a key to its value and fixed insertion deadline.
     map: FnvHashMap<Key, ExpiringElement<Value>>,
     /// An ordered list of keys by expires time.
     list: VecDeque<ExpiringElement<Key>>,
@@ -122,6 +121,10 @@ where
     }
 
     fn remove_expired_keys(&mut self, now: Instant) {
+        self.remove_expired_keys_with(now, |_| {});
+    }
+
+    fn remove_expired_keys_with(&mut self, now: Instant, mut removed: impl FnMut(Value)) {
         while let Some(element) = self.list.pop_front() {
             if element.expires > now {
                 self.list.push_front(element);
@@ -129,7 +132,7 @@ where
             }
             if let Occupied(entry) = self.map.entry(element.element.clone()) {
                 if entry.get().expires <= now {
-                    entry.remove();
+                    removed(entry.remove().element);
                 }
             }
         }
@@ -173,52 +176,117 @@ where
     }
 }
 
-pub(crate) struct DuplicateCache<Key>(TimeCache<Key, ()>);
+/// Admission never evicts a live entry or extends its original deadline.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CacheAdmission {
+    New,
+    Duplicate,
+    Full,
+}
+
+pub(crate) struct DuplicateCache<Key> {
+    cache: TimeCache<Key, usize>,
+    max_entries: usize,
+    max_bytes: usize,
+    retained_bytes: usize,
+    key_bytes: fn(&Key) -> usize,
+}
 
 impl<Key> DuplicateCache<Key>
 where
     Key: Eq + std::hash::Hash + Clone,
 {
+    #[cfg(test)]
     pub(crate) fn new(ttl: Duration) -> Self {
-        Self(TimeCache::new(ttl))
+        Self::with_limits(ttl, usize::MAX, usize::MAX, |_| 0)
     }
 
-    // Inserts new elements and removes any expired elements.
-    //
-    // If the key was not present this returns `true`. If the value was already present this
-    // returns `false`.
-    pub(crate) fn insert(&mut self, key: Key) -> bool {
-        if let Entry::Vacant(entry) = self.0.entry(key) {
-            entry.insert(());
-            true
-        } else {
-            false
+    /// `key_bytes` measures all retained key storage, including the ordered-list clone.
+    /// It must account for the actual moved key and its clone. Admission for a
+    /// borrowed key may overestimate a subsequent cloned insertion.
+    pub(crate) fn with_limits(
+        ttl: Duration,
+        max_entries: usize,
+        max_bytes: usize,
+        key_bytes: fn(&Key) -> usize,
+    ) -> Self {
+        Self {
+            cache: TimeCache::new(ttl),
+            max_entries,
+            max_bytes,
+            retained_bytes: 0,
+            key_bytes,
         }
+    }
+
+    /// Checks admission after pruning expired entries, without reserving space.
+    pub(crate) fn admission(&mut self, key: &Key) -> CacheAdmission {
+        self.admission_at(key, Instant::now()).0
+    }
+
+    fn admission_at(&mut self, key: &Key, now: Instant) -> (CacheAdmission, usize) {
+        self.prune_expired(now);
+        if self.cache.map.contains_key(key) {
+            return (CacheAdmission::Duplicate, 0);
+        }
+        if self.cache.map.len() >= self.max_entries {
+            return (CacheAdmission::Full, 0);
+        }
+        let bytes = (self.key_bytes)(key);
+        if bytes > self.max_bytes - self.retained_bytes {
+            return (CacheAdmission::Full, 0);
+        }
+        (CacheAdmission::New, bytes)
+    }
+
+    pub(crate) fn try_insert(&mut self, key: Key) -> CacheAdmission {
+        self.try_insert_at(key, Instant::now())
+    }
+
+    fn try_insert_at(&mut self, key: Key, now: Instant) -> CacheAdmission {
+        let (admission, bytes) = self.admission_at(&key, now);
+        if admission == CacheAdmission::New {
+            if let Entry::Vacant(entry) = self.cache.entry_at(key, now) {
+                entry.insert(bytes);
+                // Admission checked the remaining capacity without overflowing.
+                self.retained_bytes += bytes;
+            }
+        }
+        admission
+    }
+
+    #[cfg(test)]
+    pub(crate) fn insert(&mut self, key: Key) -> bool {
+        self.try_insert(key) == CacheAdmission::New
     }
 
     /// Release expired entries even when no new messages are inserted.
     pub(crate) fn prune_expired(&mut self, now: Instant) {
-        self.0.remove_expired_keys(now);
+        let retained_bytes = &mut self.retained_bytes;
+        self.cache.remove_expired_keys_with(now, |bytes| {
+            *retained_bytes -= bytes;
+        });
+    }
+
+    #[cfg(test)]
+    pub(crate) fn clear(&mut self) {
+        self.cache.clear();
+        self.retained_bytes = 0;
     }
 
     #[cfg(test)]
     pub(crate) fn insert_at(&mut self, key: Key, now: Instant) -> bool {
-        if let Entry::Vacant(entry) = self.0.entry_at(key, now) {
-            entry.insert(());
-            true
-        } else {
-            false
-        }
+        self.try_insert_at(key, now) == CacheAdmission::New
     }
 
     #[cfg(test)]
     pub(crate) fn retained_len(&self) -> usize {
-        assert_eq!(self.0.map.len(), self.0.list.len());
-        self.0.map.len()
+        assert_eq!(self.cache.map.len(), self.cache.list.len());
+        self.cache.map.len()
     }
 
     pub(crate) fn contains(&self, key: &Key) -> bool {
-        self.0.contains_key(key)
+        self.cache.contains_key(key)
     }
 }
 
@@ -270,10 +338,100 @@ mod logex_expiry_tests {
         assert!(!cache.insert_at([1_u8; 20], start + Duration::from_secs(5)));
         assert_eq!(cache.retained_len(), 1);
         assert!(cache
-            .0
+            .cache
             .contains_key_at(&[1; 20], start + ttl - Duration::from_nanos(1)));
-        assert!(!cache.0.contains_key_at(&[1; 20], start + ttl));
+        assert!(!cache.cache.contains_key_at(&[1; 20], start + ttl));
         assert!(cache.insert_at([1; 20], start + ttl));
         assert_eq!(cache.retained_len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod logex_capacity_tests {
+    use super::*;
+
+    #[test]
+    fn logex_entry_bound_retains_full_cache_and_duplicate_deadlines() {
+        let now = Instant::now();
+        let ttl = Duration::from_secs(10);
+        let mut cache = DuplicateCache::with_limits(ttl, 1, 8, |_| 8);
+        assert_eq!(cache.try_insert_at(1, now), CacheAdmission::New);
+        assert_eq!(cache.try_insert_at(2, now), CacheAdmission::Full);
+        assert_eq!(
+            cache.try_insert_at(1, now + ttl / 2),
+            CacheAdmission::Duplicate
+        );
+        assert_eq!(cache.retained_len(), 1);
+        assert_eq!(cache.retained_bytes, 8);
+        assert!(cache
+            .cache
+            .contains_key_at(&1, now + ttl - Duration::from_nanos(1)));
+        assert_eq!(cache.try_insert_at(2, now + ttl), CacheAdmission::New);
+        assert_eq!(cache.retained_len(), 1);
+        assert_eq!(cache.retained_bytes, 8);
+    }
+
+    #[test]
+    fn logex_byte_bound_expiry_reuse_and_idle_prune() {
+        let now = Instant::now();
+        let ttl = Duration::from_secs(10);
+        let mut cache = DuplicateCache::with_limits(ttl, 10, 6, |key: &String| key.len() * 2);
+        assert_eq!(cache.try_insert_at("a".into(), now), CacheAdmission::New);
+        assert_eq!(
+            cache.try_insert_at("bc".into(), now + ttl / 2),
+            CacheAdmission::New
+        );
+        assert_eq!(cache.retained_bytes, 6);
+        assert_eq!(
+            cache.try_insert_at("d".into(), now + ttl / 2),
+            CacheAdmission::Full
+        );
+        cache.prune_expired(now + ttl);
+        assert_eq!(cache.retained_bytes, 4);
+        assert_eq!(
+            cache.try_insert_at("d".into(), now + ttl),
+            CacheAdmission::New
+        );
+        assert_eq!(cache.retained_bytes, 6);
+        cache.prune_expired(now + ttl * 2);
+        assert_eq!(cache.retained_len(), 0);
+        assert_eq!(cache.retained_bytes, 0);
+        cache.prune_expired(now + ttl * 3);
+        assert_eq!(cache.retained_bytes, 0);
+    }
+
+    #[test]
+    fn logex_byte_accounting_cannot_overflow_and_clear_releases_capacity() {
+        let now = Instant::now();
+        let mut cache =
+            DuplicateCache::with_limits(Duration::from_secs(10), 3, usize::MAX, |key: &usize| *key);
+        assert_eq!(cache.try_insert_at(usize::MAX, now), CacheAdmission::New);
+        assert_eq!(cache.try_insert_at(1, now), CacheAdmission::Full);
+        assert_eq!(
+            cache.try_insert_at(usize::MAX, now),
+            CacheAdmission::Duplicate
+        );
+        assert_eq!(cache.retained_bytes, usize::MAX);
+        cache.clear();
+        assert_eq!(cache.retained_len(), 0);
+        assert_eq!(cache.retained_bytes, 0);
+        assert_eq!(cache.try_insert_at(1, now), CacheAdmission::New);
+    }
+
+    #[test]
+    fn logex_admission_does_not_reserve_capacity_or_admit_oversized_keys() {
+        let now = Instant::now();
+        let mut cache =
+            DuplicateCache::with_limits(Duration::from_secs(10), 1, 2, |key: &usize| *key);
+        assert_eq!(cache.admission(&2), CacheAdmission::New);
+        assert_eq!(cache.retained_len(), 0);
+        assert_eq!(cache.retained_bytes, 0);
+        assert_eq!(cache.try_insert_at(3, now), CacheAdmission::Full);
+        assert_eq!(cache.try_insert_at(2, now), CacheAdmission::New);
+        assert_eq!(cache.admission(&2), CacheAdmission::Duplicate);
+        assert_eq!(cache.admission(&1), CacheAdmission::Full);
+        let mut disabled =
+            DuplicateCache::with_limits(Duration::from_secs(10), 0, usize::MAX, |_| 0);
+        assert_eq!(disabled.try_insert_at(0, now), CacheAdmission::Full);
     }
 }

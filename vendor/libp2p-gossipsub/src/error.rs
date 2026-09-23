@@ -27,6 +27,8 @@ use libp2p_identity::SigningError;
 pub enum PublishError {
     /// This message has already been published.
     Duplicate,
+    /// Retained gossip data is at capacity. Retry after ordinary cache expiry.
+    CacheFull,
     /// An error occurred whilst signing the message.
     SigningError(SigningError),
     /// No peers are currently subscribed to receive messages on this topic.

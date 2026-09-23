@@ -21,7 +21,6 @@
 use std::{
     collections::{hash_map::Entry, HashMap, HashSet},
     fmt,
-    fmt::Debug,
 };
 
 use libp2p_identity::PeerId;
@@ -31,24 +30,39 @@ use crate::{
     types::{MessageId, RawMessage},
 };
 
-/// CacheEntry stored in the history.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// A history record retains its budget until normal expiry, even after rejection.
+#[derive(Debug, Clone)]
 pub(crate) struct CacheEntry {
     mid: MessageId,
     topic: TopicHash,
+    generation: u64,
+    bytes: usize,
 }
 
-/// MessageCache struct holding history of messages.
+#[derive(Debug, Clone)]
+struct MessageEntry {
+    message: RawMessage,
+    originating_peers: HashSet<PeerId>,
+    iwant_counts: HashMap<PeerId, u32>,
+    generation: u64,
+    bytes: usize,
+}
+
+/// Retains admitted messages until normal expiry; excess admissions are dropped.
+/// Dynamic buffers have a byte budget, while history and peer metadata have
+/// separate count budgets. These are retained-data bounds, not an RSS estimate.
 #[derive(Clone)]
 pub(crate) struct MessageCache {
-    msgs: HashMap<MessageId, (RawMessage, HashSet<PeerId>)>,
-    /// For every message and peer the number of times this peer asked for the message
-    iwant_counts: HashMap<MessageId, HashMap<PeerId, u32>>,
+    msgs: HashMap<MessageId, MessageEntry>,
     history: Vec<Vec<CacheEntry>>,
-    /// The number of indices in the cache history used for gossiping. That means that a message
-    /// won't get gossiped anymore when shift got called `gossip` many times after inserting the
-    /// message in the cache.
     gossip: usize,
+    max_entries: usize,
+    max_bytes: usize,
+    max_peer_associations: usize,
+    history_entries: usize,
+    retained_bytes: usize,
+    peer_associations: usize,
+    next_generation: Option<u64>,
 }
 
 impl fmt::Debug for MessageCache {
@@ -61,170 +75,215 @@ impl fmt::Debug for MessageCache {
     }
 }
 
-/// Implementation of the MessageCache.
 impl MessageCache {
+    #[cfg(test)]
     pub(crate) fn new(gossip: usize, history_capacity: usize) -> Self {
-        MessageCache {
+        Self::with_limits(gossip, history_capacity, usize::MAX, usize::MAX, usize::MAX)
+    }
+
+    pub(crate) fn with_limits(
+        gossip: usize,
+        history_capacity: usize,
+        max_entries: usize,
+        max_bytes: usize,
+        max_peer_associations: usize,
+    ) -> Self {
+        Self {
             gossip,
             msgs: HashMap::default(),
-            iwant_counts: HashMap::default(),
             history: vec![Vec::new(); history_capacity],
+            max_entries,
+            max_bytes,
+            max_peer_associations,
+            history_entries: 0,
+            retained_bytes: 0,
+            peer_associations: 0,
+            next_generation: Some(0),
         }
     }
 
-    /// Put a message into the memory cache.
-    ///
-    /// Returns true if the message didn't already exist in the cache.
-    pub(crate) fn put(&mut self, message_id: &MessageId, msg: RawMessage) -> bool {
+    // IDs are cloned and topics are normalized to exact-length allocations.
+    // Message buffers are moved, so charge capacity rather than just length.
+    fn admission_bytes(message_id: &MessageId, msg: &RawMessage) -> Option<(usize, usize)> {
+        let history = message_id.0.len().checked_add(msg.topic.as_str().len())?;
+        let message = history
+            .checked_add(msg.data.capacity())?
+            .checked_add(msg.signature.as_ref().map_or(0, Vec::capacity))?
+            .checked_add(msg.key.as_ref().map_or(0, Vec::capacity))?;
+        Some((history, message))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn usage(&self) -> (usize, usize, usize) {
+        (
+            self.history_entries,
+            self.retained_bytes,
+            self.peer_associations,
+        )
+    }
+
+    /// Whether a payload still owns this identity in the history window.
+    pub(crate) fn contains(&self, message_id: &MessageId) -> bool {
+        self.msgs.contains_key(message_id)
+    }
+
+    /// Preflight for a synchronous insertion; does not reserve capacity.
+    pub(crate) fn can_put(&self, message_id: &MessageId, msg: &RawMessage) -> bool {
         if self.history.is_empty() {
             return true;
         }
-        match self.msgs.entry(message_id.clone()) {
-            Entry::Occupied(_) => {
-                // Don't add duplicate entries to the cache.
-                false
-            }
-            Entry::Vacant(entry) => {
-                let cache_entry = CacheEntry {
-                    mid: message_id.clone(),
-                    topic: msg.topic.clone(),
-                };
-                entry.insert((msg, HashSet::default()));
-                self.history[0].push(cache_entry);
-
-                tracing::trace!(message=?message_id, "Put message in mcache");
-                true
-            }
+        if self.next_generation.is_none()
+            || self.msgs.contains_key(message_id)
+            || self.history_entries >= self.max_entries
+        {
+            return false;
         }
+        Self::admission_bytes(message_id, msg)
+            .and_then(|(history, message)| history.checked_add(message))
+            .and_then(|bytes| self.retained_bytes.checked_add(bytes))
+            .is_some_and(|bytes| bytes <= self.max_bytes)
     }
 
-    /// Keeps track of peers we know have received the message to prevent forwarding to said peers.
+    /// Returns true for an admitted message, or for the empty-history no-op.
+    pub(crate) fn put(&mut self, message_id: &MessageId, mut msg: RawMessage) -> bool {
+        if !self.can_put(message_id, &msg) {
+            return false;
+        }
+        if self.history.is_empty() {
+            return true;
+        }
+        let (history_bytes, message_bytes) =
+            Self::admission_bytes(message_id, &msg).expect("admission checked the byte budget");
+        msg.topic = TopicHash::from_raw(msg.topic.into_string().into_boxed_str().into_string());
+        let generation = self
+            .next_generation
+            .expect("admission checked generation availability");
+        self.next_generation = generation.checked_add(1);
+        self.history[0].push(CacheEntry {
+            mid: message_id.clone(),
+            topic: msg.topic.clone(),
+            generation,
+            bytes: history_bytes,
+        });
+        self.msgs.insert(
+            message_id.clone(),
+            MessageEntry {
+                message: msg,
+                originating_peers: HashSet::default(),
+                iwant_counts: HashMap::default(),
+                generation,
+                bytes: message_bytes,
+            },
+        );
+        self.history_entries += 1;
+        self.retained_bytes += history_bytes + message_bytes;
+        tracing::trace!(message=?message_id, "Put message in mcache");
+        true
+    }
+
+    /// Track duplicate origins only while awaiting validation and budget permits.
     pub(crate) fn observe_duplicate(&mut self, message_id: &MessageId, source: &PeerId) {
-        if let Some((message, originating_peers)) = self.msgs.get_mut(message_id) {
-            // if the message is already validated, we don't need to store extra peers sending us
-            // duplicates as the message has already been forwarded
-            if message.validated {
-                return;
+        if let Some(entry) = self.msgs.get_mut(message_id) {
+            if !entry.message.validated
+                && self.peer_associations < self.max_peer_associations
+                && entry.originating_peers.insert(*source)
+            {
+                self.peer_associations += 1;
             }
-
-            originating_peers.insert(*source);
         }
     }
 
-    /// Get a message with `message_id`
     #[cfg(test)]
     pub(crate) fn get(&self, message_id: &MessageId) -> Option<&RawMessage> {
-        self.msgs.get(message_id).map(|(message, _)| message)
+        self.msgs.get(message_id).map(|entry| &entry.message)
     }
 
-    /// Increases the iwant count for the given message by one and returns the message together
-    /// with the iwant if the message exists.
+    /// Existing IWANT counters remain authoritative under capacity pressure.
+    /// An untracked peer is not served when its counter cannot be retained.
     pub(crate) fn get_with_iwant_counts(
         &mut self,
         message_id: &MessageId,
         peer: &PeerId,
     ) -> Option<(&RawMessage, u32)> {
-        let iwant_counts = &mut self.iwant_counts;
-        self.msgs.get(message_id).and_then(|(message, _)| {
-            if !message.validated {
-                None
-            } else {
-                Some((message, {
-                    let count = iwant_counts
-                        .entry(message_id.clone())
-                        .or_default()
-                        .entry(*peer)
-                        .or_default();
-                    *count += 1;
-                    *count
-                }))
+        let entry = self.msgs.get_mut(message_id)?;
+        if !entry.message.validated {
+            return None;
+        }
+        let count = match entry.iwant_counts.entry(*peer) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => {
+                if self.peer_associations >= self.max_peer_associations {
+                    return None;
+                }
+                self.peer_associations += 1;
+                entry.insert(0)
             }
-        })
+        };
+        *count = count.saturating_add(1);
+        Some((&entry.message, *count))
     }
 
-    /// Gets a message with [`MessageId`] and tags it as validated.
-    /// This function also returns the known peers that have sent us this message. This is used to
-    /// prevent us sending redundant messages to peers who have already propagated it.
+    /// Validate and release duplicate-origin associations to the caller.
     pub(crate) fn validate(
         &mut self,
         message_id: &MessageId,
     ) -> Option<(&RawMessage, HashSet<PeerId>)> {
-        self.msgs.get_mut(message_id).map(|(message, known_peers)| {
-            message.validated = true;
-            // Clear the known peers list (after a message is validated, it is forwarded and we no
-            // longer need to store the originating peers).
-            let originating_peers = std::mem::take(known_peers);
-            (&*message, originating_peers)
-        })
+        let entry = self.msgs.get_mut(message_id)?;
+        entry.message.validated = true;
+        let peers = std::mem::take(&mut entry.originating_peers);
+        self.peer_associations -= peers.len();
+        Some((&entry.message, peers))
     }
 
-    /// Get a list of [`MessageId`]s for a given topic.
     pub(crate) fn get_gossip_message_ids(&self, topic: &TopicHash) -> Vec<MessageId> {
-        self.history[..self.gossip]
+        self.history
             .iter()
-            .fold(vec![], |mut current_entries, entries| {
-                // search for entries with desired topic
-                let mut found_entries: Vec<MessageId> = entries
-                    .iter()
-                    .filter_map(|entry| {
-                        if &entry.topic == topic {
-                            let mid = &entry.mid;
-                            // Only gossip validated messages
-                            if let Some(true) = self.msgs.get(mid).map(|(msg, _)| msg.validated) {
-                                Some(mid.clone())
-                            } else {
-                                None
-                            }
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
-
-                // generate the list
-                current_entries.append(&mut found_entries);
-                current_entries
+            .take(self.gossip)
+            .flatten()
+            .filter_map(|record| {
+                let entry = self.msgs.get(&record.mid)?;
+                (&record.topic == topic
+                    && entry.message.validated
+                    && record.generation == entry.generation)
+                    .then(|| record.mid.clone())
             })
+            .collect()
     }
 
-    /// Shift the history array down one and delete messages associated with the
-    /// last entry.
+    /// Expire one history window, without letting old records delete reinsertions.
     pub(crate) fn shift(&mut self) {
-        if self.history.is_empty() {
+        let Some(expired) = self.history.pop() else {
             return;
-        }
-
-        for entry in self.history.pop().expect("history is always > 1") {
-            if let Some((msg, _)) = self.msgs.remove(&entry.mid) {
-                if !msg.validated {
-                    // If GossipsubConfig::validate_messages is true, the implementing
-                    // application has to ensure that Gossipsub::validate_message gets called for
-                    // each received message within the cache timeout time."
-                    tracing::debug!(
-                        message=%&entry.mid,
-                        "The message got removed from the cache without being validated."
-                    );
+        };
+        for record in expired {
+            self.history_entries -= 1;
+            self.retained_bytes -= record.bytes;
+            if self
+                .msgs
+                .get(&record.mid)
+                .is_some_and(|entry| record.generation == entry.generation)
+            {
+                if let Some((msg, _)) = self.remove(&record.mid) {
+                    if !msg.validated {
+                        tracing::debug!(message=%record.mid,
+                            "The message got removed from the cache without being validated.");
+                    }
                 }
             }
-            tracing::trace!(message=%&entry.mid, "Remove message from the cache");
-
-            self.iwant_counts.remove(&entry.mid);
         }
-
-        // Insert an empty vec in position 0
         self.history.insert(0, Vec::new());
     }
 
-    /// Removes a message from the cache and returns it if existent
+    /// Remove payload and peer state. History retains its own bounded allocation
+    /// until expiry; generation ownership makes its later removal harmless.
     pub(crate) fn remove(
         &mut self,
         message_id: &MessageId,
     ) -> Option<(RawMessage, HashSet<PeerId>)> {
-        // We only remove the message from msgs and iwant_count and keep the message_id in the
-        // history vector. Zhe id in the history vector will simply be ignored on popping.
-
-        self.iwant_counts.remove(message_id);
-        self.msgs.remove(message_id)
+        let entry = self.msgs.remove(message_id)?;
+        self.retained_bytes -= entry.bytes;
+        self.peer_associations -= entry.originating_peers.len() + entry.iwant_counts.len();
+        Some((entry.message, entry.originating_peers))
     }
 }
 
@@ -391,5 +450,190 @@ mod tests {
         assert_eq!(mc.history[mc.history.len() - 1].len(), 0);
         assert_eq!(mc.history[0].len(), 0);
         assert_eq!(mc.msgs.len(), 0);
+    }
+
+    fn logex_message(id: u8) -> (MessageId, RawMessage) {
+        (
+            MessageId::new(&[id]),
+            RawMessage {
+                source: None,
+                data: vec![1],
+                sequence_number: None,
+                topic: TopicHash::from_raw("t"),
+                signature: Some(vec![2]),
+                key: Some(vec![3]),
+                validated: false,
+            },
+        )
+    }
+
+    #[test]
+    fn logex_exact_byte_and_entry_limits_preserve_admitted_messages() {
+        let (id, msg) = logex_message(1);
+        // Two ID/topic copies and three one-byte message buffers.
+        let mut too_small = MessageCache::with_limits(1, 1, 1, 6, 1);
+        assert!(!too_small.can_put(&id, &msg));
+        assert!(!too_small.put(&id, msg.clone()));
+        assert_eq!(too_small.usage(), (0, 0, 0));
+        let mut cache = MessageCache::with_limits(1, 1, 1, 7, 1);
+        assert!(cache.can_put(&id, &msg));
+        assert!(cache.put(&id, msg.clone()));
+        assert_eq!(cache.usage(), (1, 7, 0));
+        assert!(!cache.put(&id, msg));
+        let (other, message) = logex_message(2);
+        assert!(!cache.put(&other, message));
+        assert!(cache.get(&id).is_some());
+        cache.shift();
+        assert_eq!(cache.usage(), (0, 0, 0));
+
+        let mut count_limited = MessageCache::with_limits(1, 1, 1, 100, 1);
+        let (id, msg) = logex_message(1);
+        assert!(count_limited.put(&id, msg));
+        let (other, msg) = logex_message(2);
+        assert!(!count_limited.put(&other, msg));
+    }
+
+    #[test]
+    fn logex_buffer_capacity_and_topic_normalization_are_accounted() {
+        let (id, mut msg) = logex_message(1);
+        msg.data = Vec::with_capacity(8);
+        msg.data.push(1);
+        let mut topic = String::with_capacity(32);
+        topic.push('t');
+        msg.topic = TopicHash::from_raw(topic);
+        let expected = 6 + msg.data.capacity();
+        let mut cache = MessageCache::with_limits(1, 1, 1, expected - 1, 1);
+        assert!(!cache.can_put(&id, &msg));
+        cache.max_bytes = expected;
+        assert!(cache.put(&id, msg));
+        assert_eq!(cache.retained_bytes, expected);
+        assert_eq!(
+            cache
+                .get(&id)
+                .unwrap()
+                .topic
+                .clone()
+                .into_string()
+                .capacity(),
+            1
+        );
+        cache.remove(&id);
+        assert_eq!(cache.usage(), (1, 2, 0));
+        cache.shift();
+        assert_eq!(cache.usage(), (0, 0, 0));
+    }
+
+    #[test]
+    fn logex_rejection_churn_retains_bounded_history_until_expiry() {
+        let mut cache = MessageCache::with_limits(1, 2, 2, 100, 1);
+        for n in 1..=2 {
+            let (id, msg) = logex_message(n);
+            assert!(cache.put(&id, msg));
+            assert!(cache.remove(&id).is_some());
+        }
+        assert_eq!(cache.usage(), (2, 4, 0));
+        let (id, msg) = logex_message(3);
+        assert!(!cache.put(&id, msg.clone()));
+        cache.shift();
+        assert!(!cache.put(&id, msg.clone()));
+        cache.shift();
+        assert_eq!(cache.usage(), (0, 0, 0));
+        assert!(cache.put(&id, msg));
+    }
+
+    #[test]
+    fn logex_old_history_cannot_gossip_or_expire_reinserted_id() {
+        let mut cache = MessageCache::with_limits(2, 2, 2, 100, 1);
+        let (id, msg) = logex_message(1);
+        assert!(cache.put(&id, msg.clone()));
+        cache.remove(&id);
+        cache.shift();
+        assert!(cache.put(&id, msg));
+        cache.validate(&id);
+        assert_eq!(
+            cache.get_gossip_message_ids(&TopicHash::from_raw("t")),
+            vec![id.clone()]
+        );
+        assert_eq!(cache.usage(), (2, 9, 0));
+        cache.shift();
+        assert!(cache.get(&id).is_some());
+        assert_eq!(cache.usage(), (1, 7, 0));
+        cache.shift();
+        assert!(cache.get(&id).is_none());
+        assert_eq!(cache.usage(), (0, 0, 0));
+    }
+
+    #[test]
+    fn logex_peer_budget_preserves_iwant_counter_continuity() {
+        let mut cache = MessageCache::with_limits(1, 1, 2, 100, 1);
+        let (id, msg) = logex_message(1);
+        cache.put(&id, msg);
+        let first = PeerId::random();
+        let second = PeerId::random();
+        cache.observe_duplicate(&id, &first);
+        cache.observe_duplicate(&id, &first);
+        cache.observe_duplicate(&id, &second);
+        assert_eq!(cache.peer_associations, 1);
+        let (_, origins) = cache.validate(&id).unwrap();
+        assert_eq!(origins, HashSet::from([first]));
+        assert_eq!(cache.peer_associations, 0);
+        assert_eq!(cache.get_with_iwant_counts(&id, &first).unwrap().1, 1);
+        assert!(cache.get_with_iwant_counts(&id, &second).is_none());
+        assert_eq!(cache.get_with_iwant_counts(&id, &first).unwrap().1, 2);
+        cache
+            .msgs
+            .get_mut(&id)
+            .unwrap()
+            .iwant_counts
+            .insert(first, u32::MAX);
+        assert_eq!(
+            cache.get_with_iwant_counts(&id, &first).unwrap().1,
+            u32::MAX
+        );
+        // A repeated validation must not clear authoritative IWANT counters.
+        assert!(cache.validate(&id).unwrap().1.is_empty());
+        assert_eq!(cache.peer_associations, 1);
+        let mut cloned = cache.clone();
+        cloned.shift();
+        assert_eq!(cloned.usage(), (0, 0, 0));
+        assert_eq!(cache.usage(), (1, 7, 1));
+        cache.remove(&id);
+        assert_eq!(cache.usage(), (1, 2, 0));
+        cache.shift();
+        assert_eq!(cache.usage(), (0, 0, 0));
+    }
+
+    #[test]
+    fn logex_peer_budget_is_shared_between_messages_and_tracking_kinds() {
+        let mut cache = MessageCache::with_limits(1, 1, 2, 100, 1);
+        let (id, msg) = logex_message(1);
+        let (other, message) = logex_message(2);
+        cache.put(&id, msg);
+        cache.put(&other, message);
+        let peer = PeerId::random();
+        cache.observe_duplicate(&id, &peer);
+        cache.validate(&other);
+        assert!(cache.get_with_iwant_counts(&other, &peer).is_none());
+        cache.validate(&id);
+        assert_eq!(cache.get_with_iwant_counts(&other, &peer).unwrap().1, 1);
+        cache.shift();
+        assert_eq!(cache.usage(), (0, 0, 0));
+    }
+
+    #[test]
+    fn logex_empty_history_and_generation_exhaustion() {
+        let (id, msg) = logex_message(1);
+        let mut empty = MessageCache::with_limits(1, 0, 0, 0, 0);
+        assert!(empty.can_put(&id, &msg));
+        assert!(empty.put(&id, msg.clone()));
+        empty.shift();
+        assert!(empty.get_gossip_message_ids(&msg.topic).is_empty());
+        assert_eq!(empty.usage(), (0, 0, 0));
+        let mut cache = MessageCache::with_limits(1, 1, 1, 100, 1);
+        cache.next_generation = Some(u64::MAX);
+        assert!(cache.put(&id, msg.clone()));
+        cache.shift();
+        assert!(!cache.put(&id, msg));
+        assert_eq!(cache.usage(), (0, 0, 0));
     }
 }

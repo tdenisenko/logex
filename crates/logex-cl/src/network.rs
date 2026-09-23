@@ -104,6 +104,23 @@ const GOODBYE_REASON_FAULT: u64 = 3;
 const IDENTIFY_PROTOCOL_VERSION: &str = "eth2/1.0.0";
 const IDENTIFY_AGENT_VERSION: &str = concat!("logex/", env!("CARGO_PKG_VERSION"));
 const GOSSIP_MAX_PAYLOAD_SIZE: usize = 10 * 1024 * 1024;
+// Light-client topics carry small updates and 20-byte content IDs. Retain ample
+// room for fork overlap and bursts while keeping each cache owner finite. These
+// are retained-buffer budgets; connection and transport queues have other owners.
+const GOSSIP_CACHE_LIMITS: gossipsub::CacheLimits = gossipsub::CacheLimits {
+    seen_entries: 16_384,
+    seen_bytes: 16_384 * 40,
+    published_entries: 1_024,
+    published_bytes: 1_024 * 40,
+    message_entries: 1_024,
+    message_bytes: 16 * 1024 * 1024,
+    message_peer_associations: 16_384,
+    promise_entries: 4_096,
+    promise_bytes: 4_096 * 20,
+    promise_peer_associations: 8_192,
+    idontwant_entries_per_peer: 1_024,
+    idontwant_bytes_per_peer: 1_024 * 20,
+};
 const P2P_BANDWIDTH_RATE_WINDOW: Duration = Duration::from_secs(15);
 const LIGHT_CLIENT_FINALITY_UPDATE_TOPIC_NAME: &str = "light_client_finality_update";
 const LIGHT_CLIENT_OPTIMISTIC_UPDATE_TOPIC_NAME: &str = "light_client_optimistic_update";
@@ -6888,6 +6905,7 @@ fn build_gossip_config() -> Result<gossipsub::Config, ConsensusNetworkError> {
         .history_length(6)
         .history_gossip(3)
         .duplicate_cache_time(Duration::from_secs(768))
+        .cache_limits(GOSSIP_CACHE_LIMITS)
         .max_transmit_size(snap::raw::max_compress_len(GOSSIP_MAX_PAYLOAD_SIZE) + 1024)
         .message_id_fn(eth2_message_id)
         .build()
@@ -10976,6 +10994,12 @@ mod tests {
         assert_eq!(config.fanout_ttl(), Duration::from_secs(60));
         assert_eq!((config.history_length(), config.history_gossip()), (6, 3));
         assert_eq!(config.duplicate_cache_time(), Duration::from_secs(768));
+        assert_eq!(config.cache_limits(), &GOSSIP_CACHE_LIMITS);
+        assert_eq!(config.cache_limits().seen_entries, 16_384);
+        assert_eq!(config.cache_limits().seen_bytes, 655_360);
+        assert_eq!(config.cache_limits().message_bytes, 16 * 1024 * 1024);
+        assert_eq!(config.cache_limits().promise_bytes, 81_920);
+        assert_eq!(config.cache_limits().idontwant_bytes_per_peer, 20_480);
         assert_eq!(
             config.max_transmit_size_for_topic(&gossipsub::TopicHash::from_raw(TEST_GOSSIP_TOPIC)),
             12_234_442

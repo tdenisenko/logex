@@ -96,6 +96,56 @@ impl std::fmt::Debug for TopicConfigs {
     }
 }
 
+/// Retained-data budgets for gossip caches. Entry and association limits bound
+/// fixed metadata; byte limits cover owned IDs and payload buffers, not total RSS.
+/// Excess new entries are dropped without evicting or refreshing admitted entries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CacheLimits {
+    /// Seen-message IDs retained for duplicate suppression.
+    pub seen_entries: usize,
+    /// Owned ID bytes in the seen cache, including expiry-list copies.
+    pub seen_bytes: usize,
+    /// Locally published IDs retained for self-origin detection.
+    pub published_entries: usize,
+    /// Owned ID bytes in the published cache, including expiry-list copies.
+    pub published_bytes: usize,
+    /// Message-history records, including records whose payload was rejected.
+    pub message_entries: usize,
+    /// Message buffers and owned IDs/topics in payload and history records.
+    pub message_bytes: usize,
+    /// Duplicate-origin peers and IWANT counters across all retained messages.
+    pub message_peer_associations: usize,
+    /// Distinct outstanding requested-message IDs.
+    pub promise_entries: usize,
+    /// Owned ID bytes for outstanding requests.
+    pub promise_bytes: usize,
+    /// Outstanding message/peer request pairs.
+    pub promise_peer_associations: usize,
+    /// Suppression IDs retained for each connected peer.
+    pub idontwant_entries_per_peer: usize,
+    /// Owned suppression-ID bytes for each connected peer.
+    pub idontwant_bytes_per_peer: usize,
+}
+
+impl Default for CacheLimits {
+    fn default() -> Self {
+        Self {
+            seen_entries: 65_536,
+            seen_bytes: 8 * 1024 * 1024,
+            published_entries: 4_096,
+            published_bytes: 1024 * 1024,
+            message_entries: 8_192,
+            message_bytes: 64 * 1024 * 1024,
+            message_peer_associations: 65_536,
+            promise_entries: 8_192,
+            promise_bytes: 1024 * 1024,
+            promise_peer_associations: 65_536,
+            idontwant_entries_per_peer: 10_000,
+            idontwant_bytes_per_peer: 1024 * 1024,
+        }
+    }
+}
+
 /// Configuration parameters that define the performance of the gossipsub network.
 #[derive(Clone)]
 pub struct Config {
@@ -110,6 +160,7 @@ pub struct Config {
     fanout_ttl: Duration,
     check_explicit_peers_ticks: u64,
     duplicate_cache_time: Duration,
+    cache_limits: CacheLimits,
     validate_messages: bool,
     message_id_fn: Arc<dyn Fn(&Message) -> MessageId + Send + Sync + 'static>,
     allow_self_origin: bool,
@@ -267,12 +318,17 @@ impl Config {
         self.protocol_config().max_transmit_size_for_topic(topic)
     }
 
-    /// Duplicates are prevented by storing message id's of known messages in an LRU time cache.
+    /// Duplicates are prevented by retaining known message IDs until their insertion deadline.
     /// This settings sets the time period that messages are stored in the cache. Duplicates can be
     /// received if duplicate messages are sent at a time greater than this setting apart. The
     /// default is 1 minute.
     pub fn duplicate_cache_time(&self) -> Duration {
         self.duplicate_cache_time
+    }
+
+    /// Independent retention budgets for gossip caches.
+    pub fn cache_limits(&self) -> &CacheLimits {
+        &self.cache_limits
     }
 
     /// When set to `true`, prevents automatic forwarding of all received messages. This setting
@@ -514,6 +570,7 @@ impl Default for ConfigBuilder {
                 fanout_ttl: Duration::from_secs(60),
                 check_explicit_peers_ticks: 300,
                 duplicate_cache_time: Duration::from_secs(60),
+                cache_limits: CacheLimits::default(),
                 validate_messages: false,
                 message_id_fn: Arc::new(|message| {
                     // default message id is: source + sequence number
@@ -569,6 +626,15 @@ impl From<Config> for ConfigBuilder {
 }
 
 impl ConfigBuilder {
+    /// Set retained-data budgets. Zero leaves no budget of the specified kind.
+    /// Local publication reports [`crate::PublishError::CacheFull`] when a
+    /// required cache cannot admit the message.
+    /// These limits do not replace connection, queue or application-event limits.
+    pub fn cache_limits(&mut self, limits: CacheLimits) -> &mut Self {
+        self.config.cache_limits = limits;
+        self
+    }
+
     /// The protocol id prefix to negotiate this protocol (default is `/meshsub/1.1.0` and
     /// `/meshsub/1.0.0`).
     pub fn protocol_id_prefix(
@@ -787,7 +853,7 @@ impl ConfigBuilder {
         self
     }
 
-    /// Duplicates are prevented by storing message id's of known messages in an LRU time cache.
+    /// Duplicates are prevented by retaining known message IDs until their insertion deadline.
     /// This settings sets the time period that messages are stored in the cache. Duplicates can be
     /// received if duplicate messages are sent at a time greater than this setting apart. The
     /// default is 1 minute.
@@ -1156,6 +1222,7 @@ impl std::fmt::Debug for Config {
         let _ = builder.field("heartbeat_interval", &self.heartbeat_interval);
         let _ = builder.field("fanout_ttl", &self.fanout_ttl);
         let _ = builder.field("duplicate_cache_time", &self.duplicate_cache_time);
+        let _ = builder.field("cache_limits", &self.cache_limits);
         let _ = builder.field("validate_messages", &self.validate_messages);
         let _ = builder.field("allow_self_origin", &self.allow_self_origin);
         let _ = builder.field("do_px", &self.do_px);
