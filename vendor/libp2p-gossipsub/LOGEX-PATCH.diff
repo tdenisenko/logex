@@ -65,7 +65,279 @@
 
 --- a/src/behaviour/tests.rs
 +++ b/src/behaviour/tests.rs
-@@ -6787,3 +6787,319 @@
+@@ -247,7 +247,7 @@
+             connections: vec![connection_id],
+             topics: Default::default(),
+             sender,
+-            dont_send: LinkedHashMap::new(),
++            dont_send: DontSendCache::with_limits(IDONTWANT_TIMEOUT, 10_000, 1024 * 1024),
+         },
+     );
+
+@@ -643,7 +643,7 @@
+                 connections: vec![connection_id],
+                 topics: Default::default(),
+                 sender,
+-                dont_send: LinkedHashMap::new(),
++                dont_send: DontSendCache::with_limits(IDONTWANT_TIMEOUT, 10_000, 1024 * 1024),
+             },
+         );
+         receivers.insert(random_peer, receiver);
+@@ -1040,7 +1040,7 @@
+                 outbound: false,
+                 topics: topics.clone(),
+                 sender: Sender::new(gs.config.connection_handler_queue_len()),
+-                dont_send: LinkedHashMap::new(),
++                dont_send: DontSendCache::with_limits(IDONTWANT_TIMEOUT, 10_000, 1024 * 1024),
+             },
+         );
+     }
+@@ -1304,6 +1304,109 @@
+     );
+ }
+
++// Exercise real IHAVE admission and heartbeat cleanup with explicit deadlines.
++fn check_gossip_promise_expiry(scoring: bool) {
++    let config = ConfigBuilder::default()
++        .iwant_followup_time(Duration::from_secs(60))
++        .build()
++        .unwrap();
++    let score_config = scoring.then(|| {
++        (
++            PeerScoreParams {
++                behaviour_penalty_weight: -1.0,
++                ..Default::default()
++            },
++            PeerScoreThresholds::default(),
++        )
++    });
++    let (mut gs, peers, mut receivers, topics) = inject_nodes1()
++        .peer_no(1)
++        .topics(vec!["promise-expiry".into()])
++        .to_subscribe(true)
++        .gs_config(config)
++        .scoring(score_config)
++        .create_network();
++    let peer = peers[0];
++    let id = MessageId::new(b"unanswered-advertisement");
++    let receiver = receivers.remove(&peer).unwrap();
++    let count_requests = || {
++        let queue = receiver.non_priority.get_ref();
++        let mut count = 0;
++        while let Ok(message) = queue.try_recv() {
++            if let RpcOut::IWant(IWant { message_ids }) = message {
++                count += message_ids
++                    .iter()
++                    .filter(|requested| **requested == id)
++                    .count();
++            }
++        }
++        count
++    };
++    let advertise = |gs: &mut Behaviour| {
++        gs.handle_ihave(&peer, vec![(topics[0].clone(), vec![id.clone()])]);
++    };
++    advertise(&mut gs);
++    assert_eq!(count_requests(), 1);
++    assert!(gs.gossip_promises.contains(&id));
++    gs.heartbeat();
++    assert!(
++        gs.gossip_promises.contains(&id),
++        "unexpired promise must survive heartbeat"
++    );
++    advertise(&mut gs);
++    assert_eq!(
++        count_requests(),
++        0,
++        "pending promise suppresses duplicate request"
++    );
++    if scoring {
++        assert_eq!(gs.peer_score(&peer), Some(0.0));
++    }
++    // Model this admitted request after its deadline without sleeping. The
++    // promise API preserves the same ID/peer ownership and changes only expiry.
++    gs.gossip_promises.message_delivered(&id);
++    gs.gossip_promises.add_promise(
++        peer,
++        std::slice::from_ref(&id),
++        Instant::now().checked_sub(Duration::from_secs(1)).unwrap(),
++    );
++    gs.heartbeat();
++    assert!(
++        !gs.gossip_promises.contains(&id),
++        "expired promise must clear even without scoring"
++    );
++    if scoring {
++        assert_eq!(
++            gs.peer_score(&peer),
++            Some(-1.0),
++            "one unanswered request incurs one penalty"
++        );
++    } else {
++        assert_eq!(gs.peer_score(&peer), None);
++    }
++    advertise(&mut gs);
++    assert_eq!(count_requests(), 1, "expired ID must be requestable again");
++    assert!(gs.gossip_promises.contains(&id));
++    gs.heartbeat();
++    if scoring {
++        assert_eq!(
++            gs.peer_score(&peer),
++            Some(-1.0),
++            "unexpired replacement adds no penalty"
++        );
++    }
++}
++
++#[test]
++fn logex_gossip_promises_expire_without_peer_scoring() {
++    check_gossip_promise_expiry(false);
++}
++
++#[test]
++fn logex_gossip_promises_expire_with_one_peer_penalty() {
++    check_gossip_promise_expiry(true);
++}
++
+ /// tests that an event is not created when a peer shares that it has a message that
+ /// we already have
+ #[test]
+@@ -5497,7 +5600,7 @@
+         .unwrap();
+     let message_id = gs.config.message_id(&message);
+     let peer = gs.connected_peers.get_mut(&peers[2]).unwrap();
+-    peer.dont_send.insert(message_id, Instant::now());
++    peer.dont_send.insert(message_id);
+
+     gs.handle_received_message(raw_message.clone(), &local_id);
+     assert_eq!(
+@@ -5546,7 +5649,7 @@
+         },
+     );
+     let peer = gs.connected_peers.get_mut(&peers[1]).unwrap();
+-    assert!(peer.dont_send.get(&message_id).is_some());
++    assert!(peer.dont_send.contains(&message_id));
+ }
+
+ /// Test that a node clears stale IDONTWANT messages.
+@@ -5562,12 +5665,13 @@
+         .create_network();
+
+     let peer = gs.connected_peers.get_mut(&peers[2]).unwrap();
+-    peer.dont_send
+-        .insert(MessageId::new(&[1, 2, 3, 4]), Instant::now());
+-    std::thread::sleep(Duration::from_secs(3));
++    peer.dont_send.insert_at(
++        MessageId::new(&[1, 2, 3, 4]),
++        Instant::now() - IDONTWANT_TIMEOUT,
++    );
+     gs.heartbeat();
+     let peer = gs.connected_peers.get_mut(&peers[2]).unwrap();
+-    assert!(peer.dont_send.is_empty());
++    assert_eq!(peer.dont_send.retained_len(), 0);
+ }
+
+ #[test]
+@@ -5594,7 +5698,7 @@
+             outbound: false,
+             topics: topics.clone(),
+             sender: Sender::new(2),
+-            dont_send: LinkedHashMap::new(),
++            dont_send: DontSendCache::with_limits(IDONTWANT_TIMEOUT, 10_000, 1024 * 1024),
+         },
+     );
+
+@@ -5630,7 +5734,7 @@
+             outbound: false,
+             topics: topics.clone(),
+             sender: Sender::new(2),
+-            dont_send: LinkedHashMap::new(),
++            dont_send: DontSendCache::with_limits(IDONTWANT_TIMEOUT, 10_000, 1024 * 1024),
+         },
+     );
+     let peer_id = PeerId::random();
+@@ -5643,7 +5747,7 @@
+             outbound: false,
+             topics: topics.clone(),
+             sender: Sender::new(gs.config.connection_handler_queue_len()),
+-            dont_send: LinkedHashMap::new(),
++            dont_send: DontSendCache::with_limits(IDONTWANT_TIMEOUT, 10_000, 1024 * 1024),
+         },
+     );
+
+@@ -5704,7 +5808,7 @@
+             outbound: false,
+             topics: topics.clone(),
+             sender: Sender::new(2),
+-            dont_send: LinkedHashMap::new(),
++            dont_send: DontSendCache::with_limits(IDONTWANT_TIMEOUT, 10_000, 1024 * 1024),
+         },
+     );
+     peers.push(slow_peer_id);
+@@ -5721,7 +5825,7 @@
+             outbound: false,
+             topics: topics.clone(),
+             sender: Sender::new(gs.config.connection_handler_queue_len()),
+-            dont_send: LinkedHashMap::new(),
++            dont_send: DontSendCache::with_limits(IDONTWANT_TIMEOUT, 10_000, 1024 * 1024),
+         },
+     );
+
+@@ -5818,7 +5922,7 @@
+             outbound: false,
+             topics: topics.clone(),
+             sender: Sender::new(2),
+-            dont_send: LinkedHashMap::new(),
++            dont_send: DontSendCache::with_limits(IDONTWANT_TIMEOUT, 10_000, 1024 * 1024),
+         },
+     );
+     peers.push(slow_peer_id);
+@@ -5835,7 +5939,7 @@
+             outbound: false,
+             topics: topics.clone(),
+             sender: Sender::new(gs.config.connection_handler_queue_len()),
+-            dont_send: LinkedHashMap::new(),
++            dont_send: DontSendCache::with_limits(IDONTWANT_TIMEOUT, 10_000, 1024 * 1024),
+         },
+     );
+
+@@ -5912,7 +6016,7 @@
+             outbound: false,
+             topics: topics.clone(),
+             sender: Sender::new(2),
+-            dont_send: LinkedHashMap::new(),
++            dont_send: DontSendCache::with_limits(IDONTWANT_TIMEOUT, 10_000, 1024 * 1024),
+         },
+     );
+     peers.push(slow_peer_id);
+@@ -5929,7 +6033,7 @@
+             outbound: false,
+             topics: topics.clone(),
+             sender: Sender::new(gs.config.connection_handler_queue_len()),
+-            dont_send: LinkedHashMap::new(),
++            dont_send: DontSendCache::with_limits(IDONTWANT_TIMEOUT, 10_000, 1024 * 1024),
+         },
+     );
+
+@@ -6011,7 +6115,7 @@
+             outbound: false,
+             topics: topics.clone(),
+             sender: Sender::new(2),
+-            dont_send: LinkedHashMap::new(),
++            dont_send: DontSendCache::with_limits(IDONTWANT_TIMEOUT, 10_000, 1024 * 1024),
+         },
+     );
+     gs.as_peer_score_mut().add_peer(slow_peer_id);
+@@ -6025,7 +6129,7 @@
+             outbound: false,
+             topics: topics.clone(),
+             sender: Sender::new(gs.config.connection_handler_queue_len()),
+-            dont_send: LinkedHashMap::new(),
++            dont_send: DontSendCache::with_limits(IDONTWANT_TIMEOUT, 10_000, 1024 * 1024),
+         },
+     );
+
+@@ -6787,3 +6891,661 @@
          _ => panic!("Unexpected event"),
      }
  }
@@ -385,9 +657,628 @@
 +    gs.handle_prune(&peers[0], vec![(topic.clone(), vec![], Some(30))]);
 +    assert!(gs.backoffs.get_backoff_time(&topic, &peers[0]).is_some());
 +}
++
++fn logex_drain_cache_test_queues(receivers: &HashMap<PeerId, Receiver>) -> Vec<RpcOut> {
++    let mut messages = Vec::new();
++    for receiver in receivers.values() {
++        while let Ok(message) = receiver.priority.get_ref().try_recv() {
++            messages.push(message);
++        }
++        while let Ok(message) = receiver.non_priority.get_ref().try_recv() {
++            messages.push(message);
++        }
++    }
++    messages
++}
++
++fn logex_cache_test_config(limits: crate::CacheLimits) -> Config {
++    ConfigBuilder::default()
++        .cache_limits(limits)
++        .message_id_fn(|message| MessageId::new(&message.data))
++        .idontwant_message_size_threshold(0)
++        .build()
++        .unwrap()
++}
++
++#[test]
++fn logex_received_cache_limits_ignore_overflow_without_side_effects() {
++    for limit in 0..4 {
++        let mut limits = crate::CacheLimits::default();
++        match limit {
++            0 => limits.seen_entries = 1,
++            1 => limits.seen_bytes = 2,
++            2 => limits.message_entries = 1,
++            _ => limits.message_bytes = 5,
++        }
++        let (mut gs, peers, receivers, topics) = inject_nodes1()
++            .peer_no(2)
++            .topics(vec!["t".into()])
++            .to_subscribe(true)
++            .peer_kind(PeerKind::Gossipsubv1_2)
++            .scoring(Some((
++                PeerScoreParams::default(),
++                PeerScoreThresholds::default(),
++            )))
++            .gs_config(logex_cache_test_config(limits))
++            .create_network();
++        let raw = |id| RawMessage {
++            source: None,
++            data: vec![id],
++            sequence_number: None,
++            topic: topics[0].clone(),
++            signature: None,
++            key: None,
++            validated: true,
++        };
++        let first = MessageId::new(&[1]);
++        let excess = MessageId::new(&[2]);
++        gs.handle_received_message(raw(1), &peers[0]);
++        assert!(gs.mcache.get(&first).is_some(), "limit {limit}");
++        assert!(gs.events.iter().any(|event| matches!(event,
++            ToSwarm::GenerateEvent(Event::Message { message_id, .. }) if message_id == &first)));
++        gs.events.clear();
++        logex_drain_cache_test_queues(&receivers);
++        let usage = gs.mcache.usage();
++        let score = gs.peer_score(&peers[0]);
++        gs.gossip_promises.add_promise(
++            peers[0],
++            std::slice::from_ref(&excess),
++            Instant::now().checked_sub(Duration::from_secs(1)).unwrap(),
++        );
++        gs.handle_received_message(raw(2), &peers[0]);
++        assert!(
++            gs.events.is_empty(),
++            "overflow generated an event, limit {limit}"
++        );
++        assert!(
++            logex_drain_cache_test_queues(&receivers).is_empty(),
++            "overflow sent a control or payload, limit {limit}"
++        );
++        assert_eq!(gs.mcache.usage(), usage);
++        assert!(gs.mcache.get(&first).is_some());
++        assert!(!gs.duplicate_cache.contains(&excess));
++        assert!(!gs.as_peer_score_mut().tracks_message(&excess));
++        assert!(!gs.gossip_promises.contains(&excess));
++        gs.apply_iwant_penalties();
++        assert_eq!(gs.peer_score(&peers[0]), score);
++        gs.handle_received_message(raw(1), &peers[0]);
++        assert!(gs.events.is_empty(), "duplicate reached application");
++        assert_eq!(gs.mcache.usage(), usage);
++    }
++}
++
++#[test]
++fn logex_publish_cache_limits_fail_before_partial_admission_or_send() {
++    for limit in 0..6 {
++        let mut limits = crate::CacheLimits::default();
++        match limit {
++            0 => limits.seen_entries = 1,
++            1 => limits.seen_bytes = 2,
++            2 => limits.message_entries = 1,
++            3 => limits.message_bytes = 5,
++            4 => limits.published_entries = 1,
++            _ => limits.published_bytes = 2,
++        }
++        let (mut gs, peers, receivers, _) = inject_nodes1()
++            .peer_no(1)
++            .topics(vec!["t".into(), "u".into()])
++            .to_subscribe(true)
++            .peer_kind(PeerKind::Gossipsubv1_2)
++            .gs_config(
++                ConfigBuilder::default()
++                    .cache_limits(limits)
++                    .message_id_fn(|message| MessageId::new(&message.data))
++                    .flood_publish(false)
++                    .build()
++                    .unwrap(),
++            )
++            .create_network();
++        gs.publish_config = PublishConfig::Anonymous;
++        let first = gs.publish(Topic::new("t"), vec![1]).unwrap();
++        assert!(gs.unsubscribe(&Topic::new("u")));
++        let unpublished = Topic::new("u").hash();
++        assert!(gs.connected_peers[&peers[0]].topics.contains(&unpublished));
++        assert!(!gs.mesh.contains_key(&unpublished));
++        assert!(!gs.fanout.contains_key(&unpublished));
++        assert!(!gs.fanout_last_pub.contains_key(&unpublished));
++        gs.events.clear();
++        logex_drain_cache_test_queues(&receivers);
++        let usage = gs.mcache.usage();
++        let seen = gs.duplicate_cache.retained_len();
++        let published = gs.published_message_ids.retained_len();
++        let fanout = gs.fanout.clone();
++        let last_pub = gs.fanout_last_pub.clone();
++        assert!(
++            matches!(
++                gs.publish(Topic::new("u"), vec![2]),
++                Err(PublishError::CacheFull)
++            ),
++            "limit {limit}"
++        );
++        assert_eq!(gs.mcache.usage(), usage);
++        assert_eq!(gs.duplicate_cache.retained_len(), seen);
++        assert_eq!(gs.published_message_ids.retained_len(), published);
++        assert_eq!(gs.fanout, fanout);
++        assert_eq!(gs.fanout_last_pub, last_pub);
++        assert!(gs.events.is_empty());
++        assert!(logex_drain_cache_test_queues(&receivers).is_empty());
++        assert!(gs.mcache.get(&first).is_some());
++        assert!(matches!(
++            gs.publish(Topic::new("t"), vec![1]),
++            Err(PublishError::Duplicate)
++        ));
++    }
++}
++
++#[test]
++fn logex_iwant_requests_only_admitted_promises_and_clears_unsent() {
++    let limits = crate::CacheLimits {
++        promise_entries: 1,
++        ..Default::default()
++    };
++    let (mut gs, peers, receivers, topics) = inject_nodes1()
++        .peer_no(1)
++        .topics(vec!["t".into()])
++        .to_subscribe(true)
++        .scoring(Some((
++            PeerScoreParams::default(),
++            PeerScoreThresholds::default(),
++        )))
++        .gs_config(logex_cache_test_config(limits))
++        .create_network();
++    logex_drain_cache_test_queues(&receivers);
++    let ids = vec![MessageId::new(&[1]), MessageId::new(&[2])];
++    gs.handle_ihave(&peers[0], vec![(topics[0].clone(), ids.clone())]);
++    let requested: Vec<_> = logex_drain_cache_test_queues(&receivers)
++        .into_iter()
++        .flat_map(|message| match message {
++            RpcOut::IWant(IWant { message_ids }) => message_ids,
++            _ => vec![],
++        })
++        .collect();
++    assert_eq!(requested.len(), 1);
++    assert!(ids.contains(&requested[0]));
++    assert_eq!(gs.count_sent_iwant.get(&peers[0]), Some(&1));
++    for id in &ids {
++        assert_eq!(gs.gossip_promises.contains(id), requested.contains(id));
++    }
++    gs.gossip_promises.message_delivered(&requested[0]);
++    receivers[&peers[0]].non_priority.get_ref().close();
++    let unsent = MessageId::new(&[3]);
++    gs.handle_ihave(&peers[0], vec![(topics[0].clone(), vec![unsent.clone()])]);
++    assert!(!gs.gossip_promises.contains(&unsent));
++    assert_eq!(gs.count_sent_iwant.get(&peers[0]), Some(&1));
++    let score = gs.peer_score(&peers[0]);
++    gs.apply_iwant_penalties();
++    assert_eq!(gs.peer_score(&peers[0]), score);
++}
++
++#[test]
++fn logex_incoming_idontwant_preserves_admitted_ids_and_first_deadline() {
++    for (count, bytes) in [(1, 100), (3, 1)] {
++        let (mut gs, peers, _, _) = inject_nodes1()
++            .peer_no(1)
++            .peer_kind(PeerKind::Gossipsubv1_2)
++            .create_network();
++        let ttl = Duration::from_secs(60);
++        gs.connected_peers.get_mut(&peers[0]).unwrap().dont_send =
++            DontSendCache::with_limits(ttl, count, bytes);
++        let first = MessageId::new(&[1]);
++        let excess = MessageId::new(&[2]);
++        let deliver = |gs: &mut Behaviour, ids| {
++            gs.on_connection_handler_event(
++                peers[0],
++                ConnectionId::new_unchecked(0),
++                HandlerEvent::Message {
++                    rpc: Rpc {
++                        messages: vec![],
++                        subscriptions: vec![],
++                        control_msgs: vec![ControlAction::IDontWant(IDontWant {
++                            message_ids: ids,
++                        })],
++                    },
++                    invalid_messages: vec![],
++                },
++            );
++        };
++        deliver(&mut gs, vec![first.clone(), excess.clone()]);
++        let cache = &gs.connected_peers[&peers[0]].dont_send;
++        assert!(cache.contains(&first));
++        assert!(!cache.contains(&excess));
++        assert_eq!(cache.retained_len(), 1);
++        // Set a known original admission time, then exercise duplicate receipt
++        // through the actual handler before checking the original deadline.
++        let admitted = Instant::now().checked_sub(Duration::from_secs(1)).unwrap();
++        let cache = &mut gs.connected_peers.get_mut(&peers[0]).unwrap().dont_send;
++        *cache = DontSendCache::with_limits(ttl, count, bytes);
++        assert!(cache.insert_at(first.clone(), admitted));
++        deliver(&mut gs, vec![first.clone()]);
++        let cache = &mut gs.connected_peers.get_mut(&peers[0]).unwrap().dont_send;
++        cache.prune_expired(admitted + ttl);
++        assert_eq!(
++            cache.retained_len(),
++            0,
++            "duplicate extended original deadline"
++        );
++    }
++}
++
++#[test]
++fn logex_established_connections_apply_configured_idontwant_limits() {
++    for outbound in [false, true] {
++        for (count, bytes) in [(1, 100), (3, 1)] {
++            let limits = crate::CacheLimits {
++                idontwant_entries_per_peer: count,
++                idontwant_bytes_per_peer: bytes,
++                ..Default::default()
++            };
++            let (mut gs, _, _, _) = inject_nodes1()
++                .gs_config(logex_cache_test_config(limits))
++                .create_network();
++            let peer = PeerId::random();
++            let connection = ConnectionId::new_unchecked(0);
++            let address = "/ip4/127.0.0.1/tcp/1234".parse::<Multiaddr>().unwrap();
++            let _handler = if outbound {
++                gs.handle_established_outbound_connection(
++                    connection,
++                    peer,
++                    &address,
++                    Endpoint::Dialer,
++                    PortUse::Reuse,
++                )
++                .unwrap()
++            } else {
++                gs.handle_established_inbound_connection(connection, peer, &address, &address)
++                    .unwrap()
++            };
++            gs.on_connection_handler_event(
++                peer,
++                connection,
++                HandlerEvent::PeerKind(PeerKind::Gossipsubv1_2),
++            );
++            let first = MessageId::new(&[1]);
++            let excess = MessageId::new(&[2]);
++            gs.on_connection_handler_event(
++                peer,
++                connection,
++                HandlerEvent::Message {
++                    rpc: Rpc {
++                        messages: vec![],
++                        subscriptions: vec![],
++                        control_msgs: vec![ControlAction::IDontWant(IDontWant {
++                            message_ids: vec![first.clone(), excess.clone()],
++                        })],
++                    },
++                    invalid_messages: vec![],
++                },
++            );
++            let cache = &gs.connected_peers[&peer].dont_send;
++            assert!(cache.contains(&first), "outbound={outbound}, count={count}");
++            assert!(
++                !cache.contains(&excess),
++                "outbound={outbound}, count={count}"
++            );
++            assert_eq!(cache.retained_len(), 1);
++        }
++    }
++}
++
++#[test]
++fn logex_payload_history_suppresses_duplicates_after_seen_expiry() {
++    let (mut gs, peers, receivers, topics) = inject_nodes1()
++        .peer_no(1)
++        .topics(vec!["t".into()])
++        .to_subscribe(true)
++        .gs_config(logex_cache_test_config(crate::CacheLimits::default()))
++        .create_network();
++    let raw = RawMessage {
++        source: None,
++        data: vec![1],
++        sequence_number: None,
++        topic: topics[0].clone(),
++        signature: None,
++        key: None,
++        validated: true,
++    };
++    let id = MessageId::new(&[1]);
++    gs.handle_received_message(raw.clone(), &peers[0]);
++    assert!(gs.mcache.get(&id).is_some());
++    gs.duplicate_cache
++        .prune_expired(Instant::now() + gs.config.duplicate_cache_time());
++    assert_eq!(gs.duplicate_cache.retained_len(), 0);
++    gs.events.clear();
++    logex_drain_cache_test_queues(&receivers);
++    let usage = gs.mcache.usage();
++    gs.handle_received_message(raw, &peers[0]);
++    assert!(gs.events.is_empty());
++    assert_eq!(gs.mcache.usage(), usage);
++    assert_eq!(gs.duplicate_cache.retained_len(), 0);
++    assert!(matches!(
++        gs.publish(Topic::new("t"), vec![1]),
++        Err(PublishError::Duplicate)
++    ));
++    assert!(logex_drain_cache_test_queues(&receivers).is_empty());
++}
 --- a/src/behaviour.rs
 +++ b/src/behaviour.rs
-@@ -1372,7 +1372,12 @@
+@@ -32,7 +32,6 @@
+
+ use futures::FutureExt;
+ use futures_timer::Delay;
+-use hashlink::LinkedHashMap;
+ use libp2p_core::{
+     multiaddr::Protocol::{Ip4, Ip6},
+     transport::PortUse,
+@@ -64,12 +63,12 @@
+     rpc::Sender,
+     rpc_proto::proto,
+     subscription_filter::{AllowAllSubscriptionFilter, TopicSubscriptionFilter},
+-    time_cache::DuplicateCache,
++    time_cache::{CacheAdmission, DuplicateCache},
+     topic::{Hasher, Topic, TopicHash},
+     transform::{DataTransform, IdentityTransform},
+     types::{
+-        ControlAction, Graft, IDontWant, IHave, IWant, Message, MessageAcceptance, MessageId,
+-        PeerDetails, PeerInfo, PeerKind, Prune, RawMessage, RpcOut, Subscription,
++        ControlAction, DontSendCache, Graft, IDontWant, IHave, IWant, Message, MessageAcceptance,
++        MessageId, PeerDetails, PeerInfo, PeerKind, Prune, RawMessage, RpcOut, Subscription,
+         SubscriptionAction,
+     },
+     FailedMessages, PublishError, SubscriptionError, TopicScoreParams, ValidationError,
+@@ -78,11 +77,14 @@
+ #[cfg(test)]
+ mod tests;
+
+-/// IDONTWANT cache capacity.
+-const IDONTWANT_CAP: usize = 10_000;
+-
+ /// IDONTWANT timeout before removal.
+ const IDONTWANT_TIMEOUT: Duration = Duration::new(3, 0);
++
++// The time cache owns the moved ID and a cloned expiry-list ID. Fixed map/list
++// metadata is bounded independently by the entry limit.
++fn retained_message_id_bytes(id: &MessageId) -> usize {
++    id.0.capacity().saturating_add(id.0.len())
++}
+
+ /// Max allowed PRUNE backoff, 1 hour.
+ const MAX_REMOTE_PRUNE_BACKOFF_SECONDS: u64 = 3600;
+@@ -271,7 +273,7 @@
+     /// Information used for publishing messages.
+     publish_config: PublishConfig,
+
+-    /// An LRU Time cache for storing seen messages (based on their ID). This cache prevents
++    /// A bounded cache with fixed insertion deadlines for seen messages. This prevents
+     /// duplicates from being propagated to the application and on the network.
+     duplicate_cache: DuplicateCache<MessageId>,
+
+@@ -427,13 +429,19 @@
+         // We do not allow configurations where a published message would also be rejected if it
+         // were received locally.
+         validate_config(&privacy, config.validation_mode())?;
++        let limits = *config.cache_limits();
+
+         Ok(Behaviour {
+             #[cfg(feature = "metrics")]
+             metrics: None,
+             events: VecDeque::new(),
+             publish_config: privacy.into(),
+-            duplicate_cache: DuplicateCache::new(config.duplicate_cache_time()),
++            duplicate_cache: DuplicateCache::with_limits(
++                config.duplicate_cache_time(),
++                limits.seen_entries,
++                limits.seen_bytes,
++                retained_message_id_bytes,
++            ),
+             explicit_peers: HashSet::new(),
+             blacklisted_peers: HashSet::new(),
+             mesh: HashMap::new(),
+@@ -444,7 +452,13 @@
+                 config.heartbeat_interval(),
+                 config.backoff_slack(),
+             ),
+-            mcache: MessageCache::new(config.history_gossip(), config.history_length()),
++            mcache: MessageCache::with_limits(
++                config.history_gossip(),
++                config.history_length(),
++                limits.message_entries,
++                limits.message_bytes,
++                limits.message_peer_associations,
++            ),
+             heartbeat: Delay::new(config.heartbeat_interval() + config.heartbeat_initial_delay()),
+             heartbeat_ticks: 0,
+             px_peers: HashSet::new(),
+@@ -452,12 +466,21 @@
+             count_received_ihave: HashMap::new(),
+             count_sent_iwant: HashMap::new(),
+             connected_peers: HashMap::new(),
+-            published_message_ids: DuplicateCache::new(config.published_message_ids_cache_time()),
++            published_message_ids: DuplicateCache::with_limits(
++                config.published_message_ids_cache_time(),
++                limits.published_entries,
++                limits.published_bytes,
++                retained_message_id_bytes,
++            ),
+             config,
+             subscription_filter,
+             data_transform,
+             failed_messages: Default::default(),
+-            gossip_promises: Default::default(),
++            gossip_promises: GossipPromises::with_limits(
++                limits.promise_entries,
++                limits.promise_bytes,
++                limits.promise_peer_associations,
++            ),
+         })
+     }
+
+@@ -609,7 +632,7 @@
+         });
+
+         // Check the if the message has been published before
+-        if self.duplicate_cache.contains(&msg_id) {
++        if self.duplicate_cache.contains(&msg_id) || self.mcache.contains(&msg_id) {
+             // This message has already been seen. We don't re-publish messages that have already
+             // been published on the network.
+             tracing::warn!(
+@@ -617,6 +640,20 @@
+                 "Not publishing a message that has already been published"
+             );
+             return Err(PublishError::Duplicate);
++        }
++
++        let track_published = matches!(
++            self.publish_config,
++            PublishConfig::RandomAuthor | PublishConfig::Anonymous
++        ) && !self.config.allow_self_origin();
++        // Check every required owner before mutating fanout, retaining any part
++        // of this message, or scheduling sends. No await can interleave admission.
++        if self.duplicate_cache.admission(&msg_id) == CacheAdmission::Full
++            || !self.mcache.can_put(&msg_id, &raw_message)
++            || (track_published
++                && self.published_message_ids.admission(&msg_id) == CacheAdmission::Full)
++        {
++            return Err(PublishError::CacheFull);
+         }
+
+         tracing::trace!(message_id=%msg_id, "Publishing message");
+@@ -733,18 +770,19 @@
+
+         // If the message isn't a duplicate and we have sent it to some peers add it to the
+         // duplicate cache and memcache.
+-        self.duplicate_cache.insert(msg_id.clone());
+-        self.mcache.put(&msg_id, raw_message.clone());
++        let admitted = self.duplicate_cache.try_insert(msg_id.clone());
++        debug_assert_eq!(admitted, CacheAdmission::New);
++        let cached = self.mcache.put(&msg_id, raw_message.clone());
++        debug_assert!(cached);
+
+         // Consider the message as delivered for gossip promises.
+         self.gossip_promises.message_delivered(&msg_id);
+
+         // If the message is anonymous or has a random author add it to the published message ids
+         // cache.
+-        if let PublishConfig::RandomAuthor | PublishConfig::Anonymous = self.publish_config {
+-            if !self.config.allow_self_origin() {
+-                self.published_message_ids.insert(msg_id.clone());
+-            }
++        if track_published {
++            let admitted = self.published_message_ids.try_insert(msg_id.clone());
++            debug_assert_ne!(admitted, CacheAdmission::Full);
+         }
+
+         // Send to peers we know are subscribed to the topic.
+@@ -1215,7 +1253,7 @@
+
+         // IHAVE flood protection
+         let peer_have = self.count_received_ihave.entry(*peer_id).or_insert(0);
+-        *peer_have += 1;
++        *peer_have = peer_have.saturating_add(1);
+         if *peer_have > self.config.max_ihave_messages() {
+             tracing::debug!(
+                 peer=%peer_id,
+@@ -1252,7 +1290,7 @@
+             }
+
+             for id in ids.into_iter().filter(|id| {
+-                if self.duplicate_cache.contains(id) {
++                if self.duplicate_cache.contains(id) || self.mcache.contains(id) {
+                     return false;
+                 }
+
+@@ -1272,7 +1310,7 @@
+         if !iwant_ids.is_empty() {
+             let iasked = self.count_sent_iwant.entry(*peer_id).or_insert(0);
+             let mut iask = iwant_ids.len();
+-            if *iasked + iask > self.config.max_ihave_length() {
++            if iask > self.config.max_ihave_length().saturating_sub(*iasked) {
+                 iask = self.config.max_ihave_length().saturating_sub(*iasked);
+             }
+
+@@ -1290,7 +1328,6 @@
+             iwant_ids_vec.partial_shuffle(&mut rng, iask);
+
+             iwant_ids_vec.truncate(iask);
+-            *iasked += iask;
+
+             let followup_time = Instant::now()
+                 .checked_add(self.config.iwant_followup_time())
+@@ -1298,20 +1335,32 @@
+                     tracing::error!("Invalid iwant_followup_time using Instant::now()");
+                     Instant::now()
+                 });
+-            self.gossip_promises
+-                .add_promise(*peer_id, &iwant_ids_vec, followup_time);
++            let iwant_ids_vec =
++                self.gossip_promises
++                    .add_promise(*peer_id, &iwant_ids_vec, followup_time);
++            if iwant_ids_vec.is_empty() {
++                return;
++            }
+             tracing::trace!(
+                 peer=%peer_id,
+                 "IHAVE: Asking for the following messages from peer: {:?}",
+                 iwant_ids_vec
+             );
+
+-            self.send_message(
++            if self.send_message(
+                 *peer_id,
+                 RpcOut::IWant(IWant {
+-                    message_ids: iwant_ids_vec,
++                    message_ids: iwant_ids_vec.clone(),
+                 }),
+-            );
++            ) {
++                *self.count_sent_iwant.entry(*peer_id).or_default() += iwant_ids_vec.len();
++            } else {
++                // No request was scheduled. Capacity pressure in our send queue
++                // must not become a broken promise attributed to the peer.
++                for id in iwant_ids_vec {
++                    self.gossip_promises.message_delivered(&id);
++                }
++            }
+         }
+         tracing::trace!(peer=%peer_id, "Completed IHAVE handling for peer");
+     }
+@@ -1337,11 +1386,7 @@
+         for id in iwant_msgs {
+             // If we have it and the IHAVE count is not above the threshold,
+             // forward the message.
+-            if let Some((msg, count)) = self
+-                .mcache
+-                .get_with_iwant_counts(&id, peer_id)
+-                .map(|(msg, count)| (msg.clone(), count))
+-            {
++            if let Some((msg, count)) = self.mcache.get_with_iwant_counts(&id, peer_id) {
+                 if count > self.config.gossip_retransimission() {
+                     tracing::debug!(
+                         peer=%peer_id,
+@@ -1349,18 +1394,20 @@
+                         "IWANT: Peer has asked for message too many times; ignoring request"
+                     );
+                 } else {
+-                    if let Some(peer) = self.connected_peers.get_mut(peer_id) {
+-                        if peer.dont_send.contains_key(&id) {
++                    if let Some(peer) = self.connected_peers.get(peer_id) {
++                        if peer.dont_send.contains(&id) {
+                             tracing::debug!(%peer_id, message_id=%id, "Peer already sent IDONTWANT for this message");
+                             continue;
+                         }
+                     }
+
+                     tracing::debug!(peer=%peer_id, "IWANT: Sending cached messages to peer");
++                    // Clone the payload only for a request that will be served.
++                    let message = msg.clone();
+                     self.send_message(
+                         *peer_id,
+                         RpcOut::Forward {
+-                            message: msg,
++                            message,
+                             timeout: Delay::new(self.config.forward_queue_duration()),
+                         },
+                     );
+@@ -1372,7 +1419,12 @@
 
      /// Handles GRAFT control messages. If subscribed to the topic, adds the peer to mesh, if not,
      /// responds with PRUNE messages.
@@ -401,7 +1292,7 @@
          tracing::debug!(peer=%peer_id, "Handling GRAFT message for peer");
 
          let mut to_prune_topics = HashSet::new();
-@@ -1608,6 +1613,10 @@
+@@ -1608,6 +1660,10 @@
              .peer_score
              .below_threshold(peer_id, |ts| ts.accept_px_threshold);
          for (topic_hash, px, backoff) in prune_data {
@@ -412,7 +1303,7 @@
              if self.remove_peer_from_mesh(peer_id, &topic_hash, backoff, true) {
                  #[cfg(feature = "metrics")]
                  if let Some(m) = self.metrics.as_mut() {
-@@ -1766,6 +1775,10 @@
+@@ -1766,6 +1822,10 @@
          mut raw_message: RawMessage,
          propagation_source: &PeerId,
      ) {
@@ -423,7 +1314,79 @@
          // Record the received metric
          #[cfg(feature = "metrics")]
          if let Some(metrics) = self.metrics.as_mut() {
-@@ -2106,6 +2119,10 @@
+@@ -1791,6 +1851,21 @@
+         // Calculate the message id on the transformed data.
+         let msg_id = self.config.message_id(&message);
+
++        // Peers are accountable for invalid input, but not for our local cache
++        // capacity. Only admitted messages may create controls, score records or
++        // application events.
++        if !self.message_is_valid(&msg_id, &mut raw_message, propagation_source) {
++            return;
++        }
++        let admission = self.duplicate_cache.admission(&msg_id);
++        let duplicate = admission == CacheAdmission::Duplicate || self.mcache.contains(&msg_id);
++        if !duplicate
++            && (admission == CacheAdmission::Full || !self.mcache.can_put(&msg_id, &raw_message))
++        {
++            self.gossip_promises.message_delivered(&msg_id);
++            return;
++        }
++
+         // Broadcast IDONTWANT messages
+         if raw_message.raw_protobuf_len() > self.config.idontwant_message_size_threshold() {
+             let recipient_peers = self
+@@ -1815,14 +1890,7 @@
+             }
+         }
+
+-        // Check the validity of the message
+-        // Peers get penalized if this message is invalid. We don't add it to the duplicate cache
+-        // and instead continually penalize peers that repeatedly send this message.
+-        if !self.message_is_valid(&msg_id, &mut raw_message, propagation_source) {
+-            return;
+-        }
+-
+-        if !self.duplicate_cache.insert(msg_id.clone()) {
++        if duplicate {
+             tracing::debug!(message_id=%msg_id, "Message already received, ignoring");
+             if let PeerScoreState::Active(peer_score) = &mut self.peer_score {
+                 peer_score.duplicated_message(propagation_source, &msg_id, &message.topic);
+@@ -1830,6 +1898,11 @@
+             self.mcache.observe_duplicate(&msg_id, propagation_source);
+             return;
+         }
++
++        let admitted = self.duplicate_cache.try_insert(msg_id.clone());
++        debug_assert_eq!(admitted, CacheAdmission::New);
++        let cached = self.mcache.put(&msg_id, raw_message.clone());
++        debug_assert!(cached);
+
+         tracing::debug!(
+             message_id=%msg_id,
+@@ -1850,9 +1923,6 @@
+         if let PeerScoreState::Active(peer_score) = &mut self.peer_score {
+             peer_score.validate_message(propagation_source, &msg_id, &message.topic);
+         }
+-
+-        // Add the message to our memcache
+-        self.mcache.put(&msg_id, raw_message.clone());
+
+         // Dispatch the message to the user if we are subscribed to any of the topics
+         #[allow(
+@@ -2091,8 +2161,10 @@
+
+     /// Applies penalties to peers that did not respond to our IWANT requests.
+     fn apply_iwant_penalties(&mut self) {
++        // Expiry owns request lifetime even when peer scoring is disabled.
++        let broken_promises = self.gossip_promises.get_broken_promises();
+         if let PeerScoreState::Active(peer_score) = &mut self.peer_score {
+-            for (peer, count) in self.gossip_promises.get_broken_promises() {
++            for (peer, count) in broken_promises {
+                 peer_score.add_penalty(&peer, count);
+                 #[cfg(feature = "metrics")]
+                 if let Some(metrics) = self.metrics.as_mut() {
+@@ -2106,6 +2178,10 @@
      fn heartbeat(&mut self) {
          #[cfg(feature = "metrics")]
          let start = Instant::now();
@@ -434,7 +1397,60 @@
 
          // Every heartbeat we sample the send queues to add to our metrics. We do this intentionally
          // before we add all the gossip from this heartbeat in order to gain a true measure of
-@@ -3294,22 +3311,23 @@
+@@ -2538,15 +2614,9 @@
+         }
+         self.failed_messages.shrink_to_fit();
+
+-        // Flush stale IDONTWANTs.
++        // Flush stale IDONTWANTs without extending deadlines on duplicates.
+         for peer in self.connected_peers.values_mut() {
+-            while let Some((_front, instant)) = peer.dont_send.front() {
+-                if IDONTWANT_TIMEOUT >= Instant::now().saturating_duration_since(*instant) {
+-                    break;
+-                } else {
+-                    peer.dont_send.pop_front();
+-                }
+-            }
++            peer.dont_send.prune_expired(now);
+         }
+
+         #[cfg(feature = "metrics")]
+@@ -2767,7 +2837,7 @@
+         // forward the message to peers
+         for peer_id in recipient_peers.iter() {
+             if let Some(peer) = self.connected_peers.get_mut(peer_id) {
+-                if peer.dont_send.contains_key(msg_id) {
++                if peer.dont_send.contains(msg_id) {
+                     tracing::debug!(%peer_id, message_id=%msg_id, "Peer doesn't want message");
+                     continue;
+                 }
+@@ -3162,7 +3232,11 @@
+             outbound: false,
+             sender: Sender::new(self.config.connection_handler_queue_len()),
+             topics: Default::default(),
+-            dont_send: LinkedHashMap::new(),
++            dont_send: DontSendCache::with_limits(
++                IDONTWANT_TIMEOUT,
++                self.config.cache_limits().idontwant_entries_per_peer,
++                self.config.cache_limits().idontwant_bytes_per_peer,
++            ),
+         });
+         // Add the new connection
+         connected_peer.connections.push(connection_id);
+@@ -3189,7 +3263,11 @@
+             outbound: !self.px_peers.contains(&peer_id),
+             sender: Sender::new(self.config.connection_handler_queue_len()),
+             topics: Default::default(),
+-            dont_send: LinkedHashMap::new(),
++            dont_send: DontSendCache::with_limits(
++                IDONTWANT_TIMEOUT,
++                self.config.cache_limits().idontwant_entries_per_peer,
++                self.config.cache_limits().idontwant_bytes_per_peer,
++            ),
+         });
+         // Add the new connection
+         connected_peer.connections.push(connection_id);
+@@ -3294,22 +3372,23 @@
                      return;
                  }
 
@@ -467,6 +1483,1107 @@
                              "Invalid message from peer. Reason: {:?}",
                              validation_error,
                          );
+@@ -3375,11 +3454,7 @@
+                                 metrics.register_idontwant(message_ids.len());
+                             }
+                             for message_id in message_ids {
+-                                peer.dont_send.insert(message_id, Instant::now());
+-                                // Don't exceed capacity.
+-                                if peer.dont_send.len() > IDONTWANT_CAP {
+-                                    peer.dont_send.pop_front();
+-                                }
++                                peer.dont_send.insert(message_id);
+                             }
+                         }
+                     }
+@@ -3583,14 +3658,12 @@
+                 return Err("Published messages contain an author but incoming messages with an author will be rejected. Consider adjusting the validation or privacy settings in the config");
+             }
+         }
+-        ValidationMode::Strict => {
+-            if !authenticity.is_signing() {
+-                return Err(
++        ValidationMode::Strict if !authenticity.is_signing() => {
++            return Err(
+                     "Messages will be
+                 published unsigned and incoming unsigned messages will be rejected. Consider adjusting
+                 the validation or privacy settings in the config"
+-                );
+-            }
++            );
+         }
+         _ => {}
+     }
+--- a/src/config.rs
++++ b/src/config.rs
+@@ -96,6 +96,56 @@
+     }
+ }
+
++/// Retained-data budgets for gossip caches. Entry and association limits bound
++/// fixed metadata; byte limits cover owned IDs and payload buffers, not total RSS.
++/// Excess new entries are dropped without evicting or refreshing admitted entries.
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub struct CacheLimits {
++    /// Seen-message IDs retained for duplicate suppression.
++    pub seen_entries: usize,
++    /// Owned ID bytes in the seen cache, including expiry-list copies.
++    pub seen_bytes: usize,
++    /// Locally published IDs retained for self-origin detection.
++    pub published_entries: usize,
++    /// Owned ID bytes in the published cache, including expiry-list copies.
++    pub published_bytes: usize,
++    /// Message-history records, including records whose payload was rejected.
++    pub message_entries: usize,
++    /// Message buffers and owned IDs/topics in payload and history records.
++    pub message_bytes: usize,
++    /// Duplicate-origin peers and IWANT counters across all retained messages.
++    pub message_peer_associations: usize,
++    /// Distinct outstanding requested-message IDs.
++    pub promise_entries: usize,
++    /// Owned ID bytes for outstanding requests.
++    pub promise_bytes: usize,
++    /// Outstanding message/peer request pairs.
++    pub promise_peer_associations: usize,
++    /// Suppression IDs retained for each connected peer.
++    pub idontwant_entries_per_peer: usize,
++    /// Owned suppression-ID bytes for each connected peer.
++    pub idontwant_bytes_per_peer: usize,
++}
++
++impl Default for CacheLimits {
++    fn default() -> Self {
++        Self {
++            seen_entries: 65_536,
++            seen_bytes: 8 * 1024 * 1024,
++            published_entries: 4_096,
++            published_bytes: 1024 * 1024,
++            message_entries: 8_192,
++            message_bytes: 64 * 1024 * 1024,
++            message_peer_associations: 65_536,
++            promise_entries: 8_192,
++            promise_bytes: 1024 * 1024,
++            promise_peer_associations: 65_536,
++            idontwant_entries_per_peer: 10_000,
++            idontwant_bytes_per_peer: 1024 * 1024,
++        }
++    }
++}
++
+ /// Configuration parameters that define the performance of the gossipsub network.
+ #[derive(Clone)]
+ pub struct Config {
+@@ -110,6 +160,7 @@
+     fanout_ttl: Duration,
+     check_explicit_peers_ticks: u64,
+     duplicate_cache_time: Duration,
++    cache_limits: CacheLimits,
+     validate_messages: bool,
+     message_id_fn: Arc<dyn Fn(&Message) -> MessageId + Send + Sync + 'static>,
+     allow_self_origin: bool,
+@@ -267,12 +318,17 @@
+         self.protocol_config().max_transmit_size_for_topic(topic)
+     }
+
+-    /// Duplicates are prevented by storing message id's of known messages in an LRU time cache.
++    /// Duplicates are prevented by retaining known message IDs until their insertion deadline.
+     /// This settings sets the time period that messages are stored in the cache. Duplicates can be
+     /// received if duplicate messages are sent at a time greater than this setting apart. The
+     /// default is 1 minute.
+     pub fn duplicate_cache_time(&self) -> Duration {
+         self.duplicate_cache_time
++    }
++
++    /// Independent retention budgets for gossip caches.
++    pub fn cache_limits(&self) -> &CacheLimits {
++        &self.cache_limits
+     }
+
+     /// When set to `true`, prevents automatic forwarding of all received messages. This setting
+@@ -514,6 +570,7 @@
+                 fanout_ttl: Duration::from_secs(60),
+                 check_explicit_peers_ticks: 300,
+                 duplicate_cache_time: Duration::from_secs(60),
++                cache_limits: CacheLimits::default(),
+                 validate_messages: false,
+                 message_id_fn: Arc::new(|message| {
+                     // default message id is: source + sequence number
+@@ -569,6 +626,15 @@
+ }
+
+ impl ConfigBuilder {
++    /// Set retained-data budgets. Zero leaves no budget of the specified kind.
++    /// Local publication reports [`crate::PublishError::CacheFull`] when a
++    /// required cache cannot admit the message.
++    /// These limits do not replace connection, queue or application-event limits.
++    pub fn cache_limits(&mut self, limits: CacheLimits) -> &mut Self {
++        self.config.cache_limits = limits;
++        self
++    }
++
+     /// The protocol id prefix to negotiate this protocol (default is `/meshsub/1.1.0` and
+     /// `/meshsub/1.0.0`).
+     pub fn protocol_id_prefix(
+@@ -787,7 +853,7 @@
+         self
+     }
+
+-    /// Duplicates are prevented by storing message id's of known messages in an LRU time cache.
++    /// Duplicates are prevented by retaining known message IDs until their insertion deadline.
+     /// This settings sets the time period that messages are stored in the cache. Duplicates can be
+     /// received if duplicate messages are sent at a time greater than this setting apart. The
+     /// default is 1 minute.
+@@ -1156,6 +1222,7 @@
+         let _ = builder.field("heartbeat_interval", &self.heartbeat_interval);
+         let _ = builder.field("fanout_ttl", &self.fanout_ttl);
+         let _ = builder.field("duplicate_cache_time", &self.duplicate_cache_time);
++        let _ = builder.field("cache_limits", &self.cache_limits);
+         let _ = builder.field("validate_messages", &self.validate_messages);
+         let _ = builder.field("allow_self_origin", &self.allow_self_origin);
+         let _ = builder.field("do_px", &self.do_px);
+--- a/src/error.rs
++++ b/src/error.rs
+@@ -27,6 +27,8 @@
+ pub enum PublishError {
+     /// This message has already been published.
+     Duplicate,
++    /// Retained gossip data is at capacity. Retry after ordinary cache expiry.
++    CacheFull,
+     /// An error occurred whilst signing the message.
+     SigningError(SigningError),
+     /// No peers are currently subscribed to receive messages on this topic.
+--- a/src/gossip_promises.rs
++++ b/src/gossip_promises.rs
+@@ -18,7 +18,7 @@
+ // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+ // DEALINGS IN THE SOFTWARE.
+
+-use std::collections::HashMap;
++use std::collections::{hash_map::Entry, HashMap};
+
+ use libp2p_identity::PeerId;
+ use web_time::Instant;
+@@ -26,16 +26,36 @@
+ use crate::{peer_score::RejectReason, MessageId, ValidationError};
+
+ /// Tracks recently sent `IWANT` messages and checks if peers respond to them.
+-#[derive(Default)]
+ pub(crate) struct GossipPromises {
+     /// Stores for each tracked message id and peer the instant when this promise expires.
+     ///
+     /// If the peer didn't respond until then we consider the promise as broken and penalize the
+     /// peer.
+     promises: HashMap<MessageId, HashMap<PeerId, Instant>>,
++    max_entries: usize,
++    max_bytes: usize,
++    max_peer_associations: usize,
++    retained_bytes: usize,
++    peer_associations: usize,
+ }
+
+ impl GossipPromises {
++    /// Bounds message IDs, their owned bytes, and fixed-size peer/deadline associations.
++    pub(crate) fn with_limits(
++        max_entries: usize,
++        max_bytes: usize,
++        max_peer_associations: usize,
++    ) -> Self {
++        Self {
++            promises: HashMap::new(),
++            max_entries,
++            max_bytes,
++            max_peer_associations,
++            retained_bytes: 0,
++            peer_associations: 0,
++        }
++    }
++
+     /// Returns true if the message id exists in the promises.
+     pub(crate) fn contains(&self, message: &MessageId) -> bool {
+         self.promises.contains_key(message)
+@@ -50,20 +70,57 @@
+     }
+
+     /// Track a promise to deliver a message from a list of [`MessageId`]s we are requesting.
+-    pub(crate) fn add_promise(&mut self, peer: PeerId, messages: &[MessageId], expires: Instant) {
++    /// Returns only IDs whose peer promise is tracked. Expiry is left to the heartbeat,
++    /// so admission pressure never silently discards a pending scoring penalty.
++    pub(crate) fn add_promise(
++        &mut self,
++        peer: PeerId,
++        messages: &[MessageId],
++        expires: Instant,
++    ) -> Vec<MessageId> {
++        let mut admitted = Vec::new();
+         for message_id in messages {
+-            // If a promise for this message id and peer already exists we don't update the expiry!
+-            self.promises
+-                .entry(message_id.clone())
+-                .or_default()
+-                .entry(peer)
+-                .or_insert(expires);
++            if let Some(peers) = self.promises.get_mut(message_id) {
++                match peers.entry(peer) {
++                    // Keep the first promise deadline, even at capacity.
++                    Entry::Occupied(_) => {}
++                    Entry::Vacant(entry) if self.peer_associations < self.max_peer_associations => {
++                        entry.insert(expires);
++                        self.peer_associations += 1;
++                    }
++                    Entry::Vacant(_) => continue,
++                }
++                admitted.push(MessageId::new(&message_id.0));
++                continue;
++            }
++            let bytes = message_id.0.len();
++            if self.promises.len() >= self.max_entries
++                || self.peer_associations >= self.max_peer_associations
++                || bytes > self.max_bytes - self.retained_bytes
++            {
++                continue;
++            }
++            let mut peers = HashMap::new();
++            peers.insert(peer, expires);
++            // Copy only the ID's contents, never its caller-provided spare capacity.
++            self.promises.insert(MessageId::new(&message_id.0), peers);
++            self.retained_bytes += bytes;
++            self.peer_associations += 1;
++            admitted.push(MessageId::new(&message_id.0));
++        }
++        admitted
++    }
++
++    fn remove_message(&mut self, message_id: &MessageId) {
++        if let Some((id, peers)) = self.promises.remove_entry(message_id) {
++            self.retained_bytes -= id.0.len();
++            self.peer_associations -= peers.len();
+         }
+     }
+
+     pub(crate) fn message_delivered(&mut self, message_id: &MessageId) {
+         // Someone delivered a message, we can stop tracking all promises for it.
+-        self.promises.remove(message_id);
++        self.remove_message(message_id);
+     }
+
+     pub(crate) fn reject_message(&mut self, message_id: &MessageId, reason: &RejectReason) {
+@@ -75,7 +132,7 @@
+             RejectReason::ValidationError(ValidationError::InvalidSignature) => (),
+             RejectReason::SelfOrigin => (),
+             _ => {
+-                self.promises.remove(message_id);
++                self.remove_message(message_id);
+             }
+         };
+     }
+@@ -85,13 +142,18 @@
+     /// This should be called not too often relative to the expire times, since it iterates over
+     /// the whole stored data.
+     pub(crate) fn get_broken_promises(&mut self) -> HashMap<PeerId, usize> {
+-        let now = Instant::now();
++        self.get_broken_promises_at(Instant::now())
++    }
++
++    fn get_broken_promises_at(&mut self, now: Instant) -> HashMap<PeerId, usize> {
+         let mut result = HashMap::new();
+         self.promises.retain(|msg, peers| {
++            let previous_len = peers.len();
+             peers.retain(|peer_id, expires| {
+                 if *expires < now {
+                     let count = result.entry(*peer_id).or_insert(0);
+                     *count += 1;
++                    self.peer_associations -= 1;
+                     tracing::debug!(
+                         peer=%peer_id,
+                         message=%msg,
+@@ -102,8 +164,167 @@
+                     true
+                 }
+             });
+-            !peers.is_empty()
++            if peers.is_empty() {
++                self.retained_bytes -= msg.0.len();
++                false
++            } else {
++                // Return spare peer buckets after partial expiry. Otherwise a
++                // surviving promise could retain each map's former high water
++                // allocation while the freed association budget is reused.
++                if peers.len() < previous_len {
++                    peers.shrink_to_fit();
++                }
++                true
++            }
+         });
+         result
+     }
+ }
++
++#[cfg(test)]
++mod logex_capacity_tests {
++    use std::time::Duration;
++
++    use super::*;
++
++    fn peer(value: u8) -> PeerId {
++        let mut bytes = [value; 34];
++        bytes[0] = 0x12;
++        bytes[1] = 32;
++        PeerId::from_bytes(&bytes).unwrap()
++    }
++
++    fn id(value: &[u8]) -> MessageId {
++        MessageId::new(value)
++    }
++
++    fn assert_counts(promises: &GossipPromises, entries: usize, bytes: usize, pairs: usize) {
++        assert_eq!(promises.promises.len(), entries);
++        assert_eq!(promises.retained_bytes, bytes);
++        assert_eq!(promises.peer_associations, pairs);
++        assert_eq!(
++            promises.promises.keys().map(|id| id.0.len()).sum::<usize>(),
++            bytes
++        );
++        assert_eq!(
++            promises.promises.values().map(HashMap::len).sum::<usize>(),
++            pairs
++        );
++    }
++
++    #[test]
++    fn logex_entry_byte_and_pair_bounds_preserve_duplicates_and_deadlines() {
++        let now = Instant::now();
++        let later = now + Duration::from_secs(10);
++        let mut promises = GossipPromises::with_limits(1, 2, 1);
++        let first = id(b"ab");
++        assert_eq!(
++            promises.add_promise(peer(1), std::slice::from_ref(&first), now),
++            vec![first.clone()]
++        );
++        assert_eq!(
++            promises.add_promise(peer(1), std::slice::from_ref(&first), later),
++            vec![first.clone()]
++        );
++        assert!(promises
++            .add_promise(peer(2), std::slice::from_ref(&first), later)
++            .is_empty());
++        assert!(promises.add_promise(peer(1), &[id(b"c")], later).is_empty());
++        assert_eq!(promises.promises[&first][&peer(1)], now);
++        assert_counts(&promises, 1, 2, 1);
++        // Preserve the existing strict expiry boundary.
++        assert!(promises.get_broken_promises_at(now).is_empty());
++        assert_eq!(
++            promises.get_broken_promises_at(now + Duration::from_nanos(1)),
++            HashMap::from([(peer(1), 1)])
++        );
++        assert_counts(&promises, 0, 0, 0);
++        assert_eq!(
++            promises.add_promise(peer(2), std::slice::from_ref(&first), later),
++            vec![first]
++        );
++    }
++
++    #[test]
++    fn logex_byte_budget_and_peer_budget_are_independent() {
++        let now = Instant::now();
++        let mut promises = GossipPromises::with_limits(4, 3, 3);
++        let first = id(b"ab");
++        assert!(promises
++            .add_promise(peer(1), &[id(b"long")], now)
++            .is_empty());
++        assert_eq!(
++            promises
++                .add_promise(peer(1), &[first.clone(), id(b"c")], now)
++                .len(),
++            2
++        );
++        assert!(promises.add_promise(peer(1), &[id(b"d")], now).is_empty());
++        assert_eq!(
++            promises.add_promise(peer(2), std::slice::from_ref(&first), now),
++            vec![first.clone()]
++        );
++        assert!(promises.add_promise(peer(3), &[first], now).is_empty());
++        assert_counts(&promises, 2, 3, 3);
++        let mut pair_limited = GossipPromises::with_limits(4, usize::MAX, 1);
++        assert_eq!(
++            pair_limited.add_promise(peer(1), &[id(b"a"), id(b"b")], now),
++            vec![id(b"a")]
++        );
++        let mut entry_limited = GossipPromises::with_limits(1, usize::MAX, 4);
++        assert_eq!(
++            entry_limited.add_promise(peer(1), &[id(b"a"), id(b"b")], now),
++            vec![id(b"a")]
++        );
++    }
++
++    #[test]
++    fn logex_partial_expiry_delivery_and_rejection_release_exact_counts() {
++        let now = Instant::now();
++        let later = now + Duration::from_secs(10);
++        let mut promises = GossipPromises::with_limits(1, 2, 2);
++        let first = id(b"ab");
++        promises.add_promise(peer(1), std::slice::from_ref(&first), now);
++        promises.add_promise(peer(2), std::slice::from_ref(&first), later);
++        assert_eq!(
++            promises.get_broken_promises_at(now + Duration::from_nanos(1)),
++            HashMap::from([(peer(1), 1)])
++        );
++        assert_counts(&promises, 1, 2, 1);
++        promises.message_delivered(&first);
++        promises.message_delivered(&first);
++        assert_counts(&promises, 0, 0, 0);
++        assert_eq!(
++            promises
++                .add_promise(peer(1), std::slice::from_ref(&first), later)
++                .len(),
++            1
++        );
++        promises.reject_message(&first, &RejectReason::SelfOrigin);
++        promises.reject_message(
++            &first,
++            &RejectReason::ValidationError(ValidationError::InvalidSignature),
++        );
++        assert_counts(&promises, 1, 2, 1);
++        promises.reject_message(&first, &RejectReason::ValidationFailed);
++        assert_counts(&promises, 0, 0, 0);
++        assert_eq!(promises.add_promise(peer(2), &[first], later).len(), 1);
++    }
++
++    #[test]
++    fn logex_full_admission_keeps_expired_penalties_until_heartbeat() {
++        let now = Instant::now();
++        let mut promises = GossipPromises::with_limits(1, 1, 1);
++        promises.add_promise(peer(1), &[id(b"a")], now - Duration::from_secs(1));
++        assert!(promises.add_promise(peer(2), &[id(b"b")], now).is_empty());
++        assert_eq!(
++            promises.get_broken_promises_at(now),
++            HashMap::from([(peer(1), 1)])
++        );
++        assert_eq!(
++            promises.add_promise(peer(2), &[id(b"b")], now),
++            vec![id(b"b")]
++        );
++        assert_counts(&promises, 1, 1, 1);
++    }
++}
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -118,7 +118,7 @@
+
+ pub use self::{
+     behaviour::{Behaviour, Event, MessageAuthenticity},
+-    config::{Config, ConfigBuilder, ValidationMode, Version},
++    config::{CacheLimits, Config, ConfigBuilder, ValidationMode, Version},
+     error::{ConfigBuilderError, PublishError, SubscriptionError, ValidationError},
+     peer_score::{
+         score_parameter_decay, score_parameter_decay_with_base, PeerScoreParams,
+--- a/src/mcache.rs
++++ b/src/mcache.rs
+@@ -21,7 +21,6 @@
+ use std::{
+     collections::{hash_map::Entry, HashMap, HashSet},
+     fmt,
+-    fmt::Debug,
+ };
+
+ use libp2p_identity::PeerId;
+@@ -31,24 +30,39 @@
+     types::{MessageId, RawMessage},
+ };
+
+-/// CacheEntry stored in the history.
+-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
++/// A history record retains its budget until normal expiry, even after rejection.
++#[derive(Debug, Clone)]
+ pub(crate) struct CacheEntry {
+     mid: MessageId,
+     topic: TopicHash,
++    generation: u64,
++    bytes: usize,
+ }
+
+-/// MessageCache struct holding history of messages.
++#[derive(Debug, Clone)]
++struct MessageEntry {
++    message: RawMessage,
++    originating_peers: HashSet<PeerId>,
++    iwant_counts: HashMap<PeerId, u32>,
++    generation: u64,
++    bytes: usize,
++}
++
++/// Retains admitted messages until normal expiry; excess admissions are dropped.
++/// Dynamic buffers have a byte budget, while history and peer metadata have
++/// separate count budgets. These are retained-data bounds, not an RSS estimate.
+ #[derive(Clone)]
+ pub(crate) struct MessageCache {
+-    msgs: HashMap<MessageId, (RawMessage, HashSet<PeerId>)>,
+-    /// For every message and peer the number of times this peer asked for the message
+-    iwant_counts: HashMap<MessageId, HashMap<PeerId, u32>>,
++    msgs: HashMap<MessageId, MessageEntry>,
+     history: Vec<Vec<CacheEntry>>,
+-    /// The number of indices in the cache history used for gossiping. That means that a message
+-    /// won't get gossiped anymore when shift got called `gossip` many times after inserting the
+-    /// message in the cache.
+     gossip: usize,
++    max_entries: usize,
++    max_bytes: usize,
++    max_peer_associations: usize,
++    history_entries: usize,
++    retained_bytes: usize,
++    peer_associations: usize,
++    next_generation: Option<u64>,
+ }
+
+ impl fmt::Debug for MessageCache {
+@@ -61,170 +75,215 @@
+     }
+ }
+
+-/// Implementation of the MessageCache.
+ impl MessageCache {
++    #[cfg(test)]
+     pub(crate) fn new(gossip: usize, history_capacity: usize) -> Self {
+-        MessageCache {
++        Self::with_limits(gossip, history_capacity, usize::MAX, usize::MAX, usize::MAX)
++    }
++
++    pub(crate) fn with_limits(
++        gossip: usize,
++        history_capacity: usize,
++        max_entries: usize,
++        max_bytes: usize,
++        max_peer_associations: usize,
++    ) -> Self {
++        Self {
+             gossip,
+             msgs: HashMap::default(),
+-            iwant_counts: HashMap::default(),
+             history: vec![Vec::new(); history_capacity],
+-        }
+-    }
+-
+-    /// Put a message into the memory cache.
+-    ///
+-    /// Returns true if the message didn't already exist in the cache.
+-    pub(crate) fn put(&mut self, message_id: &MessageId, msg: RawMessage) -> bool {
++            max_entries,
++            max_bytes,
++            max_peer_associations,
++            history_entries: 0,
++            retained_bytes: 0,
++            peer_associations: 0,
++            next_generation: Some(0),
++        }
++    }
++
++    // IDs are cloned and topics are normalized to exact-length allocations.
++    // Message buffers are moved, so charge capacity rather than just length.
++    fn admission_bytes(message_id: &MessageId, msg: &RawMessage) -> Option<(usize, usize)> {
++        let history = message_id.0.len().checked_add(msg.topic.as_str().len())?;
++        let message = history
++            .checked_add(msg.data.capacity())?
++            .checked_add(msg.signature.as_ref().map_or(0, Vec::capacity))?
++            .checked_add(msg.key.as_ref().map_or(0, Vec::capacity))?;
++        Some((history, message))
++    }
++
++    #[cfg(test)]
++    pub(crate) fn usage(&self) -> (usize, usize, usize) {
++        (
++            self.history_entries,
++            self.retained_bytes,
++            self.peer_associations,
++        )
++    }
++
++    /// Whether a payload still owns this identity in the history window.
++    pub(crate) fn contains(&self, message_id: &MessageId) -> bool {
++        self.msgs.contains_key(message_id)
++    }
++
++    /// Preflight for a synchronous insertion; does not reserve capacity.
++    pub(crate) fn can_put(&self, message_id: &MessageId, msg: &RawMessage) -> bool {
+         if self.history.is_empty() {
+             return true;
+         }
+-        match self.msgs.entry(message_id.clone()) {
+-            Entry::Occupied(_) => {
+-                // Don't add duplicate entries to the cache.
+-                false
++        if self.next_generation.is_none()
++            || self.msgs.contains_key(message_id)
++            || self.history_entries >= self.max_entries
++        {
++            return false;
++        }
++        Self::admission_bytes(message_id, msg)
++            .and_then(|(history, message)| history.checked_add(message))
++            .and_then(|bytes| self.retained_bytes.checked_add(bytes))
++            .is_some_and(|bytes| bytes <= self.max_bytes)
++    }
++
++    /// Returns true for an admitted message, or for the empty-history no-op.
++    pub(crate) fn put(&mut self, message_id: &MessageId, mut msg: RawMessage) -> bool {
++        if !self.can_put(message_id, &msg) {
++            return false;
++        }
++        if self.history.is_empty() {
++            return true;
++        }
++        let (history_bytes, message_bytes) =
++            Self::admission_bytes(message_id, &msg).expect("admission checked the byte budget");
++        msg.topic = TopicHash::from_raw(msg.topic.into_string().into_boxed_str().into_string());
++        let generation = self
++            .next_generation
++            .expect("admission checked generation availability");
++        self.next_generation = generation.checked_add(1);
++        self.history[0].push(CacheEntry {
++            mid: message_id.clone(),
++            topic: msg.topic.clone(),
++            generation,
++            bytes: history_bytes,
++        });
++        self.msgs.insert(
++            message_id.clone(),
++            MessageEntry {
++                message: msg,
++                originating_peers: HashSet::default(),
++                iwant_counts: HashMap::default(),
++                generation,
++                bytes: message_bytes,
++            },
++        );
++        self.history_entries += 1;
++        self.retained_bytes += history_bytes + message_bytes;
++        tracing::trace!(message=?message_id, "Put message in mcache");
++        true
++    }
++
++    /// Track duplicate origins only while awaiting validation and budget permits.
++    pub(crate) fn observe_duplicate(&mut self, message_id: &MessageId, source: &PeerId) {
++        if let Some(entry) = self.msgs.get_mut(message_id) {
++            if !entry.message.validated
++                && self.peer_associations < self.max_peer_associations
++                && entry.originating_peers.insert(*source)
++            {
++                self.peer_associations += 1;
+             }
+-            Entry::Vacant(entry) => {
+-                let cache_entry = CacheEntry {
+-                    mid: message_id.clone(),
+-                    topic: msg.topic.clone(),
+-                };
+-                entry.insert((msg, HashSet::default()));
+-                self.history[0].push(cache_entry);
+-
+-                tracing::trace!(message=?message_id, "Put message in mcache");
+-                true
+-            }
+-        }
+-    }
+-
+-    /// Keeps track of peers we know have received the message to prevent forwarding to said peers.
+-    pub(crate) fn observe_duplicate(&mut self, message_id: &MessageId, source: &PeerId) {
+-        if let Some((message, originating_peers)) = self.msgs.get_mut(message_id) {
+-            // if the message is already validated, we don't need to store extra peers sending us
+-            // duplicates as the message has already been forwarded
+-            if message.validated {
+-                return;
+-            }
+-
+-            originating_peers.insert(*source);
+-        }
+-    }
+-
+-    /// Get a message with `message_id`
++        }
++    }
++
+     #[cfg(test)]
+     pub(crate) fn get(&self, message_id: &MessageId) -> Option<&RawMessage> {
+-        self.msgs.get(message_id).map(|(message, _)| message)
+-    }
+-
+-    /// Increases the iwant count for the given message by one and returns the message together
+-    /// with the iwant if the message exists.
++        self.msgs.get(message_id).map(|entry| &entry.message)
++    }
++
++    /// Existing IWANT counters remain authoritative under capacity pressure.
++    /// An untracked peer is not served when its counter cannot be retained.
+     pub(crate) fn get_with_iwant_counts(
+         &mut self,
+         message_id: &MessageId,
+         peer: &PeerId,
+     ) -> Option<(&RawMessage, u32)> {
+-        let iwant_counts = &mut self.iwant_counts;
+-        self.msgs.get(message_id).and_then(|(message, _)| {
+-            if !message.validated {
+-                None
+-            } else {
+-                Some((message, {
+-                    let count = iwant_counts
+-                        .entry(message_id.clone())
+-                        .or_default()
+-                        .entry(*peer)
+-                        .or_default();
+-                    *count += 1;
+-                    *count
+-                }))
++        let entry = self.msgs.get_mut(message_id)?;
++        if !entry.message.validated {
++            return None;
++        }
++        let count = match entry.iwant_counts.entry(*peer) {
++            Entry::Occupied(entry) => entry.into_mut(),
++            Entry::Vacant(entry) => {
++                if self.peer_associations >= self.max_peer_associations {
++                    return None;
++                }
++                self.peer_associations += 1;
++                entry.insert(0)
+             }
+-        })
+-    }
+-
+-    /// Gets a message with [`MessageId`] and tags it as validated.
+-    /// This function also returns the known peers that have sent us this message. This is used to
+-    /// prevent us sending redundant messages to peers who have already propagated it.
++        };
++        *count = count.saturating_add(1);
++        Some((&entry.message, *count))
++    }
++
++    /// Validate and release duplicate-origin associations to the caller.
+     pub(crate) fn validate(
+         &mut self,
+         message_id: &MessageId,
+     ) -> Option<(&RawMessage, HashSet<PeerId>)> {
+-        self.msgs.get_mut(message_id).map(|(message, known_peers)| {
+-            message.validated = true;
+-            // Clear the known peers list (after a message is validated, it is forwarded and we no
+-            // longer need to store the originating peers).
+-            let originating_peers = std::mem::take(known_peers);
+-            (&*message, originating_peers)
+-        })
+-    }
+-
+-    /// Get a list of [`MessageId`]s for a given topic.
++        let entry = self.msgs.get_mut(message_id)?;
++        entry.message.validated = true;
++        let peers = std::mem::take(&mut entry.originating_peers);
++        self.peer_associations -= peers.len();
++        Some((&entry.message, peers))
++    }
++
+     pub(crate) fn get_gossip_message_ids(&self, topic: &TopicHash) -> Vec<MessageId> {
+-        self.history[..self.gossip]
++        self.history
+             .iter()
+-            .fold(vec![], |mut current_entries, entries| {
+-                // search for entries with desired topic
+-                let mut found_entries: Vec<MessageId> = entries
+-                    .iter()
+-                    .filter_map(|entry| {
+-                        if &entry.topic == topic {
+-                            let mid = &entry.mid;
+-                            // Only gossip validated messages
+-                            if let Some(true) = self.msgs.get(mid).map(|(msg, _)| msg.validated) {
+-                                Some(mid.clone())
+-                            } else {
+-                                None
+-                            }
+-                        } else {
+-                            None
+-                        }
+-                    })
+-                    .collect();
+-
+-                // generate the list
+-                current_entries.append(&mut found_entries);
+-                current_entries
++            .take(self.gossip)
++            .flatten()
++            .filter_map(|record| {
++                let entry = self.msgs.get(&record.mid)?;
++                (&record.topic == topic
++                    && entry.message.validated
++                    && record.generation == entry.generation)
++                    .then(|| record.mid.clone())
+             })
+-    }
+-
+-    /// Shift the history array down one and delete messages associated with the
+-    /// last entry.
++            .collect()
++    }
++
++    /// Expire one history window, without letting old records delete reinsertions.
+     pub(crate) fn shift(&mut self) {
+-        if self.history.is_empty() {
++        let Some(expired) = self.history.pop() else {
+             return;
+-        }
+-
+-        for entry in self.history.pop().expect("history is always > 1") {
+-            if let Some((msg, _)) = self.msgs.remove(&entry.mid) {
+-                if !msg.validated {
+-                    // If GossipsubConfig::validate_messages is true, the implementing
+-                    // application has to ensure that Gossipsub::validate_message gets called for
+-                    // each received message within the cache timeout time."
+-                    tracing::debug!(
+-                        message=%&entry.mid,
+-                        "The message got removed from the cache without being validated."
+-                    );
++        };
++        for record in expired {
++            self.history_entries -= 1;
++            self.retained_bytes -= record.bytes;
++            if self
++                .msgs
++                .get(&record.mid)
++                .is_some_and(|entry| record.generation == entry.generation)
++            {
++                if let Some((msg, _)) = self.remove(&record.mid) {
++                    if !msg.validated {
++                        tracing::debug!(message=%record.mid,
++                            "The message got removed from the cache without being validated.");
++                    }
+                 }
+             }
+-            tracing::trace!(message=%&entry.mid, "Remove message from the cache");
+-
+-            self.iwant_counts.remove(&entry.mid);
+-        }
+-
+-        // Insert an empty vec in position 0
++        }
+         self.history.insert(0, Vec::new());
+     }
+
+-    /// Removes a message from the cache and returns it if existent
++    /// Remove payload and peer state. History retains its own bounded allocation
++    /// until expiry; generation ownership makes its later removal harmless.
+     pub(crate) fn remove(
+         &mut self,
+         message_id: &MessageId,
+     ) -> Option<(RawMessage, HashSet<PeerId>)> {
+-        // We only remove the message from msgs and iwant_count and keep the message_id in the
+-        // history vector. Zhe id in the history vector will simply be ignored on popping.
+-
+-        self.iwant_counts.remove(message_id);
+-        self.msgs.remove(message_id)
++        let entry = self.msgs.remove(message_id)?;
++        self.retained_bytes -= entry.bytes;
++        self.peer_associations -= entry.originating_peers.len() + entry.iwant_counts.len();
++        Some((entry.message, entry.originating_peers))
+     }
+ }
+
+@@ -392,4 +451,189 @@
+         assert_eq!(mc.history[0].len(), 0);
+         assert_eq!(mc.msgs.len(), 0);
+     }
++
++    fn logex_message(id: u8) -> (MessageId, RawMessage) {
++        (
++            MessageId::new(&[id]),
++            RawMessage {
++                source: None,
++                data: vec![1],
++                sequence_number: None,
++                topic: TopicHash::from_raw("t"),
++                signature: Some(vec![2]),
++                key: Some(vec![3]),
++                validated: false,
++            },
++        )
++    }
++
++    #[test]
++    fn logex_exact_byte_and_entry_limits_preserve_admitted_messages() {
++        let (id, msg) = logex_message(1);
++        // Two ID/topic copies and three one-byte message buffers.
++        let mut too_small = MessageCache::with_limits(1, 1, 1, 6, 1);
++        assert!(!too_small.can_put(&id, &msg));
++        assert!(!too_small.put(&id, msg.clone()));
++        assert_eq!(too_small.usage(), (0, 0, 0));
++        let mut cache = MessageCache::with_limits(1, 1, 1, 7, 1);
++        assert!(cache.can_put(&id, &msg));
++        assert!(cache.put(&id, msg.clone()));
++        assert_eq!(cache.usage(), (1, 7, 0));
++        assert!(!cache.put(&id, msg));
++        let (other, message) = logex_message(2);
++        assert!(!cache.put(&other, message));
++        assert!(cache.get(&id).is_some());
++        cache.shift();
++        assert_eq!(cache.usage(), (0, 0, 0));
++
++        let mut count_limited = MessageCache::with_limits(1, 1, 1, 100, 1);
++        let (id, msg) = logex_message(1);
++        assert!(count_limited.put(&id, msg));
++        let (other, msg) = logex_message(2);
++        assert!(!count_limited.put(&other, msg));
++    }
++
++    #[test]
++    fn logex_buffer_capacity_and_topic_normalization_are_accounted() {
++        let (id, mut msg) = logex_message(1);
++        msg.data = Vec::with_capacity(8);
++        msg.data.push(1);
++        let mut topic = String::with_capacity(32);
++        topic.push('t');
++        msg.topic = TopicHash::from_raw(topic);
++        let expected = 6 + msg.data.capacity();
++        let mut cache = MessageCache::with_limits(1, 1, 1, expected - 1, 1);
++        assert!(!cache.can_put(&id, &msg));
++        cache.max_bytes = expected;
++        assert!(cache.put(&id, msg));
++        assert_eq!(cache.retained_bytes, expected);
++        assert_eq!(
++            cache
++                .get(&id)
++                .unwrap()
++                .topic
++                .clone()
++                .into_string()
++                .capacity(),
++            1
++        );
++        cache.remove(&id);
++        assert_eq!(cache.usage(), (1, 2, 0));
++        cache.shift();
++        assert_eq!(cache.usage(), (0, 0, 0));
++    }
++
++    #[test]
++    fn logex_rejection_churn_retains_bounded_history_until_expiry() {
++        let mut cache = MessageCache::with_limits(1, 2, 2, 100, 1);
++        for n in 1..=2 {
++            let (id, msg) = logex_message(n);
++            assert!(cache.put(&id, msg));
++            assert!(cache.remove(&id).is_some());
++        }
++        assert_eq!(cache.usage(), (2, 4, 0));
++        let (id, msg) = logex_message(3);
++        assert!(!cache.put(&id, msg.clone()));
++        cache.shift();
++        assert!(!cache.put(&id, msg.clone()));
++        cache.shift();
++        assert_eq!(cache.usage(), (0, 0, 0));
++        assert!(cache.put(&id, msg));
++    }
++
++    #[test]
++    fn logex_old_history_cannot_gossip_or_expire_reinserted_id() {
++        let mut cache = MessageCache::with_limits(2, 2, 2, 100, 1);
++        let (id, msg) = logex_message(1);
++        assert!(cache.put(&id, msg.clone()));
++        cache.remove(&id);
++        cache.shift();
++        assert!(cache.put(&id, msg));
++        cache.validate(&id);
++        assert_eq!(
++            cache.get_gossip_message_ids(&TopicHash::from_raw("t")),
++            vec![id.clone()]
++        );
++        assert_eq!(cache.usage(), (2, 9, 0));
++        cache.shift();
++        assert!(cache.get(&id).is_some());
++        assert_eq!(cache.usage(), (1, 7, 0));
++        cache.shift();
++        assert!(cache.get(&id).is_none());
++        assert_eq!(cache.usage(), (0, 0, 0));
++    }
++
++    #[test]
++    fn logex_peer_budget_preserves_iwant_counter_continuity() {
++        let mut cache = MessageCache::with_limits(1, 1, 2, 100, 1);
++        let (id, msg) = logex_message(1);
++        cache.put(&id, msg);
++        let first = PeerId::random();
++        let second = PeerId::random();
++        cache.observe_duplicate(&id, &first);
++        cache.observe_duplicate(&id, &first);
++        cache.observe_duplicate(&id, &second);
++        assert_eq!(cache.peer_associations, 1);
++        let (_, origins) = cache.validate(&id).unwrap();
++        assert_eq!(origins, HashSet::from([first]));
++        assert_eq!(cache.peer_associations, 0);
++        assert_eq!(cache.get_with_iwant_counts(&id, &first).unwrap().1, 1);
++        assert!(cache.get_with_iwant_counts(&id, &second).is_none());
++        assert_eq!(cache.get_with_iwant_counts(&id, &first).unwrap().1, 2);
++        cache
++            .msgs
++            .get_mut(&id)
++            .unwrap()
++            .iwant_counts
++            .insert(first, u32::MAX);
++        assert_eq!(
++            cache.get_with_iwant_counts(&id, &first).unwrap().1,
++            u32::MAX
++        );
++        // A repeated validation must not clear authoritative IWANT counters.
++        assert!(cache.validate(&id).unwrap().1.is_empty());
++        assert_eq!(cache.peer_associations, 1);
++        let mut cloned = cache.clone();
++        cloned.shift();
++        assert_eq!(cloned.usage(), (0, 0, 0));
++        assert_eq!(cache.usage(), (1, 7, 1));
++        cache.remove(&id);
++        assert_eq!(cache.usage(), (1, 2, 0));
++        cache.shift();
++        assert_eq!(cache.usage(), (0, 0, 0));
++    }
++
++    #[test]
++    fn logex_peer_budget_is_shared_between_messages_and_tracking_kinds() {
++        let mut cache = MessageCache::with_limits(1, 1, 2, 100, 1);
++        let (id, msg) = logex_message(1);
++        let (other, message) = logex_message(2);
++        cache.put(&id, msg);
++        cache.put(&other, message);
++        let peer = PeerId::random();
++        cache.observe_duplicate(&id, &peer);
++        cache.validate(&other);
++        assert!(cache.get_with_iwant_counts(&other, &peer).is_none());
++        cache.validate(&id);
++        assert_eq!(cache.get_with_iwant_counts(&other, &peer).unwrap().1, 1);
++        cache.shift();
++        assert_eq!(cache.usage(), (0, 0, 0));
++    }
++
++    #[test]
++    fn logex_empty_history_and_generation_exhaustion() {
++        let (id, msg) = logex_message(1);
++        let mut empty = MessageCache::with_limits(1, 0, 0, 0, 0);
++        assert!(empty.can_put(&id, &msg));
++        assert!(empty.put(&id, msg.clone()));
++        empty.shift();
++        assert!(empty.get_gossip_message_ids(&msg.topic).is_empty());
++        assert_eq!(empty.usage(), (0, 0, 0));
++        let mut cache = MessageCache::with_limits(1, 1, 1, 100, 1);
++        cache.next_generation = Some(u64::MAX);
++        assert!(cache.put(&id, msg.clone()));
++        cache.shift();
++        assert!(!cache.put(&id, msg));
++        assert_eq!(cache.usage(), (0, 0, 0));
++    }
+ }
+--- a/src/peer_score.rs
++++ b/src/peer_score.rs
+@@ -639,6 +639,11 @@
+         }
+     }
+
++    #[cfg(test)]
++    pub(crate) fn tracks_message(&self, msg_id: &MessageId) -> bool {
++        self.deliveries.contains_key(msg_id)
++    }
++
+     pub(crate) fn validate_message(
+         &mut self,
+         from: &PeerId,
 --- a/src/subscription_filter.rs
 +++ b/src/subscription_filter.rs
 @@ -23,7 +23,19 @@
@@ -492,7 +2609,45 @@
      /// Filters a list of incoming subscriptions and returns a filtered set
 --- a/src/time_cache.rs
 +++ b/src/time_cache.rs
-@@ -136,7 +136,10 @@
+@@ -18,7 +18,7 @@
+ // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+ // DEALINGS IN THE SOFTWARE.
+
+-//! This implements a time-based LRU cache for checking gossipsub message duplicates.
++//! Time-based caches with fixed insertion deadlines for gossipsub state.
+
+ use std::{
+     collections::{
+@@ -42,8 +42,7 @@
+ }
+
+ pub(crate) struct TimeCache<Key, Value> {
+-    /// Mapping a key to its value together with its latest expire time (can be updated through
+-    /// reinserts).
++    /// Mapping a key to its value and fixed insertion deadline.
+     map: FnvHashMap<Key, ExpiringElement<Value>>,
+     /// An ordered list of keys by expires time.
+     list: VecDeque<ExpiringElement<Key>>,
+@@ -122,6 +121,10 @@
+     }
+
+     fn remove_expired_keys(&mut self, now: Instant) {
++        self.remove_expired_keys_with(now, |_| {});
++    }
++
++    fn remove_expired_keys_with(&mut self, now: Instant, mut removed: impl FnMut(Value)) {
+         while let Some(element) = self.list.pop_front() {
+             if element.expires > now {
+                 self.list.push_front(element);
+@@ -129,14 +132,17 @@
+             }
+             if let Occupied(entry) = self.map.entry(element.element.clone()) {
+                 if entry.get().expires <= now {
+-                    entry.remove();
++                    removed(entry.remove().element);
+                 }
+             }
+         }
      }
 
      pub(crate) fn entry(&mut self, key: Key) -> Entry<'_, Key, Value> {
@@ -504,48 +2659,152 @@
          self.remove_expired_keys(now);
          match self.map.entry(key) {
              Occupied(entry) => Entry::Occupied(OccupiedEntry { entry }),
-@@ -162,7 +165,11 @@
+@@ -162,35 +168,125 @@
      }
 
      pub(crate) fn contains_key(&self, key: &Key) -> bool {
 -        self.map.contains_key(key)
+-    }
+-}
+-
+-pub(crate) struct DuplicateCache<Key>(TimeCache<Key, ()>);
 +        self.contains_key_at(key, Instant::now())
 +    }
 +
 +    fn contains_key_at(&self, key: &Key, now: Instant) -> bool {
 +        self.map.get(key).is_some_and(|entry| entry.expires > now)
-     }
- }
++    }
++}
++
++/// Admission never evicts a live entry or extends its original deadline.
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++pub(crate) enum CacheAdmission {
++    New,
++    Duplicate,
++    Full,
++}
++
++pub(crate) struct DuplicateCache<Key> {
++    cache: TimeCache<Key, usize>,
++    max_entries: usize,
++    max_bytes: usize,
++    retained_bytes: usize,
++    key_bytes: fn(&Key) -> usize,
++}
 
-@@ -189,6 +196,27 @@
-         }
-     }
-
+ impl<Key> DuplicateCache<Key>
+ where
+     Key: Eq + std::hash::Hash + Clone,
+ {
++    #[cfg(test)]
+     pub(crate) fn new(ttl: Duration) -> Self {
+-        Self(TimeCache::new(ttl))
+-    }
+-
+-    // Inserts new elements and removes any expired elements.
+-    //
+-    // If the key was not present this returns `true`. If the value was already present this
+-    // returns `false`.
++        Self::with_limits(ttl, usize::MAX, usize::MAX, |_| 0)
++    }
++
++    /// `key_bytes` measures all retained key storage, including the ordered-list clone.
++    /// It must account for the actual moved key and its clone. Admission for a
++    /// borrowed key may overestimate a subsequent cloned insertion.
++    pub(crate) fn with_limits(
++        ttl: Duration,
++        max_entries: usize,
++        max_bytes: usize,
++        key_bytes: fn(&Key) -> usize,
++    ) -> Self {
++        Self {
++            cache: TimeCache::new(ttl),
++            max_entries,
++            max_bytes,
++            retained_bytes: 0,
++            key_bytes,
++        }
++    }
++
++    /// Checks admission after pruning expired entries, without reserving space.
++    pub(crate) fn admission(&mut self, key: &Key) -> CacheAdmission {
++        self.admission_at(key, Instant::now()).0
++    }
++
++    fn admission_at(&mut self, key: &Key, now: Instant) -> (CacheAdmission, usize) {
++        self.prune_expired(now);
++        if self.cache.map.contains_key(key) {
++            return (CacheAdmission::Duplicate, 0);
++        }
++        if self.cache.map.len() >= self.max_entries {
++            return (CacheAdmission::Full, 0);
++        }
++        let bytes = (self.key_bytes)(key);
++        if bytes > self.max_bytes - self.retained_bytes {
++            return (CacheAdmission::Full, 0);
++        }
++        (CacheAdmission::New, bytes)
++    }
++
++    pub(crate) fn try_insert(&mut self, key: Key) -> CacheAdmission {
++        self.try_insert_at(key, Instant::now())
++    }
++
++    fn try_insert_at(&mut self, key: Key, now: Instant) -> CacheAdmission {
++        let (admission, bytes) = self.admission_at(&key, now);
++        if admission == CacheAdmission::New {
++            if let Entry::Vacant(entry) = self.cache.entry_at(key, now) {
++                entry.insert(bytes);
++                // Admission checked the remaining capacity without overflowing.
++                self.retained_bytes += bytes;
++            }
++        }
++        admission
++    }
++
++    #[cfg(test)]
+     pub(crate) fn insert(&mut self, key: Key) -> bool {
+-        if let Entry::Vacant(entry) = self.0.entry(key) {
+-            entry.insert(());
+-            true
+-        } else {
+-            false
+-        }
++        self.try_insert(key) == CacheAdmission::New
++    }
++
 +    /// Release expired entries even when no new messages are inserted.
 +    pub(crate) fn prune_expired(&mut self, now: Instant) {
-+        self.0.remove_expired_keys(now);
++        let retained_bytes = &mut self.retained_bytes;
++        self.cache.remove_expired_keys_with(now, |bytes| {
++            *retained_bytes -= bytes;
++        });
++    }
++
++    #[cfg(test)]
++    pub(crate) fn clear(&mut self) {
++        self.cache.clear();
++        self.retained_bytes = 0;
 +    }
 +
 +    #[cfg(test)]
 +    pub(crate) fn insert_at(&mut self, key: Key, now: Instant) -> bool {
-+        if let Entry::Vacant(entry) = self.0.entry_at(key, now) {
-+            entry.insert(());
-+            true
-+        } else {
-+            false
-+        }
++        self.try_insert_at(key, now) == CacheAdmission::New
 +    }
 +
 +    #[cfg(test)]
 +    pub(crate) fn retained_len(&self) -> usize {
-+        assert_eq!(self.0.map.len(), self.0.list.len());
-+        self.0.map.len()
-+    }
-+
-     pub(crate) fn contains(&self, key: &Key) -> bool {
-         self.0.contains_key(key)
++        assert_eq!(self.cache.map.len(), self.cache.list.len());
++        self.cache.map.len()
      }
-@@ -228,3 +256,24 @@
+
+     pub(crate) fn contains(&self, key: &Key) -> bool {
+-        self.0.contains_key(key)
++        self.cache.contains_key(key)
+     }
+ }
+
+@@ -228,3 +324,114 @@
          assert!(cache.insert("t"));
      }
  }
@@ -563,10 +2822,312 @@
 +        assert!(!cache.insert_at([1_u8; 20], start + Duration::from_secs(5)));
 +        assert_eq!(cache.retained_len(), 1);
 +        assert!(cache
-+            .0
++            .cache
 +            .contains_key_at(&[1; 20], start + ttl - Duration::from_nanos(1)));
-+        assert!(!cache.0.contains_key_at(&[1; 20], start + ttl));
++        assert!(!cache.cache.contains_key_at(&[1; 20], start + ttl));
 +        assert!(cache.insert_at([1; 20], start + ttl));
 +        assert_eq!(cache.retained_len(), 1);
++    }
++}
++
++#[cfg(test)]
++mod logex_capacity_tests {
++    use super::*;
++
++    #[test]
++    fn logex_entry_bound_retains_full_cache_and_duplicate_deadlines() {
++        let now = Instant::now();
++        let ttl = Duration::from_secs(10);
++        let mut cache = DuplicateCache::with_limits(ttl, 1, 8, |_| 8);
++        assert_eq!(cache.try_insert_at(1, now), CacheAdmission::New);
++        assert_eq!(cache.try_insert_at(2, now), CacheAdmission::Full);
++        assert_eq!(
++            cache.try_insert_at(1, now + ttl / 2),
++            CacheAdmission::Duplicate
++        );
++        assert_eq!(cache.retained_len(), 1);
++        assert_eq!(cache.retained_bytes, 8);
++        assert!(cache
++            .cache
++            .contains_key_at(&1, now + ttl - Duration::from_nanos(1)));
++        assert_eq!(cache.try_insert_at(2, now + ttl), CacheAdmission::New);
++        assert_eq!(cache.retained_len(), 1);
++        assert_eq!(cache.retained_bytes, 8);
++    }
++
++    #[test]
++    fn logex_byte_bound_expiry_reuse_and_idle_prune() {
++        let now = Instant::now();
++        let ttl = Duration::from_secs(10);
++        let mut cache = DuplicateCache::with_limits(ttl, 10, 6, |key: &String| key.len() * 2);
++        assert_eq!(cache.try_insert_at("a".into(), now), CacheAdmission::New);
++        assert_eq!(
++            cache.try_insert_at("bc".into(), now + ttl / 2),
++            CacheAdmission::New
++        );
++        assert_eq!(cache.retained_bytes, 6);
++        assert_eq!(
++            cache.try_insert_at("d".into(), now + ttl / 2),
++            CacheAdmission::Full
++        );
++        cache.prune_expired(now + ttl);
++        assert_eq!(cache.retained_bytes, 4);
++        assert_eq!(
++            cache.try_insert_at("d".into(), now + ttl),
++            CacheAdmission::New
++        );
++        assert_eq!(cache.retained_bytes, 6);
++        cache.prune_expired(now + ttl * 2);
++        assert_eq!(cache.retained_len(), 0);
++        assert_eq!(cache.retained_bytes, 0);
++        cache.prune_expired(now + ttl * 3);
++        assert_eq!(cache.retained_bytes, 0);
++    }
++
++    #[test]
++    fn logex_byte_accounting_cannot_overflow_and_clear_releases_capacity() {
++        let now = Instant::now();
++        let mut cache =
++            DuplicateCache::with_limits(Duration::from_secs(10), 3, usize::MAX, |key: &usize| *key);
++        assert_eq!(cache.try_insert_at(usize::MAX, now), CacheAdmission::New);
++        assert_eq!(cache.try_insert_at(1, now), CacheAdmission::Full);
++        assert_eq!(
++            cache.try_insert_at(usize::MAX, now),
++            CacheAdmission::Duplicate
++        );
++        assert_eq!(cache.retained_bytes, usize::MAX);
++        cache.clear();
++        assert_eq!(cache.retained_len(), 0);
++        assert_eq!(cache.retained_bytes, 0);
++        assert_eq!(cache.try_insert_at(1, now), CacheAdmission::New);
++    }
++
++    #[test]
++    fn logex_admission_does_not_reserve_capacity_or_admit_oversized_keys() {
++        let now = Instant::now();
++        let mut cache =
++            DuplicateCache::with_limits(Duration::from_secs(10), 1, 2, |key: &usize| *key);
++        assert_eq!(cache.admission(&2), CacheAdmission::New);
++        assert_eq!(cache.retained_len(), 0);
++        assert_eq!(cache.retained_bytes, 0);
++        assert_eq!(cache.try_insert_at(3, now), CacheAdmission::Full);
++        assert_eq!(cache.try_insert_at(2, now), CacheAdmission::New);
++        assert_eq!(cache.admission(&2), CacheAdmission::Duplicate);
++        assert_eq!(cache.admission(&1), CacheAdmission::Full);
++        let mut disabled =
++            DuplicateCache::with_limits(Duration::from_secs(10), 0, usize::MAX, |_| 0);
++        assert_eq!(disabled.try_insert_at(0, now), CacheAdmission::Full);
++    }
++}
+--- a/src/types.rs
++++ b/src/types.rs
+@@ -19,7 +19,7 @@
+ // DEALINGS IN THE SOFTWARE.
+
+ //! A collection of types using the Gossipsub system.
+-use std::{collections::BTreeSet, fmt, fmt::Debug};
++use std::{collections::BTreeSet, fmt, fmt::Debug, time::Duration};
+
+ use futures_timer::Delay;
+ use hashlink::LinkedHashMap;
+@@ -100,6 +100,88 @@
+     }
+ }
+
++/// Bounded per-peer IDONTWANT suppression. Admitted IDs retain their original
++/// deadline; duplicates and capacity pressure cannot extend or evict them.
++#[derive(Debug)]
++pub(crate) struct DontSendCache {
++    entries: LinkedHashMap<MessageId, Instant>,
++    ttl: Duration,
++    max_entries: usize,
++    max_bytes: usize,
++    retained_bytes: usize,
++}
++
++impl DontSendCache {
++    pub(crate) fn with_limits(ttl: Duration, max_entries: usize, max_bytes: usize) -> Self {
++        Self {
++            entries: LinkedHashMap::new(),
++            ttl,
++            max_entries,
++            max_bytes,
++            retained_bytes: 0,
++        }
++    }
++
++    /// Returns true only when a new ID is retained.
++    pub(crate) fn insert(&mut self, id: MessageId) -> bool {
++        self.insert_with_time(id, Instant::now())
++    }
++
++    fn insert_with_time(&mut self, id: MessageId, now: Instant) -> bool {
++        self.prune_expired(now);
++        if self.entries.contains_key(&id) || self.entries.len() >= self.max_entries {
++            return false;
++        }
++        let Some(deadline) = now.checked_add(self.ttl) else {
++            return false;
++        };
++        if deadline <= now {
++            return false;
++        }
++        // The ID is moved, so spare buffer capacity remains owned by this cache.
++        let Some(bytes) = self.retained_bytes.checked_add(id.0.capacity()) else {
++            return false;
++        };
++        if bytes > self.max_bytes {
++            return false;
++        }
++        self.entries.insert(id, deadline);
++        self.retained_bytes = bytes;
++        true
++    }
++
++    pub(crate) fn contains(&self, id: &MessageId) -> bool {
++        self.contains_at(id, Instant::now())
++    }
++
++    fn contains_at(&self, id: &MessageId, now: Instant) -> bool {
++        self.entries.get(id).is_some_and(|deadline| *deadline > now)
++    }
++
++    /// Fixed TTL and monotonic insertion keep deadlines ordered. Each expired
++    /// record is visited once; insertion never scans all retained records.
++    pub(crate) fn prune_expired(&mut self, now: Instant) {
++        while self
++            .entries
++            .front()
++            .is_some_and(|(_, deadline)| *deadline <= now)
++        {
++            let (id, _) = self.entries.pop_front().expect("front was present");
++            self.retained_bytes -= id.0.capacity();
++        }
++    }
++
++    #[cfg(test)]
++    pub(crate) fn insert_at(&mut self, id: MessageId, now: Instant) -> bool {
++        self.insert_with_time(id, now)
++    }
++
++    #[cfg(test)]
++    pub(crate) fn retained_len(&self) -> usize {
++        self.entries.len()
++    }
++}
++
+ #[derive(Debug)]
+ /// Connected peer details.
+ pub(crate) struct PeerDetails {
+@@ -114,7 +196,7 @@
+     /// The rpc sender to the connection handler(s).
+     pub(crate) sender: Sender,
+     /// Don't send messages.
+-    pub(crate) dont_send: LinkedHashMap<MessageId, Instant>,
++    pub(crate) dont_send: DontSendCache,
+ }
+
+ /// Describes the types of peers that can exist in the gossipsub context.
+@@ -219,10 +301,7 @@
+ impl fmt::Debug for Message {
+     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+         f.debug_struct("Message")
+-            .field(
+-                "data",
+-                &format_args!("{:<20}", &hex_fmt::HexFmt(&self.data)),
+-            )
++            .field("data", &format_args!("{:<20}", hex_fmt::HexFmt(&self.data)))
+             .field("source", &self.source)
+             .field("sequence_number", &self.sequence_number)
+             .field("topic", &self.topic)
+@@ -635,3 +714,90 @@
+         f.write_str(self.as_ref())
+     }
+ }
++
++#[cfg(test)]
++mod dont_send_cache_tests {
++    use super::*;
++
++    #[test]
++    fn logex_dont_send_exact_entry_and_byte_limits() {
++        let now = Instant::now();
++        let mut cache = DontSendCache::with_limits(Duration::from_secs(2), 2, 2);
++        let first = MessageId::new(&[1]);
++        let second = MessageId::new(&[2]);
++        assert!(cache.insert_at(first.clone(), now));
++        assert!(cache.insert_at(second.clone(), now));
++        assert!(!cache.insert_at(MessageId::new(&[3]), now));
++        assert_eq!(cache.retained_len(), 2);
++        assert_eq!(cache.retained_bytes, 2);
++        assert!(cache.contains_at(&first, now));
++        assert!(cache.contains_at(&second, now));
++        let mut bytes = DontSendCache::with_limits(Duration::from_secs(2), 3, 1);
++        assert!(bytes.insert_at(first, now));
++        assert!(!bytes.insert_at(second, now));
++        assert_eq!(bytes.retained_len(), 1);
++    }
++
++    #[test]
++    fn logex_dont_send_charges_moved_id_capacity() {
++        let now = Instant::now();
++        let mut id = Vec::with_capacity(8);
++        id.push(1);
++        let capacity = id.capacity();
++        let mut cache = DontSendCache::with_limits(Duration::from_secs(1), 1, capacity - 1);
++        assert!(!cache.insert_at(MessageId(id), now));
++        assert_eq!(cache.retained_len(), 0);
++        assert_eq!(cache.retained_bytes, 0);
++        let mut id = Vec::with_capacity(8);
++        id.push(1);
++        cache.max_bytes = id.capacity();
++        assert!(cache.insert_at(MessageId(id), now));
++        assert_eq!(cache.retained_bytes, cache.max_bytes);
++        cache.prune_expired(now + Duration::from_secs(1));
++        assert_eq!(cache.retained_len(), 0);
++        assert_eq!(cache.retained_bytes, 0);
++    }
++
++    #[test]
++    fn logex_dont_send_duplicates_do_not_refresh_or_reorder_expiry() {
++        let now = Instant::now();
++        let mut cache = DontSendCache::with_limits(Duration::from_secs(2), 2, 2);
++        let first = MessageId::new(&[1]);
++        let second = MessageId::new(&[2]);
++        assert!(cache.insert_at(first.clone(), now));
++        assert!(cache.insert_at(second.clone(), now + Duration::from_secs(1)));
++        assert!(!cache.insert_at(first.clone(), now + Duration::from_secs(1)));
++        let deadline = now + Duration::from_secs(2);
++        assert!(!cache.contains_at(&first, deadline));
++        assert!(cache.contains_at(&second, deadline));
++        cache.prune_expired(deadline);
++        assert_eq!(cache.retained_len(), 1);
++        assert_eq!(cache.retained_bytes, 1);
++        assert!(cache.insert_at(first.clone(), deadline));
++        cache.prune_expired(now + Duration::from_secs(3));
++        assert!(!cache.contains_at(&second, now + Duration::from_secs(3)));
++        assert!(cache.contains_at(&first, now + Duration::from_secs(3)));
++        assert_eq!(cache.retained_bytes, 1);
++        cache.prune_expired(now + Duration::from_secs(4));
++        assert_eq!(cache.retained_len(), 0);
++        assert_eq!(cache.retained_bytes, 0);
++    }
++
++    #[test]
++    fn logex_dont_send_admission_reclaims_expired_capacity() {
++        let now = Instant::now();
++        let mut cache = DontSendCache::with_limits(Duration::from_secs(1), 1, 1);
++        assert!(cache.insert_at(MessageId::new(&[1]), now));
++        assert!(cache.insert_at(MessageId::new(&[2]), now + Duration::from_secs(1)));
++        assert_eq!(cache.retained_len(), 1);
++        assert_eq!(cache.retained_bytes, 1);
++        let mut disabled = DontSendCache::with_limits(Duration::ZERO, 1, 1);
++        assert!(!disabled.insert_at(MessageId::new(&[1]), now));
++        assert_eq!(disabled.retained_len(), 0);
++        if now.checked_add(Duration::MAX).is_none() {
++            let mut overflow = DontSendCache::with_limits(Duration::MAX, 1, 1);
++            assert!(!overflow.insert_at(MessageId::new(&[1]), now));
++            assert_eq!(overflow.retained_len(), 0);
++        }
 +    }
 +}

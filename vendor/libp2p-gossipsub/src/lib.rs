@@ -118,7 +118,7 @@ pub use metrics::Config as MetricsConfig;
 
 pub use self::{
     behaviour::{Behaviour, Event, MessageAuthenticity},
-    config::{Config, ConfigBuilder, ValidationMode, Version},
+    config::{CacheLimits, Config, ConfigBuilder, ValidationMode, Version},
     error::{ConfigBuilderError, PublishError, SubscriptionError, ValidationError},
     peer_score::{
         score_parameter_decay, score_parameter_decay_with_base, PeerScoreParams,

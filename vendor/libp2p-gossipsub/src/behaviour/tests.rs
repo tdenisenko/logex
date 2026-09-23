@@ -247,7 +247,7 @@ where
             connections: vec![connection_id],
             topics: Default::default(),
             sender,
-            dont_send: LinkedHashMap::new(),
+            dont_send: DontSendCache::with_limits(IDONTWANT_TIMEOUT, 10_000, 1024 * 1024),
         },
     );
 
@@ -643,7 +643,7 @@ fn test_join() {
                 connections: vec![connection_id],
                 topics: Default::default(),
                 sender,
-                dont_send: LinkedHashMap::new(),
+                dont_send: DontSendCache::with_limits(IDONTWANT_TIMEOUT, 10_000, 1024 * 1024),
             },
         );
         receivers.insert(random_peer, receiver);
@@ -1040,7 +1040,7 @@ fn test_get_random_peers() {
                 outbound: false,
                 topics: topics.clone(),
                 sender: Sender::new(gs.config.connection_handler_queue_len()),
-                dont_send: LinkedHashMap::new(),
+                dont_send: DontSendCache::with_limits(IDONTWANT_TIMEOUT, 10_000, 1024 * 1024),
             },
         );
     }
@@ -1302,6 +1302,109 @@ fn test_handle_ihave_subscribed_and_msg_not_cached() {
         iwant_exists,
         "Expected to send an IWANT control message for unknown message id"
     );
+}
+
+// Exercise real IHAVE admission and heartbeat cleanup with explicit deadlines.
+fn check_gossip_promise_expiry(scoring: bool) {
+    let config = ConfigBuilder::default()
+        .iwant_followup_time(Duration::from_secs(60))
+        .build()
+        .unwrap();
+    let score_config = scoring.then(|| {
+        (
+            PeerScoreParams {
+                behaviour_penalty_weight: -1.0,
+                ..Default::default()
+            },
+            PeerScoreThresholds::default(),
+        )
+    });
+    let (mut gs, peers, mut receivers, topics) = inject_nodes1()
+        .peer_no(1)
+        .topics(vec!["promise-expiry".into()])
+        .to_subscribe(true)
+        .gs_config(config)
+        .scoring(score_config)
+        .create_network();
+    let peer = peers[0];
+    let id = MessageId::new(b"unanswered-advertisement");
+    let receiver = receivers.remove(&peer).unwrap();
+    let count_requests = || {
+        let queue = receiver.non_priority.get_ref();
+        let mut count = 0;
+        while let Ok(message) = queue.try_recv() {
+            if let RpcOut::IWant(IWant { message_ids }) = message {
+                count += message_ids
+                    .iter()
+                    .filter(|requested| **requested == id)
+                    .count();
+            }
+        }
+        count
+    };
+    let advertise = |gs: &mut Behaviour| {
+        gs.handle_ihave(&peer, vec![(topics[0].clone(), vec![id.clone()])]);
+    };
+    advertise(&mut gs);
+    assert_eq!(count_requests(), 1);
+    assert!(gs.gossip_promises.contains(&id));
+    gs.heartbeat();
+    assert!(
+        gs.gossip_promises.contains(&id),
+        "unexpired promise must survive heartbeat"
+    );
+    advertise(&mut gs);
+    assert_eq!(
+        count_requests(),
+        0,
+        "pending promise suppresses duplicate request"
+    );
+    if scoring {
+        assert_eq!(gs.peer_score(&peer), Some(0.0));
+    }
+    // Model this admitted request after its deadline without sleeping. The
+    // promise API preserves the same ID/peer ownership and changes only expiry.
+    gs.gossip_promises.message_delivered(&id);
+    gs.gossip_promises.add_promise(
+        peer,
+        std::slice::from_ref(&id),
+        Instant::now().checked_sub(Duration::from_secs(1)).unwrap(),
+    );
+    gs.heartbeat();
+    assert!(
+        !gs.gossip_promises.contains(&id),
+        "expired promise must clear even without scoring"
+    );
+    if scoring {
+        assert_eq!(
+            gs.peer_score(&peer),
+            Some(-1.0),
+            "one unanswered request incurs one penalty"
+        );
+    } else {
+        assert_eq!(gs.peer_score(&peer), None);
+    }
+    advertise(&mut gs);
+    assert_eq!(count_requests(), 1, "expired ID must be requestable again");
+    assert!(gs.gossip_promises.contains(&id));
+    gs.heartbeat();
+    if scoring {
+        assert_eq!(
+            gs.peer_score(&peer),
+            Some(-1.0),
+            "unexpired replacement adds no penalty"
+        );
+    }
+}
+
+#[test]
+fn logex_gossip_promises_expire_without_peer_scoring() {
+    check_gossip_promise_expiry(false);
+}
+
+#[test]
+fn logex_gossip_promises_expire_with_one_peer_penalty() {
+    check_gossip_promise_expiry(true);
 }
 
 /// tests that an event is not created when a peer shares that it has a message that
@@ -5497,7 +5600,7 @@ fn doesnt_forward_idontwant() {
         .unwrap();
     let message_id = gs.config.message_id(&message);
     let peer = gs.connected_peers.get_mut(&peers[2]).unwrap();
-    peer.dont_send.insert(message_id, Instant::now());
+    peer.dont_send.insert(message_id);
 
     gs.handle_received_message(raw_message.clone(), &local_id);
     assert_eq!(
@@ -5546,7 +5649,7 @@ fn parses_idontwant() {
         },
     );
     let peer = gs.connected_peers.get_mut(&peers[1]).unwrap();
-    assert!(peer.dont_send.get(&message_id).is_some());
+    assert!(peer.dont_send.contains(&message_id));
 }
 
 /// Test that a node clears stale IDONTWANT messages.
@@ -5562,12 +5665,13 @@ fn clear_stale_idontwant() {
         .create_network();
 
     let peer = gs.connected_peers.get_mut(&peers[2]).unwrap();
-    peer.dont_send
-        .insert(MessageId::new(&[1, 2, 3, 4]), Instant::now());
-    std::thread::sleep(Duration::from_secs(3));
+    peer.dont_send.insert_at(
+        MessageId::new(&[1, 2, 3, 4]),
+        Instant::now() - IDONTWANT_TIMEOUT,
+    );
     gs.heartbeat();
     let peer = gs.connected_peers.get_mut(&peers[2]).unwrap();
-    assert!(peer.dont_send.is_empty());
+    assert_eq!(peer.dont_send.retained_len(), 0);
 }
 
 #[test]
@@ -5594,7 +5698,7 @@ fn test_all_queues_full() {
             outbound: false,
             topics: topics.clone(),
             sender: Sender::new(2),
-            dont_send: LinkedHashMap::new(),
+            dont_send: DontSendCache::with_limits(IDONTWANT_TIMEOUT, 10_000, 1024 * 1024),
         },
     );
 
@@ -5630,7 +5734,7 @@ fn test_slow_peer_returns_failed_publish() {
             outbound: false,
             topics: topics.clone(),
             sender: Sender::new(2),
-            dont_send: LinkedHashMap::new(),
+            dont_send: DontSendCache::with_limits(IDONTWANT_TIMEOUT, 10_000, 1024 * 1024),
         },
     );
     let peer_id = PeerId::random();
@@ -5643,7 +5747,7 @@ fn test_slow_peer_returns_failed_publish() {
             outbound: false,
             topics: topics.clone(),
             sender: Sender::new(gs.config.connection_handler_queue_len()),
-            dont_send: LinkedHashMap::new(),
+            dont_send: DontSendCache::with_limits(IDONTWANT_TIMEOUT, 10_000, 1024 * 1024),
         },
     );
 
@@ -5704,7 +5808,7 @@ fn test_slow_peer_returns_failed_ihave_handling() {
             outbound: false,
             topics: topics.clone(),
             sender: Sender::new(2),
-            dont_send: LinkedHashMap::new(),
+            dont_send: DontSendCache::with_limits(IDONTWANT_TIMEOUT, 10_000, 1024 * 1024),
         },
     );
     peers.push(slow_peer_id);
@@ -5721,7 +5825,7 @@ fn test_slow_peer_returns_failed_ihave_handling() {
             outbound: false,
             topics: topics.clone(),
             sender: Sender::new(gs.config.connection_handler_queue_len()),
-            dont_send: LinkedHashMap::new(),
+            dont_send: DontSendCache::with_limits(IDONTWANT_TIMEOUT, 10_000, 1024 * 1024),
         },
     );
 
@@ -5818,7 +5922,7 @@ fn test_slow_peer_returns_failed_iwant_handling() {
             outbound: false,
             topics: topics.clone(),
             sender: Sender::new(2),
-            dont_send: LinkedHashMap::new(),
+            dont_send: DontSendCache::with_limits(IDONTWANT_TIMEOUT, 10_000, 1024 * 1024),
         },
     );
     peers.push(slow_peer_id);
@@ -5835,7 +5939,7 @@ fn test_slow_peer_returns_failed_iwant_handling() {
             outbound: false,
             topics: topics.clone(),
             sender: Sender::new(gs.config.connection_handler_queue_len()),
-            dont_send: LinkedHashMap::new(),
+            dont_send: DontSendCache::with_limits(IDONTWANT_TIMEOUT, 10_000, 1024 * 1024),
         },
     );
 
@@ -5912,7 +6016,7 @@ fn test_slow_peer_returns_failed_forward() {
             outbound: false,
             topics: topics.clone(),
             sender: Sender::new(2),
-            dont_send: LinkedHashMap::new(),
+            dont_send: DontSendCache::with_limits(IDONTWANT_TIMEOUT, 10_000, 1024 * 1024),
         },
     );
     peers.push(slow_peer_id);
@@ -5929,7 +6033,7 @@ fn test_slow_peer_returns_failed_forward() {
             outbound: false,
             topics: topics.clone(),
             sender: Sender::new(gs.config.connection_handler_queue_len()),
-            dont_send: LinkedHashMap::new(),
+            dont_send: DontSendCache::with_limits(IDONTWANT_TIMEOUT, 10_000, 1024 * 1024),
         },
     );
 
@@ -6011,7 +6115,7 @@ fn test_slow_peer_is_downscored_on_publish() {
             outbound: false,
             topics: topics.clone(),
             sender: Sender::new(2),
-            dont_send: LinkedHashMap::new(),
+            dont_send: DontSendCache::with_limits(IDONTWANT_TIMEOUT, 10_000, 1024 * 1024),
         },
     );
     gs.as_peer_score_mut().add_peer(slow_peer_id);
@@ -6025,7 +6129,7 @@ fn test_slow_peer_is_downscored_on_publish() {
             outbound: false,
             topics: topics.clone(),
             sender: Sender::new(gs.config.connection_handler_queue_len()),
-            dont_send: LinkedHashMap::new(),
+            dont_send: DontSendCache::with_limits(IDONTWANT_TIMEOUT, 10_000, 1024 * 1024),
         },
     );
 
@@ -7102,4 +7206,346 @@ fn logex_topic_allow_all_retains_unsubscribed_message_behavior() {
     assert!(gs.connected_peers[&peers[0]].topics.contains(&topic));
     gs.handle_prune(&peers[0], vec![(topic.clone(), vec![], Some(30))]);
     assert!(gs.backoffs.get_backoff_time(&topic, &peers[0]).is_some());
+}
+
+fn logex_drain_cache_test_queues(receivers: &HashMap<PeerId, Receiver>) -> Vec<RpcOut> {
+    let mut messages = Vec::new();
+    for receiver in receivers.values() {
+        while let Ok(message) = receiver.priority.get_ref().try_recv() {
+            messages.push(message);
+        }
+        while let Ok(message) = receiver.non_priority.get_ref().try_recv() {
+            messages.push(message);
+        }
+    }
+    messages
+}
+
+fn logex_cache_test_config(limits: crate::CacheLimits) -> Config {
+    ConfigBuilder::default()
+        .cache_limits(limits)
+        .message_id_fn(|message| MessageId::new(&message.data))
+        .idontwant_message_size_threshold(0)
+        .build()
+        .unwrap()
+}
+
+#[test]
+fn logex_received_cache_limits_ignore_overflow_without_side_effects() {
+    for limit in 0..4 {
+        let mut limits = crate::CacheLimits::default();
+        match limit {
+            0 => limits.seen_entries = 1,
+            1 => limits.seen_bytes = 2,
+            2 => limits.message_entries = 1,
+            _ => limits.message_bytes = 5,
+        }
+        let (mut gs, peers, receivers, topics) = inject_nodes1()
+            .peer_no(2)
+            .topics(vec!["t".into()])
+            .to_subscribe(true)
+            .peer_kind(PeerKind::Gossipsubv1_2)
+            .scoring(Some((
+                PeerScoreParams::default(),
+                PeerScoreThresholds::default(),
+            )))
+            .gs_config(logex_cache_test_config(limits))
+            .create_network();
+        let raw = |id| RawMessage {
+            source: None,
+            data: vec![id],
+            sequence_number: None,
+            topic: topics[0].clone(),
+            signature: None,
+            key: None,
+            validated: true,
+        };
+        let first = MessageId::new(&[1]);
+        let excess = MessageId::new(&[2]);
+        gs.handle_received_message(raw(1), &peers[0]);
+        assert!(gs.mcache.get(&first).is_some(), "limit {limit}");
+        assert!(gs.events.iter().any(|event| matches!(event,
+            ToSwarm::GenerateEvent(Event::Message { message_id, .. }) if message_id == &first)));
+        gs.events.clear();
+        logex_drain_cache_test_queues(&receivers);
+        let usage = gs.mcache.usage();
+        let score = gs.peer_score(&peers[0]);
+        gs.gossip_promises.add_promise(
+            peers[0],
+            std::slice::from_ref(&excess),
+            Instant::now().checked_sub(Duration::from_secs(1)).unwrap(),
+        );
+        gs.handle_received_message(raw(2), &peers[0]);
+        assert!(
+            gs.events.is_empty(),
+            "overflow generated an event, limit {limit}"
+        );
+        assert!(
+            logex_drain_cache_test_queues(&receivers).is_empty(),
+            "overflow sent a control or payload, limit {limit}"
+        );
+        assert_eq!(gs.mcache.usage(), usage);
+        assert!(gs.mcache.get(&first).is_some());
+        assert!(!gs.duplicate_cache.contains(&excess));
+        assert!(!gs.as_peer_score_mut().tracks_message(&excess));
+        assert!(!gs.gossip_promises.contains(&excess));
+        gs.apply_iwant_penalties();
+        assert_eq!(gs.peer_score(&peers[0]), score);
+        gs.handle_received_message(raw(1), &peers[0]);
+        assert!(gs.events.is_empty(), "duplicate reached application");
+        assert_eq!(gs.mcache.usage(), usage);
+    }
+}
+
+#[test]
+fn logex_publish_cache_limits_fail_before_partial_admission_or_send() {
+    for limit in 0..6 {
+        let mut limits = crate::CacheLimits::default();
+        match limit {
+            0 => limits.seen_entries = 1,
+            1 => limits.seen_bytes = 2,
+            2 => limits.message_entries = 1,
+            3 => limits.message_bytes = 5,
+            4 => limits.published_entries = 1,
+            _ => limits.published_bytes = 2,
+        }
+        let (mut gs, peers, receivers, _) = inject_nodes1()
+            .peer_no(1)
+            .topics(vec!["t".into(), "u".into()])
+            .to_subscribe(true)
+            .peer_kind(PeerKind::Gossipsubv1_2)
+            .gs_config(
+                ConfigBuilder::default()
+                    .cache_limits(limits)
+                    .message_id_fn(|message| MessageId::new(&message.data))
+                    .flood_publish(false)
+                    .build()
+                    .unwrap(),
+            )
+            .create_network();
+        gs.publish_config = PublishConfig::Anonymous;
+        let first = gs.publish(Topic::new("t"), vec![1]).unwrap();
+        assert!(gs.unsubscribe(&Topic::new("u")));
+        let unpublished = Topic::new("u").hash();
+        assert!(gs.connected_peers[&peers[0]].topics.contains(&unpublished));
+        assert!(!gs.mesh.contains_key(&unpublished));
+        assert!(!gs.fanout.contains_key(&unpublished));
+        assert!(!gs.fanout_last_pub.contains_key(&unpublished));
+        gs.events.clear();
+        logex_drain_cache_test_queues(&receivers);
+        let usage = gs.mcache.usage();
+        let seen = gs.duplicate_cache.retained_len();
+        let published = gs.published_message_ids.retained_len();
+        let fanout = gs.fanout.clone();
+        let last_pub = gs.fanout_last_pub.clone();
+        assert!(
+            matches!(
+                gs.publish(Topic::new("u"), vec![2]),
+                Err(PublishError::CacheFull)
+            ),
+            "limit {limit}"
+        );
+        assert_eq!(gs.mcache.usage(), usage);
+        assert_eq!(gs.duplicate_cache.retained_len(), seen);
+        assert_eq!(gs.published_message_ids.retained_len(), published);
+        assert_eq!(gs.fanout, fanout);
+        assert_eq!(gs.fanout_last_pub, last_pub);
+        assert!(gs.events.is_empty());
+        assert!(logex_drain_cache_test_queues(&receivers).is_empty());
+        assert!(gs.mcache.get(&first).is_some());
+        assert!(matches!(
+            gs.publish(Topic::new("t"), vec![1]),
+            Err(PublishError::Duplicate)
+        ));
+    }
+}
+
+#[test]
+fn logex_iwant_requests_only_admitted_promises_and_clears_unsent() {
+    let limits = crate::CacheLimits {
+        promise_entries: 1,
+        ..Default::default()
+    };
+    let (mut gs, peers, receivers, topics) = inject_nodes1()
+        .peer_no(1)
+        .topics(vec!["t".into()])
+        .to_subscribe(true)
+        .scoring(Some((
+            PeerScoreParams::default(),
+            PeerScoreThresholds::default(),
+        )))
+        .gs_config(logex_cache_test_config(limits))
+        .create_network();
+    logex_drain_cache_test_queues(&receivers);
+    let ids = vec![MessageId::new(&[1]), MessageId::new(&[2])];
+    gs.handle_ihave(&peers[0], vec![(topics[0].clone(), ids.clone())]);
+    let requested: Vec<_> = logex_drain_cache_test_queues(&receivers)
+        .into_iter()
+        .flat_map(|message| match message {
+            RpcOut::IWant(IWant { message_ids }) => message_ids,
+            _ => vec![],
+        })
+        .collect();
+    assert_eq!(requested.len(), 1);
+    assert!(ids.contains(&requested[0]));
+    assert_eq!(gs.count_sent_iwant.get(&peers[0]), Some(&1));
+    for id in &ids {
+        assert_eq!(gs.gossip_promises.contains(id), requested.contains(id));
+    }
+    gs.gossip_promises.message_delivered(&requested[0]);
+    receivers[&peers[0]].non_priority.get_ref().close();
+    let unsent = MessageId::new(&[3]);
+    gs.handle_ihave(&peers[0], vec![(topics[0].clone(), vec![unsent.clone()])]);
+    assert!(!gs.gossip_promises.contains(&unsent));
+    assert_eq!(gs.count_sent_iwant.get(&peers[0]), Some(&1));
+    let score = gs.peer_score(&peers[0]);
+    gs.apply_iwant_penalties();
+    assert_eq!(gs.peer_score(&peers[0]), score);
+}
+
+#[test]
+fn logex_incoming_idontwant_preserves_admitted_ids_and_first_deadline() {
+    for (count, bytes) in [(1, 100), (3, 1)] {
+        let (mut gs, peers, _, _) = inject_nodes1()
+            .peer_no(1)
+            .peer_kind(PeerKind::Gossipsubv1_2)
+            .create_network();
+        let ttl = Duration::from_secs(60);
+        gs.connected_peers.get_mut(&peers[0]).unwrap().dont_send =
+            DontSendCache::with_limits(ttl, count, bytes);
+        let first = MessageId::new(&[1]);
+        let excess = MessageId::new(&[2]);
+        let deliver = |gs: &mut Behaviour, ids| {
+            gs.on_connection_handler_event(
+                peers[0],
+                ConnectionId::new_unchecked(0),
+                HandlerEvent::Message {
+                    rpc: Rpc {
+                        messages: vec![],
+                        subscriptions: vec![],
+                        control_msgs: vec![ControlAction::IDontWant(IDontWant {
+                            message_ids: ids,
+                        })],
+                    },
+                    invalid_messages: vec![],
+                },
+            );
+        };
+        deliver(&mut gs, vec![first.clone(), excess.clone()]);
+        let cache = &gs.connected_peers[&peers[0]].dont_send;
+        assert!(cache.contains(&first));
+        assert!(!cache.contains(&excess));
+        assert_eq!(cache.retained_len(), 1);
+        // Set a known original admission time, then exercise duplicate receipt
+        // through the actual handler before checking the original deadline.
+        let admitted = Instant::now().checked_sub(Duration::from_secs(1)).unwrap();
+        let cache = &mut gs.connected_peers.get_mut(&peers[0]).unwrap().dont_send;
+        *cache = DontSendCache::with_limits(ttl, count, bytes);
+        assert!(cache.insert_at(first.clone(), admitted));
+        deliver(&mut gs, vec![first.clone()]);
+        let cache = &mut gs.connected_peers.get_mut(&peers[0]).unwrap().dont_send;
+        cache.prune_expired(admitted + ttl);
+        assert_eq!(
+            cache.retained_len(),
+            0,
+            "duplicate extended original deadline"
+        );
+    }
+}
+
+#[test]
+fn logex_established_connections_apply_configured_idontwant_limits() {
+    for outbound in [false, true] {
+        for (count, bytes) in [(1, 100), (3, 1)] {
+            let limits = crate::CacheLimits {
+                idontwant_entries_per_peer: count,
+                idontwant_bytes_per_peer: bytes,
+                ..Default::default()
+            };
+            let (mut gs, _, _, _) = inject_nodes1()
+                .gs_config(logex_cache_test_config(limits))
+                .create_network();
+            let peer = PeerId::random();
+            let connection = ConnectionId::new_unchecked(0);
+            let address = "/ip4/127.0.0.1/tcp/1234".parse::<Multiaddr>().unwrap();
+            let _handler = if outbound {
+                gs.handle_established_outbound_connection(
+                    connection,
+                    peer,
+                    &address,
+                    Endpoint::Dialer,
+                    PortUse::Reuse,
+                )
+                .unwrap()
+            } else {
+                gs.handle_established_inbound_connection(connection, peer, &address, &address)
+                    .unwrap()
+            };
+            gs.on_connection_handler_event(
+                peer,
+                connection,
+                HandlerEvent::PeerKind(PeerKind::Gossipsubv1_2),
+            );
+            let first = MessageId::new(&[1]);
+            let excess = MessageId::new(&[2]);
+            gs.on_connection_handler_event(
+                peer,
+                connection,
+                HandlerEvent::Message {
+                    rpc: Rpc {
+                        messages: vec![],
+                        subscriptions: vec![],
+                        control_msgs: vec![ControlAction::IDontWant(IDontWant {
+                            message_ids: vec![first.clone(), excess.clone()],
+                        })],
+                    },
+                    invalid_messages: vec![],
+                },
+            );
+            let cache = &gs.connected_peers[&peer].dont_send;
+            assert!(cache.contains(&first), "outbound={outbound}, count={count}");
+            assert!(
+                !cache.contains(&excess),
+                "outbound={outbound}, count={count}"
+            );
+            assert_eq!(cache.retained_len(), 1);
+        }
+    }
+}
+
+#[test]
+fn logex_payload_history_suppresses_duplicates_after_seen_expiry() {
+    let (mut gs, peers, receivers, topics) = inject_nodes1()
+        .peer_no(1)
+        .topics(vec!["t".into()])
+        .to_subscribe(true)
+        .gs_config(logex_cache_test_config(crate::CacheLimits::default()))
+        .create_network();
+    let raw = RawMessage {
+        source: None,
+        data: vec![1],
+        sequence_number: None,
+        topic: topics[0].clone(),
+        signature: None,
+        key: None,
+        validated: true,
+    };
+    let id = MessageId::new(&[1]);
+    gs.handle_received_message(raw.clone(), &peers[0]);
+    assert!(gs.mcache.get(&id).is_some());
+    gs.duplicate_cache
+        .prune_expired(Instant::now() + gs.config.duplicate_cache_time());
+    assert_eq!(gs.duplicate_cache.retained_len(), 0);
+    gs.events.clear();
+    logex_drain_cache_test_queues(&receivers);
+    let usage = gs.mcache.usage();
+    gs.handle_received_message(raw, &peers[0]);
+    assert!(gs.events.is_empty());
+    assert_eq!(gs.mcache.usage(), usage);
+    assert_eq!(gs.duplicate_cache.retained_len(), 0);
+    assert!(matches!(
+        gs.publish(Topic::new("t"), vec![1]),
+        Err(PublishError::Duplicate)
+    ));
+    assert!(logex_drain_cache_test_queues(&receivers).is_empty());
 }

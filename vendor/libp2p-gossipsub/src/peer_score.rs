@@ -639,6 +639,11 @@ impl PeerScore {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn tracks_message(&self, msg_id: &MessageId) -> bool {
+        self.deliveries.contains_key(msg_id)
+    }
+
     pub(crate) fn validate_message(
         &mut self,
         from: &PeerId,

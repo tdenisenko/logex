@@ -19,7 +19,7 @@
 // DEALINGS IN THE SOFTWARE.
 
 //! A collection of types using the Gossipsub system.
-use std::{collections::BTreeSet, fmt, fmt::Debug};
+use std::{collections::BTreeSet, fmt, fmt::Debug, time::Duration};
 
 use futures_timer::Delay;
 use hashlink::LinkedHashMap;
@@ -100,6 +100,88 @@ impl std::fmt::Debug for MessageId {
     }
 }
 
+/// Bounded per-peer IDONTWANT suppression. Admitted IDs retain their original
+/// deadline; duplicates and capacity pressure cannot extend or evict them.
+#[derive(Debug)]
+pub(crate) struct DontSendCache {
+    entries: LinkedHashMap<MessageId, Instant>,
+    ttl: Duration,
+    max_entries: usize,
+    max_bytes: usize,
+    retained_bytes: usize,
+}
+
+impl DontSendCache {
+    pub(crate) fn with_limits(ttl: Duration, max_entries: usize, max_bytes: usize) -> Self {
+        Self {
+            entries: LinkedHashMap::new(),
+            ttl,
+            max_entries,
+            max_bytes,
+            retained_bytes: 0,
+        }
+    }
+
+    /// Returns true only when a new ID is retained.
+    pub(crate) fn insert(&mut self, id: MessageId) -> bool {
+        self.insert_with_time(id, Instant::now())
+    }
+
+    fn insert_with_time(&mut self, id: MessageId, now: Instant) -> bool {
+        self.prune_expired(now);
+        if self.entries.contains_key(&id) || self.entries.len() >= self.max_entries {
+            return false;
+        }
+        let Some(deadline) = now.checked_add(self.ttl) else {
+            return false;
+        };
+        if deadline <= now {
+            return false;
+        }
+        // The ID is moved, so spare buffer capacity remains owned by this cache.
+        let Some(bytes) = self.retained_bytes.checked_add(id.0.capacity()) else {
+            return false;
+        };
+        if bytes > self.max_bytes {
+            return false;
+        }
+        self.entries.insert(id, deadline);
+        self.retained_bytes = bytes;
+        true
+    }
+
+    pub(crate) fn contains(&self, id: &MessageId) -> bool {
+        self.contains_at(id, Instant::now())
+    }
+
+    fn contains_at(&self, id: &MessageId, now: Instant) -> bool {
+        self.entries.get(id).is_some_and(|deadline| *deadline > now)
+    }
+
+    /// Fixed TTL and monotonic insertion keep deadlines ordered. Each expired
+    /// record is visited once; insertion never scans all retained records.
+    pub(crate) fn prune_expired(&mut self, now: Instant) {
+        while self
+            .entries
+            .front()
+            .is_some_and(|(_, deadline)| *deadline <= now)
+        {
+            let (id, _) = self.entries.pop_front().expect("front was present");
+            self.retained_bytes -= id.0.capacity();
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn insert_at(&mut self, id: MessageId, now: Instant) -> bool {
+        self.insert_with_time(id, now)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn retained_len(&self) -> usize {
+        self.entries.len()
+    }
+}
+
 #[derive(Debug)]
 /// Connected peer details.
 pub(crate) struct PeerDetails {
@@ -114,7 +196,7 @@ pub(crate) struct PeerDetails {
     /// The rpc sender to the connection handler(s).
     pub(crate) sender: Sender,
     /// Don't send messages.
-    pub(crate) dont_send: LinkedHashMap<MessageId, Instant>,
+    pub(crate) dont_send: DontSendCache,
 }
 
 /// Describes the types of peers that can exist in the gossipsub context.
@@ -219,10 +301,7 @@ pub struct Message {
 impl fmt::Debug for Message {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Message")
-            .field(
-                "data",
-                &format_args!("{:<20}", &hex_fmt::HexFmt(&self.data)),
-            )
+            .field("data", &format_args!("{:<20}", hex_fmt::HexFmt(&self.data)))
             .field("source", &self.source)
             .field("sequence_number", &self.sequence_number)
             .field("topic", &self.topic)
@@ -633,5 +712,92 @@ impl AsRef<str> for PeerKind {
 impl fmt::Display for PeerKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_ref())
+    }
+}
+
+#[cfg(test)]
+mod dont_send_cache_tests {
+    use super::*;
+
+    #[test]
+    fn logex_dont_send_exact_entry_and_byte_limits() {
+        let now = Instant::now();
+        let mut cache = DontSendCache::with_limits(Duration::from_secs(2), 2, 2);
+        let first = MessageId::new(&[1]);
+        let second = MessageId::new(&[2]);
+        assert!(cache.insert_at(first.clone(), now));
+        assert!(cache.insert_at(second.clone(), now));
+        assert!(!cache.insert_at(MessageId::new(&[3]), now));
+        assert_eq!(cache.retained_len(), 2);
+        assert_eq!(cache.retained_bytes, 2);
+        assert!(cache.contains_at(&first, now));
+        assert!(cache.contains_at(&second, now));
+        let mut bytes = DontSendCache::with_limits(Duration::from_secs(2), 3, 1);
+        assert!(bytes.insert_at(first, now));
+        assert!(!bytes.insert_at(second, now));
+        assert_eq!(bytes.retained_len(), 1);
+    }
+
+    #[test]
+    fn logex_dont_send_charges_moved_id_capacity() {
+        let now = Instant::now();
+        let mut id = Vec::with_capacity(8);
+        id.push(1);
+        let capacity = id.capacity();
+        let mut cache = DontSendCache::with_limits(Duration::from_secs(1), 1, capacity - 1);
+        assert!(!cache.insert_at(MessageId(id), now));
+        assert_eq!(cache.retained_len(), 0);
+        assert_eq!(cache.retained_bytes, 0);
+        let mut id = Vec::with_capacity(8);
+        id.push(1);
+        cache.max_bytes = id.capacity();
+        assert!(cache.insert_at(MessageId(id), now));
+        assert_eq!(cache.retained_bytes, cache.max_bytes);
+        cache.prune_expired(now + Duration::from_secs(1));
+        assert_eq!(cache.retained_len(), 0);
+        assert_eq!(cache.retained_bytes, 0);
+    }
+
+    #[test]
+    fn logex_dont_send_duplicates_do_not_refresh_or_reorder_expiry() {
+        let now = Instant::now();
+        let mut cache = DontSendCache::with_limits(Duration::from_secs(2), 2, 2);
+        let first = MessageId::new(&[1]);
+        let second = MessageId::new(&[2]);
+        assert!(cache.insert_at(first.clone(), now));
+        assert!(cache.insert_at(second.clone(), now + Duration::from_secs(1)));
+        assert!(!cache.insert_at(first.clone(), now + Duration::from_secs(1)));
+        let deadline = now + Duration::from_secs(2);
+        assert!(!cache.contains_at(&first, deadline));
+        assert!(cache.contains_at(&second, deadline));
+        cache.prune_expired(deadline);
+        assert_eq!(cache.retained_len(), 1);
+        assert_eq!(cache.retained_bytes, 1);
+        assert!(cache.insert_at(first.clone(), deadline));
+        cache.prune_expired(now + Duration::from_secs(3));
+        assert!(!cache.contains_at(&second, now + Duration::from_secs(3)));
+        assert!(cache.contains_at(&first, now + Duration::from_secs(3)));
+        assert_eq!(cache.retained_bytes, 1);
+        cache.prune_expired(now + Duration::from_secs(4));
+        assert_eq!(cache.retained_len(), 0);
+        assert_eq!(cache.retained_bytes, 0);
+    }
+
+    #[test]
+    fn logex_dont_send_admission_reclaims_expired_capacity() {
+        let now = Instant::now();
+        let mut cache = DontSendCache::with_limits(Duration::from_secs(1), 1, 1);
+        assert!(cache.insert_at(MessageId::new(&[1]), now));
+        assert!(cache.insert_at(MessageId::new(&[2]), now + Duration::from_secs(1)));
+        assert_eq!(cache.retained_len(), 1);
+        assert_eq!(cache.retained_bytes, 1);
+        let mut disabled = DontSendCache::with_limits(Duration::ZERO, 1, 1);
+        assert!(!disabled.insert_at(MessageId::new(&[1]), now));
+        assert_eq!(disabled.retained_len(), 0);
+        if now.checked_add(Duration::MAX).is_none() {
+            let mut overflow = DontSendCache::with_limits(Duration::MAX, 1, 1);
+            assert!(!overflow.insert_at(MessageId::new(&[1]), now));
+            assert_eq!(overflow.retained_len(), 0);
+        }
     }
 }

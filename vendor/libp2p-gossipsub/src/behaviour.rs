@@ -32,7 +32,6 @@ use std::{
 
 use futures::FutureExt;
 use futures_timer::Delay;
-use hashlink::LinkedHashMap;
 use libp2p_core::{
     multiaddr::Protocol::{Ip4, Ip6},
     transport::PortUse,
@@ -64,12 +63,12 @@ use crate::{
     rpc::Sender,
     rpc_proto::proto,
     subscription_filter::{AllowAllSubscriptionFilter, TopicSubscriptionFilter},
-    time_cache::DuplicateCache,
+    time_cache::{CacheAdmission, DuplicateCache},
     topic::{Hasher, Topic, TopicHash},
     transform::{DataTransform, IdentityTransform},
     types::{
-        ControlAction, Graft, IDontWant, IHave, IWant, Message, MessageAcceptance, MessageId,
-        PeerDetails, PeerInfo, PeerKind, Prune, RawMessage, RpcOut, Subscription,
+        ControlAction, DontSendCache, Graft, IDontWant, IHave, IWant, Message, MessageAcceptance,
+        MessageId, PeerDetails, PeerInfo, PeerKind, Prune, RawMessage, RpcOut, Subscription,
         SubscriptionAction,
     },
     FailedMessages, PublishError, SubscriptionError, TopicScoreParams, ValidationError,
@@ -78,11 +77,14 @@ use crate::{
 #[cfg(test)]
 mod tests;
 
-/// IDONTWANT cache capacity.
-const IDONTWANT_CAP: usize = 10_000;
-
 /// IDONTWANT timeout before removal.
 const IDONTWANT_TIMEOUT: Duration = Duration::new(3, 0);
+
+// The time cache owns the moved ID and a cloned expiry-list ID. Fixed map/list
+// metadata is bounded independently by the entry limit.
+fn retained_message_id_bytes(id: &MessageId) -> usize {
+    id.0.capacity().saturating_add(id.0.len())
+}
 
 /// Max allowed PRUNE backoff, 1 hour.
 const MAX_REMOTE_PRUNE_BACKOFF_SECONDS: u64 = 3600;
@@ -271,7 +273,7 @@ pub struct Behaviour<D = IdentityTransform, F = AllowAllSubscriptionFilter> {
     /// Information used for publishing messages.
     publish_config: PublishConfig,
 
-    /// An LRU Time cache for storing seen messages (based on their ID). This cache prevents
+    /// A bounded cache with fixed insertion deadlines for seen messages. This prevents
     /// duplicates from being propagated to the application and on the network.
     duplicate_cache: DuplicateCache<MessageId>,
 
@@ -427,13 +429,19 @@ where
         // We do not allow configurations where a published message would also be rejected if it
         // were received locally.
         validate_config(&privacy, config.validation_mode())?;
+        let limits = *config.cache_limits();
 
         Ok(Behaviour {
             #[cfg(feature = "metrics")]
             metrics: None,
             events: VecDeque::new(),
             publish_config: privacy.into(),
-            duplicate_cache: DuplicateCache::new(config.duplicate_cache_time()),
+            duplicate_cache: DuplicateCache::with_limits(
+                config.duplicate_cache_time(),
+                limits.seen_entries,
+                limits.seen_bytes,
+                retained_message_id_bytes,
+            ),
             explicit_peers: HashSet::new(),
             blacklisted_peers: HashSet::new(),
             mesh: HashMap::new(),
@@ -444,7 +452,13 @@ where
                 config.heartbeat_interval(),
                 config.backoff_slack(),
             ),
-            mcache: MessageCache::new(config.history_gossip(), config.history_length()),
+            mcache: MessageCache::with_limits(
+                config.history_gossip(),
+                config.history_length(),
+                limits.message_entries,
+                limits.message_bytes,
+                limits.message_peer_associations,
+            ),
             heartbeat: Delay::new(config.heartbeat_interval() + config.heartbeat_initial_delay()),
             heartbeat_ticks: 0,
             px_peers: HashSet::new(),
@@ -452,12 +466,21 @@ where
             count_received_ihave: HashMap::new(),
             count_sent_iwant: HashMap::new(),
             connected_peers: HashMap::new(),
-            published_message_ids: DuplicateCache::new(config.published_message_ids_cache_time()),
+            published_message_ids: DuplicateCache::with_limits(
+                config.published_message_ids_cache_time(),
+                limits.published_entries,
+                limits.published_bytes,
+                retained_message_id_bytes,
+            ),
             config,
             subscription_filter,
             data_transform,
             failed_messages: Default::default(),
-            gossip_promises: Default::default(),
+            gossip_promises: GossipPromises::with_limits(
+                limits.promise_entries,
+                limits.promise_bytes,
+                limits.promise_peer_associations,
+            ),
         })
     }
 
@@ -609,7 +632,7 @@ where
         });
 
         // Check the if the message has been published before
-        if self.duplicate_cache.contains(&msg_id) {
+        if self.duplicate_cache.contains(&msg_id) || self.mcache.contains(&msg_id) {
             // This message has already been seen. We don't re-publish messages that have already
             // been published on the network.
             tracing::warn!(
@@ -617,6 +640,20 @@ where
                 "Not publishing a message that has already been published"
             );
             return Err(PublishError::Duplicate);
+        }
+
+        let track_published = matches!(
+            self.publish_config,
+            PublishConfig::RandomAuthor | PublishConfig::Anonymous
+        ) && !self.config.allow_self_origin();
+        // Check every required owner before mutating fanout, retaining any part
+        // of this message, or scheduling sends. No await can interleave admission.
+        if self.duplicate_cache.admission(&msg_id) == CacheAdmission::Full
+            || !self.mcache.can_put(&msg_id, &raw_message)
+            || (track_published
+                && self.published_message_ids.admission(&msg_id) == CacheAdmission::Full)
+        {
+            return Err(PublishError::CacheFull);
         }
 
         tracing::trace!(message_id=%msg_id, "Publishing message");
@@ -733,18 +770,19 @@ where
 
         // If the message isn't a duplicate and we have sent it to some peers add it to the
         // duplicate cache and memcache.
-        self.duplicate_cache.insert(msg_id.clone());
-        self.mcache.put(&msg_id, raw_message.clone());
+        let admitted = self.duplicate_cache.try_insert(msg_id.clone());
+        debug_assert_eq!(admitted, CacheAdmission::New);
+        let cached = self.mcache.put(&msg_id, raw_message.clone());
+        debug_assert!(cached);
 
         // Consider the message as delivered for gossip promises.
         self.gossip_promises.message_delivered(&msg_id);
 
         // If the message is anonymous or has a random author add it to the published message ids
         // cache.
-        if let PublishConfig::RandomAuthor | PublishConfig::Anonymous = self.publish_config {
-            if !self.config.allow_self_origin() {
-                self.published_message_ids.insert(msg_id.clone());
-            }
+        if track_published {
+            let admitted = self.published_message_ids.try_insert(msg_id.clone());
+            debug_assert_ne!(admitted, CacheAdmission::Full);
         }
 
         // Send to peers we know are subscribed to the topic.
@@ -1215,7 +1253,7 @@ where
 
         // IHAVE flood protection
         let peer_have = self.count_received_ihave.entry(*peer_id).or_insert(0);
-        *peer_have += 1;
+        *peer_have = peer_have.saturating_add(1);
         if *peer_have > self.config.max_ihave_messages() {
             tracing::debug!(
                 peer=%peer_id,
@@ -1252,7 +1290,7 @@ where
             }
 
             for id in ids.into_iter().filter(|id| {
-                if self.duplicate_cache.contains(id) {
+                if self.duplicate_cache.contains(id) || self.mcache.contains(id) {
                     return false;
                 }
 
@@ -1272,7 +1310,7 @@ where
         if !iwant_ids.is_empty() {
             let iasked = self.count_sent_iwant.entry(*peer_id).or_insert(0);
             let mut iask = iwant_ids.len();
-            if *iasked + iask > self.config.max_ihave_length() {
+            if iask > self.config.max_ihave_length().saturating_sub(*iasked) {
                 iask = self.config.max_ihave_length().saturating_sub(*iasked);
             }
 
@@ -1290,7 +1328,6 @@ where
             iwant_ids_vec.partial_shuffle(&mut rng, iask);
 
             iwant_ids_vec.truncate(iask);
-            *iasked += iask;
 
             let followup_time = Instant::now()
                 .checked_add(self.config.iwant_followup_time())
@@ -1298,20 +1335,32 @@ where
                     tracing::error!("Invalid iwant_followup_time using Instant::now()");
                     Instant::now()
                 });
-            self.gossip_promises
-                .add_promise(*peer_id, &iwant_ids_vec, followup_time);
+            let iwant_ids_vec =
+                self.gossip_promises
+                    .add_promise(*peer_id, &iwant_ids_vec, followup_time);
+            if iwant_ids_vec.is_empty() {
+                return;
+            }
             tracing::trace!(
                 peer=%peer_id,
                 "IHAVE: Asking for the following messages from peer: {:?}",
                 iwant_ids_vec
             );
 
-            self.send_message(
+            if self.send_message(
                 *peer_id,
                 RpcOut::IWant(IWant {
-                    message_ids: iwant_ids_vec,
+                    message_ids: iwant_ids_vec.clone(),
                 }),
-            );
+            ) {
+                *self.count_sent_iwant.entry(*peer_id).or_default() += iwant_ids_vec.len();
+            } else {
+                // No request was scheduled. Capacity pressure in our send queue
+                // must not become a broken promise attributed to the peer.
+                for id in iwant_ids_vec {
+                    self.gossip_promises.message_delivered(&id);
+                }
+            }
         }
         tracing::trace!(peer=%peer_id, "Completed IHAVE handling for peer");
     }
@@ -1337,11 +1386,7 @@ where
         for id in iwant_msgs {
             // If we have it and the IHAVE count is not above the threshold,
             // forward the message.
-            if let Some((msg, count)) = self
-                .mcache
-                .get_with_iwant_counts(&id, peer_id)
-                .map(|(msg, count)| (msg.clone(), count))
-            {
+            if let Some((msg, count)) = self.mcache.get_with_iwant_counts(&id, peer_id) {
                 if count > self.config.gossip_retransimission() {
                     tracing::debug!(
                         peer=%peer_id,
@@ -1349,18 +1394,20 @@ where
                         "IWANT: Peer has asked for message too many times; ignoring request"
                     );
                 } else {
-                    if let Some(peer) = self.connected_peers.get_mut(peer_id) {
-                        if peer.dont_send.contains_key(&id) {
+                    if let Some(peer) = self.connected_peers.get(peer_id) {
+                        if peer.dont_send.contains(&id) {
                             tracing::debug!(%peer_id, message_id=%id, "Peer already sent IDONTWANT for this message");
                             continue;
                         }
                     }
 
                     tracing::debug!(peer=%peer_id, "IWANT: Sending cached messages to peer");
+                    // Clone the payload only for a request that will be served.
+                    let message = msg.clone();
                     self.send_message(
                         *peer_id,
                         RpcOut::Forward {
-                            message: msg,
+                            message,
                             timeout: Delay::new(self.config.forward_queue_duration()),
                         },
                     );
@@ -1804,6 +1851,21 @@ where
         // Calculate the message id on the transformed data.
         let msg_id = self.config.message_id(&message);
 
+        // Peers are accountable for invalid input, but not for our local cache
+        // capacity. Only admitted messages may create controls, score records or
+        // application events.
+        if !self.message_is_valid(&msg_id, &mut raw_message, propagation_source) {
+            return;
+        }
+        let admission = self.duplicate_cache.admission(&msg_id);
+        let duplicate = admission == CacheAdmission::Duplicate || self.mcache.contains(&msg_id);
+        if !duplicate
+            && (admission == CacheAdmission::Full || !self.mcache.can_put(&msg_id, &raw_message))
+        {
+            self.gossip_promises.message_delivered(&msg_id);
+            return;
+        }
+
         // Broadcast IDONTWANT messages
         if raw_message.raw_protobuf_len() > self.config.idontwant_message_size_threshold() {
             let recipient_peers = self
@@ -1828,14 +1890,7 @@ where
             }
         }
 
-        // Check the validity of the message
-        // Peers get penalized if this message is invalid. We don't add it to the duplicate cache
-        // and instead continually penalize peers that repeatedly send this message.
-        if !self.message_is_valid(&msg_id, &mut raw_message, propagation_source) {
-            return;
-        }
-
-        if !self.duplicate_cache.insert(msg_id.clone()) {
+        if duplicate {
             tracing::debug!(message_id=%msg_id, "Message already received, ignoring");
             if let PeerScoreState::Active(peer_score) = &mut self.peer_score {
                 peer_score.duplicated_message(propagation_source, &msg_id, &message.topic);
@@ -1843,6 +1898,11 @@ where
             self.mcache.observe_duplicate(&msg_id, propagation_source);
             return;
         }
+
+        let admitted = self.duplicate_cache.try_insert(msg_id.clone());
+        debug_assert_eq!(admitted, CacheAdmission::New);
+        let cached = self.mcache.put(&msg_id, raw_message.clone());
+        debug_assert!(cached);
 
         tracing::debug!(
             message_id=%msg_id,
@@ -1863,9 +1923,6 @@ where
         if let PeerScoreState::Active(peer_score) = &mut self.peer_score {
             peer_score.validate_message(propagation_source, &msg_id, &message.topic);
         }
-
-        // Add the message to our memcache
-        self.mcache.put(&msg_id, raw_message.clone());
 
         // Dispatch the message to the user if we are subscribed to any of the topics
         #[allow(
@@ -2104,8 +2161,10 @@ where
 
     /// Applies penalties to peers that did not respond to our IWANT requests.
     fn apply_iwant_penalties(&mut self) {
+        // Expiry owns request lifetime even when peer scoring is disabled.
+        let broken_promises = self.gossip_promises.get_broken_promises();
         if let PeerScoreState::Active(peer_score) = &mut self.peer_score {
-            for (peer, count) in self.gossip_promises.get_broken_promises() {
+            for (peer, count) in broken_promises {
                 peer_score.add_penalty(&peer, count);
                 #[cfg(feature = "metrics")]
                 if let Some(metrics) = self.metrics.as_mut() {
@@ -2555,15 +2614,9 @@ where
         }
         self.failed_messages.shrink_to_fit();
 
-        // Flush stale IDONTWANTs.
+        // Flush stale IDONTWANTs without extending deadlines on duplicates.
         for peer in self.connected_peers.values_mut() {
-            while let Some((_front, instant)) = peer.dont_send.front() {
-                if IDONTWANT_TIMEOUT >= Instant::now().saturating_duration_since(*instant) {
-                    break;
-                } else {
-                    peer.dont_send.pop_front();
-                }
-            }
+            peer.dont_send.prune_expired(now);
         }
 
         #[cfg(feature = "metrics")]
@@ -2784,7 +2837,7 @@ where
         // forward the message to peers
         for peer_id in recipient_peers.iter() {
             if let Some(peer) = self.connected_peers.get_mut(peer_id) {
-                if peer.dont_send.contains_key(msg_id) {
+                if peer.dont_send.contains(msg_id) {
                     tracing::debug!(%peer_id, message_id=%msg_id, "Peer doesn't want message");
                     continue;
                 }
@@ -3179,7 +3232,11 @@ where
             outbound: false,
             sender: Sender::new(self.config.connection_handler_queue_len()),
             topics: Default::default(),
-            dont_send: LinkedHashMap::new(),
+            dont_send: DontSendCache::with_limits(
+                IDONTWANT_TIMEOUT,
+                self.config.cache_limits().idontwant_entries_per_peer,
+                self.config.cache_limits().idontwant_bytes_per_peer,
+            ),
         });
         // Add the new connection
         connected_peer.connections.push(connection_id);
@@ -3206,7 +3263,11 @@ where
             outbound: !self.px_peers.contains(&peer_id),
             sender: Sender::new(self.config.connection_handler_queue_len()),
             topics: Default::default(),
-            dont_send: LinkedHashMap::new(),
+            dont_send: DontSendCache::with_limits(
+                IDONTWANT_TIMEOUT,
+                self.config.cache_limits().idontwant_entries_per_peer,
+                self.config.cache_limits().idontwant_bytes_per_peer,
+            ),
         });
         // Add the new connection
         connected_peer.connections.push(connection_id);
@@ -3393,11 +3454,7 @@ where
                                 metrics.register_idontwant(message_ids.len());
                             }
                             for message_id in message_ids {
-                                peer.dont_send.insert(message_id, Instant::now());
-                                // Don't exceed capacity.
-                                if peer.dont_send.len() > IDONTWANT_CAP {
-                                    peer.dont_send.pop_front();
-                                }
+                                peer.dont_send.insert(message_id);
                             }
                         }
                     }
@@ -3601,14 +3658,12 @@ fn validate_config(
                 return Err("Published messages contain an author but incoming messages with an author will be rejected. Consider adjusting the validation or privacy settings in the config");
             }
         }
-        ValidationMode::Strict => {
-            if !authenticity.is_signing() {
-                return Err(
+        ValidationMode::Strict if !authenticity.is_signing() => {
+            return Err(
                     "Messages will be
                 published unsigned and incoming unsigned messages will be rejected. Consider adjusting
                 the validation or privacy settings in the config"
-                );
-            }
+            );
         }
         _ => {}
     }
