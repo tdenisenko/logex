@@ -88,8 +88,9 @@ impl AppState {
     }
 
     /// Configure shared admission and accounted memory for this server.
-    /// DataFusion operators, fallback reads and scan output participate;
-    /// native working sets, manifest/control metadata and responses
+    /// DataFusion operators, index candidates, source reads, native working sets,
+    /// scan output, structured results and encoded query responses participate.
+    /// Manifest/control metadata and internal expression-kernel temporaries
     /// remain outside this accounting. This is not an RSS cap.
     pub fn with_query_limits(
         storage: PartitionManager,
@@ -1285,6 +1286,8 @@ mod tests {
 
 #[cfg(test)]
 mod admission_tests;
+#[cfg(test)]
+mod composition_tests;
 #[cfg(test)]
 mod memory_tests;
 #[cfg(test)]

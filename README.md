@@ -144,8 +144,9 @@ continues. Metadata, status, cancellation and subscription operations are
 exempt. REST's existing exclusive-query behavior still applies.
 
 DataFusion operators, index candidates, fallback scan reads, scan output buffers,
-native row selection, COUNT, native sum state and structured SQL results use a shared accounted-memory
-budget across REST, JSON-RPC and gRPC queries. Response encoding uses the same budget.
+native row selection, COUNT, native sums and structured SQL results use a shared
+accounted-memory budget across REST, JSON-RPC and gRPC queries. Response encoding
+uses the same budget.
 Configure it with
 `sync --query-memory-bytes <BYTES>` or TOML
 `query_memory_bytes`; the default is 1 GiB (`1073741824` bytes). The value must be
@@ -153,6 +154,9 @@ positive and fit the platform's signed address space. Explicit CLI values overri
 config, including the default value. A participating operation that cannot reserve
 capacity returns HTTP 503 with `query_capacity` and resource `memory`, JSON-RPC
 `-32005`, or gRPC `RESOURCE_EXHAUSTED`. A capacity failure does not mark storage unhealthy.
+Retained responses can exhaust memory across protocols even when query slots
+remain available. Their memory becomes available again when the final owned
+response buffers are released; a capacity failure alone does not require repair.
 
 Fallback reads reserve source, page-index, selection, decoding and output buffers
 before allocation. Fixed raw reads stop at their captured or selected prefix;
