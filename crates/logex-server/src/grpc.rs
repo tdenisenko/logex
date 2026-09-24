@@ -76,10 +76,11 @@ impl LogExGrpcService {
         let memory = self.state.query_memory.clone();
         self.state
             .run_blocking_query(query, move |snapshot, _head, cancel| {
-                let rows = logex_query::execute_log_filter_on_snapshot_with_cancel(
+                let rows = logex_query::execute_log_filter_on_snapshot_with_memory(
                     snapshot,
                     &filter,
                     Some(&cancel),
+                    &memory,
                 )?;
                 protocol::log_response(&rows, &memory, Some(&cancel))
             })

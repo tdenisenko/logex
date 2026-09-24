@@ -93,6 +93,10 @@ impl<T> QueryBuffer<T> {
     pub fn truncate(&mut self, len: usize) {
         self.values.truncate(len);
     }
+    /// Drop an initial page while keeping the backing allocation charged.
+    pub fn remove_prefix(&mut self, len: usize) {
+        self.values.drain(..len.min(self.values.len()));
+    }
     /// Filter in place without releasing the backing allocation or its charge.
     pub fn retain(&mut self, keep: impl FnMut(&T) -> bool) {
         self.values.retain(keep);
@@ -154,6 +158,14 @@ impl<T> QueryBuffer<T> {
         for value in values {
             self.try_push(value)?;
         }
+        Ok(())
+    }
+
+    /// Move elements without detaching either backing allocation's owner.
+    /// The emptied source retains its capacity and charge until it is dropped.
+    pub fn try_append(&mut self, other: &mut Self) -> io::Result<()> {
+        self.try_reserve(other.len())?;
+        self.values.append(&mut other.values);
         Ok(())
     }
 }
@@ -219,6 +231,33 @@ mod tests {
         values.clear();
         assert_eq!(memory.used(), 8);
         drop(values);
+        assert_eq!(memory.used(), 0);
+    }
+
+    #[test]
+    fn append_and_pagination_preserve_both_backing_owners() {
+        let memory = QueryMemoryBudget::new(QueryMemoryLimit::new(32).unwrap());
+        let mut first = QueryBuffer::try_with_capacity(1, Some(&memory), "first").unwrap();
+        first.try_push(1u64).unwrap();
+        let mut second = QueryBuffer::try_with_capacity(1, Some(&memory), "second").unwrap();
+        second.try_push(2u64).unwrap();
+        let held = memory.reserve(1, "competing query").unwrap();
+        assert!(first.try_append(&mut second).is_err());
+        assert_eq!(&*first, &[1]);
+        assert_eq!(&*second, &[2]);
+        drop(held);
+        first.try_append(&mut second).unwrap();
+        assert_eq!(&*first, &[1, 2]);
+        assert!(second.is_empty());
+        assert_eq!(memory.used(), 24);
+        first.remove_prefix(1);
+        assert_eq!(&*first, &[2]);
+        first.remove_prefix(usize::MAX);
+        assert!(first.is_empty());
+        assert_eq!(memory.used(), 24);
+        drop(second);
+        assert_eq!(memory.used(), 16);
+        drop(first);
         assert_eq!(memory.used(), 0);
     }
 

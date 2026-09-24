@@ -1238,6 +1238,30 @@ impl SegmentReader {
         self.materialize_log_rows(row_ids, None)
     }
 
+    /// Materialize an explicit query batch with source columns, output rows and
+    /// nested payload backing charged to this reader's captured memory budget.
+    /// The reader must be opened with `open_projected_with_memory` and include
+    /// all log columns. Selection order and duplicate IDs are preserved.
+    /// Cancellation is checked between column reads and every 256 assembled rows;
+    /// a single admitted column read/decode is a synchronous boundary.
+    pub fn read_log_rows_with_memory(
+        &self,
+        row_ids: &[u32],
+        cancel: Option<&dyn Fn() -> bool>,
+    ) -> io::Result<QueryBuffer<LogRow>> {
+        let memory = self.memory.as_ref().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "accounted log rows require a budgeted reader",
+            )
+        })?;
+        check_log_materialization_cancel(cancel)?;
+        if row_ids.is_empty() {
+            return QueryBuffer::try_with_capacity(0, Some(memory), "native log rows");
+        }
+        self.materialize_log_rows_core(Some(row_ids), None, Some(memory), cancel)
+    }
+
     /// Preflight only the fixed repair routing columns. No data payload or
     /// companion data-length column is read. The reader must be offline-projected
     /// to these columns under the maintenance directory owner.
@@ -1694,22 +1718,50 @@ impl SegmentReader {
         row_ids: Option<&[u32]>,
         data: Option<(Vec<Bytes>, Vec<u32>)>,
     ) -> io::Result<Vec<LogRow>> {
-        let addresses = self.read_address(row_ids)?;
-        let block_numbers = self.read_u64("block_number", row_ids)?;
-        let block_hashes = self.read_b256("block_hash", row_ids)?;
-        let timestamps = self.read_u64("timestamp", row_ids)?;
-        let tx_hashes = self.read_b256("tx_hash", row_ids)?;
-        let tx_indices = self.read_u32("tx_index", row_ids)?;
-        let log_indices = self.read_u32("log_index", row_ids)?;
-        let topic0s = self.read_nullable_b256("topic0", row_ids)?;
-        let topic1s = self.read_nullable_b256("topic1", row_ids)?;
-        let topic2s = self.read_nullable_b256("topic2", row_ids)?;
-        let topic3s = self.read_nullable_b256("topic3", row_ids)?;
+        self.materialize_log_rows_core(row_ids, data, None, None)
+            .map(|rows| rows.into_parts().0)
+    }
+
+    fn materialize_log_rows_core(
+        &self,
+        row_ids: Option<&[u32]>,
+        data: Option<(Vec<Bytes>, Vec<u32>)>,
+        memory: Option<&QueryMemoryBudget>,
+        cancel: Option<&dyn Fn() -> bool>,
+    ) -> io::Result<QueryBuffer<LogRow>> {
+        macro_rules! read_column {
+            ($read:expr) => {{
+                check_log_materialization_cancel(cancel)?;
+                $read?
+            }};
+        }
+        let addresses = read_column!(self.read_address_core(row_ids, memory));
+        let block_numbers = read_column!(self.read_u64_core("block_number", row_ids, memory));
+        let block_hashes = read_column!(self.read_b256_core("block_hash", row_ids, memory));
+        let timestamps = read_column!(self.read_u64_core("timestamp", row_ids, memory));
+        let tx_hashes = read_column!(self.read_b256_core("tx_hash", row_ids, memory));
+        let tx_indices = read_column!(self.read_u32_core("tx_index", row_ids, memory));
+        let log_indices = read_column!(self.read_u32_core("log_index", row_ids, memory));
+        let topic0s = read_column!(self.read_nullable_b256_core("topic0", row_ids, memory));
+        let topic1s = read_column!(self.read_nullable_b256_core("topic1", row_ids, memory));
+        let topic2s = read_column!(self.read_nullable_b256_core("topic2", row_ids, memory));
+        let topic3s = read_column!(self.read_nullable_b256_core("topic3", row_ids, memory));
         let (data, data_lens) = match data {
-            Some(data) => data,
-            None => self.read_var_bytes_with_lengths("data", row_ids)?,
+            Some((values, lengths)) => (QueryBuffer::unaccounted(values), Some(lengths)),
+            // The accounted variable reader validates selected raw lengths and
+            // every decoded page's companion lengths before returning Bytes.
+            // Derive LogRow lengths from those validated values, avoiding a
+            // second companion read and a redundant output vector.
+            None if memory.is_some() => (
+                read_column!(self.read_var_bytes_with_memory("data", row_ids)),
+                None,
+            ),
+            None => {
+                let (values, lengths) = self.read_var_bytes_with_lengths("data", row_ids)?;
+                (QueryBuffer::unaccounted(values), Some(lengths))
+            }
         };
-        let sources = self.read_u8("source", row_ids)?;
+        let sources = read_column!(self.read_u8_core("source", row_ids, memory));
 
         if [
             block_numbers.len(),
@@ -1723,15 +1775,17 @@ impl SegmentReader {
             topic2s.len(),
             topic3s.len(),
             data.len(),
-            data_lens.len(),
             sources.len(),
         ]
         .into_iter()
         .any(|len| len != addresses.len())
-            || data
-                .iter()
-                .zip(&data_lens)
-                .any(|(bytes, &len)| bytes.len() as u64 != u64::from(len))
+            || data_lens.as_ref().is_some_and(|lengths| {
+                lengths.len() != addresses.len()
+                    || data
+                        .iter()
+                        .zip(lengths)
+                        .any(|(bytes, &len)| bytes.len() as u64 != u64::from(len))
+            })
         {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -1739,9 +1793,13 @@ impl SegmentReader {
             ));
         }
 
-        let mut rows = Vec::with_capacity(addresses.len());
+        check_log_materialization_cancel(cancel)?;
+        let mut rows = QueryBuffer::try_with_capacity(addresses.len(), memory, "native log rows")?;
         for index in 0..addresses.len() {
-            rows.push(LogRow {
+            if index % 256 == 0 {
+                check_log_materialization_cancel(cancel)?;
+            }
+            rows.try_push(LogRow {
                 block_number: block_numbers[index],
                 block_hash: block_hashes[index],
                 timestamp: timestamps[index],
@@ -1754,16 +1812,21 @@ impl SegmentReader {
                 topic2: topic2s[index],
                 topic3: topic3s[index],
                 data: data[index].clone(),
-                data_len: data_lens[index],
+                data_len: match &data_lens {
+                    Some(lengths) => lengths[index],
+                    None => u32::try_from(data[index].len()).map_err(|_| {
+                        io::Error::new(io::ErrorKind::InvalidData, "log data length exceeds u32")
+                    })?,
+                },
                 source: Source::from_u8(sources[index]).ok_or_else(|| {
                     io::Error::new(
                         io::ErrorKind::InvalidData,
                         format!("invalid source byte: {}", sources[index]),
                     )
                 })?,
-            });
+            })?;
         }
-
+        check_log_materialization_cancel(cancel)?;
         Ok(rows)
     }
 
@@ -2361,6 +2424,14 @@ fn validate_data_lengths(values: &[Bytes], lengths: &[u32]) -> io::Result<()> {
     Ok(())
 }
 
+fn check_log_materialization_cancel(cancel: Option<&dyn Fn() -> bool>) -> io::Result<()> {
+    if cancel.is_some_and(|check| check()) {
+        Err(io::Error::new(io::ErrorKind::Interrupted, "query canceled"))
+    } else {
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2528,6 +2599,138 @@ mod tests {
         reader.manifest.as_mut().unwrap().row_count = 0;
         assert!(
             matches!(reader.inspection_preflight(u64::MAX, u64::MAX), Err(InspectionPreflightError::Io(error)) if error.kind() == io::ErrorKind::InvalidData)
+        );
+    }
+
+    const QUERY_LOG_COLUMNS: &[&str] = &[
+        "address",
+        "block_number",
+        "block_hash",
+        "timestamp",
+        "tx_hash",
+        "tx_index",
+        "log_index",
+        "topic0",
+        "topic1",
+        "topic2",
+        "topic3",
+        "data",
+        "data_len",
+        "source",
+    ];
+
+    #[test]
+    fn accounted_log_materialization_preserves_rows_and_payload_aliases() {
+        let expected = make_rows();
+        let raw = TempDir::new().unwrap();
+        ColumnFile::write_batch(raw.path(), &expected).unwrap();
+        let (_paged, paged_dir) = compacted_fixture();
+        let bundled = TempDir::new().unwrap();
+        let mut storage = crate::native::NativeStorage::open(crate::native::NativeStorageConfig {
+            data_dir: bundled.path().to_path_buf(),
+            hot_target_rows: 20,
+            compaction_safety_margin_blocks: 0,
+        })
+        .unwrap();
+        let bundle_dir = storage.write_historical_batch(&expected).unwrap()[0]
+            .path
+            .clone();
+        drop(storage);
+        for dir in [raw.path(), paged_dir.as_path(), bundle_dir.as_path()] {
+            let memory = QueryMemoryBudget::new(
+                logex_types::QueryMemoryLimit::new(4 * 1024 * 1024).unwrap(),
+            );
+            let reader =
+                SegmentReader::open_projected_with_memory(dir, QUERY_LOG_COLUMNS, memory.clone())
+                    .unwrap();
+            for ids in [&[][..], &[19, 0, 19, 7][..], &[0, 7, 19][..]] {
+                let rows = reader.read_log_rows_with_memory(ids, None).unwrap();
+                let reference: Vec<_> = ids
+                    .iter()
+                    .map(|&id| expected[id as usize].clone())
+                    .collect();
+                assert_eq!(&*rows, reference.as_slice());
+            }
+            let rows = reader
+                .read_log_rows_with_memory(&[19, 0, 19], None)
+                .unwrap();
+            let payload = rows[0].data.clone();
+            let slice = payload.slice(1..2);
+            drop(reader);
+            let rows_and_payloads = memory.used();
+            assert!(rows_and_payloads >= (rows.capacity() * std::mem::size_of::<LogRow>()) as u128);
+            drop(rows);
+            drop(payload);
+            assert!(memory.used() > 0);
+            assert!(memory.used() < rows_and_payloads);
+            assert_eq!(slice.as_ref(), &[0xad]);
+            drop(slice);
+            assert_eq!(memory.used(), 0);
+        }
+    }
+
+    #[test]
+    fn accounted_log_materialization_pressure_cancel_and_invalid_ids_release() {
+        use std::cell::Cell;
+        let raw = TempDir::new().unwrap();
+        ColumnFile::write_batch(raw.path(), &make_rows()).unwrap();
+        let memory =
+            QueryMemoryBudget::new(logex_types::QueryMemoryLimit::new(1024 * 1024).unwrap());
+        let reader = SegmentReader::open_projected_with_memory(
+            raw.path(),
+            QUERY_LOG_COLUMNS,
+            memory.clone(),
+        )
+        .unwrap();
+        let baseline = memory.used();
+        let competitor = memory
+            .reserve(
+                memory.limit() - usize::try_from(baseline).unwrap() - 1,
+                "fixture competitor",
+            )
+            .unwrap();
+        let error = reader.read_log_rows_with_memory(&[0], None).unwrap_err();
+        assert!(matches!(
+            error
+                .get_ref()
+                .and_then(|error| error.downcast_ref::<logex_types::QueryMemoryError>()),
+            Some(logex_types::QueryMemoryError::CapacityExceeded { .. })
+        ));
+        assert_eq!(memory.used(), baseline + competitor.bytes());
+        drop(competitor);
+        for stop_at in [1, 5, 16, 17] {
+            let calls = Cell::new(0);
+            let cancel = || {
+                calls.set(calls.get() + 1);
+                calls.get() >= stop_at
+            };
+            let error = reader
+                .read_log_rows_with_memory(&[19, 0, 19], Some(&cancel))
+                .unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+            assert_eq!(memory.used(), baseline);
+        }
+        assert_eq!(
+            reader
+                .read_log_rows_with_memory(&[20], None)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(memory.used(), baseline);
+        assert_eq!(
+            reader.read_log_rows_with_memory(&[0], None).unwrap()[0],
+            make_rows()[0]
+        );
+        drop(reader);
+        assert_eq!(memory.used(), 0);
+        let unbudgeted = SegmentReader::open_projected(raw.path(), QUERY_LOG_COLUMNS).unwrap();
+        assert_eq!(
+            unbudgeted
+                .read_log_rows_with_memory(&[], None)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput
         );
     }
 
@@ -3141,7 +3344,16 @@ mod tests {
             let memory =
                 QueryMemoryBudget::new(logex_types::QueryMemoryLimit::new(1024 * 1024).unwrap());
             let reader =
-                SegmentReader::open_projected_with_memory(&dir, &["data"], memory.clone()).unwrap();
+                SegmentReader::open_projected_with_memory(&dir, QUERY_LOG_COLUMNS, memory.clone())
+                    .unwrap();
+            assert_eq!(
+                reader
+                    .read_log_rows_with_memory(&[19], None)
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::InvalidData,
+            );
+            assert_eq!(memory.used(), 0);
             assert_eq!(
                 reader
                     .read_var_bytes_with_memory("data", Some(&[19]))

@@ -110,6 +110,266 @@ pub fn execute_log_filter_on_snapshot_with_cancel(
     result
 }
 
+/// Execute a native query with source, candidate, row and sorting allocations
+/// charged to a shared budget. Returned rows and payload aliases retain their
+/// own backing charges. Snapshot/path metadata remains planning overhead.
+pub fn execute_log_filter_on_snapshot_with_memory(
+    snapshot: &StorageSnapshot,
+    filter: &NativeLogFilter,
+    cancel: Option<&crate::QueryCancelCheck>,
+    memory: &QueryMemoryBudget,
+) -> io::Result<QueryBuffer<LogRow>> {
+    snapshot.validate()?;
+    let result = (|| {
+        check_candidate_canceled(cancel)?;
+        let mut rows = QueryBuffer::try_with_capacity(0, Some(memory), "native query rows")?;
+        if filter.limit == Some(0) || filter.min_topic_count > filter.topics.len() {
+            return Ok(rows);
+        }
+        let scan_limit = filter
+            .limit
+            .map(|limit| limit.saturating_add(filter.offset));
+        for partition in snapshot.partitions_in_order(filter.order) {
+            snapshot.validate()?;
+            check_candidate_canceled(cancel)?;
+            if ordered_page_is_complete(&partition, &rows, filter.order, scan_limit) {
+                break;
+            }
+            if !partition_matches_filter(&partition, filter) {
+                continue;
+            }
+            let mut selected = scan_native_partition_with_memory(
+                &partition.path,
+                filter,
+                scan_limit,
+                cancel,
+                partition.row_count,
+                memory,
+            )?;
+            rows.try_append(&mut selected)?;
+            drop(selected);
+            retain_ordered_prefix_with_memory(&mut rows, filter.order, scan_limit, memory, cancel)?;
+        }
+        sort_native_rows_with_memory(&mut rows, filter.order, memory, cancel)?;
+        rows.remove_prefix(filter.offset);
+        if let Some(limit) = filter.limit {
+            rows.truncate(limit);
+        }
+        check_candidate_canceled(cancel)?;
+        Ok(rows)
+    })();
+    // Invalidation takes priority even if allocation or cancellation also failed.
+    snapshot.validate()?;
+    result
+}
+
+pub(crate) fn scan_native_partition_with_memory(
+    path: &Path,
+    filter: &NativeLogFilter,
+    limit: Option<usize>,
+    cancel: Option<&crate::QueryCancelCheck>,
+    visible_rows: u64,
+    memory: &QueryMemoryBudget,
+) -> io::Result<QueryBuffer<LogRow>> {
+    check_candidate_canceled(cancel)?;
+    if limit == Some(0) {
+        return QueryBuffer::try_with_capacity(0, Some(memory), "native log rows");
+    }
+    let mut ids = candidate_row_ids_with_memory(path, filter, true, visible_rows, memory, cancel)?;
+    if ids.is_empty() {
+        return QueryBuffer::try_with_capacity(0, Some(memory), "native log rows");
+    }
+    order_native_row_ids_with_memory(path, &mut ids, filter.order, limit, memory, cancel)?;
+    const COLUMNS: &[&str] = &[
+        "block_number",
+        "block_hash",
+        "timestamp",
+        "tx_hash",
+        "tx_index",
+        "log_index",
+        "address",
+        "topic0",
+        "topic1",
+        "topic2",
+        "topic3",
+        "data",
+        "data_len",
+        "source",
+    ];
+    let reader = SegmentReader::open_projected_with_memory(path, COLUMNS, memory.clone())?;
+    let canceled = || cancel.is_some_and(|check| check());
+    // One admitted selection avoids repeatedly reading raw column prefixes.
+    // Exact candidates allow prefix selection before payload materialization.
+    let mut rows = reader.read_log_rows_with_memory(&ids, Some(&canceled))?;
+    let mut position = 0usize;
+    let mut interrupted = false;
+    rows.retain(|row| {
+        if position.is_multiple_of(256) {
+            interrupted |= canceled();
+        }
+        position += 1;
+        interrupted || matches_native_filter(row, filter)
+    });
+    if interrupted {
+        return Err(io::Error::new(io::ErrorKind::Interrupted, "query canceled"));
+    }
+    check_candidate_canceled(cancel)?;
+    Ok(rows)
+}
+
+fn order_native_row_ids_with_memory(
+    path: &Path,
+    ids: &mut QueryBuffer<u32>,
+    order: LogOrder,
+    limit: Option<usize>,
+    memory: &QueryMemoryBudget,
+    cancel: Option<&crate::QueryCancelCheck>,
+) -> io::Result<()> {
+    if ids.len() < 2 {
+        if let Some(limit) = limit {
+            ids.truncate(limit);
+        }
+        return check_candidate_canceled(cancel);
+    }
+    let reader = SegmentReader::open_projected_with_memory(
+        path,
+        &["block_number", "tx_index", "log_index"],
+        memory.clone(),
+    )?;
+    check_candidate_canceled(cancel)?;
+    let blocks = reader.read_u64_with_memory("block_number", Some(ids))?;
+    check_candidate_canceled(cancel)?;
+    let transactions = reader.read_u32_with_memory("tx_index", Some(ids))?;
+    check_candidate_canceled(cancel)?;
+    let logs = reader.read_u32_with_memory("log_index", Some(ids))?;
+    if [blocks.len(), transactions.len(), logs.len()]
+        .into_iter()
+        .any(|len| len != ids.len())
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "native ordering columns differ in length",
+        ));
+    }
+    let mut keyed =
+        QueryBuffer::try_with_capacity(ids.len(), Some(memory), "native ordering keys")?;
+    for (position, &id) in ids.iter().enumerate() {
+        if position.is_multiple_of(256) {
+            check_candidate_canceled(cancel)?;
+        }
+        keyed.try_push((
+            (blocks[position], transactions[position], logs[position]),
+            position,
+            id,
+        ))?;
+    }
+    drop((blocks, transactions, logs, reader));
+    // Original position makes equal log keys stable without allocating opaque
+    // stable-sort scratch. Only this explicitly owned key buffer is sorted.
+    keyed.sort_unstable_by(|left, right| {
+        compare_log_keys(left.0, right.0, order).then_with(|| left.1.cmp(&right.1))
+    });
+    check_candidate_canceled(cancel)?;
+    if let Some(limit) = limit {
+        keyed.truncate(limit);
+    }
+    ids.truncate(keyed.len());
+    for (output, &(_, _, id)) in ids.iter_mut().zip(keyed.iter()) {
+        *output = id;
+    }
+    Ok(())
+}
+
+fn compare_log_keys(
+    left: (u64, u32, u32),
+    right: (u64, u32, u32),
+    order: LogOrder,
+) -> std::cmp::Ordering {
+    match order {
+        LogOrder::Ascending => left.cmp(&right),
+        LogOrder::Descending => right.cmp(&left),
+    }
+}
+
+/// Keep stable tie behavior using an explicitly owned permutation, then move
+/// rows in place. The index sort itself uses no heap scratch. Cancellation is
+/// cooperative before/after that admitted sort and during the permutation.
+pub(crate) fn sort_native_rows_with_memory(
+    rows: &mut [LogRow],
+    order: LogOrder,
+    memory: &QueryMemoryBudget,
+    cancel: Option<&crate::QueryCancelCheck>,
+) -> io::Result<()> {
+    check_candidate_canceled(cancel)?;
+    if rows.len() < 2 {
+        return Ok(());
+    }
+    let mut ordered = true;
+    for (position, pair) in rows.windows(2).enumerate() {
+        if position.is_multiple_of(256) {
+            check_candidate_canceled(cancel)?;
+        }
+        if compare_log_keys(
+            native_log_sort_key(&pair[0]),
+            native_log_sort_key(&pair[1]),
+            order,
+        )
+        .is_gt()
+        {
+            ordered = false;
+            break;
+        }
+    }
+    if ordered {
+        return check_candidate_canceled(cancel);
+    }
+    let mut positions =
+        QueryBuffer::try_with_capacity(rows.len(), Some(memory), "native sort positions")?;
+    positions.try_extend(0..rows.len())?;
+    positions.sort_unstable_by(|&left, &right| {
+        compare_log_keys(
+            native_log_sort_key(&rows[left]),
+            native_log_sort_key(&rows[right]),
+            order,
+        )
+        .then_with(|| left.cmp(&right))
+    });
+    check_candidate_canceled(cancel)?;
+    let mut moved = 0usize;
+    for start in 0..positions.len() {
+        if start.is_multiple_of(256) {
+            check_candidate_canceled(cancel)?;
+        }
+        let mut destination = start;
+        while positions[destination] != start {
+            if moved.is_multiple_of(256) {
+                check_candidate_canceled(cancel)?;
+            }
+            moved += 1;
+            let source = positions[destination];
+            rows.swap(destination, source);
+            positions[destination] = destination;
+            destination = source;
+        }
+        positions[destination] = destination;
+    }
+    check_candidate_canceled(cancel)
+}
+
+pub(crate) fn retain_ordered_prefix_with_memory(
+    rows: &mut QueryBuffer<LogRow>,
+    order: LogOrder,
+    limit: Option<usize>,
+    memory: &QueryMemoryBudget,
+    cancel: Option<&crate::QueryCancelCheck>,
+) -> io::Result<()> {
+    if let Some(limit) = limit {
+        sort_native_rows_with_memory(rows, order, memory, cancel)?;
+        rows.truncate(limit);
+    }
+    Ok(())
+}
+
 fn execute_log_filter_snapshot_inner(
     snapshot: &StorageSnapshot,
     filter: &NativeLogFilter,
@@ -2294,6 +2554,176 @@ mod tests {
         let rows = execute_log_filter(&storage, &filter).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].block_number, 101);
+    }
+
+    #[test]
+    fn accounted_native_sort_preserves_stable_ties_across_permutations() {
+        let prototype = make_test_rows()[0].clone();
+        let base: Vec<_> = (0..7)
+            .map(|index| {
+                let mut row = prototype.clone();
+                row.block_number = index % 3;
+                row.log_index = 0;
+                row.block_hash = B256::repeat_byte(index as u8);
+                row
+            })
+            .collect();
+        let memory = QueryMemoryBudget::new(QueryMemoryLimit::new(1024).unwrap());
+        let mut seed = 7u64;
+        for _ in 0..96 {
+            let mut input = base.clone();
+            for index in (1..input.len()).rev() {
+                seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                input.swap(index, (seed as usize) % (index + 1));
+            }
+            for order in [LogOrder::Ascending, LogOrder::Descending] {
+                let mut expected = input.clone();
+                match order {
+                    LogOrder::Ascending => {
+                        expected.sort_by_key(|row| (row.block_number, row.tx_index, row.log_index))
+                    }
+                    LogOrder::Descending => expected.sort_by_key(|row| {
+                        std::cmp::Reverse((row.block_number, row.tx_index, row.log_index))
+                    }),
+                }
+                let mut actual = input.clone();
+                sort_native_rows_with_memory(&mut actual, order, &memory, None).unwrap();
+                assert_eq!(actual, expected);
+                assert_eq!(memory.used(), 0);
+            }
+        }
+        let mut unordered = vec![base[2].clone(), base[0].clone(), base[1].clone()];
+        let original = unordered.clone();
+        let constrained =
+            QueryMemoryBudget::new(QueryMemoryLimit::new(3 * size_of::<usize>() - 1).unwrap());
+        let error =
+            sort_native_rows_with_memory(&mut unordered, LogOrder::Ascending, &constrained, None)
+                .unwrap_err();
+        assert!(
+            error
+                .get_ref()
+                .unwrap()
+                .is::<logex_types::QueryMemoryError>()
+        );
+        assert_eq!(unordered, original);
+        assert_eq!(constrained.used(), 0);
+        unordered.sort_by_key(|row| row.block_number);
+        let held = constrained
+            .reserve(constrained.limit(), "other query")
+            .unwrap();
+        sort_native_rows_with_memory(&mut unordered, LogOrder::Ascending, &constrained, None)
+            .unwrap();
+        assert_eq!(constrained.used(), held.bytes());
+    }
+
+    #[test]
+    fn accounted_native_query_matches_pages_and_retains_payload_aliases() {
+        let (_tmp, storage) = setup_storage();
+        let snapshot = StorageSnapshot::from_storage(&storage);
+        let memory = QueryMemoryBudget::new(QueryMemoryLimit::new(16 * 1024 * 1024).unwrap());
+        for order in [LogOrder::Ascending, LogOrder::Descending] {
+            for offset in 0..4 {
+                for limit in [None, Some(0), Some(1), Some(3)] {
+                    let filter = NativeLogFilter {
+                        order,
+                        offset,
+                        limit,
+                        ..NativeLogFilter::new()
+                    };
+                    let expected = execute_log_filter(&storage, &filter).unwrap();
+                    let rows = execute_log_filter_on_snapshot_with_memory(
+                        &snapshot, &filter, None, &memory,
+                    )
+                    .unwrap();
+                    assert_eq!(&*rows, expected);
+                    assert!(memory.used() >= (rows.capacity() * size_of::<LogRow>()) as u128);
+                    drop(rows);
+                    assert_eq!(memory.used(), 0);
+                }
+            }
+        }
+        let rows = execute_log_filter_on_snapshot_with_memory(
+            &snapshot,
+            &NativeLogFilter::new(),
+            None,
+            &memory,
+        )
+        .unwrap();
+        let payload = rows
+            .iter()
+            .find(|row| !row.data.is_empty())
+            .unwrap()
+            .data
+            .clone();
+        let expected = payload.to_vec();
+        drop(rows);
+        assert!(memory.used() > 0);
+        assert_eq!(&payload[..], expected);
+        drop(payload);
+        assert_eq!(memory.used(), 0);
+    }
+
+    #[test]
+    fn accounted_native_pressure_and_cancellation_release_partial_results() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+
+        let (_tmp, storage) = setup_storage();
+        let snapshot = StorageSnapshot::from_storage(&storage);
+        let memory = QueryMemoryBudget::new(QueryMemoryLimit::new(16 * 1024 * 1024).unwrap());
+        let held = memory.reserve(memory.limit(), "other query").unwrap();
+        let error = execute_log_filter_on_snapshot_with_memory(
+            &snapshot,
+            &NativeLogFilter::new(),
+            None,
+            &memory,
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .get_ref()
+                .unwrap()
+                .is::<logex_types::QueryMemoryError>()
+        );
+        assert_eq!(memory.used(), held.bytes());
+        drop(held);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let probe: crate::QueryCancelCheck = {
+            let calls = Arc::clone(&calls);
+            Arc::new(move || {
+                calls.fetch_add(1, Ordering::Relaxed);
+                false
+            })
+        };
+        drop(
+            execute_log_filter_on_snapshot_with_memory(
+                &snapshot,
+                &NativeLogFilter::new(),
+                Some(&probe),
+                &memory,
+            )
+            .unwrap(),
+        );
+        let total = calls.load(Ordering::Relaxed);
+        assert!(total > 6);
+        for at in [1, total / 2, total] {
+            calls.store(0, Ordering::Relaxed);
+            let cancel: crate::QueryCancelCheck = {
+                let calls = Arc::clone(&calls);
+                Arc::new(move || calls.fetch_add(1, Ordering::Relaxed) + 1 >= at)
+            };
+            let error = execute_log_filter_on_snapshot_with_memory(
+                &snapshot,
+                &NativeLogFilter::new(),
+                Some(&cancel),
+                &memory,
+            )
+            .unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+            assert_eq!(memory.used(), 0);
+        }
     }
 
     #[test]

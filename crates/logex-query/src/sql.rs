@@ -74,8 +74,9 @@ use crate::json::{
 use crate::lexer::{Token, tokenize};
 use crate::native::{
     StorageSnapshot, candidate_row_ids, candidate_row_ids_for_reader,
-    candidate_row_ids_with_memory, erc20_event_bloom_exclusions, matches_native_filter,
-    ordered_page_is_complete, partition_matches_filter, retain_ordered_prefix, sort_native_rows,
+    candidate_row_ids_with_memory, erc20_event_bloom_exclusions, ordered_page_is_complete,
+    partition_matches_filter, retain_ordered_prefix_with_memory, scan_native_partition_with_memory,
+    sort_native_rows_with_memory,
 };
 use crate::result::{JsonResultBuilder, QueryJsonRows, SQL_RESULT_STAGE};
 
@@ -900,10 +901,18 @@ fn try_execute_native_select(
     };
     native_query.filter.offset = page.offset;
 
-    let (rows, total_scanned) =
-        execute_native_sql_filter(snapshot, &native_query.filter, cancel_check.as_ref())?;
-    let rows =
-        materialize_native_log_rows(&rows, &native_query.columns, memory, cancel_check.as_ref())?;
+    let (rows, total_scanned) = execute_native_sql_filter(
+        snapshot,
+        &native_query.filter,
+        cancel_check.as_ref(),
+        &memory,
+    )?;
+    let rows = materialize_native_log_rows(
+        &rows,
+        &native_query.columns,
+        memory.clone(),
+        cancel_check.as_ref(),
+    )?;
 
     Ok(Some(SqlQueryResult {
         rows,
@@ -915,10 +924,15 @@ fn execute_native_sql_filter(
     snapshot: &StorageSnapshot,
     filter: &NativeLogFilter,
     cancel_check: Option<&QueryCancelCheck>,
-) -> Result<(Vec<logex_types::LogRow>, u64), SqlQueryError> {
+    memory: &QueryMemoryBudget,
+) -> Result<(QueryBuffer<logex_types::LogRow>, u64), SqlQueryError> {
     check_query_canceled(cancel_check).map_err(SqlQueryError::DataFusion)?;
     if filter.limit == Some(0) {
-        return Ok((Vec::new(), 0));
+        return Ok((
+            QueryBuffer::try_with_capacity(0, Some(memory), "native query rows")
+                .map_err(map_native_query_io_error)?,
+            0,
+        ));
     }
     let partitions: Vec<_> = snapshot
         .partitions_in_order(filter.order)
@@ -933,7 +947,8 @@ fn execute_native_sql_filter(
     let scan_limit = filter
         .limit
         .map(|limit| limit.saturating_add(filter.offset));
-    let mut rows = Vec::new();
+    let mut rows = QueryBuffer::try_with_capacity(0, Some(memory), "native query rows")
+        .map_err(map_native_query_io_error)?;
     let mut total_scanned = 0u64;
 
     for chunk in partitions.chunks(window_size) {
@@ -944,18 +959,14 @@ fn execute_native_sql_filter(
         let chunk_results = std::thread::scope(|scope| {
             let mut handles = Vec::with_capacity(chunk.len());
             for partition in chunk {
-                let path = partition.path.clone();
-                let visible_rows = partition.row_count;
-                let filter = filter.clone();
-                let cancel_check = cancel_check.cloned();
-                let limit = scan_limit;
                 handles.push(scope.spawn(move || {
-                    scan_native_sql_partition(
-                        &path,
-                        &filter,
-                        limit,
-                        cancel_check.as_ref(),
-                        visible_rows,
+                    scan_native_partition_with_memory(
+                        &partition.path,
+                        filter,
+                        scan_limit,
+                        cancel_check,
+                        partition.row_count,
+                        memory,
                     )
                 }));
             }
@@ -970,96 +981,33 @@ fn execute_native_sql_filter(
         });
 
         for result in chunk_results {
-            let mut partition_rows = result.map_err(|err| {
-                if err.kind() == std::io::ErrorKind::Interrupted {
-                    SqlQueryError::DataFusion(DataFusionError::Execution(
-                        "query canceled".to_owned(),
-                    ))
-                } else {
-                    SqlQueryError::Storage(err)
-                }
-            })?;
+            let mut partition_rows = result.map_err(map_native_query_io_error)?;
             total_scanned += partition_rows.len() as u64;
-            rows.append(&mut partition_rows);
+            rows.try_append(&mut partition_rows)
+                .map_err(map_native_query_io_error)?;
         }
         // Every scanned partition in the window can contribute earlier rows.
         // Merge them before deciding whether later range bounds permit stopping.
-        retain_ordered_prefix(&mut rows, filter.order, scan_limit);
+        retain_ordered_prefix_with_memory(
+            &mut rows,
+            filter.order,
+            scan_limit,
+            memory,
+            cancel_check,
+        )
+        .map_err(map_native_query_io_error)?;
     }
 
-    sort_native_rows(&mut rows, filter.order);
+    sort_native_rows_with_memory(&mut rows, filter.order, memory, cancel_check)
+        .map_err(map_native_query_io_error)?;
     if filter.offset > 0 {
-        if filter.offset >= rows.len() {
-            rows.clear();
-        } else {
-            rows.drain(..filter.offset);
-        }
+        rows.remove_prefix(filter.offset);
     }
     if let Some(limit) = filter.limit {
         rows.truncate(limit);
     }
 
     Ok((rows, total_scanned))
-}
-
-fn scan_native_sql_partition(
-    path: &std::path::Path,
-    filter: &NativeLogFilter,
-    limit: Option<usize>,
-    cancel_check: Option<&QueryCancelCheck>,
-    visible_rows: u64,
-) -> std::io::Result<Vec<logex_types::LogRow>> {
-    if cancel_check.is_some_and(|is_canceled| is_canceled()) {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Interrupted,
-            "query canceled",
-        ));
-    }
-    let mut row_ids = candidate_row_ids(path, filter, true, visible_rows)?;
-    if row_ids.is_empty() {
-        return Ok(Vec::new());
-    }
-    order_and_truncate_row_ids(path, &mut row_ids, filter.order, limit)?;
-    if row_ids.is_empty() {
-        return Ok(Vec::new());
-    }
-    let reader = SegmentReader::open(path)?;
-    let mut rows = reader.read_log_rows(Some(&row_ids))?;
-    rows.retain(|row| matches_native_filter(row, filter));
-    Ok(rows)
-}
-
-fn order_and_truncate_row_ids(
-    path: &std::path::Path,
-    row_ids: &mut Vec<u32>,
-    order: logex_storage::native::LogOrder,
-    limit: Option<usize>,
-) -> std::io::Result<()> {
-    if row_ids.is_empty() {
-        return Ok(());
-    }
-    let reader = SegmentReader::open_projected(path, &["block_number", "tx_index", "log_index"])?;
-    let blocks = reader.read_u64("block_number", Some(row_ids))?;
-    let tx_indices = reader.read_u32("tx_index", Some(row_ids))?;
-    let log_indices = reader.read_u32("log_index", Some(row_ids))?;
-    let mut keyed: Vec<_> = row_ids
-        .iter()
-        .copied()
-        .zip(blocks.into_iter().zip(tx_indices).zip(log_indices))
-        .map(|(row_id, ((block, tx_index), log_index))| (row_id, block, tx_index, log_index))
-        .collect();
-    if matches!(order, logex_storage::native::LogOrder::Descending) {
-        keyed.sort_by_key(|(_, block, tx_index, log_index)| {
-            std::cmp::Reverse((*block, *tx_index, *log_index))
-        });
-    } else {
-        keyed.sort_by_key(|(_, block, tx_index, log_index)| (*block, *tx_index, *log_index));
-    }
-    if let Some(limit) = limit {
-        keyed.truncate(limit);
-    }
-    *row_ids = keyed.into_iter().map(|(row_id, _, _, _)| row_id).collect();
-    Ok(())
 }
 
 struct NativeSqlQuery {
@@ -6866,7 +6814,6 @@ mod tests {
         let snapshot = StorageSnapshot::from_storage(&storage);
         let head = storage.head_block().unwrap_or(0);
         for sql in [
-            "SELECT block_hash, topics, data FROM logs",
             "SELECT COUNT(*) AS total FROM logs",
             "SELECT SUM(data) AS total FROM logs",
             "SELECT table_name FROM information_schema.tables",
@@ -6906,6 +6853,110 @@ mod tests {
             );
             assert_eq!(constrained.used(), 0, "{sql}");
         }
+    }
+
+    #[test]
+    fn native_select_rows_remain_charged_through_json_materialization() {
+        let (_tmp, storage) = setup_storage();
+        let snapshot = StorageSnapshot::from_storage(&storage);
+        let query = parse_native_select_query(
+            "SELECT block_number, block_hash, data FROM logs \
+             ORDER BY block_number, tx_index, log_index",
+        )
+        .unwrap()
+        .expect("native SELECT");
+        let memory = QueryMemoryBudget::new(QueryMemoryLimit::new(64 * 1024 * 1024).unwrap());
+        let (source_rows, total_scanned) =
+            execute_native_sql_filter(&snapshot, &query.filter, None, &memory).unwrap();
+        assert_eq!(total_scanned, 2);
+        assert_eq!(
+            source_rows
+                .iter()
+                .map(|row| row.block_number)
+                .collect::<Vec<_>>(),
+            vec![100, 200]
+        );
+        let source_charge = memory.used();
+        assert!(
+            source_charge > 0,
+            "selected LogRows must retain their owners"
+        );
+
+        let available = memory.limit() as u128 - source_charge;
+        let competitor = memory
+            .reserve(
+                usize::try_from(available).unwrap(),
+                "native source overlap fixture",
+            )
+            .unwrap();
+        let error = materialize_native_log_rows(&source_rows, &query.columns, memory.clone(), None)
+            .unwrap_err();
+        assert!(
+            matches!(error, SqlQueryError::Capacity(ref message) if message.contains(SQL_RESULT_STAGE)),
+            "retained source rows must overlap structured output: {error}"
+        );
+        assert_eq!(memory.used(), source_charge + competitor.bytes());
+        drop(competitor);
+        assert_eq!(memory.used(), source_charge);
+        drop(source_rows);
+        assert_eq!(memory.used(), 0);
+    }
+
+    #[tokio::test]
+    async fn native_select_accounted_path_preserves_values_pagination_and_cleanup() {
+        let (_tmp, storage) = setup_storage();
+        let memory = QueryMemoryBudget::new(QueryMemoryLimit::new(64 * 1024 * 1024).unwrap());
+        let result = execute_sql_page_on_snapshot_with_memory(
+            "SELECT block_number, log_index, topic1 AS selected_topic, data_len \
+             FROM logs ORDER BY block_number DESC, tx_index DESC, log_index DESC",
+            StorageSnapshot::from_storage(&storage),
+            storage.head_block().unwrap_or(0),
+            SqlQueryPage::new(Some(1), 1),
+            None,
+            memory.clone(),
+        )
+        .await
+        .unwrap();
+        let expected = &make_test_rows()[0];
+        assert_eq!(result.total_scanned, 2);
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0]["block_number"], expected.block_number);
+        assert_eq!(result.rows[0]["log_index"], expected.log_index);
+        let expected_topic = expected
+            .topic1
+            .map(|topic| Value::String(format!("{topic:#x}")))
+            .unwrap_or(Value::Null);
+        assert_eq!(result.rows[0]["selected_topic"], expected_topic);
+        assert_eq!(result.rows[0]["data_len"], expected.data_len);
+        assert!(memory.used() > 0);
+        drop(result);
+        assert_eq!(memory.used(), 0);
+    }
+
+    #[test]
+    fn native_select_cancellation_after_entry_releases_working_sets() {
+        let (_tmp, storage) = setup_storage();
+        let snapshot = StorageSnapshot::from_storage(&storage);
+        let query = parse_native_select_query(
+            "SELECT block_number, data FROM logs \
+             ORDER BY block_number, tx_index, log_index",
+        )
+        .unwrap()
+        .expect("native SELECT");
+        let memory = QueryMemoryBudget::new(QueryMemoryLimit::new(64 * 1024 * 1024).unwrap());
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed = Arc::clone(&calls);
+        let cancel: QueryCancelCheck =
+            Arc::new(move || observed.fetch_add(1, Ordering::Relaxed) >= 1);
+        let error = execute_native_sql_filter(&snapshot, &query.filter, Some(&cancel), &memory)
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            SqlQueryError::DataFusion(DataFusionError::Execution(message))
+                if message == "query canceled"
+        ));
+        assert!(calls.load(Ordering::Relaxed) >= 2);
+        assert_eq!(memory.used(), 0);
     }
 
     #[tokio::test]
