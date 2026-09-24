@@ -5316,6 +5316,7 @@ version = "0.1.0"
 dependencies = [
  "alloy-primitives",
  "alloy-rpc-types",
+ "bytes",
  "serde",
  "serde_json",
 ]

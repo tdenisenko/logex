@@ -1,5 +1,5 @@
 //! Immutable compressed-artifact snapshots, committed by the storage catalog.
-use logex_types::{QueryBuffer, QueryMemoryBudget};
+use logex_types::{QueryBuffer, QueryMemoryBudget, QueryMemoryReservation};
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
@@ -92,6 +92,89 @@ struct Stream {
     inline: Vec<u8>,
 }
 
+// Payload vector capacities are owned here; BTreeMap nodes and fixed control
+// fields are deliberately outside the cooperative byte-buffer budget.
+#[derive(Debug, Default)]
+struct CapturedStreams {
+    streams: BTreeMap<u8, Stream>,
+    charges: BTreeMap<
+        u8,
+        (
+            Option<QueryMemoryReservation>,
+            Option<QueryMemoryReservation>,
+        ),
+    >,
+}
+
+impl std::ops::Deref for CapturedStreams {
+    type Target = BTreeMap<u8, Stream>;
+    fn deref(&self) -> &Self::Target {
+        &self.streams
+    }
+}
+
+impl CapturedStreams {
+    fn insert(&mut self, id: u8, len: u64, extents: QueryBuffer<Extent>, inline: QueryBuffer<u8>) {
+        let (extents, extent_charge) = extents.into_parts();
+        let (inline, inline_charge) = inline.into_parts();
+        // Drop replaced allocations before their corresponding reservations.
+        self.streams.insert(
+            id,
+            Stream {
+                len,
+                extents,
+                inline,
+            },
+        );
+        if extent_charge.is_some() || inline_charge.is_some() {
+            self.charges.insert(id, (extent_charge, inline_charge));
+        } else {
+            self.charges.remove(&id);
+        }
+    }
+
+    fn take(&mut self, id: u8) -> io::Result<(u64, QueryBuffer<Extent>, QueryBuffer<u8>)> {
+        let stream = self
+            .streams
+            .remove(&id)
+            .ok_or_else(|| invalid("missing captured stream"))?;
+        let (extent_charge, inline_charge) = self.charges.remove(&id).unwrap_or_default();
+        // Tuple fields drop in order if the first reconciliation fails.
+        let inline_owner = (stream.inline, inline_charge);
+        let extents = QueryBuffer::from_reserved(stream.extents, extent_charge)?;
+        let inline = QueryBuffer::from_reserved(inline_owner.0, inline_owner.1)?;
+        Ok((stream.len, extents, inline))
+    }
+
+    fn clone_stream(
+        &mut self,
+        id: u8,
+        stream: &Stream,
+        memory: Option<&QueryMemoryBudget>,
+    ) -> io::Result<()> {
+        let mut extents = QueryBuffer::try_with_capacity(
+            stream.extents.len(),
+            memory,
+            "bundle captured extents",
+        )?;
+        extents.try_extend_from_slice(&stream.extents)?;
+        let mut inline = QueryBuffer::try_with_capacity(
+            stream.inline.len(),
+            memory,
+            "bundle captured inline bytes",
+        )?;
+        inline.try_extend_from_slice(&stream.inline)?;
+        self.insert(id, stream.len, extents, inline);
+        Ok(())
+    }
+
+    // Only the legacy writer consumes captured state as ordinary Vec values.
+    // Query reader clones retain the entire owner through Arc instead.
+    fn into_writer_streams(self) -> BTreeMap<u8, Stream> {
+        self.streams
+    }
+}
+
 #[derive(Debug)]
 struct StreamBoundary {
     len: u64,
@@ -103,13 +186,17 @@ struct StreamBoundary {
 struct GroupBase {
     reference: BundleReference,
     data: BTreeMap<u8, StreamBoundary>,
-    metadata: BTreeMap<u8, Stream>,
+    metadata: CapturedStreams,
 }
 
 impl GroupBase {
-    fn capture(reference: BundleReference, streams: &BTreeMap<u8, Stream>) -> Self {
+    fn capture(
+        reference: BundleReference,
+        streams: &BTreeMap<u8, Stream>,
+        memory: Option<&QueryMemoryBudget>,
+    ) -> io::Result<Self> {
         let mut data = BTreeMap::new();
-        let mut metadata = BTreeMap::new();
+        let mut metadata = CapturedStreams::default();
         for (&id, stream) in streams {
             if id < DATA_STREAMS {
                 data.insert(
@@ -121,14 +208,14 @@ impl GroupBase {
                     },
                 );
             } else {
-                metadata.insert(id, stream.clone());
+                metadata.clone_stream(id, stream, memory)?;
             }
         }
-        Self {
+        Ok(Self {
             reference,
             data,
             metadata,
-        }
+        })
     }
 }
 
@@ -136,7 +223,7 @@ impl GroupBase {
 pub(crate) struct BundleReader {
     file: Arc<Mutex<ReadWindow>>,
     reference: BundleReference,
-    streams: Arc<BTreeMap<u8, Stream>>,
+    streams: Arc<CapturedStreams>,
     group_base: Option<Arc<GroupBase>>,
     memory: Option<QueryMemoryBudget>,
 }
@@ -244,17 +331,21 @@ impl BundleReader {
         // References strictly decrease in offset, depth and total read budget.
         // Decode each bounded table once and apply deltas oldest first.
         let mut current = reference.clone();
-        let mut tables = Vec::with_capacity(reference.depth as usize);
+        let mut tables = QueryBuffer::try_with_capacity(
+            reference.depth as usize,
+            memory,
+            "bundle table ancestors",
+        )?;
         loop {
             file.seek(SeekFrom::Start(current.table_offset))?;
-            let mut bytes = buffer(current.table_len as usize)?;
+            let mut bytes = query_buffer(current.table_len as usize, memory)?;
             file.read_exact(&mut bytes)?;
             if crc32fast::hash(&bytes) != current.checksum {
                 return Err(invalid("bundle table checksum mismatch"));
             }
-            let decoded = decode_record(&bytes, current.chain_bytes)?;
-            let (streams, parent) = decode_table(&decoded, &current)?;
-            tables.push((current.clone(), streams));
+            let decoded = decode_record_accounted(&bytes, current.chain_bytes, memory)?;
+            let (streams, parent) = decode_table(&decoded, &current, memory)?;
+            tables.try_push((current.clone(), streams))?;
             match parent {
                 Some(parent) => current = parent,
                 None => break,
@@ -263,32 +354,40 @@ impl BundleReader {
         let next_sequence = reference.sequence.checked_add(1).unwrap_or(1);
         let base_sequence = next_sequence - table_span(next_sequence);
         let mut group_base = None;
-        let mut streams: BTreeMap<u8, Stream> = BTreeMap::new();
-        for (table_reference, table) in tables.into_iter().rev() {
-            for (id, mut update) in table {
+        let mut streams = CapturedStreams::default();
+        while let Some((table_reference, mut table)) = tables.pop() {
+            while let Some(id) = table.keys().next().copied() {
+                let (update_len, update_extents, update_inline) = table.take(id)?;
                 if id < DATA_STREAMS {
-                    let stream = streams.entry(id).or_default();
-                    if stream.extents.len() + update.extents.len() > MAX_EXTENTS {
+                    if !streams.contains_key(&id) {
+                        // The first ancestor already owns the exact vectors;
+                        // transfer them without a duplicate merge allocation.
+                        streams.insert(id, update_len, update_extents, update_inline);
+                        continue;
+                    }
+                    let (len, mut extents, mut inline) = streams.take(id)?;
+                    if extents.len() + update_extents.len() > MAX_EXTENTS {
                         return Err(invalid("bundle extent chain exceeds its bound"));
                     }
-                    if stream.inline.len() + update.inline.len() > INDEX_BYTES {
+                    if inline.len() + update_inline.len() > INDEX_BYTES {
                         return Err(invalid("bundle index chain exceeds its bound"));
                     }
-                    stream.len = stream
-                        .len
-                        .checked_add(update.len)
+                    let len = len
+                        .checked_add(update_len)
                         .ok_or_else(|| invalid("bundle stream length overflow"))?;
-                    stream.extents.append(&mut update.extents);
-                    stream.inline.append(&mut update.inline);
+                    extents.try_extend_from_slice(&update_extents)?;
+                    inline.try_extend_from_slice(&update_inline)?;
+                    streams.insert(id, len, extents, inline);
                 } else {
-                    streams.insert(id, update);
+                    streams.insert(id, update_len, update_extents, update_inline);
                 }
             }
             if base_sequence != reference.sequence && table_reference.sequence == base_sequence {
-                // Capture only the lengths at the next carry's already-verified
-                // boundary. Reopening the old prefix would duplicate table I/O
-                // and would need another file identity check after inspection.
-                group_base = Some(Arc::new(GroupBase::capture(table_reference, &streams)));
+                group_base = Some(Arc::new(GroupBase::capture(
+                    table_reference,
+                    &streams,
+                    memory,
+                )?));
             }
         }
         Ok(Self {
@@ -475,7 +574,7 @@ impl BundleSizer {
             offset,
             initial_offset: offset,
             parent: Some(reader.reference.clone()),
-            streams: (*reader.streams).clone(),
+            streams: reader.streams.streams.clone(),
         })))
     }
 
@@ -725,7 +824,9 @@ impl BundleWriter {
             file: BufWriter::with_capacity(64 * 1024, file),
             offset,
             initial_rows: reader.reference.row_count,
-            streams: Arc::try_unwrap(reader.streams).unwrap_or_else(|streams| (*streams).clone()),
+            streams: Arc::try_unwrap(reader.streams)
+                .map(CapturedStreams::into_writer_streams)
+                .unwrap_or_else(|streams| streams.streams.clone()),
             updates: BTreeMap::new(),
             parent: Some(reader.reference),
             group_base: reader.group_base,
@@ -1005,7 +1106,18 @@ fn encode_record(bytes: &[u8]) -> Vec<u8> {
     record
 }
 
+#[cfg(test)]
 fn decode_record(record: &[u8], budget: u32) -> io::Result<Vec<u8>> {
+    Ok(decode_record_accounted(record, budget, None)?
+        .into_parts()
+        .0)
+}
+
+fn decode_record_accounted(
+    record: &[u8],
+    budget: u32,
+    memory: Option<&QueryMemoryBudget>,
+) -> io::Result<QueryBuffer<u8>> {
     let mut cursor = Cursor(record);
     let [codec] = cursor.take::<1>()?;
     let len = cursor.u32()?;
@@ -1013,9 +1125,14 @@ fn decode_record(record: &[u8], budget: u32) -> io::Result<Vec<u8>> {
         return Err(invalid("bundle decoded table exceeds its bound"));
     }
     match codec {
-        0 if cursor.0.len() == len as usize => Ok(cursor.0.to_vec()),
+        0 if cursor.0.len() == len as usize => {
+            let mut bytes =
+                QueryBuffer::try_with_capacity(len as usize, memory, "bundle decoded table")?;
+            bytes.try_extend_from_slice(cursor.0)?;
+            Ok(bytes)
+        }
         1 if cursor.0.len() < len as usize => {
-            let mut bytes = buffer(len as usize)?;
+            let mut bytes = query_buffer(len as usize, memory)?;
             let actual = lz4_flex::block::decompress_into(cursor.0, &mut bytes)
                 .map_err(|_| invalid("invalid compressed bundle table"))?;
             if actual != bytes.len() {
@@ -1030,7 +1147,8 @@ fn decode_record(record: &[u8], budget: u32) -> io::Result<Vec<u8>> {
 fn decode_table(
     bytes: &[u8],
     reference: &BundleReference,
-) -> io::Result<(BTreeMap<u8, Stream>, Option<BundleReference>)> {
+    memory: Option<&QueryMemoryBudget>,
+) -> io::Result<(CapturedStreams, Option<BundleReference>)> {
     let mut cursor = Cursor(bytes);
     if &cursor.take::<8>()? != TABLE_MAGIC
         || cursor.u64()? != reference.row_count
@@ -1077,8 +1195,8 @@ fn decode_table(
         .map(BundleReference::end)
         .transpose()?
         .unwrap_or(FILE_MAGIC.len() as u64);
-    let mut streams = BTreeMap::new();
-    let mut physical = Vec::new();
+    let mut streams = CapturedStreams::default();
+    let mut physical = QueryBuffer::try_with_capacity(0, memory, "bundle extent validation")?;
     for _ in 0..count {
         let [id, a, b, c] = cursor.take::<4>()?;
         if id >= STREAMS
@@ -1100,20 +1218,19 @@ fn decode_table(
                 .split_at_checked(len as usize)
                 .ok_or_else(|| invalid("truncated inline bundle index"))?;
             cursor.0 = tail;
-            streams.insert(
-                id,
-                Stream {
-                    len,
-                    extents: Vec::new(),
-                    inline: bytes.to_vec(),
-                },
-            );
+            let mut inline = QueryBuffer::try_with_capacity(
+                bytes.len(),
+                memory,
+                "bundle captured inline bytes",
+            )?;
+            inline.try_extend_from_slice(bytes)?;
+            streams.insert(id, len, QueryBuffer::unaccounted(Vec::new()), inline);
             continue;
         }
         if count > MAX_EXTENTS || count > cursor.0.len() / 16 {
             return Err(invalid("bundle extent count exceeds its bound"));
         }
-        let mut extents = Vec::with_capacity(count);
+        let mut extents = QueryBuffer::try_with_capacity(count, memory, "bundle captured extents")?;
         let mut total = 0u64;
         let mut previous_end = payload_start;
         for _ in 0..count {
@@ -1134,24 +1251,17 @@ fn decode_table(
             total = total
                 .checked_add(u64::from(len))
                 .ok_or_else(|| invalid("bundle logical length overflow"))?;
-            extents.push(Extent {
+            extents.try_push(Extent {
                 offset,
                 len,
                 checksum,
-            });
-            physical.push(offset..end);
+            })?;
+            physical.try_push(offset..end)?;
         }
         if total != len {
             return Err(invalid("bundle stream length mismatch"));
         }
-        streams.insert(
-            id,
-            Stream {
-                len,
-                extents,
-                inline: Vec::new(),
-            },
-        );
+        streams.insert(id, len, extents, QueryBuffer::unaccounted(Vec::new()));
     }
     if !cursor.0.is_empty() {
         return Err(invalid("trailing bundle table bytes"));
@@ -1188,12 +1298,6 @@ fn invalid(message: &str) -> io::Error {
 fn query_buffer(len: usize, memory: Option<&QueryMemoryBudget>) -> io::Result<QueryBuffer<u8>> {
     let mut bytes = QueryBuffer::try_with_capacity(len, memory, "bundle read bytes")?;
     bytes.try_resize(len, 0)?;
-    Ok(bytes)
-}
-fn buffer(len: usize) -> io::Result<Vec<u8>> {
-    let mut bytes = Vec::new();
-    bytes.try_reserve_exact(len).map_err(io::Error::other)?;
-    bytes.resize(len, 0);
     Ok(bytes)
 }
 
@@ -1241,8 +1345,14 @@ mod tests {
         let path = tmp.path().join("bundle");
         let reference = accounted_fixture(&path);
         let memory =
-            QueryMemoryBudget::new(logex_types::QueryMemoryLimit::new(100 * 1024).unwrap());
+            QueryMemoryBudget::new(logex_types::QueryMemoryLimit::new(1024 * 1024).unwrap());
         let reader = BundleReader::open_with_memory(&path, &reference, Some(&memory)).unwrap();
+        let pressure = memory
+            .reserve(
+                memory.limit() - memory.used() as usize - 100 * 1024,
+                "test pressure",
+            )
+            .unwrap();
         drop(reader.read_range_accounted(0, 0..1).unwrap());
         let before = memory.used();
         let error = reader.read_range_accounted(0, 70_000..70_001).unwrap_err();
@@ -1258,6 +1368,78 @@ mod tests {
         assert!(memory.used() >= before);
         drop(window);
         drop(reader);
+        drop(pressure);
+        assert_eq!(memory.used(), 0);
+    }
+
+    fn captured_bytes(streams: &CapturedStreams) -> usize {
+        streams
+            .values()
+            .map(|stream| {
+                stream.extents.capacity() * std::mem::size_of::<Extent>() + stream.inline.capacity()
+            })
+            .sum()
+    }
+
+    #[test]
+    fn capture_payloads_and_group_base_follow_last_shared_owner() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("bundle");
+        let mut reference = create(&path);
+        for sequence in 2..=15 {
+            let writer = BundleWriter::append(&path, &reference).unwrap();
+            writer.append_data(0, &[sequence as u8; 8]).unwrap();
+            writer.append_data(14, &[sequence as u8; 24]).unwrap();
+            writer.replace_metadata(28, &[sequence as u8; 9]).unwrap();
+            reference = writer.finish(sequence + 1).unwrap();
+        }
+        let memory =
+            QueryMemoryBudget::new(logex_types::QueryMemoryLimit::new(1024 * 1024).unwrap());
+        let reader = BundleReader::open_with_memory(&path, &reference, Some(&memory)).unwrap();
+        let base = reader.group_base.clone().expect("carry boundary captured");
+        let base_bytes = captured_bytes(&base.metadata);
+        let retained = captured_bytes(&reader.streams) + base_bytes;
+        assert!(base_bytes > 0);
+        assert_eq!(memory.used(), retained as u128);
+        let clone = reader.clone();
+        let inline = reader.read_stream_accounted(14).unwrap();
+        assert_eq!(memory.used(), (retained + inline.capacity()) as u128);
+        drop(reader);
+        assert_eq!(memory.used(), (retained + inline.capacity()) as u128);
+        drop(clone);
+        assert_eq!(memory.used(), (base_bytes + inline.capacity()) as u128);
+        drop(base);
+        assert_eq!(memory.used(), inline.capacity() as u128);
+        drop(inline);
+        assert_eq!(memory.used(), 0);
+    }
+
+    #[test]
+    fn capture_denial_and_malformed_record_release_all_credit() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("bundle");
+        let reference = accounted_fixture(&path);
+        for limit in [1, 4096, 32 * 1024] {
+            let memory = QueryMemoryBudget::new(logex_types::QueryMemoryLimit::new(limit).unwrap());
+            let error =
+                BundleReader::open_with_memory(&path, &reference, Some(&memory)).unwrap_err();
+            assert!(
+                error
+                    .get_ref()
+                    .unwrap()
+                    .is::<logex_types::QueryMemoryError>()
+            );
+            assert_eq!(memory.used(), 0);
+        }
+        let mut bytes = fs::read(&path).unwrap();
+        bytes[reference.table_offset as usize] = 255;
+        let mut corrupt = reference.clone();
+        corrupt.checksum = crc32fast::hash(&bytes[reference.table_offset as usize..]);
+        fs::write(&path, bytes).unwrap();
+        let memory =
+            QueryMemoryBudget::new(logex_types::QueryMemoryLimit::new(1024 * 1024).unwrap());
+        let error = BundleReader::open_with_memory(&path, &corrupt, Some(&memory)).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         assert_eq!(memory.used(), 0);
     }
 

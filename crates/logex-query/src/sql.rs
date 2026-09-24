@@ -760,10 +760,10 @@ pub async fn execute_sql_page_on_snapshot(
 /// Execute one SQL page against a captured storage view using a shared memory budget.
 ///
 /// The view remains subject to optimistic invalidation checks. DataFusion operator
-/// reservations, retained fixed-column scan sources, and retained Arrow output from
-/// custom scans participate in `memory` across concurrent queries. Query planning,
-/// variable-column scan sources, remaining decoder scratch, native fast paths, and
-/// result conversion are outside this accounting milestone. Infallible
+/// reservations, retained fixed and variable-column scan sources, and retained Arrow
+/// output from custom scans participate in `memory` across concurrent queries. Query
+/// planning, remaining decoder scratch, native fast paths, and result conversion are
+/// outside this accounting milestone. Infallible
 /// DataFusion allocations are recorded even when
 /// they temporarily exceed the configured limit. Disk spilling is disabled, so a
 /// fallible operator reservation that exceeds available capacity returns
@@ -4793,7 +4793,9 @@ fn read_column_as_array(
             memory,
         )?,
         "topics" => build_topics_array(reader, row_ids, memory)?,
-        "data" => build_variable_hex_array(reader.read_var_bytes("data", Some(row_ids))?, memory)?,
+        "data" => {
+            build_variable_hex_array(read_var_bytes_source(reader, row_ids, memory)?, memory)?
+        }
         "data_len" => build_converted_u64_array(
             read_u32_source(reader, "data_len", row_ids, memory)?,
             memory,
@@ -4894,6 +4896,19 @@ fn read_address_source(
         Some(_) => reader.read_address_with_memory(Some(row_ids)),
         None => reader
             .read_address(Some(row_ids))
+            .map(QueryBuffer::unaccounted),
+    }
+}
+
+fn read_var_bytes_source(
+    reader: &SegmentReader,
+    row_ids: &[u32],
+    memory: Option<&QueryMemoryBudget>,
+) -> std::io::Result<QueryBuffer<alloy_primitives::Bytes>> {
+    match memory {
+        Some(_) => reader.read_var_bytes_with_memory("data", Some(row_ids)),
+        None => reader
+            .read_var_bytes("data", Some(row_ids))
             .map(QueryBuffer::unaccounted),
     }
 }
@@ -5150,7 +5165,7 @@ fn build_nullable_hex_array(
 }
 
 fn build_variable_hex_array<T: AsRef<[u8]>>(
-    values: Vec<T>,
+    values: QueryBuffer<T>,
     memory: Option<&QueryMemoryBudget>,
 ) -> std::io::Result<ArrayRef> {
     let value_bytes = values.iter().try_fold(0usize, |total, value| {
@@ -5163,7 +5178,7 @@ fn build_variable_hex_array<T: AsRef<[u8]>>(
     let estimate = string_capacity(values.len(), value_bytes, false)?;
     let reservation = reserve_scan_output(memory, estimate)?;
     let mut builder = StringBuilder::with_capacity(values.len(), value_bytes);
-    for value in values {
+    for value in values.iter() {
         append_hex(&mut builder, value.as_ref())?;
     }
     finish_scan_array(Arc::new(builder.finish()), memory, reservation)
@@ -6306,6 +6321,63 @@ mod tests {
     }
 
     #[test]
+    fn variable_scan_output_reserves_while_nested_source_and_headers_are_live() {
+        struct AccountedPayload {
+            bytes: Vec<u8>,
+            _reservation: QueryMemoryReservation,
+        }
+
+        impl AsRef<[u8]> for AccountedPayload {
+            fn as_ref(&self) -> &[u8] {
+                &self.bytes
+            }
+        }
+
+        fn make_source(memory: &QueryMemoryBudget) -> QueryBuffer<alloy_primitives::Bytes> {
+            let payload = memory.reserve(1, "variable selected payload").unwrap();
+            let value = bytes::Bytes::from_owner(AccountedPayload {
+                bytes: vec![7],
+                _reservation: payload,
+            })
+            .into();
+            let mut source =
+                QueryBuffer::try_with_capacity(1, Some(memory), "variable result headers").unwrap();
+            source.try_push(value).unwrap();
+            source
+        }
+
+        let header_bytes = std::mem::size_of::<alloy_primitives::Bytes>();
+        let payload_bytes = 1;
+        let output_bytes = string_capacity(1, 4, false).unwrap();
+        let constrained = QueryMemoryBudget::new(
+            QueryMemoryLimit::new(header_bytes + payload_bytes + output_bytes - 1).unwrap(),
+        );
+        let source = make_source(&constrained);
+        assert!(matches!(
+            build_variable_hex_array(source, Some(&constrained)),
+            Err(error) if error.get_ref().is_some_and(|inner| inner.is::<QueryMemoryError>())
+        ));
+        assert_eq!(constrained.used(), 0);
+
+        let exact = QueryMemoryBudget::new(
+            QueryMemoryLimit::new(header_bytes + payload_bytes + output_bytes).unwrap(),
+        );
+        let source = make_source(&exact);
+        let array = build_variable_hex_array(source, Some(&exact)).unwrap();
+        assert_eq!(exact.used(), output_bytes as u128);
+        assert_eq!(
+            array
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap()
+                .value(0),
+            "0x07"
+        );
+        drop(array);
+        assert_eq!(exact.used(), 0);
+    }
+
+    #[test]
     fn chunked_hex_encoding_matches_existing_formatter_across_boundaries() {
         let bytes = (0u8..=255).collect::<Vec<_>>();
         let values = vec![bytes[..255].to_vec(), bytes.clone(), {
@@ -6317,7 +6389,7 @@ mod tests {
             .iter()
             .map(|value| to_hex_bytes(value))
             .collect::<Vec<_>>();
-        let array = build_variable_hex_array(values, None).unwrap();
+        let array = build_variable_hex_array(QueryBuffer::unaccounted(values), None).unwrap();
         let strings = array.as_any().downcast_ref::<StringArray>().unwrap();
         assert_eq!(
             strings.iter().map(Option::unwrap).collect::<Vec<_>>(),
@@ -6328,7 +6400,11 @@ mod tests {
     #[test]
     fn projected_columns_release_independent_scan_output_leases() {
         let budget = QueryMemoryBudget::new(QueryMemoryLimit::new(1024 * 1024).unwrap());
-        let large = build_variable_hex_array(vec![vec![7u8; 512]], Some(&budget)).unwrap();
+        let large = build_variable_hex_array(
+            QueryBuffer::unaccounted(vec![vec![7u8; 512]]),
+            Some(&budget),
+        )
+        .unwrap();
         let large_charge = budget.used();
         let small =
             build_direct_u64_array(QueryBuffer::unaccounted(vec![1]), Some(&budget)).unwrap();

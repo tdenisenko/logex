@@ -6,9 +6,8 @@ use logex_types::{QueryBuffer, QueryMemoryBudget};
 use crate::compression::{
     decode_buffer, delta_decode_accounted, delta_encode, delta_of_delta_decode_accounted,
     delta_of_delta_encode, dict_decode_accounted, dict_encode_raw, lz4_compress,
-    lz4_decompress_bounded, lz4_decompress_bounded_accounted, signed_delta_decode_accounted,
-    signed_delta_encode, zstd_compress, zstd_compress_level, zstd_decompress_bounded,
-    zstd_decompress_bounded_accounted,
+    lz4_decompress_bounded_accounted, signed_delta_decode_accounted, signed_delta_encode,
+    zstd_compress, zstd_compress_level, zstd_decompress_bounded_accounted,
 };
 use crate::native::CompressionCodec;
 
@@ -540,6 +539,20 @@ pub(crate) fn decode_var_bytes_page_bounded(
     codec: CompressionCodec,
     data_lengths: &[u32],
 ) -> io::Result<Vec<Bytes>> {
+    decode_var_bytes_page_selected_accounted(encoded, codec, data_lengths, None, None)
+        .map(|values| values.into_parts().0)
+}
+
+/// Validate the complete decoded page and every companion length before copying
+/// selected payloads. Query-owned outputs share only the selected payload bytes,
+/// with their backing capacity retained until the last output alias is dropped.
+pub(crate) fn decode_var_bytes_page_selected_accounted(
+    encoded: &[u8],
+    codec: CompressionCodec,
+    data_lengths: &[u32],
+    selection: Option<&[usize]>,
+    memory: Option<&QueryMemoryBudget>,
+) -> io::Result<QueryBuffer<Bytes>> {
     let data_bytes = data_lengths.iter().try_fold(0usize, |sum, &length| {
         sum.checked_add(length as usize)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "bytes page budget overflow"))
@@ -559,12 +572,14 @@ pub(crate) fn decode_var_bytes_page_bounded(
                 .split_first()
                 .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "empty adaptive page"))?;
             match *tag {
-                ADAPTIVE_BYTES_ZSTD_U64_OFFSETS => {
-                    (zstd_decompress_bounded(payload, raw_len(8)?)?, false)
-                }
-                ADAPTIVE_BYTES_ZSTD_U32_OFFSETS => {
-                    (zstd_decompress_bounded(payload, raw_len(4)?)?, true)
-                }
+                ADAPTIVE_BYTES_ZSTD_U64_OFFSETS => (
+                    zstd_decompress_bounded_accounted(payload, raw_len(8)?, memory)?,
+                    false,
+                ),
+                ADAPTIVE_BYTES_ZSTD_U32_OFFSETS => (
+                    zstd_decompress_bounded_accounted(payload, raw_len(4)?, memory)?,
+                    true,
+                ),
                 _ => {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
@@ -573,9 +588,18 @@ pub(crate) fn decode_var_bytes_page_bounded(
                 }
             }
         }
-        CompressionCodec::Zstd => (zstd_decompress_bounded(encoded, raw_len(8)?)?, false),
-        CompressionCodec::Lz4 => (lz4_decompress_bounded(encoded, raw_len(8)?)?, false),
-        CompressionCodec::None if encoded.len() == raw_len(8)? => (encoded.to_vec(), false),
+        CompressionCodec::Zstd => (
+            zstd_decompress_bounded_accounted(encoded, raw_len(8)?, memory)?,
+            false,
+        ),
+        CompressionCodec::Lz4 => (
+            lz4_decompress_bounded_accounted(encoded, raw_len(8)?, memory)?,
+            false,
+        ),
+        CompressionCodec::None if encoded.len() == raw_len(8)? => (
+            decode_buffer(encoded.len(), memory, DECODE_STAGE, || Ok(encoded.to_vec()))?,
+            false,
+        ),
         _ => {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -589,40 +613,18 @@ pub(crate) fn decode_var_bytes_page_bounded(
             "decoded bytes page has an unexpected length",
         ));
     }
-    let stored_rows = raw
-        .get(..4)
-        .and_then(|bytes| bytes.try_into().ok())
-        .map(u32::from_le_bytes)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "bytes page is truncated"))?;
-    let expected_rows = u32::try_from(data_lengths.len()).map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            "bytes page row count exceeds storage format",
-        )
-    })?;
-    if stored_rows != expected_rows {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "decoded bytes page has an unexpected row count",
-        ));
-    }
-    let rows = if narrow {
-        decode_var_bytes_raw_u32(&raw)?
-    } else {
-        decode_var_bytes_raw_u64(&raw)?
-    };
-    if rows.len() != data_lengths.len()
-        || rows
-            .iter()
-            .zip(data_lengths)
-            .any(|(row, &expected)| row.len() != expected as usize)
+    let page = BorrowedVarBytes::parse(&raw, narrow, Some(data_lengths.len()))?;
+    if data_lengths
+        .iter()
+        .enumerate()
+        .any(|(row, &expected)| page.row(row).len() != expected as usize)
     {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "decoded bytes page differs from its row-length metadata",
         ));
     }
-    Ok(rows)
+    page.materialize(selection, memory)
 }
 
 fn decoded_fixed_len(rows: usize, width: usize) -> io::Result<usize> {
@@ -697,125 +699,141 @@ fn encode_var_bytes_raw_u32(values: &[impl AsRef<[u8]>]) -> Vec<u8> {
     raw
 }
 
-fn decode_var_bytes_raw_u64(raw: &[u8]) -> io::Result<Vec<Bytes>> {
-    if raw.len() < 4 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "bytes page is truncated",
-        ));
-    }
-
-    let row_count = u32::from_le_bytes(raw[..4].try_into().map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            "bytes page row-count is truncated",
-        )
-    })?) as usize;
-    let offsets_start = 4;
-    let blob_start = row_count
-        .checked_add(1)
-        .and_then(|n| n.checked_mul(8))
-        .and_then(|n| n.checked_add(offsets_start))
-        .ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                "bytes page offset table overflow",
-            )
-        })?;
-    if raw.len() < blob_start {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "bytes page offsets are truncated",
-        ));
-    }
-
-    let mut offsets = Vec::with_capacity(row_count + 1);
-    for index in 0..=row_count {
-        let start = offsets_start + index * 8;
-        let end = start + 8;
-        offsets.push(u64::from_le_bytes(raw[start..end].try_into().map_err(
-            |_| io::Error::new(io::ErrorKind::InvalidData, "bytes page offset is truncated"),
-        )?));
-    }
-
-    materialize_var_bytes(&raw[blob_start..], &offsets)
+/// Borrowed offsets avoid allocating a second table during page validation.
+struct BorrowedVarBytes<'a> {
+    offsets: &'a [u8],
+    blob: &'a [u8],
+    row_count: usize,
+    narrow: bool,
 }
 
-fn decode_var_bytes_raw_u32(raw: &[u8]) -> io::Result<Vec<Bytes>> {
-    if raw.len() < 4 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "bytes page is truncated",
-        ));
-    }
-
-    let row_count = u32::from_le_bytes(raw[..4].try_into().map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            "bytes page row-count is truncated",
-        )
-    })?) as usize;
-    let offsets_start = 4;
-    let blob_start = row_count
-        .checked_add(1)
-        .and_then(|n| n.checked_mul(4))
-        .and_then(|n| n.checked_add(offsets_start))
-        .ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                "bytes page offset table overflow",
-            )
-        })?;
-    if raw.len() < blob_start {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "bytes page offsets are truncated",
-        ));
-    }
-
-    let mut offsets = Vec::with_capacity(row_count + 1);
-    for index in 0..=row_count {
-        let start = offsets_start + index * 4;
-        let end = start + 4;
-        offsets.push(u32::from_le_bytes(raw[start..end].try_into().map_err(|_| {
-            io::Error::new(io::ErrorKind::InvalidData, "bytes page offset is truncated")
-        })?) as u64);
-    }
-
-    materialize_var_bytes(&raw[blob_start..], &offsets)
-}
-
-fn materialize_var_bytes(blob: &[u8], offsets: &[u64]) -> io::Result<Vec<Bytes>> {
-    if offsets.first() != Some(&0) || offsets.last().copied() != Some(blob.len() as u64) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "bytes page offsets do not cover its exact payload",
-        ));
-    }
-    let row_count = offsets.len().saturating_sub(1);
-    let mut values = Vec::with_capacity(row_count);
-    for index in 0..row_count {
-        let start = usize::try_from(offsets[index]).map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                "bytes offset exceeds address space",
-            )
-        })?;
-        let end = usize::try_from(offsets[index + 1]).map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                "bytes offset exceeds address space",
-            )
-        })?;
-        if end < start || end > blob.len() {
+impl<'a> BorrowedVarBytes<'a> {
+    fn parse(raw: &'a [u8], narrow: bool, expected_rows: Option<usize>) -> io::Result<Self> {
+        let row_count = raw
+            .get(..4)
+            .and_then(|bytes| bytes.try_into().ok())
+            .map(u32::from_le_bytes)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "bytes page is truncated"))?
+            as usize;
+        if expected_rows.is_some_and(|expected| row_count != expected) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "bytes page offset is out of bounds",
+                "decoded bytes page has an unexpected row count",
             ));
         }
-        values.push(Bytes::copy_from_slice(&blob[start..end]));
+        let width = if narrow { 4 } else { 8 };
+        let blob_start = row_count
+            .checked_add(1)
+            .and_then(|count| count.checked_mul(width))
+            .and_then(|bytes| bytes.checked_add(4))
+            .filter(|&end| end <= raw.len())
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "bytes page offsets are truncated",
+                )
+            })?;
+        let page = Self {
+            offsets: &raw[4..blob_start],
+            blob: &raw[blob_start..],
+            row_count,
+            narrow,
+        };
+        let mut previous = 0;
+        for row in 0..=row_count {
+            let offset = page.encoded_offset(row);
+            if (row == 0 && offset != 0) || offset < previous || offset > page.blob.len() as u64 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "bytes page offset is out of bounds",
+                ));
+            }
+            previous = offset;
+        }
+        if previous != page.blob.len() as u64 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "bytes page offsets do not cover its exact payload",
+            ));
+        }
+        Ok(page)
     }
-    Ok(values)
+
+    fn encoded_offset(&self, row: usize) -> u64 {
+        if self.narrow {
+            u64::from(u32::from_le_bytes(self.offsets.as_chunks::<4>().0[row]))
+        } else {
+            u64::from_le_bytes(self.offsets.as_chunks::<8>().0[row])
+        }
+    }
+
+    fn row(&self, row: usize) -> &[u8] {
+        // Parsing bounds every offset by blob.len(), making both conversions
+        // safe even on platforms whose address space is narrower than u64.
+        let start = self.encoded_offset(row) as usize;
+        let end = self.encoded_offset(row + 1) as usize;
+        &self.blob[start..end]
+    }
+
+    fn materialize(
+        &self,
+        selection: Option<&[usize]>,
+        memory: Option<&QueryMemoryBudget>,
+    ) -> io::Result<QueryBuffer<Bytes>> {
+        if selection.is_some_and(|rows| rows.iter().any(|&row| row >= self.row_count)) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "bytes page selection is out of bounds",
+            ));
+        }
+        let count = selection.map_or(self.row_count, <[usize]>::len);
+        let row_at = |position| selection.map_or(position, |rows| rows[position]);
+        let mut values = QueryBuffer::try_with_capacity(count, memory, "variable page output")?;
+        if memory.is_none() {
+            // Preserve ordinary storage consumers' independently owned values.
+            for position in 0..count {
+                values.try_push(Bytes::copy_from_slice(self.row(row_at(position))))?;
+            }
+            return Ok(values);
+        }
+        let bytes = (0..count).try_fold(0usize, |sum, position| {
+            sum.checked_add(self.row(row_at(position)).len())
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "selected payload size overflow")
+                })
+        })?;
+        let mut payload = QueryBuffer::try_with_capacity(bytes, memory, "variable page payload")?;
+        for position in 0..count {
+            payload.try_extend_from_slice(self.row(row_at(position)))?;
+        }
+        let payload = payload.into_bytes();
+        let mut start = 0;
+        for position in 0..count {
+            let length = self.row(row_at(position)).len();
+            let end = start + length; // the complete selected sum was checked above
+            values.try_push(if length == 0 {
+                Bytes::new()
+            } else {
+                payload.slice(start..end)
+            })?;
+            start = end;
+        }
+        Ok(values)
+    }
+}
+
+#[cfg(test)]
+fn decode_var_bytes_raw_u64(raw: &[u8]) -> io::Result<Vec<Bytes>> {
+    BorrowedVarBytes::parse(raw, false, None)?
+        .materialize(None, None)
+        .map(|values| values.into_parts().0)
+}
+
+#[cfg(test)]
+fn decode_var_bytes_raw_u32(raw: &[u8]) -> io::Result<Vec<Bytes>> {
+    BorrowedVarBytes::parse(raw, true, None)?
+        .materialize(None, None)
+        .map(|values| values.into_parts().0)
 }
 
 fn decode_plain_u64_page(raw: &[u8], row_count: usize) -> io::Result<Vec<u64>> {
@@ -857,6 +875,152 @@ mod tests {
                 Some(logex_types::QueryMemoryError::CapacityExceeded { .. })
             )
         })
+    }
+
+    #[test]
+    fn accounted_variable_pages_preserve_selection_and_payload_aliases() {
+        let values = [
+            Vec::new(),
+            b"abc".to_vec(),
+            vec![9; 1024],
+            b"payload".to_vec(),
+        ];
+        let lengths = [0, 3, 1024, 7];
+        let codecs = [
+            CompressionCodec::None,
+            CompressionCodec::Lz4,
+            CompressionCodec::Zstd,
+            CompressionCodec::AdaptiveBytes,
+        ];
+        let mut encodings: Vec<_> = codecs
+            .into_iter()
+            .map(|codec| (codec, encode_var_bytes_page(&values, codec).unwrap()))
+            .collect();
+        // Keep both supported adaptive offset widths covered independently of
+        // the writer's choice for this small fixture.
+        let mut wide = vec![ADAPTIVE_BYTES_ZSTD_U64_OFFSETS];
+        wide.extend(zstd_compress(&encode_var_bytes_raw_u64(&values)).unwrap());
+        encodings.push((CompressionCodec::AdaptiveBytes, wide));
+        for (codec, encoded) in encodings {
+            for selection in [None, Some(&[][..]), Some(&[3, 0, 1, 3][..])] {
+                let memory = query_budget(64 * 1024);
+                let output = decode_var_bytes_page_selected_accounted(
+                    &encoded,
+                    codec,
+                    &lengths,
+                    selection,
+                    Some(&memory),
+                )
+                .unwrap();
+                let expected: Vec<_> = match selection {
+                    Some(rows) => rows.iter().map(|&row| values[row].as_slice()).collect(),
+                    None => values.iter().map(Vec::as_slice).collect(),
+                };
+                assert_eq!(
+                    output.iter().map(Bytes::as_ref).collect::<Vec<_>>(),
+                    expected
+                );
+                let payload_bytes: usize = expected.iter().map(|row| row.len()).sum();
+                assert_eq!(
+                    memory.used(),
+                    (payload_bytes + output.capacity() * size_of::<Bytes>()) as u128
+                );
+                let alias = output
+                    .iter()
+                    .find(|row| !row.is_empty())
+                    .map(|row| row.slice(..1));
+                drop(output);
+                assert_eq!(
+                    memory.used(),
+                    if alias.is_some() {
+                        payload_bytes as u128
+                    } else {
+                        0
+                    }
+                );
+                drop(alias);
+                assert_eq!(memory.used(), 0);
+            }
+        }
+    }
+
+    #[test]
+    fn variable_page_budget_covers_decode_and_only_selected_payload_copies() {
+        let values = [vec![8; 16 * 1024], b"ok".to_vec()];
+        let encoded = encode_var_bytes_page(&values, CompressionCodec::None).unwrap();
+        let expected_peak = encoded.len() + size_of::<Bytes>() + 2;
+        let memory = query_budget(expected_peak - 1);
+        let error = decode_var_bytes_page_selected_accounted(
+            &encoded,
+            CompressionCodec::None,
+            &[16 * 1024, 2],
+            Some(&[1]),
+            Some(&memory),
+        )
+        .unwrap_err();
+        assert!(is_query_capacity(&error));
+        assert_eq!(memory.used(), 0);
+        let memory = query_budget(expected_peak);
+        let output = decode_var_bytes_page_selected_accounted(
+            &encoded,
+            CompressionCodec::None,
+            &[16 * 1024, 2],
+            Some(&[1]),
+            Some(&memory),
+        )
+        .unwrap();
+        assert_eq!(&output[0][..], b"ok");
+        assert_eq!(memory.used(), (size_of::<Bytes>() + 2) as u128);
+        drop(output);
+        assert_eq!(memory.used(), 0);
+    }
+
+    #[test]
+    fn selected_variable_pages_still_validate_every_offset_and_length() {
+        let values = [b"abc".as_slice(), b"de", b"selected"];
+        for codec in [
+            CompressionCodec::None,
+            CompressionCodec::Lz4,
+            CompressionCodec::Zstd,
+            CompressionCodec::AdaptiveBytes,
+        ] {
+            let encoded = encode_var_bytes_page(&values, codec).unwrap();
+            let memory = query_budget(16 * 1024);
+            // Same total size, different unselected row boundaries.
+            let error = decode_var_bytes_page_selected_accounted(
+                &encoded,
+                codec,
+                &[4, 1, 8],
+                Some(&[2]),
+                Some(&memory),
+            )
+            .unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+            assert_eq!(memory.used(), 0);
+            let error = decode_var_bytes_page_selected_accounted(
+                &encoded,
+                codec,
+                &[3, 2, 8],
+                Some(&[3]),
+                Some(&memory),
+            )
+            .unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+            assert_eq!(memory.used(), 0);
+        }
+        let mut raw = encode_var_bytes_raw_u64(&values);
+        raw[12..20].copy_from_slice(&6u64.to_le_bytes());
+        let memory = query_budget(16 * 1024);
+        let error = decode_var_bytes_page_selected_accounted(
+            &raw,
+            CompressionCodec::None,
+            &[3, 2, 8],
+            Some(&[2]),
+            Some(&memory),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(memory.used(), 0);
     }
 
     #[test]
@@ -1189,13 +1353,16 @@ mod tests {
 
     #[test]
     fn bounded_variable_decoder_checks_row_shape_before_raw_offsets() {
-        let mut malformed = Vec::new();
-        malformed.extend_from_slice(&3u32.to_le_bytes());
-        malformed.extend_from_slice(&[0; 4 * std::mem::size_of::<u64>()]);
-        let error =
-            decode_var_bytes_page_bounded(&malformed, CompressionCodec::None, &[4, 4]).unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
-        assert!(error.to_string().contains("row count"));
+        for first_offset in [0, 1] {
+            let mut malformed = Vec::new();
+            malformed.extend_from_slice(&3u32.to_le_bytes());
+            malformed.extend_from_slice(&[0; 4 * std::mem::size_of::<u64>()]);
+            malformed[4] = first_offset;
+            let error = decode_var_bytes_page_bounded(&malformed, CompressionCodec::None, &[4, 4])
+                .unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+            assert!(error.to_string().contains("row count"));
+        }
     }
 
     #[test]

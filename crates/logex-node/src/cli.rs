@@ -338,7 +338,7 @@ Security:
         #[arg(long, default_value = "8")]
         query_max_concurrent: usize,
 
-        /// Shared budget for SQL operators, fixed-width reads and scan output.
+        /// Shared budget for SQL operators, fallback reads and scan output.
         /// This is not a process memory limit.
         #[arg(long, default_value = "1073741824")]
         query_memory_bytes: u64,

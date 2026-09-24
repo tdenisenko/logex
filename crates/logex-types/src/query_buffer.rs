@@ -93,6 +93,10 @@ impl<T> QueryBuffer<T> {
     pub fn truncate(&mut self, len: usize) {
         self.values.truncate(len);
     }
+    /// Remove a value while retaining the backing capacity and its charge.
+    pub fn pop(&mut self) -> Option<T> {
+        self.values.pop()
+    }
 
     #[inline]
     pub fn try_reserve(&mut self, additional: usize) -> io::Result<()> {
@@ -147,6 +151,21 @@ impl<T> QueryBuffer<T> {
             self.try_push(value)?;
         }
         Ok(())
+    }
+}
+
+impl QueryBuffer<u8> {
+    /// Share immutable bytes without detaching their allocation reservation.
+    /// Clones and slices retain the whole backing capacity until the last alias
+    /// is released. The small reference-counted owner is control overhead.
+    pub fn into_bytes(self) -> alloy_primitives::Bytes {
+        if self.values.is_empty() {
+            return alloy_primitives::Bytes::new();
+        }
+        if self.reservation.is_none() {
+            return self.values.into();
+        }
+        bytes::Bytes::from_owner(self).into()
     }
 }
 
@@ -234,5 +253,35 @@ mod tests {
         let mut empty = QueryBuffer::try_with_capacity(4, Some(&memory), "zst").unwrap();
         empty.try_extend([(), (), ()]).unwrap();
         assert_eq!(memory.used(), 0);
+    }
+
+    #[test]
+    fn immutable_bytes_keep_capacity_until_the_last_slice_drops() {
+        let memory = QueryMemoryBudget::new(QueryMemoryLimit::new(64).unwrap());
+        let mut buffer = QueryBuffer::try_with_capacity(32, Some(&memory), "payload").unwrap();
+        buffer.try_extend_from_slice(b"payload").unwrap();
+        let pointer = buffer.as_ptr();
+        let bytes = buffer.into_bytes();
+        assert_eq!(bytes.as_ptr(), pointer);
+        let clone = bytes.clone();
+        let slice = bytes.slice(1..3);
+        drop(bytes);
+        drop(clone);
+        assert_eq!(memory.used(), 32);
+        assert_eq!(&slice[..], b"ay");
+        drop(slice);
+        assert_eq!(memory.used(), 0);
+
+        let empty = QueryBuffer::<u8>::try_with_capacity(32, Some(&memory), "empty")
+            .unwrap()
+            .into_bytes();
+        assert!(empty.is_empty());
+        assert_eq!(memory.used(), 0);
+
+        let plain = QueryBuffer::unaccounted(b"legacy".to_vec());
+        let pointer = plain.as_ptr();
+        let bytes = plain.into_bytes();
+        assert_eq!(bytes.as_ptr(), pointer);
+        assert_eq!(&bytes[..], b"legacy");
     }
 }

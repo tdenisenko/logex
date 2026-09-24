@@ -230,7 +230,7 @@ impl<const WIDTH: usize> RawFixedColumn<WIDTH> {
 /// Validated raw offset table with payloads borrowed from one owned file buffer.
 /// Compaction borrows a page at a time; public query results still own each value.
 pub(crate) struct RawBytesColumn {
-    data: Vec<u8>,
+    data: QueryBuffer<u8>,
     row_count: usize,
     blob_start: usize,
 }
@@ -241,6 +241,10 @@ impl RawBytesColumn {
     }
 
     pub(crate) fn from_bytes(path: &Path, data: Vec<u8>) -> io::Result<Self> {
+        Self::from_accounted(path, QueryBuffer::unaccounted(data))
+    }
+
+    pub(crate) fn from_accounted(path: &Path, data: QueryBuffer<u8>) -> io::Result<Self> {
         let invalid = |reason: &str| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -292,21 +296,7 @@ impl RawBytesColumn {
         row_ids: Option<&[u32]>,
         visible_rows: Option<u64>,
     ) -> io::Result<Vec<Bytes>> {
-        let visible =
-            usize::try_from(visible_rows.unwrap_or(self.row_count() as u64)).map_err(|_| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "visible raw row count exceeds address space",
-                )
-            })?;
-        if visible > self.row_count()
-            || row_ids.is_some_and(|ids| ids.iter().any(|&id| id as usize >= visible))
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "raw selection exceeds captured rows",
-            ));
-        }
+        let visible = self.validate_selection(row_ids, visible_rows)?;
         let mut values = Vec::new();
         values
             .try_reserve_exact(row_ids.map_or(visible, <[u32]>::len))
@@ -322,6 +312,69 @@ impl RawBytesColumn {
                     values.push(Bytes::copy_from_slice(self.row(row)?));
                 }
             }
+        }
+        Ok(values)
+    }
+
+    fn validate_selection(
+        &self,
+        row_ids: Option<&[u32]>,
+        visible_rows: Option<u64>,
+    ) -> io::Result<usize> {
+        let visible =
+            usize::try_from(visible_rows.unwrap_or(self.row_count() as u64)).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "visible raw row count exceeds address space",
+                )
+            })?;
+        if visible > self.row_count()
+            || row_ids.is_some_and(|ids| ids.iter().any(|&id| id as usize >= visible))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "raw selection exceeds captured rows",
+            ));
+        }
+        Ok(visible)
+    }
+
+    /// Validate the complete source, then retain only selected payload bytes in
+    /// one backing allocation. Output aliases retain that allocation's charge.
+    pub(crate) fn materialize_accounted(
+        &self,
+        row_ids: Option<&[u32]>,
+        visible_rows: Option<u64>,
+        memory: Option<&QueryMemoryBudget>,
+    ) -> io::Result<QueryBuffer<Bytes>> {
+        let visible = self.validate_selection(row_ids, visible_rows)?;
+        let count = row_ids.map_or(visible, <[u32]>::len);
+        let selected_row = |position: usize| row_ids.map_or(position, |ids| ids[position] as usize);
+        let total = (0..count).try_fold(0usize, |total, position| {
+            total
+                .checked_add(self.row(selected_row(position))?.len())
+                .ok_or_else(|| {
+                    io::Error::other(logex_types::QueryMemoryError::SizeOverflow {
+                        stage: "variable selected payload",
+                    })
+                })
+        })?;
+        let mut values = QueryBuffer::try_with_capacity(count, memory, "variable result headers")?;
+        let mut payload =
+            QueryBuffer::try_with_capacity(total, memory, "variable selected payload")?;
+        for position in 0..count {
+            payload.try_extend_from_slice(self.row(selected_row(position))?)?;
+        }
+        let payload = payload.into_bytes();
+        let mut cursor = 0usize;
+        for position in 0..count {
+            let end = cursor + self.row(selected_row(position))?.len();
+            values.try_push(if cursor == end {
+                Bytes::new()
+            } else {
+                payload.slice(cursor..end)
+            })?;
+            cursor = end;
         }
         Ok(values)
     }
