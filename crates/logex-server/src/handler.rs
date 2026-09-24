@@ -4,15 +4,16 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use axum::extract::State;
 use axum::extract::rejection::JsonRejection;
-use axum::http::StatusCode;
+use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Json, Response};
 
 use logex_query::{self, DEFAULT_QUERY_PAGE_SIZE, NativeStorageSnapshot, QueryCancelCheck};
 use logex_storage::PartitionManager;
 use logex_types::{LOGEX_CLIENT_VERSION, QueryMemoryBudget, QueryMemoryLimit, SyncStatus};
 
-use crate::eth_filter::{EthFilter, RpcLog};
+use crate::eth_filter::{EthFilter, RpcLogs};
 use crate::jsonrpc::{JsonRpcDocument, JsonRpcRequest, JsonRpcResponse};
+use crate::query_encoding::{is_capacity_error, serialize_json};
 use crate::query_response::retain_query_lease;
 use crate::storage_metrics::CachedStorageMetrics;
 
@@ -417,7 +418,6 @@ pub async fn handle_jsonrpc(
     if notification {
         StatusCode::NO_CONTENT.into_response()
     } else {
-        let response = Json(response).into_response();
         match lease {
             Some(lease) => retain_query_lease(response, lease),
             None => response,
@@ -478,32 +478,53 @@ impl RpcMethod {
 async fn dispatch_jsonrpc(
     state: Arc<AppState>,
     request: JsonRpcRequest,
-) -> (JsonRpcResponse, Option<QueryLease>) {
+) -> (Response, Option<QueryLease>) {
     let id = request.id.unwrap_or_default();
     let method = match RpcMethod::parse(&request.method, request.params) {
         Ok(method) => method,
-        Err(error) => return (JsonRpcResponse::invalid_params(id, error), None),
+        Err(error) => {
+            return (
+                Json(JsonRpcResponse::invalid_params(id, error)).into_response(),
+                None,
+            );
+        }
     };
     // Metadata methods remain available without opening storage.
     match method {
         RpcMethod::ClientVersion => {
             return (
-                JsonRpcResponse::success(id, LOGEX_CLIENT_VERSION.into()),
+                Json(JsonRpcResponse::success(id, LOGEX_CLIENT_VERSION.into())).into_response(),
                 None,
             );
         }
-        RpcMethod::NetworkVersion => return (JsonRpcResponse::success(id, "1".into()), None),
-        RpcMethod::Unknown => return (JsonRpcResponse::method_not_found(id), None),
+        RpcMethod::NetworkVersion => {
+            return (
+                Json(JsonRpcResponse::success(id, "1".into())).into_response(),
+                None,
+            );
+        }
+        RpcMethod::Unknown => {
+            return (
+                Json(JsonRpcResponse::method_not_found(id)).into_response(),
+                None,
+            );
+        }
         RpcMethod::BlockNumber => {
             let storage = match state.read_storage().await {
                 Ok(storage) => storage,
-                Err(reason) => return (JsonRpcResponse::internal_error(id, reason), None),
+                Err(reason) => {
+                    return (
+                        Json(JsonRpcResponse::internal_error(id, reason)).into_response(),
+                        None,
+                    );
+                }
             };
             return (
-                JsonRpcResponse::success(
+                Json(JsonRpcResponse::success(
                     id,
                     serde_json::Value::String(format!("0x{:x}", storage.head_block().unwrap_or(0))),
-                ),
+                ))
+                .into_response(),
                 None,
             );
         }
@@ -513,22 +534,35 @@ async fn dispatch_jsonrpc(
         Ok(query) => query,
         Err(QueryAdmissionError::Capacity) => {
             return (
-                JsonRpcResponse::error(id, -32005, QueryAdmissionError::CAPACITY_MESSAGE.into()),
+                Json(JsonRpcResponse::error(
+                    id,
+                    -32005,
+                    QueryAdmissionError::CAPACITY_MESSAGE.into(),
+                ))
+                .into_response(),
                 None,
             );
         }
         Err(QueryAdmissionError::StorageUnavailable(reason)) => {
-            return (JsonRpcResponse::internal_error(id, reason), None);
+            return (
+                Json(JsonRpcResponse::internal_error(id, reason)).into_response(),
+                None,
+            );
         }
         Err(QueryAdmissionError::Busy) => {
             unreachable!("concurrent admission has no exclusive owner")
         }
     };
+    // Share the exact request ID with the worker without cloning its raw JSON.
+    // The request's bounded control data is separate from scalable query output.
+    let id = Arc::new(id);
     let response = match method {
         RpcMethod::GetLogs(filter) => {
+            let worker_id = Arc::clone(&id);
+            let memory = state.query_memory.clone();
             state
                 .run_blocking_query(&query, move |snapshot, head, cancel| {
-                    handle_eth_get_logs(snapshot, head, filter, &cancel)
+                    handle_eth_get_logs(snapshot, head, filter, &cancel, &memory, &worker_id)
                 })
                 .await
         }
@@ -540,10 +574,15 @@ async fn dispatch_jsonrpc(
         }
     };
     let response = match state.storage_failure() {
-        Some(reason) => JsonRpcResponse::internal_error(id, reason),
+        Some(reason) => Json(JsonRpcResponse::internal_error(&**id, reason)).into_response(),
         None => match response {
-            Ok(result) => JsonRpcResponse::success(id, result),
-            Err(error) => JsonRpcResponse::internal_error(id, error.to_string()),
+            Ok(bytes) => ([(header::CONTENT_TYPE, "application/json")], bytes).into_response(),
+            Err(error) if is_capacity_error(&error) => {
+                Json(JsonRpcResponse::error(&**id, -32005, error.to_string())).into_response()
+            }
+            Err(error) => {
+                Json(JsonRpcResponse::internal_error(&**id, error.to_string())).into_response()
+            }
         },
     };
     (response, Some(query.lease()))
@@ -554,7 +593,9 @@ fn handle_eth_get_logs(
     head_block: u64,
     filter: EthFilter,
     cancel: &logex_query::QueryCancelCheck,
-) -> io::Result<serde_json::Value> {
+    memory: &QueryMemoryBudget,
+    id: &serde_json::value::RawValue,
+) -> io::Result<bytes::Bytes> {
     let mut native_filter = filter.to_native_filter(head_block);
     native_filter.limit = Some(
         filter
@@ -568,8 +609,16 @@ fn handle_eth_get_logs(
         &native_filter,
         Some(cancel),
     )?;
-    let logs: Vec<RpcLog> = rows.iter().map(RpcLog::from).collect();
-    serde_json::to_value(&logs).map_err(io::Error::other)
+    serialize_json(
+        &JsonRpcResponse {
+            jsonrpc: "2.0",
+            result: Some(RpcLogs(&rows)),
+            error: None,
+            id,
+        },
+        memory,
+        Some(cancel),
+    )
 }
 
 #[cfg(test)]
@@ -1237,3 +1286,5 @@ mod tests {
 mod admission_tests;
 #[cfg(test)]
 mod memory_tests;
+#[cfg(test)]
+mod response_memory_tests;

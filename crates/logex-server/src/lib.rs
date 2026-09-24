@@ -5,6 +5,7 @@ pub mod grpc;
 pub mod handler;
 pub mod jsonrpc;
 mod maintenance;
+mod query_encoding;
 mod query_response;
 pub mod rest;
 mod storage_metrics;

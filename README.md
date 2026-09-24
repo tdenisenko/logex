@@ -145,13 +145,14 @@ exempt. REST's existing exclusive-query behavior still applies.
 
 DataFusion operators, index candidates, fallback scan reads, scan output buffers
 and structured SQL results use a shared accounted-memory budget across REST and
-gRPC SQL queries. Configure it with
+gRPC SQL queries. REST and JSON-RPC query response encoding uses the same budget.
+Configure it with
 `sync --query-memory-bytes <BYTES>` or TOML
 `query_memory_bytes`; the default is 1 GiB (`1073741824` bytes). The value must be
 positive and fit the platform's signed address space. Explicit CLI values override
 config, including the default value. A participating operation that cannot reserve
-capacity returns HTTP 503 with `query_capacity` and resource `memory`, or gRPC
-`RESOURCE_EXHAUSTED`. A capacity failure does not mark storage unhealthy.
+capacity returns HTTP 503 with `query_capacity` and resource `memory`, JSON-RPC
+`-32005`, or gRPC `RESOURCE_EXHAUSTED`. A capacity failure does not mark storage unhealthy.
 
 Fallback reads reserve source, page-index, selection, decoding and output buffers
 before allocation. Fixed raw reads stop at their captured or selected prefix;
@@ -179,10 +180,17 @@ nodes use a conservative allowance derived from the pinned Rust implementation;
 this is not a measurement of allocator overhead. Updating the toolchain or JSON
 map representation requires reviewing that allowance.
 
+HTTP query responses reserve output capacity before encoding growth. Structured
+SQL rows remain charged while REST serializes them; JSON-RPC writes borrowed log
+rows directly without constructing duplicate protocol objects. Encoded bytes keep
+their whole backing allocation charged through the last response-body or frame
+clone/slice. A failed encoding releases its partial output and returns an explicit
+error. Small error/control responses remain available when the query budget is full.
+
 This budget is not a process-RAM ceiling. Some DataFusion operators account after
 allocating; planner/scratch allocations, native query source and aggregate working
-sets (including temporary arbitrary-precision formatting buffers), and protocol
-object/encoding buffers are not yet covered. Captured JSON manifests,
+sets (including temporary arbitrary-precision formatting buffers), and gRPC
+protocol object/encoding buffers are not yet covered. Captured JSON manifests,
 paths, codec contexts, fixed builder-control, non-result map nodes and ownership metadata
 are also outside the accounted buffer capacity. Snapshot paths and plan/control
 objects scale with the number of captured or selected segments. One query can
@@ -377,7 +385,7 @@ Global options:
 | Option | Default | Use |
 | --- | --- | --- |
 | `--query-max-concurrent <N>` | `8` | Shared admission limit for REST SQL, JSON-RPC logs and gRPC SQL/native queries. Excess requests fail immediately; does not bound query memory. |
-| `--query-memory-bytes <BYTES>` | `1073741824` | Shared accounted-memory budget for DataFusion operators, index candidates, fallback reads, scan output and structured SQL results in REST/gRPC queries; not a process-RAM ceiling. Native working sets, manifest/control metadata and protocol encoding are not yet covered. |
+| `--query-memory-bytes <BYTES>` | `1073741824` | Shared accounted-memory budget for DataFusion operators, index candidates, fallback reads, scan output, structured SQL results and REST/JSON-RPC query response encoding; not a process-RAM ceiling. Native working sets, manifest/control metadata and gRPC protocol encoding are not yet covered. |
 | `--http-host <IP>` | `127.0.0.1` | HTTP bind host for dashboard, `/status`, `/query`, JSON-RPC, and WebSocket routes. Use `0.0.0.0` only with `--dashboard-password` and network-level protection. |
 | `--http-port <PORT>` | `8577` | HTTP dashboard, REST, JSON-RPC, and WebSocket port. Keep this stable for browser sessions and automation. |
 | `--grpc-host <IP>` | `127.0.0.1` | gRPC bind host. gRPC is unauthenticated; public gRPC requires `--allow-public-grpc`. |

@@ -291,7 +291,7 @@ fn parse_b256(s: &str) -> Result<B256, String> {
     Ok(B256::from(bytes))
 }
 
-/// JSON-RPC log object returned by `eth_getLogs`.
+/// Owned Ethereum log object used for subscription delivery.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RpcLog {
@@ -336,6 +336,114 @@ impl From<&LogRow> for RpcLog {
     }
 }
 
+/// Borrow query rows while writing their JSON directly into the charged output.
+/// Subscription objects still use `RpcLog`, because those own a different lifetime.
+pub(crate) struct RpcLogs<'a>(pub &'a [LogRow]);
+
+impl Serialize for RpcLogs<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        let mut rows = serializer.serialize_seq(Some(self.0.len()))?;
+        for row in self.0 {
+            rows.serialize_element(&RpcLogRef(row))?;
+        }
+        rows.end()
+    }
+}
+
+struct RpcLogRef<'a>(&'a LogRow);
+
+impl Serialize for RpcLogRef<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let row = self.0;
+        let mut object = serializer.serialize_struct("RpcLog", 9)?;
+        // Preserve the key order of the previously materialized JSON value.
+        object.serialize_field("address", &HexBytes(row.address.as_slice()))?;
+        object.serialize_field("blockHash", &HexBytes(row.block_hash.as_slice()))?;
+        object.serialize_field("blockNumber", &HexQuantity(row.block_number))?;
+        object.serialize_field("data", &HexBytes(&row.data))?;
+        object.serialize_field("logIndex", &HexQuantity(u64::from(row.log_index)))?;
+        object.serialize_field("removed", &false)?;
+        object.serialize_field("topics", &RpcTopics(row))?;
+        object.serialize_field("transactionHash", &HexBytes(row.tx_hash.as_slice()))?;
+        object.serialize_field("transactionIndex", &HexQuantity(u64::from(row.tx_index)))?;
+        object.end()
+    }
+}
+
+struct RpcTopics<'a>(&'a LogRow);
+
+impl Serialize for RpcTopics<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        let topics = [
+            &self.0.topic0,
+            &self.0.topic1,
+            &self.0.topic2,
+            &self.0.topic3,
+        ];
+        let mut sequence = serializer
+            .serialize_seq(Some(topics.iter().filter(|topic| topic.is_some()).count()))?;
+        for topic in topics.into_iter().flatten() {
+            sequence.serialize_element(&HexBytes(topic.as_slice()))?;
+        }
+        sequence.end()
+    }
+}
+
+struct HexQuantity(u64);
+
+impl std::fmt::Display for HexQuantity {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "0x{:x}", self.0)
+    }
+}
+
+impl Serialize for HexQuantity {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+
+struct HexBytes<'a>(&'a [u8]);
+
+impl std::fmt::Display for HexBytes<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("0x")?;
+        if self.0.len() <= 32 {
+            write_hex_chunk(self.0, &mut [0; 64], formatter)
+        } else {
+            write_hex_payload(self.0, formatter)
+        }
+    }
+}
+
+impl Serialize for HexBytes<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+
+#[inline(never)]
+fn write_hex_payload(bytes: &[u8], formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    let mut scratch = [0; 8192];
+    for chunk in bytes.chunks(scratch.len() / 2) {
+        write_hex_chunk(chunk, &mut scratch, formatter)?;
+    }
+    Ok(())
+}
+
+fn write_hex_chunk(
+    bytes: &[u8],
+    scratch: &mut [u8],
+    formatter: &mut std::fmt::Formatter<'_>,
+) -> std::fmt::Result {
+    let encoded = &mut scratch[..bytes.len() * 2];
+    hex::encode_to_slice(bytes, encoded).map_err(|_| std::fmt::Error)?;
+    formatter.write_str(std::str::from_utf8(encoded).map_err(|_| std::fmt::Error)?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -363,6 +471,41 @@ mod tests {
             data_len: 2,
             source: Source::Receipt,
         }
+    }
+
+    #[test]
+    fn borrowed_logs_match_the_previous_wire_representation() {
+        for length in [0, 20, 32, 33, 4096, 4097] {
+            for topic_count in 0..=4 {
+                let mut row = test_row();
+                row.block_number = u64::MAX;
+                row.tx_index = u32::MAX;
+                row.log_index = u32::MAX;
+                row.data = (0..length)
+                    .map(|index| index as u8)
+                    .collect::<Vec<_>>()
+                    .into();
+                row.data_len = length as u32;
+                row.topic0 = (topic_count > 0).then_some(B256::repeat_byte(0x01));
+                row.topic1 = (topic_count > 1).then_some(B256::repeat_byte(0x02));
+                row.topic2 = (topic_count > 2).then_some(B256::repeat_byte(0x03));
+                row.topic3 = (topic_count > 3).then_some(B256::repeat_byte(0x04));
+                let previous = serde_json::to_value(vec![RpcLog::from(&row)]).unwrap();
+                let direct = serde_json::to_vec(&RpcLogs(std::slice::from_ref(&row))).unwrap();
+                assert_eq!(direct, serde_json::to_vec(&previous).unwrap());
+            }
+        }
+        assert_eq!(serde_json::to_vec(&RpcLogs(&[])).unwrap(), b"[]");
+        let mut sparse = test_row();
+        sparse.block_number = 0;
+        sparse.tx_index = 0;
+        sparse.log_index = 0;
+        sparse.topic0 = None;
+        sparse.topic3 = Some(B256::repeat_byte(0x04));
+        assert_eq!(
+            serde_json::to_value(RpcLogs(std::slice::from_ref(&sparse))).unwrap(),
+            serde_json::to_value(vec![RpcLog::from(&sparse)]).unwrap(),
+        );
     }
 
     #[test]

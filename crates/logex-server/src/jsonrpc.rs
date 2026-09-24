@@ -278,13 +278,13 @@ impl<'de> Deserialize<'de> for LiteralValue {
 
 /// A JSON-RPC 2.0 response.
 #[derive(Debug, Serialize)]
-pub struct JsonRpcResponse {
+pub struct JsonRpcResponse<Payload = serde_json::Value, Id = Box<RawValue>> {
     pub jsonrpc: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub result: Option<serde_json::Value>,
+    pub result: Option<Payload>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<JsonRpcError>,
-    pub id: Box<RawValue>,
+    pub id: Id,
 }
 
 /// A JSON-RPC 2.0 error.
@@ -302,8 +302,10 @@ impl JsonRpcResponse {
     pub fn invalid_request() -> Self {
         Self::error(Box::<RawValue>::default(), -32600, "Invalid Request".into())
     }
+}
 
-    pub fn success(id: Box<RawValue>, result: serde_json::Value) -> Self {
+impl<Id> JsonRpcResponse<serde_json::Value, Id> {
+    pub fn success(id: Id, result: serde_json::Value) -> Self {
         Self {
             jsonrpc: "2.0",
             result: Some(result),
@@ -312,7 +314,7 @@ impl JsonRpcResponse {
         }
     }
 
-    pub fn error(id: Box<RawValue>, code: i64, message: String) -> Self {
+    pub fn error(id: Id, code: i64, message: String) -> Self {
         Self {
             jsonrpc: "2.0",
             result: None,
@@ -321,15 +323,15 @@ impl JsonRpcResponse {
         }
     }
 
-    pub fn method_not_found(id: Box<RawValue>) -> Self {
+    pub fn method_not_found(id: Id) -> Self {
         Self::error(id, -32601, "Method not found".into())
     }
 
-    pub fn invalid_params(id: Box<RawValue>, msg: String) -> Self {
+    pub fn invalid_params(id: Id, msg: String) -> Self {
         Self::error(id, -32602, msg)
     }
 
-    pub fn internal_error(id: Box<RawValue>, msg: String) -> Self {
+    pub fn internal_error(id: Id, msg: String) -> Self {
         Self::error(id, -32603, msg)
     }
 }
