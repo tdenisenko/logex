@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 const MEMORY_BYTES: usize = 2 * 1024;
 const ROWS: usize = 1_024;
+const GROUP_MEMORY_BYTES: usize = 128 * 1024;
 
 fn rows() -> Vec<LogRow> {
     (0..ROWS).map(row).collect()
@@ -33,6 +34,14 @@ fn row(index: usize) -> LogRow {
         data_len: 1,
         source: Source::Receipt,
     }
+}
+
+fn grouped_row(index: usize) -> LogRow {
+    let mut value = row(index);
+    let mut address = [0u8; 20];
+    address[12..].copy_from_slice(&(index as u64).to_be_bytes());
+    value.address = Address::from(address);
+    value
 }
 
 #[tokio::test]
@@ -152,6 +161,61 @@ async fn grouped_native_data_sum_rejects_working_set_that_exceeds_shared_budget(
     assert!(
         matches!(error, SqlQueryError::Capacity(ref message) if !message.contains("structured SQL result")),
         "grouped native SUM must reject its working set before the tiny result: {error}"
+    );
+    assert_eq!(constrained_memory.used(), 0);
+}
+
+#[tokio::test]
+async fn grouped_native_sum_rejects_retained_group_state_before_empty_output() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut storage = PartitionManager::open(PartitionManagerConfig {
+        data_dir: tmp.path().to_owned(),
+        partition_target_rows: 2_000,
+        compaction_safety_margin_blocks: 0,
+    })
+    .unwrap();
+    let fixture = (0..ROWS).map(grouped_row).collect::<Vec<_>>();
+    storage.write_batch(&fixture).unwrap();
+    storage.checkpoint().unwrap();
+    let snapshot = NativeStorageSnapshot::from_storage(&storage);
+    let head = storage.head_block().unwrap_or(0);
+    let sql = "SELECT address, SUM(data) AS total \
+               FROM logs GROUP BY address HAVING total > 1";
+
+    let generous_memory = QueryMemoryBudget::new(QueryMemoryLimit::new(4 * 1024 * 1024).unwrap());
+    let result = execute_sql_page_on_snapshot_with_memory(
+        sql,
+        snapshot.clone(),
+        head,
+        SqlQueryPage::default(),
+        None,
+        generous_memory.clone(),
+    )
+    .await
+    .unwrap();
+    assert!(result.rows.is_empty());
+    assert_eq!(result.total_scanned, ROWS as u64);
+    drop(result);
+    assert_eq!(generous_memory.used(), 0);
+
+    // HAVING suppresses every result row. This public regression proves that
+    // native grouped working memory is admitted even when no response rows are
+    // retained; the query-unit boundary test isolates retained map/slab state.
+    let constrained_memory =
+        QueryMemoryBudget::new(QueryMemoryLimit::new(GROUP_MEMORY_BYTES).unwrap());
+    let error = execute_sql_page_on_snapshot_with_memory(
+        sql,
+        snapshot,
+        head,
+        SqlQueryPage::default(),
+        None,
+        constrained_memory.clone(),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(error, SqlQueryError::Capacity(ref message) if !message.contains("structured SQL result")),
+        "grouped native SUM must reject retained group state before empty output: {error}"
     );
     assert_eq!(constrained_memory.used(), 0);
 }

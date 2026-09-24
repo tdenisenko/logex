@@ -54,7 +54,7 @@ use datafusion::sql::sqlparser::ast::{
 use datafusion::sql::sqlparser::keywords::Keyword;
 use datafusion::sql::sqlparser::tokenizer::Token as SqlToken;
 use futures_util::{Stream, TryStreamExt, stream};
-use num_bigint::{BigInt, BigUint};
+use num_bigint::BigInt;
 use serde_json::{Map, Value};
 
 use logex_storage::native::{NativeLogFilter, TopicConstraint};
@@ -79,8 +79,11 @@ use crate::native::{
 };
 #[path = "native_sum_memory.rs"]
 mod native_sum_memory;
-use crate::result::{JsonResultBuilder, QueryJsonRows, SQL_RESULT_STAGE};
-use native_sum_memory::NativeDataSumAccumulator;
+use crate::result::{JsonResultBuilder, QueryJsonRows, SQL_RESULT_STAGE, btree_node_bytes};
+use native_sum_memory::{
+    NATIVE_SUM_STAGE, NativeDataSumAccumulator, RestrictedSumAdmission, RestrictedSumBatchPlan,
+    RestrictedSumState,
+};
 
 const DATAFUSION_BATCH_SIZE: usize = 4_096;
 static DEFAULT_QUERY_MEMORY_BUDGET: LazyLock<QueryMemoryBudget> =
@@ -581,6 +584,23 @@ fn check_query_canceled(cancel_check: Option<&QueryCancelCheck>) -> DataFusionRe
     Ok(())
 }
 
+fn check_native_sum_canceled_periodically(
+    cancel_check: Option<&QueryCancelCheck>,
+    operations: &mut usize,
+) -> std::io::Result<()> {
+    *operations = operations
+        .checked_add(1)
+        .ok_or_else(native_sum_size_overflow)?;
+    if (*operations).is_multiple_of(1_024) && cancel_check.is_some_and(|is_canceled| is_canceled())
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            "query canceled",
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Debug)]
 struct EmptyLogPartition {
     schema: SchemaRef,
@@ -724,11 +744,11 @@ pub async fn execute_sql_page_on_snapshot(
 /// reservations, index candidates, exact retained row IDs, fixed and variable-column
 /// scan sources, retained Arrow output from custom scans, and structured output from
 /// DataFusion and native SQL shortcuts participate in `memory` across concurrent queries.
-/// Query planning, small segment-scaled plan/control objects, remaining decoder scratch,
-/// native working sets and arbitrary-precision formatting scratch, and protocol encoding
-/// remain outside this accounting milestone. Infallible DataFusion allocations are
-/// recorded even when
-/// they temporarily exceed the configured limit. Disk spilling is disabled, so a
+/// Query planning, small segment-scaled control metadata, direct engine-kernel
+/// temporaries, and general native SUM projection, sorting and formatting remain outside
+/// this accounting milestone. This is cooperative allocation accounting rather than a
+/// process-RSS ceiling. Infallible DataFusion allocations are recorded even when they
+/// temporarily exceed the configured limit. Disk spilling is disabled, so a
 /// fallible operator reservation that exceeds available capacity returns
 /// [`SqlQueryError::Capacity`] without truncating rows.
 pub async fn execute_sql_page_on_snapshot_with_memory(
@@ -1131,13 +1151,489 @@ struct PreparedSumInputs {
     cases: Arc<PreparedSqlExpressions>,
 }
 
-struct NativeSumState {
-    expr: PreparedRowValueExpr,
-    sum: BigInt,
-    count: u64,
+struct NativeSumGroupAllocations {
+    groups: BTreeMap<Option<NativeGroupKey>, usize>,
+    states: Vec<RestrictedSumState>,
+    sum_count: usize,
+    numeric_bytes: usize,
 }
 
-type NativeDataSumGroups = BTreeMap<Option<NativeGroupKey>, Vec<NativeSumState>>;
+struct NativeDataSumGroups {
+    allocations: NativeSumGroupAllocations,
+    budget: QueryMemoryBudget,
+    reservation: QueryMemoryReservation,
+}
+
+impl NativeDataSumGroups {
+    fn new(sum_count: usize, budget: QueryMemoryBudget) -> std::io::Result<Self> {
+        let reservation = budget
+            .reserve(0, NATIVE_SUM_STAGE)
+            .map_err(std::io::Error::other)?;
+        Ok(Self {
+            allocations: NativeSumGroupAllocations {
+                groups: BTreeMap::new(),
+                states: Vec::new(),
+                sum_count,
+                numeric_bytes: 0,
+            },
+            budget,
+            reservation,
+        })
+    }
+
+    fn groups(&self) -> &BTreeMap<Option<NativeGroupKey>, usize> {
+        &self.allocations.groups
+    }
+
+    fn is_empty(&self) -> bool {
+        self.allocations.groups.is_empty()
+    }
+
+    fn states(&self, ordinal: usize) -> &[RestrictedSumState] {
+        let start = ordinal * self.allocations.sum_count;
+        &self.allocations.states[start..start + self.allocations.sum_count]
+    }
+
+    fn ensure_groups(&mut self, keys: &[Option<NativeGroupKey>]) -> std::io::Result<()> {
+        let missing = keys
+            .iter()
+            .filter(|key| !self.allocations.groups.contains_key(key))
+            .count();
+        if missing == 0 {
+            return Ok(());
+        }
+        let future_groups = self
+            .allocations
+            .groups
+            .len()
+            .checked_add(missing)
+            .ok_or_else(native_sum_size_overflow)?;
+        let current_nodes = btree_node_bytes::<Option<NativeGroupKey>, usize>(
+            self.allocations.groups.len(),
+            NATIVE_SUM_STAGE,
+        )
+        .map_err(std::io::Error::other)?;
+        let future_nodes =
+            btree_node_bytes::<Option<NativeGroupKey>, usize>(future_groups, NATIVE_SUM_STAGE)
+                .map_err(std::io::Error::other)?;
+        self.reservation
+            .try_grow(future_nodes - current_nodes)
+            .map_err(std::io::Error::other)?;
+
+        let required_states = future_groups
+            .checked_mul(self.allocations.sum_count)
+            .ok_or_else(native_sum_size_overflow)?;
+        self.ensure_state_capacity(required_states)?;
+        for key in keys {
+            if self.allocations.groups.contains_key(key) {
+                continue;
+            }
+            let ordinal = self.allocations.groups.len();
+            for _ in 0..self.allocations.sum_count {
+                self.allocations.states.push(RestrictedSumState::zero());
+            }
+            self.allocations.groups.insert(*key, ordinal);
+        }
+        Ok(())
+    }
+
+    fn ensure_state_capacity(&mut self, required: usize) -> std::io::Result<()> {
+        ensure_native_sum_state_capacity(
+            &mut self.allocations,
+            &self.budget,
+            &mut self.reservation,
+            required,
+        )
+    }
+
+    fn admit_numeric_batch(
+        &mut self,
+        keys: &[Option<NativeGroupKey>],
+        plans: &[RestrictedSumBatchPlan],
+        cancel_check: Option<&QueryCancelCheck>,
+    ) -> std::io::Result<(QueryBuffer<RestrictedSumAdmission>, usize)> {
+        let expected = keys
+            .len()
+            .checked_mul(self.allocations.sum_count)
+            .ok_or_else(native_sum_size_overflow)?;
+        if plans.len() != expected {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "native SUM batch plan has the wrong state count",
+            ));
+        }
+        let mut admissions =
+            QueryBuffer::try_with_capacity(expected, Some(&self.budget), "native SUM batch plans")?;
+        let mut retained_growth = 0usize;
+        let mut scratch = 0usize;
+        let mut operations = 0usize;
+        for (key_index, key) in keys.iter().enumerate() {
+            let ordinal = *self.allocations.groups.get(key).ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "native SUM group is missing",
+                )
+            })?;
+            let states = self.states(ordinal);
+            for sum_index in 0..self.allocations.sum_count {
+                check_native_sum_canceled_periodically(cancel_check, &mut operations)?;
+                let admission = states[sum_index]
+                    .plan_batch(&plans[key_index * self.allocations.sum_count + sum_index])?;
+                retained_growth = retained_growth
+                    .checked_add(
+                        admission
+                            .retained_bytes()?
+                            .checked_sub(states[sum_index].retained_bytes()?)
+                            .ok_or_else(native_sum_size_overflow)?,
+                    )
+                    .ok_or_else(native_sum_size_overflow)?;
+                scratch = scratch.max(admission.scratch_bytes());
+                admissions.try_push(admission)?;
+            }
+        }
+        self.reservation
+            .try_grow(
+                retained_growth
+                    .checked_add(scratch)
+                    .ok_or_else(native_sum_size_overflow)?,
+            )
+            .map_err(std::io::Error::other)?;
+        self.allocations.numeric_bytes = self
+            .allocations
+            .numeric_bytes
+            .checked_add(retained_growth)
+            .ok_or_else(native_sum_size_overflow)?;
+        Ok((admissions, scratch))
+    }
+
+    fn begin_numeric_batch(
+        &mut self,
+        keys: &[Option<NativeGroupKey>],
+        admissions: &[RestrictedSumAdmission],
+        cancel_check: Option<&QueryCancelCheck>,
+    ) -> std::io::Result<()> {
+        let mut operations = 0usize;
+        for (key_index, key) in keys.iter().enumerate() {
+            let ordinal = self.allocations.groups[key];
+            let start = ordinal * self.allocations.sum_count;
+            for sum_index in 0..self.allocations.sum_count {
+                check_native_sum_canceled_periodically(cancel_check, &mut operations)?;
+                self.allocations.states[start + sum_index]
+                    .begin_batch(&admissions[key_index * self.allocations.sum_count + sum_index]);
+            }
+        }
+        Ok(())
+    }
+
+    fn finish_numeric_batch(&mut self, scratch: usize) -> std::io::Result<()> {
+        self.reservation
+            .shrink(scratch)
+            .map_err(std::io::Error::other)
+    }
+
+    fn merge(
+        self,
+        other: Self,
+        cancel_check: Option<&QueryCancelCheck>,
+    ) -> Result<Self, SqlQueryError> {
+        NativeSumMergeOwner::new(self, other)
+            .map_err(map_native_query_io_error)?
+            .merge(cancel_check)
+    }
+}
+
+fn ensure_native_sum_state_capacity(
+    allocations: &mut NativeSumGroupAllocations,
+    budget: &QueryMemoryBudget,
+    reservation: &mut QueryMemoryReservation,
+    required: usize,
+) -> std::io::Result<()> {
+    if required <= allocations.states.capacity() {
+        return Ok(());
+    }
+    let old_capacity = allocations.states.capacity();
+    let target = old_capacity
+        .checked_mul(2)
+        .unwrap_or(required)
+        .max(required);
+    let requested = QueryMemoryBudget::array_bytes::<RestrictedSumState>(target, NATIVE_SUM_STAGE)
+        .map_err(std::io::Error::other)?;
+    reservation
+        .try_grow(requested)
+        .map_err(std::io::Error::other)?;
+    let mut replacement = Vec::new();
+    replacement
+        .try_reserve_exact(target)
+        .map_err(std::io::Error::other)?;
+    let actual = QueryMemoryBudget::array_bytes::<RestrictedSumState>(
+        replacement.capacity(),
+        NATIVE_SUM_STAGE,
+    )
+    .map_err(std::io::Error::other)?;
+    if actual > requested {
+        let used = budget.used();
+        reservation.record_existing(actual - requested);
+        if budget.used() > budget.limit() as u128 {
+            return Err(std::io::Error::other(QueryMemoryError::CapacityExceeded {
+                requested: actual - requested,
+                used,
+                limit: budget.limit(),
+                stage: NATIVE_SUM_STAGE,
+            }));
+        }
+    } else if requested > actual {
+        reservation
+            .shrink(requested - actual)
+            .map_err(std::io::Error::other)?;
+    }
+    replacement.append(&mut allocations.states);
+    let old = std::mem::replace(&mut allocations.states, replacement);
+    drop(old);
+    let old_bytes =
+        QueryMemoryBudget::array_bytes::<RestrictedSumState>(old_capacity, NATIVE_SUM_STAGE)
+            .map_err(std::io::Error::other)?;
+    reservation.shrink(old_bytes).map_err(std::io::Error::other)
+}
+
+struct NativeSumMergeOwner {
+    destination: NativeSumGroupAllocations,
+    source: NativeSumGroupAllocations,
+    budget: QueryMemoryBudget,
+    reservation: QueryMemoryReservation,
+    source_reservation: QueryMemoryReservation,
+}
+
+impl NativeSumMergeOwner {
+    fn new(destination: NativeDataSumGroups, source: NativeDataSumGroups) -> std::io::Result<Self> {
+        let NativeDataSumGroups {
+            allocations: destination,
+            budget,
+            reservation,
+        } = destination;
+        let NativeDataSumGroups {
+            allocations: source,
+            budget: source_budget,
+            reservation: source_reservation,
+        } = source;
+        let mut owner = Self {
+            destination,
+            source,
+            budget,
+            reservation,
+            source_reservation,
+        };
+        owner
+            .reservation
+            .absorb(&mut owner.source_reservation)
+            .map_err(std::io::Error::other)?;
+        drop(source_budget);
+        Ok(owner)
+    }
+
+    fn merge(
+        mut self,
+        cancel_check: Option<&QueryCancelCheck>,
+    ) -> Result<NativeDataSumGroups, SqlQueryError> {
+        check_query_canceled(cancel_check)?;
+        if self.destination.sum_count != self.source.sum_count {
+            return Err(SqlQueryError::DataFusion(DataFusionError::Internal(
+                "native SUM merge state counts differ".to_owned(),
+            )));
+        }
+        let mut operations = 0usize;
+        let mut missing = 0usize;
+        let mut overlap_count = 0usize;
+        for key in self.source.groups.keys() {
+            check_native_sum_canceled_periodically(cancel_check, &mut operations)
+                .map_err(map_native_query_io_error)?;
+            if self.destination.groups.contains_key(key) {
+                overlap_count = overlap_count
+                    .checked_add(1)
+                    .ok_or_else(|| map_native_query_io_error(native_sum_size_overflow()))?;
+            } else {
+                missing = missing
+                    .checked_add(1)
+                    .ok_or_else(|| map_native_query_io_error(native_sum_size_overflow()))?;
+            }
+        }
+        let future_groups = self
+            .destination
+            .groups
+            .len()
+            .checked_add(missing)
+            .ok_or_else(|| map_native_query_io_error(native_sum_size_overflow()))?;
+        let current_nodes = btree_node_bytes::<Option<NativeGroupKey>, usize>(
+            self.destination.groups.len(),
+            NATIVE_SUM_STAGE,
+        )
+        .map_err(std::io::Error::other)
+        .map_err(map_native_query_io_error)?;
+        let future_nodes =
+            btree_node_bytes::<Option<NativeGroupKey>, usize>(future_groups, NATIVE_SUM_STAGE)
+                .map_err(std::io::Error::other)
+                .map_err(map_native_query_io_error)?;
+        self.reservation
+            .try_grow(future_nodes - current_nodes)
+            .map_err(std::io::Error::other)
+            .map_err(map_native_query_io_error)?;
+        let required_states = future_groups
+            .checked_mul(self.destination.sum_count)
+            .ok_or_else(|| map_native_query_io_error(native_sum_size_overflow()))?;
+        ensure_native_sum_state_capacity(
+            &mut self.destination,
+            &self.budget,
+            &mut self.reservation,
+            required_states,
+        )
+        .map_err(map_native_query_io_error)?;
+
+        let admission_count = overlap_count
+            .checked_mul(self.destination.sum_count)
+            .ok_or_else(|| map_native_query_io_error(native_sum_size_overflow()))?;
+        let mut admissions = QueryBuffer::try_with_capacity(
+            admission_count,
+            Some(&self.budget),
+            "native SUM merge plans",
+        )
+        .map_err(map_native_query_io_error)?;
+        let mut retained_growth = 0usize;
+        let mut moved_retained = 0usize;
+        let mut scratch = 0usize;
+        for (key, &source_ordinal) in &self.source.groups {
+            check_native_sum_canceled_periodically(cancel_check, &mut operations)
+                .map_err(map_native_query_io_error)?;
+            let Some(&destination_ordinal) = self.destination.groups.get(key) else {
+                for sum_index in 0..self.source.sum_count {
+                    check_native_sum_canceled_periodically(cancel_check, &mut operations)
+                        .map_err(map_native_query_io_error)?;
+                    moved_retained = moved_retained
+                        .checked_add(
+                            self.source.states[source_ordinal * self.source.sum_count + sum_index]
+                                .retained_bytes()
+                                .map_err(map_native_query_io_error)?,
+                        )
+                        .ok_or_else(|| map_native_query_io_error(native_sum_size_overflow()))?;
+                }
+                continue;
+            };
+            for sum_index in 0..self.destination.sum_count {
+                check_native_sum_canceled_periodically(cancel_check, &mut operations)
+                    .map_err(map_native_query_io_error)?;
+                let destination = &self.destination.states
+                    [destination_ordinal * self.destination.sum_count + sum_index];
+                let source =
+                    &self.source.states[source_ordinal * self.source.sum_count + sum_index];
+                let admission = destination
+                    .plan_merge(source)
+                    .map_err(map_native_query_io_error)?;
+                retained_growth = retained_growth
+                    .checked_add(
+                        admission
+                            .retained_bytes()
+                            .map_err(map_native_query_io_error)?
+                            .checked_sub(
+                                destination
+                                    .retained_bytes()
+                                    .map_err(map_native_query_io_error)?,
+                            )
+                            .ok_or_else(|| map_native_query_io_error(native_sum_size_overflow()))?,
+                    )
+                    .ok_or_else(|| map_native_query_io_error(native_sum_size_overflow()))?;
+                scratch = scratch.max(admission.scratch_bytes());
+                admissions
+                    .try_push(admission)
+                    .map_err(map_native_query_io_error)?;
+            }
+        }
+        self.reservation
+            .try_grow(
+                retained_growth
+                    .checked_add(scratch)
+                    .ok_or_else(|| map_native_query_io_error(native_sum_size_overflow()))?,
+            )
+            .map_err(std::io::Error::other)
+            .map_err(map_native_query_io_error)?;
+
+        let source_groups = std::mem::take(&mut self.source.groups);
+        let mut admission_index = 0usize;
+        for (key, source_ordinal) in source_groups {
+            if let Some(&destination_ordinal) = self.destination.groups.get(&key) {
+                for sum_index in 0..self.destination.sum_count {
+                    let source_index = source_ordinal * self.source.sum_count + sum_index;
+                    let source = std::mem::replace(
+                        &mut self.source.states[source_index],
+                        RestrictedSumState::zero(),
+                    );
+                    let destination_index =
+                        destination_ordinal * self.destination.sum_count + sum_index;
+                    self.destination.states[destination_index]
+                        .merge_from(source, &admissions[admission_index]);
+                    admission_index += 1;
+                    check_query_canceled(cancel_check)?;
+                }
+            } else {
+                let destination_ordinal = self.destination.groups.len();
+                for sum_index in 0..self.destination.sum_count {
+                    let source_index = source_ordinal * self.source.sum_count + sum_index;
+                    self.destination.states.push(std::mem::replace(
+                        &mut self.source.states[source_index],
+                        RestrictedSumState::zero(),
+                    ));
+                }
+                self.destination.groups.insert(key, destination_ordinal);
+                check_query_canceled(cancel_check)?;
+            }
+        }
+        drop(admissions);
+        self.destination.numeric_bytes = self
+            .destination
+            .numeric_bytes
+            .checked_add(retained_growth)
+            .and_then(|bytes| bytes.checked_add(moved_retained))
+            .ok_or_else(|| map_native_query_io_error(native_sum_size_overflow()))?;
+        let source_states = std::mem::take(&mut self.source.states);
+        drop(source_states);
+        let retained = self
+            .retained_destination_bytes()
+            .map_err(map_native_query_io_error)?;
+        let current = usize::try_from(self.reservation.bytes())
+            .map_err(|_| map_native_query_io_error(native_sum_size_overflow()))?;
+        if current > retained {
+            self.reservation
+                .shrink(current - retained)
+                .map_err(std::io::Error::other)
+                .map_err(map_native_query_io_error)?;
+        }
+        Ok(NativeDataSumGroups {
+            allocations: self.destination,
+            budget: self.budget,
+            reservation: self.reservation,
+        })
+    }
+
+    fn retained_destination_bytes(&self) -> std::io::Result<usize> {
+        let nodes = btree_node_bytes::<Option<NativeGroupKey>, usize>(
+            self.destination.groups.len(),
+            NATIVE_SUM_STAGE,
+        )
+        .map_err(std::io::Error::other)?;
+        let states = QueryMemoryBudget::array_bytes::<RestrictedSumState>(
+            self.destination.states.capacity(),
+            NATIVE_SUM_STAGE,
+        )
+        .map_err(std::io::Error::other)?;
+        nodes
+            .checked_add(states)
+            .and_then(|bytes| bytes.checked_add(self.destination.numeric_bytes))
+            .ok_or_else(native_sum_size_overflow)
+    }
+}
+
+fn native_sum_size_overflow() -> std::io::Error {
+    std::io::Error::other(QueryMemoryError::SizeOverflow {
+        stage: NATIVE_SUM_STAGE,
+    })
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum NativeGroupKey {
@@ -1787,7 +2283,7 @@ fn try_execute_native_data_sum(
         cancel_check.as_ref(),
         &memory,
     )?;
-    let mut values = native_data_sum_values(&native_query, groups);
+    let mut values = native_data_sum_values(&native_query, &groups);
     if let Some(limit) = native_query.sql_limit {
         values.truncate(limit);
     }
@@ -2642,7 +3138,8 @@ fn execute_native_data_sum(
     memory: &QueryMemoryBudget,
 ) -> Result<(NativeDataSumGroups, u64), SqlQueryError> {
     check_query_canceled(cancel_check).map_err(SqlQueryError::DataFusion)?;
-    let mut groups = BTreeMap::new();
+    let mut groups = NativeDataSumGroups::new(prepared.sums.len(), memory.clone())
+        .map_err(map_native_query_io_error)?;
     let sum_inputs = &prepared.sums;
     let partitions: Vec<_> = snapshot
         .partitions_in_order(filter.order)
@@ -2689,7 +3186,7 @@ fn execute_native_data_sum(
 
         for result in chunk_results {
             let (partition_groups, partition_scanned) = result?;
-            merge_native_sum_groups(&mut groups, partition_groups)?;
+            groups = groups.merge(partition_groups, cancel_check)?;
             total_scanned = total_scanned
                 .checked_add(partition_scanned)
                 .ok_or_else(|| {
@@ -2701,52 +3198,12 @@ fn execute_native_data_sum(
     }
 
     if group_by == NativeDataSumGroupBy::None && groups.is_empty() {
-        groups.insert(None, initial_native_sum_states(sum_inputs));
+        groups
+            .ensure_groups(&[None])
+            .map_err(map_native_query_io_error)?;
     }
 
     Ok((groups, total_scanned))
-}
-
-fn initial_native_sum_states(sum_inputs: &[PreparedRowValueExpr]) -> Vec<NativeSumState> {
-    sum_inputs
-        .iter()
-        .cloned()
-        .map(|expr| NativeSumState {
-            expr,
-            sum: BigInt::default(),
-            count: 0,
-        })
-        .collect()
-}
-
-fn merge_native_sum_states(
-    states: &mut [NativeSumState],
-    partial_states: Vec<NativeSumState>,
-) -> Result<(), SqlQueryError> {
-    for (state, partial) in states.iter_mut().zip(partial_states) {
-        state.sum += partial.sum;
-        state.count = state.count.checked_add(partial.count).ok_or_else(|| {
-            SqlQueryError::DataFusion(DataFusionError::Execution(
-                "native SUM value count overflow".to_owned(),
-            ))
-        })?;
-    }
-    Ok(())
-}
-
-fn merge_native_sum_groups(
-    groups: &mut NativeDataSumGroups,
-    partial_groups: NativeDataSumGroups,
-) -> Result<(), SqlQueryError> {
-    for (key, partial_states) in partial_groups {
-        match groups.get_mut(&key) {
-            Some(states) => merge_native_sum_states(states, partial_states)?,
-            None => {
-                groups.insert(key, partial_states);
-            }
-        }
-    }
-    Ok(())
 }
 
 fn scan_native_data_sum_partition(
@@ -2754,7 +3211,8 @@ fn scan_native_data_sum_partition(
     scan: NativeDataSumPartitionScan<'_>,
 ) -> Result<(NativeDataSumGroups, u64), SqlQueryError> {
     check_query_canceled(scan.cancel_check)?;
-    let mut groups: BTreeMap<Option<NativeGroupKey>, Vec<NativeSumState>> = BTreeMap::new();
+    let mut groups = NativeDataSumGroups::new(scan.sum_inputs.len(), scan.memory.clone())
+        .map_err(map_native_query_io_error)?;
     let mut projection: Vec<&str> =
         candidate_refinement_columns_for_filters(scan.candidate_filters);
     for column in scan
@@ -2877,49 +3335,168 @@ fn scan_native_data_sum_partition(
                     .map_err(map_native_query_io_error)?,
             ),
         };
-        for (row_index, data) in values.iter().enumerate() {
-            if row_index % 1_024 == 0 {
-                check_query_canceled(scan.cancel_check)?;
-            }
-            let key = addresses.as_ref().map(|addresses| {
-                let mut bytes = [0u8; 20];
-                bytes.copy_from_slice(addresses[row_index].as_slice());
-                NativeGroupKey::Address(bytes)
-            });
-            let states = groups
-                .entry(key)
-                .or_insert_with(|| initial_native_sum_states(scan.sum_inputs));
-            for state in states.iter_mut() {
-                if let Some(value) =
-                    eval_native_row_value(data.as_ref(), &state.expr, &typed_cases, row_index)?
-                {
-                    state.sum += value;
-                    state.count = state.count.checked_add(1).ok_or_else(|| {
-                        SqlQueryError::DataFusion(DataFusionError::Execution(
-                            "native SUM value count overflow".to_owned(),
-                        ))
-                    })?;
-                }
-            }
-            total_scanned = total_scanned.checked_add(1).ok_or_else(|| {
-                SqlQueryError::DataFusion(DataFusionError::Execution(
-                    "native SUM scanned-row count overflow".to_owned(),
-                ))
-            })?;
-        }
+        add_native_sum_batch(
+            &mut groups,
+            scan.group_by,
+            scan.sum_inputs,
+            &values,
+            addresses.as_deref(),
+            &typed_cases,
+            scan.cancel_check,
+        )?;
+        let batch_scanned = u64::try_from(values.len()).map_err(|_| {
+            SqlQueryError::DataFusion(DataFusionError::Execution(
+                "native SUM scanned-row count overflow".to_owned(),
+            ))
+        })?;
+        total_scanned = total_scanned.checked_add(batch_scanned).ok_or_else(|| {
+            SqlQueryError::DataFusion(DataFusionError::Execution(
+                "native SUM scanned-row count overflow".to_owned(),
+            ))
+        })?;
     }
 
     check_query_canceled(scan.cancel_check)?;
     Ok((groups, total_scanned))
 }
 
+#[allow(clippy::too_many_arguments)]
+fn add_native_sum_batch(
+    groups: &mut NativeDataSumGroups,
+    group_by: NativeDataSumGroupBy,
+    sum_inputs: &[PreparedRowValueExpr],
+    values: &QueryBuffer<alloy_primitives::Bytes>,
+    addresses: Option<&[Address]>,
+    cases: &[&Int64Array],
+    cancel_check: Option<&QueryCancelCheck>,
+) -> Result<(), SqlQueryError> {
+    if addresses.is_some_and(|addresses| addresses.len() != values.len()) {
+        return Err(SqlQueryError::DataFusion(DataFusionError::Internal(
+            "native SUM address source has the wrong row count".to_owned(),
+        )));
+    }
+    let row_keys = match group_by {
+        NativeDataSumGroupBy::None => None,
+        NativeDataSumGroupBy::Address => {
+            let mut row_keys = QueryBuffer::try_with_capacity(
+                values.len(),
+                Some(&groups.budget),
+                "native SUM batch group keys",
+            )
+            .map_err(map_native_query_io_error)?;
+            for row_index in 0..values.len() {
+                let mut bytes = [0u8; 20];
+                bytes.copy_from_slice(addresses.unwrap()[row_index].as_slice());
+                row_keys
+                    .try_push(Some(NativeGroupKey::Address(bytes)))
+                    .map_err(map_native_query_io_error)?;
+            }
+            Some(row_keys)
+        }
+    };
+    let touched_capacity = row_keys.as_ref().map_or(1, |keys| keys.len());
+    let mut unique_keys = QueryBuffer::try_with_capacity(
+        touched_capacity,
+        Some(&groups.budget),
+        "native SUM touched groups",
+    )
+    .map_err(map_native_query_io_error)?;
+    if let Some(row_keys) = &row_keys {
+        unique_keys
+            .try_extend_from_slice(row_keys)
+            .map_err(map_native_query_io_error)?;
+        unique_keys.sort_unstable();
+        let mut previous = None;
+        unique_keys.retain(|key| {
+            let keep = previous != Some(*key);
+            previous = Some(*key);
+            keep
+        });
+    } else {
+        unique_keys
+            .try_push(None)
+            .map_err(map_native_query_io_error)?;
+    }
+    groups
+        .ensure_groups(&unique_keys)
+        .map_err(map_native_query_io_error)?;
+
+    let plan_len = unique_keys
+        .len()
+        .checked_mul(sum_inputs.len())
+        .ok_or_else(|| map_native_query_io_error(native_sum_size_overflow()))?;
+    let mut plans = QueryBuffer::try_with_capacity(
+        plan_len,
+        Some(&groups.budget),
+        "native SUM sparse state plans",
+    )
+    .map_err(map_native_query_io_error)?;
+    plans
+        .try_resize(plan_len, RestrictedSumBatchPlan::default())
+        .map_err(map_native_query_io_error)?;
+    let mut plan_operations = 0usize;
+    for (row_index, data) in values.iter().enumerate() {
+        let row_key = row_keys.as_ref().and_then(|keys| keys[row_index]);
+        let key_index = unique_keys.binary_search(&row_key).map_err(|_| {
+            SqlQueryError::DataFusion(DataFusionError::Internal(
+                "native SUM touched group is missing".to_owned(),
+            ))
+        })?;
+        for (sum_index, expr) in sum_inputs.iter().enumerate() {
+            check_native_sum_canceled_periodically(cancel_check, &mut plan_operations)
+                .map_err(map_native_query_io_error)?;
+            let Some(value) = eval_native_row_value(data.as_ref(), expr, cases, row_index)? else {
+                continue;
+            };
+            let plan = &mut plans[key_index * sum_inputs.len() + sum_index];
+            match value {
+                NativeSumContribution::Data(bytes) => plan.include_data(bytes),
+                NativeSumContribution::Literal(value) => plan.include_literal(value),
+            }
+            .map_err(map_native_query_io_error)?;
+        }
+    }
+    let (admissions, scratch) = groups
+        .admit_numeric_batch(&unique_keys, &plans, cancel_check)
+        .map_err(map_native_query_io_error)?;
+    groups
+        .begin_numeric_batch(&unique_keys, &admissions, cancel_check)
+        .map_err(map_native_query_io_error)?;
+
+    let mut mutation_operations = 0usize;
+    for (row_index, data) in values.iter().enumerate() {
+        check_native_sum_canceled_periodically(cancel_check, &mut mutation_operations)
+            .map_err(map_native_query_io_error)?;
+        let row_key = row_keys.as_ref().and_then(|keys| keys[row_index]);
+        let ordinal = groups.allocations.groups[&row_key];
+        let start = ordinal * groups.allocations.sum_count;
+        for (sum_index, expr) in sum_inputs.iter().enumerate() {
+            let Some(value) = eval_native_row_value(data.as_ref(), expr, cases, row_index)? else {
+                continue;
+            };
+            let state = &mut groups.allocations.states[start + sum_index];
+            match value {
+                NativeSumContribution::Data(bytes) => state.add_data(bytes),
+                NativeSumContribution::Literal(value) => state.add_literal(value),
+            }
+            check_query_canceled(cancel_check)?;
+        }
+    }
+    groups
+        .finish_numeric_batch(scratch)
+        .map_err(map_native_query_io_error)
+}
+
 fn native_data_sum_values(
     query: &NativeDataSumQuery,
-    groups: BTreeMap<Option<NativeGroupKey>, Vec<NativeSumState>>,
+    groups: &NativeDataSumGroups,
 ) -> Vec<NativeDataSumResultRow> {
     let mut rows = groups
-        .into_iter()
-        .filter_map(|(group_key, states)| native_data_sum_result_row(query, group_key, &states))
+        .groups()
+        .iter()
+        .filter_map(|(group_key, &ordinal)| {
+            native_data_sum_result_row(query, *group_key, groups.states(ordinal))
+        })
         .collect::<Vec<_>>();
 
     if let Some(order) = query.order {
@@ -2952,7 +3529,7 @@ struct NativeDataSumResultRow {
 fn native_data_sum_result_row(
     query: &NativeDataSumQuery,
     group_key: Option<NativeGroupKey>,
-    states: &[NativeSumState],
+    states: &[RestrictedSumState],
 ) -> Option<NativeDataSumResultRow> {
     let values = query
         .projections
@@ -3114,12 +3691,12 @@ fn compare_bigint(
 
 fn eval_native_aggregate_expr(
     expr: &NativeAggregateExpr,
-    states: &[NativeSumState],
+    states: &[RestrictedSumState],
 ) -> Option<BigInt> {
     match expr {
         NativeAggregateExpr::Sum(index) => {
             let state = states.get(*index)?;
-            (state.count > 0).then(|| state.sum.clone())
+            state.value().cloned()
         }
         NativeAggregateExpr::Add(left, right) => Some(
             eval_native_aggregate_expr(left, states)? + eval_native_aggregate_expr(right, states)?,
@@ -3130,15 +3707,21 @@ fn eval_native_aggregate_expr(
     }
 }
 
-fn eval_native_row_value(
-    data: &[u8],
-    expr: &PreparedRowValueExpr,
+#[derive(Debug)]
+enum NativeSumContribution<'a> {
+    Data(&'a [u8]),
+    Literal(&'a BigInt),
+}
+
+fn eval_native_row_value<'a>(
+    data: &'a [u8],
+    expr: &'a PreparedRowValueExpr,
     cases: &[&Int64Array],
     row_index: usize,
-) -> Result<Option<BigInt>, SqlQueryError> {
+) -> Result<Option<NativeSumContribution<'a>>, SqlQueryError> {
     match expr {
-        PreparedRowValueExpr::Data => Ok(Some(BigInt::from(BigUint::from_bytes_be(data)))),
-        PreparedRowValueExpr::Literal(value) => Ok(Some(value.clone())),
+        PreparedRowValueExpr::Data => Ok(Some(NativeSumContribution::Data(data))),
+        PreparedRowValueExpr::Literal(value) => Ok(Some(NativeSumContribution::Literal(value))),
         PreparedRowValueExpr::Case { expression, leaves } => {
             let result = *cases.get(*expression).ok_or_else(|| {
                 DataFusionError::Internal(format!(
@@ -3161,8 +3744,10 @@ fn eval_native_row_value(
                 ))
             })?;
             match leaves.get(leaf) {
-                Some(NativeRowLeaf::Data) => Ok(Some(BigInt::from(BigUint::from_bytes_be(data)))),
-                Some(NativeRowLeaf::Literal(value)) => Ok(Some(value.clone())),
+                Some(NativeRowLeaf::Data) => Ok(Some(NativeSumContribution::Data(data))),
+                Some(NativeRowLeaf::Literal(value)) => {
+                    Ok(Some(NativeSumContribution::Literal(value)))
+                }
                 None => Err(DataFusionError::Internal(format!(
                     "prepared SUM CASE leaf selector {leaf} is out of range"
                 ))
@@ -7684,6 +8269,214 @@ mod tests {
     }
 
     #[test]
+    fn grouped_state_memory_fixture_is_native_eligible() {
+        let query = parse_native_data_sum_query(
+            "SELECT address, SUM(data) AS total \
+             FROM logs GROUP BY address HAVING total > 1",
+        )
+        .unwrap()
+        .expect("group-state memory fixture must exercise the native SUM path");
+        assert!(query.group_by == NativeDataSumGroupBy::Address);
+        assert_eq!(query.sums.len(), 1);
+        assert!(matches!(query.sums[0], NativeRowValueExpr::Data));
+        assert!(query.having.is_some());
+    }
+
+    #[test]
+    fn grouped_sum_nodes_and_state_slab_are_owned_and_duplicates_reuse_them() {
+        let memory = QueryMemoryBudget::new(QueryMemoryLimit::new(1024 * 1024).unwrap());
+        let mut groups = NativeDataSumGroups::new(2, memory.clone()).unwrap();
+        let first = Some(NativeGroupKey::Address([1; 20]));
+        groups.ensure_groups(&[first]).unwrap();
+        let first_charge = memory.used();
+        assert!(first_charge > 0);
+        groups.ensure_groups(&[first]).unwrap();
+        assert_eq!(memory.used(), first_charge);
+        groups
+            .ensure_groups(&[Some(NativeGroupKey::Address([2; 20]))])
+            .unwrap();
+        assert!(memory.used() >= first_charge);
+        drop(groups);
+        assert_eq!(memory.used(), 0);
+
+        let constrained = QueryMemoryBudget::new(QueryMemoryLimit::new(1).unwrap());
+        let mut groups = NativeDataSumGroups::new(2, constrained.clone()).unwrap();
+        let error = groups.ensure_groups(&[first]).unwrap_err();
+        assert!(capacity_error_message(&error).is_some(), "{error}");
+        drop(groups);
+        assert_eq!(constrained.used(), 0);
+    }
+
+    #[test]
+    fn grouped_sum_retained_state_boundary_is_typed_and_releases() {
+        let keys = (0..128)
+            .map(|value| Some(NativeGroupKey::Address([value; 20])))
+            .collect::<Vec<_>>();
+        let probe_memory = QueryMemoryBudget::new(QueryMemoryLimit::new(1024 * 1024).unwrap());
+        let mut probe = NativeDataSumGroups::new(2, probe_memory.clone()).unwrap();
+        probe.ensure_groups(&keys).unwrap();
+        let retained = usize::try_from(probe_memory.used()).unwrap();
+        assert!(retained > 1);
+        drop(probe);
+        assert_eq!(probe_memory.used(), 0);
+
+        let constrained = QueryMemoryBudget::new(QueryMemoryLimit::new(retained - 1).unwrap());
+        let mut groups = NativeDataSumGroups::new(2, constrained.clone()).unwrap();
+        let error = groups.ensure_groups(&keys).unwrap_err();
+        assert!(
+            capacity_error_message(&error)
+                .is_some_and(|message| message.contains(NATIVE_SUM_STAGE)),
+            "{error}"
+        );
+        drop(groups);
+        assert_eq!(constrained.used(), 0);
+    }
+
+    #[test]
+    fn grouped_sum_sparse_preflight_cancels_and_releases() {
+        let memory = QueryMemoryBudget::new(QueryMemoryLimit::new(4 * 1024 * 1024).unwrap());
+        let keys = (0..1_024)
+            .map(|value| {
+                let mut address = [0u8; 20];
+                address[12..].copy_from_slice(&(value as u64).to_be_bytes());
+                Some(NativeGroupKey::Address(address))
+            })
+            .collect::<Vec<_>>();
+        let plans = vec![RestrictedSumBatchPlan::default(); keys.len()];
+        let mut groups = NativeDataSumGroups::new(1, memory.clone()).unwrap();
+        groups.ensure_groups(&keys).unwrap();
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let cancel: QueryCancelCheck = Arc::new(move || calls.fetch_add(1, Ordering::Relaxed) >= 1);
+        let (admissions, scratch) = groups
+            .admit_numeric_batch(&keys, &plans, Some(&cancel))
+            .unwrap();
+        assert_eq!(scratch, 0);
+        let error = groups
+            .begin_numeric_batch(&keys, &admissions, Some(&cancel))
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::Interrupted);
+        drop(admissions);
+        drop(groups);
+        assert_eq!(memory.used(), 0);
+    }
+
+    #[test]
+    fn grouped_sum_batch_planning_cancels_inside_sum_input_loop() {
+        let memory = QueryMemoryBudget::new(QueryMemoryLimit::new(4 * 1024 * 1024).unwrap());
+        let mut groups = NativeDataSumGroups::new(4, memory.clone()).unwrap();
+        let values = QueryBuffer::unaccounted(vec![bytes!("01"); 1_024]);
+        let sums = vec![PreparedRowValueExpr::Data; 4];
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let cancel: QueryCancelCheck = Arc::new(move || calls.fetch_add(1, Ordering::Relaxed) >= 2);
+        let error = add_native_sum_batch(
+            &mut groups,
+            NativeDataSumGroupBy::None,
+            &sums,
+            &values,
+            None,
+            &[],
+            Some(&cancel),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, SqlQueryError::DataFusion(DataFusionError::Execution(ref message)) if message == "query canceled"),
+            "{error}"
+        );
+        assert!(
+            groups
+                .allocations
+                .states
+                .iter()
+                .all(|state| state.value().is_none())
+        );
+        drop(groups);
+        assert_eq!(memory.used(), 0);
+    }
+
+    fn native_sum_groups_with_values(
+        memory: QueryMemoryBudget,
+        values: &[(u8, u8)],
+    ) -> NativeDataSumGroups {
+        let mut groups = NativeDataSumGroups::new(1, memory).unwrap();
+        let keys = values
+            .iter()
+            .map(|(key, _)| Some(NativeGroupKey::Address([*key; 20])))
+            .collect::<Vec<_>>();
+        groups.ensure_groups(&keys).unwrap();
+        let plans = values
+            .iter()
+            .map(|(_, value)| {
+                let mut plan = RestrictedSumBatchPlan::default();
+                plan.include_data(&[*value]).unwrap();
+                plan
+            })
+            .collect::<Vec<_>>();
+        let (admissions, scratch) = groups.admit_numeric_batch(&keys, &plans, None).unwrap();
+        groups
+            .begin_numeric_batch(&keys, &admissions, None)
+            .unwrap();
+        for ((key, value), admission) in values.iter().zip(admissions.iter()) {
+            let group = Some(NativeGroupKey::Address([*key; 20]));
+            let ordinal = groups.allocations.groups[&group];
+            groups.allocations.states[ordinal].add_data(&[*value]);
+            assert!(admission.retained_bytes().unwrap() > 0);
+        }
+        groups.finish_numeric_batch(scratch).unwrap();
+        groups
+    }
+
+    #[test]
+    fn grouped_sum_merge_owns_disjoint_and_overlapping_states_on_cancel() {
+        let success_memory = QueryMemoryBudget::new(QueryMemoryLimit::new(1024 * 1024).unwrap());
+        let destination = native_sum_groups_with_values(success_memory.clone(), &[(1, 2)]);
+        let source = native_sum_groups_with_values(success_memory.clone(), &[(1, 3), (2, 4)]);
+        let callback_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed = Arc::clone(&callback_count);
+        let count_callbacks: QueryCancelCheck = Arc::new(move || {
+            observed.fetch_add(1, Ordering::Relaxed);
+            false
+        });
+        let merged = destination.merge(source, Some(&count_callbacks)).unwrap();
+        let first = merged.allocations.groups[&Some(NativeGroupKey::Address([1; 20]))];
+        let second = merged.allocations.groups[&Some(NativeGroupKey::Address([2; 20]))];
+        assert_eq!(merged.states(first)[0].value().unwrap(), &BigInt::from(5));
+        assert_eq!(merged.states(second)[0].value().unwrap(), &BigInt::from(4));
+        drop(merged);
+        assert_eq!(success_memory.used(), 0);
+
+        let callback_count = callback_count.load(Ordering::Relaxed);
+        assert!(
+            callback_count > 2,
+            "fixture must cross preflight and mutation"
+        );
+        for cancel_at in 0..callback_count {
+            let memory = QueryMemoryBudget::new(QueryMemoryLimit::new(1024 * 1024).unwrap());
+            let destination = native_sum_groups_with_values(memory.clone(), &[(1, 2)]);
+            let source = native_sum_groups_with_values(memory.clone(), &[(1, 3), (2, 4)]);
+            let calls = std::sync::atomic::AtomicUsize::new(0);
+            let cancel: QueryCancelCheck =
+                Arc::new(move || calls.fetch_add(1, Ordering::Relaxed) >= cancel_at);
+            let error = match destination.merge(source, Some(&cancel)) {
+                Ok(_) => panic!("merge should cancel at callback {cancel_at}"),
+                Err(error) => error,
+            };
+            assert!(
+                matches!(error, SqlQueryError::DataFusion(DataFusionError::Execution(ref message)) if message == "query canceled"),
+                "callback {cancel_at}: {error}"
+            );
+            assert_eq!(memory.used(), 0, "callback {cancel_at}");
+        }
+
+        let left_memory = QueryMemoryBudget::new(QueryMemoryLimit::new(1024 * 1024).unwrap());
+        let right_memory = QueryMemoryBudget::new(QueryMemoryLimit::new(1024 * 1024).unwrap());
+        let left = native_sum_groups_with_values(left_memory.clone(), &[(1, 2)]);
+        let right = native_sum_groups_with_values(right_memory.clone(), &[(2, 3)]);
+        assert!(left.merge(right, None).is_err());
+        assert_eq!(left_memory.used(), 0);
+        assert_eq!(right_memory.used(), 0);
+    }
+
+    #[test]
     fn native_select_rows_remain_charged_through_json_materialization() {
         let (_tmp, storage) = setup_storage();
         let snapshot = StorageSnapshot::from_storage(&storage);
@@ -8730,9 +9523,10 @@ mod tests {
             leaves: vec![NativeRowLeaf::Data],
         };
         let null_case = [Int64Array::from(vec![None])];
-        assert_eq!(
-            eval_native_row_value(&[], &expr, &[&null_case[0]], 0).unwrap(),
-            None
+        assert!(
+            eval_native_row_value(&[], &expr, &[&null_case[0]], 0)
+                .unwrap()
+                .is_none()
         );
 
         let invalid_case = [Int64Array::from(vec![Some(1)])];
