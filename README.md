@@ -144,7 +144,7 @@ continues. Metadata, status, cancellation and subscription operations are
 exempt. REST's existing exclusive-query behavior still applies.
 
 DataFusion operators, index candidates, fallback scan reads, scan output buffers,
-native row selection, native COUNT and structured SQL results use a shared accounted-memory
+native row selection, COUNT, ungrouped payload sums and structured SQL results use a shared accounted-memory
 budget across REST, JSON-RPC and gRPC queries. Response encoding uses the same budget.
 Configure it with
 `sync --query-memory-bytes <BYTES>` or TOML
@@ -189,6 +189,20 @@ partition work and column reads and periodically while counting; an admitted
 column read remains synchronous. Structured count results retain the same JSON
 output ownership as other SQL results.
 
+Native sums over payload data without grouping, conditional inputs or residual
+expressions account their candidate IDs, retained source buffers, batches and
+numeric working memory. Exact native filters still apply. Raw buffers and page
+indexes are loaded once per partition scan; companion pages are reused across
+batch boundaries. Repeated sums of the same selected payload sequence share one
+accumulator. Arithmetic, merging, projection and decimal-formatting allowances
+retain input ownership while admitting replacement and temporary buffers, with
+batch admission instead of a shared-budget lock for every row. Numeric allowances
+are conservative and preserve the existing optimized arithmetic and formatter.
+They depend on audited `num-bigint` 0.4.6 and pinned Rust allocation behavior;
+changing either requires reviewing these bounds. Cancellation is checked between
+batches and arithmetic operations; an individual admitted read, numeric operation
+or decimal conversion remains synchronous.
+
 SQL output is converted one Arrow batch at a time. Completed JSON rows remain
 charged while the next batch is processed; the previous batch can be released.
 Structured results reserve row, key, string and nested-container allocations
@@ -219,9 +233,9 @@ synchronously; cancellation does not interrupt an individual copy. The controlle
 encoder does not support compression; LogEx does not enable response compression.
 
 This budget is not a process-RAM ceiling. Some DataFusion operators account after
-allocating; planner/scratch allocations and native SUM/group working sets
-(including temporary arbitrary-precision formatting buffers) are not yet
-covered. Captured JSON manifests,
+allocating; planner/scratch allocations and native sums with grouping, conditional
+inputs or residual expressions (including their numeric formatting buffers) are
+not yet covered. Captured JSON manifests,
 paths, codec contexts, fixed builder-control, non-result map nodes and ownership metadata
 are also outside the accounted buffer capacity. Snapshot paths and plan/control
 objects scale with the number of captured or selected segments. One query can
@@ -416,7 +430,7 @@ Global options:
 | Option | Default | Use |
 | --- | --- | --- |
 | `--query-max-concurrent <N>` | `8` | Shared admission limit for REST SQL, JSON-RPC logs and gRPC SQL/native queries. Excess requests fail immediately; does not bound query memory. |
-| `--query-memory-bytes <BYTES>` | `1073741824` | Shared accounted-memory budget for DataFusion operators, index candidates, fallback reads, native row selection and COUNT, scan output, structured SQL results and REST/JSON-RPC/gRPC query responses; not a process-RAM ceiling. Native SUM/group working sets and manifest/control metadata are not yet covered. |
+| `--query-memory-bytes <BYTES>` | `1073741824` | Shared accounted-memory budget for DataFusion operators, index candidates, fallback reads, native row selection, COUNT and ungrouped payload sums, scan output, structured SQL results and REST/JSON-RPC/gRPC query responses; not a process-RAM ceiling. Grouped/conditional/residual native sum working sets and manifest/control metadata are not yet covered. |
 | `--http-host <IP>` | `127.0.0.1` | HTTP bind host for dashboard, `/status`, `/query`, JSON-RPC, and WebSocket routes. Use `0.0.0.0` only with `--dashboard-password` and network-level protection. |
 | `--http-port <PORT>` | `8577` | HTTP dashboard, REST, JSON-RPC, and WebSocket port. Keep this stable for browser sessions and automation. |
 | `--grpc-host <IP>` | `127.0.0.1` | gRPC bind host. gRPC is unauthenticated; public gRPC requires `--allow-public-grpc`. |

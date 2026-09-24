@@ -417,16 +417,6 @@ pub fn encode_u32_page(values: &[u32], codec: CompressionCodec) -> io::Result<Ve
     }
 }
 
-pub fn decode_u32_page(
-    encoded: &[u8],
-    row_count: usize,
-    codec: CompressionCodec,
-) -> io::Result<Vec<u32>> {
-    Ok(decode_u32_page_accounted(encoded, row_count, codec, None)?
-        .into_parts()
-        .0)
-}
-
 pub(crate) fn decode_u32_page_accounted(
     encoded: &[u8],
     row_count: usize,
@@ -1259,11 +1249,14 @@ mod tests {
             for rows in [0, 1, MAX_PAGE_ROWS as usize] {
                 let values: Vec<u32> = (0..rows).map(|row| u32::MAX - row as u32).collect();
                 let encoded = encode_u32_page(&values, codec).unwrap();
-                assert_eq!(decode_u32_page(&encoded, rows, codec).unwrap(), values);
-                assert!(decode_u32_page(&encoded, rows + 1, codec).is_err());
-                assert!(decode_u32_page(&encoded, usize::MAX, codec).is_err());
+                assert_eq!(
+                    &*decode_u32_page_accounted(&encoded, rows, codec, None).unwrap(),
+                    values.as_slice()
+                );
+                assert!(decode_u32_page_accounted(&encoded, rows + 1, codec, None).is_err());
+                assert!(decode_u32_page_accounted(&encoded, usize::MAX, codec, None).is_err());
                 if rows > 0 {
-                    assert!(decode_u32_page(&encoded, rows - 1, codec).is_err());
+                    assert!(decode_u32_page_accounted(&encoded, rows - 1, codec, None).is_err());
                 }
 
                 let values: Vec<u8> = (0..rows).map(|row| row as u8).collect();
@@ -1281,7 +1274,7 @@ mod tests {
         for length in [0, 2, 3, 5, 65_536] {
             let encoded = vec![0; length];
             assert_eq!(
-                decode_u32_page(&encoded, 1, CompressionCodec::None)
+                decode_u32_page_accounted(&encoded, 1, CompressionCodec::None, None)
                     .unwrap_err()
                     .kind(),
                 io::ErrorKind::InvalidData

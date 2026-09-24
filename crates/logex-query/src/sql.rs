@@ -78,7 +78,10 @@ use crate::native::{
     retain_ordered_prefix_with_memory, scan_native_partition_with_memory,
     sort_native_rows_with_memory,
 };
+#[path = "native_sum_memory.rs"]
+mod native_sum_memory;
 use crate::result::{JsonResultBuilder, QueryJsonRows, SQL_RESULT_STAGE};
+use native_sum_memory::NativeDataSumAccumulator;
 
 const DATAFUSION_BATCH_SIZE: usize = 4_096;
 static DEFAULT_QUERY_MEMORY_BUDGET: LazyLock<QueryMemoryBudget> =
@@ -1150,7 +1153,6 @@ struct NativeDataSumPartitionScan {
     cases: Arc<PreparedSqlExpressions>,
     group_by: NativeDataSumGroupBy,
     sum_inputs: Vec<PreparedRowValueExpr>,
-    data_only: bool,
     cancel_check: Option<QueryCancelCheck>,
 }
 
@@ -1757,12 +1759,24 @@ fn try_execute_native_data_sum(
     .map_err(DataFusionError::from)?;
 
     let prepared = prepare_sum_inputs(&native_query.sums, native_query.selection.as_ref())?;
+    check_query_canceled(cancel_check.as_ref()).map_err(SqlQueryError::DataFusion)?;
 
     if native_query.sql_limit == Some(0) || page.limit == Some(0) {
         return Ok(Some(SqlQueryResult {
             rows: JsonResultBuilder::new(memory)?.finish(),
             total_scanned: 0,
         }));
+    }
+
+    let data_only = prepared.selection.is_none()
+        && native_query.group_by == NativeDataSumGroupBy::None
+        && prepared
+            .sums
+            .iter()
+            .all(|expr| matches!(expr, PreparedRowValueExpr::Data));
+    if data_only {
+        return execute_native_data_only_sum(native_query, snapshot, page, cancel_check, memory)
+            .map(Some);
     }
 
     let (groups, total_scanned) = execute_native_data_sum(
@@ -2303,6 +2317,320 @@ fn parse_topic_eq_term(expr: &SqlAstExpr) -> Option<(usize, B256)> {
     Some((index, topic))
 }
 
+fn execute_native_data_only_sum(
+    query: NativeDataSumQuery,
+    snapshot: &StorageSnapshot,
+    page: SqlQueryPage,
+    cancel_check: Option<QueryCancelCheck>,
+    memory: QueryMemoryBudget,
+) -> Result<SqlQueryResult, SqlQueryError> {
+    if query.candidate_filters.len() != 1 {
+        return Err(SqlQueryError::DataFusion(DataFusionError::Internal(
+            "data-only native SUM must have exactly one exact candidate filter".to_owned(),
+        )));
+    }
+    let mut accumulator =
+        NativeDataSumAccumulator::new(memory.clone()).map_err(map_native_query_io_error)?;
+    let mut total_scanned = 0u64;
+    let partitions: Vec<_> = snapshot
+        .partitions_in_order(query.filter.order)
+        .into_iter()
+        .filter(|partition| partition_matches_filter(partition, &query.filter))
+        .collect();
+    let worker_count = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1)
+        .clamp(1, 8);
+    let window_size = worker_count.saturating_mul(4).max(1);
+
+    for chunk in partitions.chunks(window_size) {
+        check_query_canceled(cancel_check.as_ref()).map_err(SqlQueryError::DataFusion)?;
+        let partials = std::thread::scope(|scope| {
+            let mut handles = Vec::with_capacity(chunk.len());
+            for partition in chunk {
+                let path = &partition.path;
+                let visible_rows = partition.row_count;
+                let filter = &query.filter;
+                let memory = memory.clone();
+                let cancel = cancel_check.as_ref();
+                handles.push(scope.spawn(move || {
+                    scan_native_data_only_sum_partition(path, filter, visible_rows, &memory, cancel)
+                }));
+            }
+            handles
+                .into_iter()
+                .map(|handle| {
+                    handle.join().unwrap_or_else(|_| {
+                        Err(SqlQueryError::Storage(std::io::Error::other(
+                            "query worker panicked",
+                        )))
+                    })
+                })
+                .collect::<Vec<_>>()
+        });
+        for partial in partials {
+            let (partial, scanned) = partial?;
+            accumulator
+                .merge(partial, || {
+                    cancel_check.as_ref().is_some_and(|check| check())
+                })
+                .map_err(map_native_query_io_error)?;
+            total_scanned = total_scanned.checked_add(scanned).ok_or_else(|| {
+                SqlQueryError::DataFusion(DataFusionError::Execution(
+                    "native SUM scanned-row count overflow".to_owned(),
+                ))
+            })?;
+        }
+    }
+
+    check_query_canceled(cancel_check.as_ref()).map_err(SqlQueryError::DataFusion)?;
+    let nodes = query
+        .projections
+        .iter()
+        .try_fold(0usize, |total, projection| {
+            let NativeDataSumProjection::Aggregate(projection) = projection else {
+                return Err(SqlQueryError::DataFusion(DataFusionError::Internal(
+                    "data-only native SUM unexpectedly projected a group key".to_owned(),
+                )));
+            };
+            total
+                .checked_add(native_aggregate_expr_nodes(&projection.expr))
+                .ok_or_else(|| {
+                    SqlQueryError::DataFusion(DataFusionError::Execution(
+                        "native SUM expression size overflow".to_owned(),
+                    ))
+                })
+        })?;
+    accumulator
+        .admit_expression_arena(nodes)
+        .map_err(map_native_query_io_error)?;
+    let row = native_data_only_sum_result_row(&query, accumulator, cancel_check.as_ref())?;
+    let mut source_rows = row.into_iter().collect::<Vec<_>>();
+    if let Some(limit) = query.sql_limit {
+        source_rows.truncate(limit);
+    }
+    apply_json_page(&mut source_rows, page);
+    let rows = materialize_native_data_only_sum_rows(
+        &query,
+        &mut source_rows,
+        memory,
+        cancel_check.as_ref(),
+    )?;
+    check_query_canceled(cancel_check.as_ref()).map_err(SqlQueryError::DataFusion)?;
+    Ok(SqlQueryResult {
+        rows,
+        total_scanned,
+    })
+}
+
+fn scan_native_data_only_sum_partition(
+    path: &std::path::Path,
+    filter: &NativeLogFilter,
+    visible_rows: u64,
+    memory: &QueryMemoryBudget,
+    cancel: Option<&QueryCancelCheck>,
+) -> Result<(NativeDataSumAccumulator, u64), SqlQueryError> {
+    check_query_canceled(cancel).map_err(SqlQueryError::DataFusion)?;
+    let row_ids = candidate_row_ids_with_memory(path, filter, true, visible_rows, memory, cancel)
+        .map_err(map_native_query_io_error)?;
+    let scanned = u64::try_from(row_ids.len()).map_err(|_| {
+        SqlQueryError::DataFusion(DataFusionError::Execution(
+            "native SUM candidate count overflow".to_owned(),
+        ))
+    })?;
+    let mut accumulator =
+        NativeDataSumAccumulator::new(memory.clone()).map_err(map_native_query_io_error)?;
+    if row_ids.is_empty() {
+        return Ok((accumulator, 0));
+    }
+    let reader = SegmentReader::open_projected_with_memory(path, &["data"], memory.clone())
+        .map_err(map_native_query_io_error)?;
+    let mut batches = reader
+        .var_bytes_batches_with_memory("data", &row_ids)
+        .map_err(map_native_query_io_error)?;
+    loop {
+        check_query_canceled(cancel).map_err(SqlQueryError::DataFusion)?;
+        let Some(values) = batches.next() else {
+            break;
+        };
+        let values = values.map_err(map_native_query_io_error)?;
+        accumulator
+            .add_batch(&values, || cancel.is_some_and(|check| check()))
+            .map_err(map_native_query_io_error)?;
+    }
+    check_query_canceled(cancel).map_err(SqlQueryError::DataFusion)?;
+    Ok((accumulator, scanned))
+}
+
+fn native_aggregate_expr_nodes(expr: &NativeAggregateExpr) -> usize {
+    match expr {
+        NativeAggregateExpr::Sum(_) => 1,
+        NativeAggregateExpr::Add(left, right) | NativeAggregateExpr::Sub(left, right) => 1usize
+            .saturating_add(native_aggregate_expr_nodes(left))
+            .saturating_add(native_aggregate_expr_nodes(right)),
+    }
+}
+
+fn eval_native_data_only_aggregate_expr(
+    expr: &NativeAggregateExpr,
+    accumulator: &NativeDataSumAccumulator,
+    sum_count: usize,
+    cancel_check: Option<&QueryCancelCheck>,
+) -> Result<Option<BigInt>, SqlQueryError> {
+    match expr {
+        NativeAggregateExpr::Sum(index) => {
+            if *index >= sum_count {
+                return Err(SqlQueryError::DataFusion(DataFusionError::Internal(
+                    format!("native SUM expression index {index} is out of range"),
+                )));
+            }
+            Ok(accumulator.value().cloned())
+        }
+        NativeAggregateExpr::Add(left, right) => {
+            let Some(left) =
+                eval_native_data_only_aggregate_expr(left, accumulator, sum_count, cancel_check)?
+            else {
+                return Ok(None);
+            };
+            let Some(right) =
+                eval_native_data_only_aggregate_expr(right, accumulator, sum_count, cancel_check)?
+            else {
+                return Ok(None);
+            };
+            check_query_canceled(cancel_check).map_err(SqlQueryError::DataFusion)?;
+            Ok(Some(left + right))
+        }
+        NativeAggregateExpr::Sub(left, right) => {
+            let Some(left) =
+                eval_native_data_only_aggregate_expr(left, accumulator, sum_count, cancel_check)?
+            else {
+                return Ok(None);
+            };
+            let Some(right) =
+                eval_native_data_only_aggregate_expr(right, accumulator, sum_count, cancel_check)?
+            else {
+                return Ok(None);
+            };
+            check_query_canceled(cancel_check).map_err(SqlQueryError::DataFusion)?;
+            Ok(Some(left - right))
+        }
+    }
+}
+
+struct NativeDataOnlySumResultRow {
+    values: QueryBuffer<Option<BigInt>>,
+    // Keep the numeric reservation after every BigInt backing on all exits.
+    accumulator: NativeDataSumAccumulator,
+}
+
+fn native_data_only_sum_result_row(
+    query: &NativeDataSumQuery,
+    accumulator: NativeDataSumAccumulator,
+    cancel_check: Option<&QueryCancelCheck>,
+) -> Result<Option<NativeDataOnlySumResultRow>, SqlQueryError> {
+    let mut values = QueryBuffer::try_with_capacity(
+        query.projections.len(),
+        Some(accumulator.budget()),
+        "native SUM result values",
+    )
+    .map_err(map_native_query_io_error)?;
+    for projection in &query.projections {
+        check_query_canceled(cancel_check).map_err(SqlQueryError::DataFusion)?;
+        let value = match projection {
+            NativeDataSumProjection::Aggregate(projection) => eval_native_data_only_aggregate_expr(
+                &projection.expr,
+                &accumulator,
+                query.sums.len(),
+                cancel_check,
+            )?,
+            NativeDataSumProjection::GroupColumn { .. } => {
+                return Err(SqlQueryError::DataFusion(DataFusionError::Internal(
+                    "data-only native SUM unexpectedly projected a group key".to_owned(),
+                )));
+            }
+        };
+        values.try_push(value).map_err(map_native_query_io_error)?;
+    }
+    if let Some(having) = &query.having {
+        let Some(value) = values
+            .get(having.projection_index)
+            .and_then(|value| value.as_ref())
+        else {
+            return Ok(None);
+        };
+        if !compare_bigint(
+            value,
+            having.operator.clone(),
+            &having.value,
+            having.reversed,
+        ) {
+            return Ok(None);
+        }
+    }
+    Ok(Some(NativeDataOnlySumResultRow {
+        values,
+        accumulator,
+    }))
+}
+
+fn materialize_native_data_only_sum_rows(
+    query: &NativeDataSumQuery,
+    source_rows: &mut [NativeDataOnlySumResultRow],
+    memory: QueryMemoryBudget,
+    cancel_check: Option<&QueryCancelCheck>,
+) -> Result<QueryJsonRows, SqlQueryError> {
+    let mut plan = JsonAllocationPlan::new();
+    for row in source_rows.iter() {
+        plan.add_object(query.projections.len())?;
+        for (index, projection) in query.projections.iter().enumerate() {
+            let NativeDataSumProjection::Aggregate(projection) = projection else {
+                return Err(SqlQueryError::DataFusion(DataFusionError::Internal(
+                    "data-only native SUM unexpectedly projected a group key".to_owned(),
+                )));
+            };
+            plan.add_string_capacity(projection.output_column.len())?;
+            if let Some(value) = &row.values[index] {
+                plan.add_string_capacity(bigint_decimal_bound(value)?)?;
+            }
+        }
+    }
+    let mut output = JsonResultBuilder::new(memory)?;
+    let mut batch = output.begin_batch(plan.bytes(), source_rows.len())?;
+    for row in source_rows.iter_mut() {
+        check_query_canceled(cancel_check).map_err(SqlQueryError::DataFusion)?;
+        let mut object = Map::new();
+        for (index, projection) in query.projections.iter().enumerate() {
+            let NativeDataSumProjection::Aggregate(projection) = projection else {
+                unreachable!("validated above")
+            };
+            check_query_canceled(cancel_check).map_err(SqlQueryError::DataFusion)?;
+            let value = match &row.values[index] {
+                Some(value) => {
+                    let scratch = row
+                        .accumulator
+                        .reserve_decimal_scratch(value)
+                        .map_err(map_native_query_io_error)?;
+                    let formatted =
+                        allocate_json_display(bigint_decimal_bound(value)?, value, &mut batch);
+                    let formatted = formatted?;
+                    row.accumulator
+                        .release_scratch(scratch)
+                        .map_err(map_native_query_io_error)?;
+                    Value::String(formatted)
+                }
+                None => Value::Null,
+            };
+            object.insert(
+                allocate_json_string(&projection.output_column, &mut batch)?,
+                value,
+            );
+        }
+        batch.push_row(Value::Object(object));
+    }
+    batch.finish()?;
+    Ok(output.finish())
+}
+
 fn execute_native_data_sum(
     snapshot: &StorageSnapshot,
     filter: &NativeLogFilter,
@@ -2314,11 +2642,6 @@ fn execute_native_data_sum(
     check_query_canceled(cancel_check).map_err(SqlQueryError::DataFusion)?;
     let mut groups = BTreeMap::new();
     let sum_inputs = &prepared.sums;
-    let data_only = prepared.selection.is_none()
-        && group_by == NativeDataSumGroupBy::None
-        && sum_inputs
-            .iter()
-            .all(|expr| matches!(expr, PreparedRowValueExpr::Data));
     let partitions: Vec<_> = snapshot
         .partitions_in_order(filter.order)
         .into_iter()
@@ -2344,7 +2667,6 @@ fn execute_native_data_sum(
                     cases: Arc::clone(&prepared.cases),
                     group_by,
                     sum_inputs: sum_inputs.to_vec(),
-                    data_only,
                     cancel_check: cancel_check.cloned(),
                 };
                 handles.push(scope.spawn(move || scan_native_data_sum_partition(&path, scan)));
@@ -2443,27 +2765,6 @@ fn scan_native_data_sum_partition(
     }
 
     let mut total_scanned = 0u64;
-    if scan.data_only {
-        let states = groups
-            .entry(None)
-            .or_insert_with(|| initial_native_sum_states(&scan.sum_inputs));
-        let mut batches = reader.var_bytes_batches("data", &row_ids)?;
-        loop {
-            check_query_canceled(scan.cancel_check.as_ref())?;
-            let Some(values) = batches.next() else {
-                break;
-            };
-            for value in values? {
-                let value = BigInt::from(BigUint::from_bytes_be(value.as_ref()));
-                for state in states.iter_mut() {
-                    state.sum += value.clone();
-                    state.count += 1;
-                }
-            }
-        }
-        return Ok((groups, row_ids.len() as u64));
-    }
-
     for row_ids in row_ids.chunks(DATAFUSION_BATCH_SIZE) {
         check_query_canceled(scan.cancel_check.as_ref())?;
         // Candidate selection refines every native constraint against stored
@@ -6914,10 +7215,7 @@ mod tests {
         let (_tmp, storage) = setup_storage();
         let snapshot = StorageSnapshot::from_storage(&storage);
         let head = storage.head_block().unwrap_or(0);
-        for sql in [
-            "SELECT SUM(data) AS total FROM logs",
-            "SELECT table_name FROM information_schema.tables",
-        ] {
+        for sql in ["SELECT table_name FROM information_schema.tables"] {
             let probe = QueryMemoryBudget::new(QueryMemoryLimit::new(64 * 1024 * 1024).unwrap());
             let result = execute_sql_page_on_snapshot_with_memory(
                 sql,
@@ -6953,6 +7251,78 @@ mod tests {
             );
             assert_eq!(constrained.used(), 0, "{sql}");
         }
+
+        let sum_sql = "SELECT SUM(data) AS total FROM logs";
+        let probe = QueryMemoryBudget::new(QueryMemoryLimit::new(64 * 1024 * 1024).unwrap());
+        let result = execute_sql_page_on_snapshot_with_memory(
+            sum_sql,
+            snapshot.clone(),
+            head,
+            SqlQueryPage::default(),
+            None,
+            probe.clone(),
+        )
+        .await
+        .unwrap();
+        let charge = usize::try_from(probe.used()).unwrap();
+        drop(result);
+        assert_eq!(probe.used(), 0);
+        let constrained =
+            QueryMemoryBudget::new(QueryMemoryLimit::new(charge.saturating_sub(1).max(1)).unwrap());
+        let error = execute_sql_page_on_snapshot_with_memory(
+            sum_sql,
+            snapshot,
+            head,
+            SqlQueryPage::default(),
+            None,
+            constrained.clone(),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, SqlQueryError::Capacity(_)), "{error}");
+        assert_eq!(constrained.used(), 0);
+    }
+
+    #[test]
+    fn data_only_sum_result_materializer_rejects_one_byte_short_and_releases() {
+        let query = parse_native_data_sum_query("SELECT SUM(data) AS total FROM logs")
+            .unwrap()
+            .unwrap();
+        let memory = QueryMemoryBudget::new(QueryMemoryLimit::new(1024 * 1024).unwrap());
+        let mut accumulator = NativeDataSumAccumulator::new(memory.clone()).unwrap();
+        accumulator
+            .add_batch(
+                &QueryBuffer::unaccounted(vec![alloy_primitives::Bytes::from_static(&[1])]),
+                || false,
+            )
+            .unwrap();
+        accumulator.admit_expression_arena(1).unwrap();
+        let row = native_data_only_sum_result_row(&query, accumulator, None)
+            .unwrap()
+            .unwrap();
+        let mut rows = vec![row];
+        let retained = usize::try_from(memory.used()).unwrap();
+        let output =
+            materialize_native_data_only_sum_rows(&query, &mut rows, memory.clone(), None).unwrap();
+        let with_output = usize::try_from(memory.used()).unwrap();
+        let output_charge = with_output.checked_sub(retained).unwrap();
+        assert!(output_charge > 1);
+        drop(output);
+        assert_eq!(memory.used(), retained as u128);
+
+        let available = memory.limit() - retained;
+        let held = memory
+            .reserve(available - (output_charge - 1), "competing query")
+            .unwrap();
+        let error = materialize_native_data_only_sum_rows(&query, &mut rows, memory.clone(), None)
+            .unwrap_err();
+        assert!(
+            matches!(error, SqlQueryError::Capacity(ref message) if message.contains(SQL_RESULT_STAGE)),
+            "{error}"
+        );
+        drop(held);
+        drop(rows);
+        assert_eq!(memory.used(), 0);
     }
 
     #[test]
@@ -7962,33 +8332,37 @@ mod tests {
     }
 
     #[test]
-    fn data_only_sum_observes_cancellation_between_batches() {
-        let (_tmp, storage) = setup_batched_sum_storage();
+    fn data_only_sum_cancels_at_an_arithmetic_boundary_and_releases_ownership() {
+        let memory = QueryMemoryBudget::new(QueryMemoryLimit::new(4096).unwrap());
+        let mut accumulator = NativeDataSumAccumulator::new(memory.clone()).unwrap();
+        accumulator
+            .add_batch(
+                &QueryBuffer::unaccounted(vec![alloy_primitives::Bytes::from_static(&[1])]),
+                || false,
+            )
+            .unwrap();
+        accumulator.admit_expression_arena(3).unwrap();
+        let expression = NativeAggregateExpr::Add(
+            Box::new(NativeAggregateExpr::Sum(0)),
+            Box::new(NativeAggregateExpr::Sum(1)),
+        );
         let checks = Arc::new(AtomicU64::new(0));
-        let cancel_checks = Arc::clone(&checks);
-        let scan = NativeDataSumPartitionScan {
-            visible_rows: BATCHED_SUM_TEST_ROWS as u64,
-            candidate_filters: vec![NativeLogFilter::default()],
-            selection: None,
-            cases: Arc::new(PreparedSqlExpressions::empty()),
-            group_by: NativeDataSumGroupBy::None,
-            sum_inputs: vec![PreparedRowValueExpr::Data],
-            data_only: true,
-            cancel_check: Some(Arc::new(move || {
-                cancel_checks.fetch_add(1, Ordering::Relaxed) >= 2
-            })),
-        };
-
-        let error = match scan_native_data_sum_partition(&storage.hot_partition().meta.path, scan) {
-            Ok(_) => panic!("cancellation before the second batch must stop the aggregate"),
-            Err(error) => error,
-        };
+        let observed = Arc::clone(&checks);
+        let cancel: QueryCancelCheck = Arc::new(move || {
+            observed.fetch_add(1, Ordering::Relaxed);
+            true
+        });
+        let error =
+            eval_native_data_only_aggregate_expr(&expression, &accumulator, 2, Some(&cancel))
+                .unwrap_err();
         assert!(matches!(
             error,
             SqlQueryError::DataFusion(DataFusionError::Execution(message))
                 if message == "query canceled"
         ));
-        assert_eq!(checks.load(Ordering::Relaxed), 3);
+        assert_eq!(checks.load(Ordering::Relaxed), 1);
+        drop(accumulator);
+        assert_eq!(memory.used(), 0);
     }
 
     #[test]
