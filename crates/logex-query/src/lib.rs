@@ -6,8 +6,8 @@ mod sql;
 
 pub use native::{
     StorageSnapshot as NativeStorageSnapshot, execute_log_filter,
-    execute_log_filter_on_snapshot_with_cancel, execute_log_filter_with_cancel,
-    matches_native_filter,
+    execute_log_filter_on_snapshot_with_cancel, execute_log_filter_on_snapshot_with_memory,
+    execute_log_filter_with_cancel, matches_native_filter,
 };
 pub use result::QueryJsonRows;
 pub use sql::{

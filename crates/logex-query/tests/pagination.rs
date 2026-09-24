@@ -1,9 +1,12 @@
 use alloy_primitives::{Address, B256, Bytes};
 use logex_index::IndexBuilder;
-use logex_query::{SqlQueryPage, execute_log_filter, execute_sql_page};
+use logex_query::{
+    NativeStorageSnapshot, SqlQueryPage, execute_log_filter,
+    execute_log_filter_on_snapshot_with_memory, execute_sql_page,
+};
 use logex_storage::native::{LogOrder, NativeLogFilter};
 use logex_storage::{PartitionManager, PartitionManagerConfig};
-use logex_types::{LogRow, Source};
+use logex_types::{LogRow, QueryMemoryBudget, QueryMemoryLimit, Source};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
@@ -158,6 +161,9 @@ async fn pagination_matches_reference_across_storage_layouts_and_equal_block_bou
                         IndexBuilder::build_all_indexes(&partition.meta.path).unwrap();
                     }
                 }
+                let snapshot = NativeStorageSnapshot::from_storage(&storage);
+                let memory =
+                    QueryMemoryBudget::new(QueryMemoryLimit::new(16 * 1024 * 1024).unwrap());
                 for (order, direction) in
                     [(LogOrder::Ascending, "ASC"), (LogOrder::Descending, "DESC")]
                 {
@@ -187,6 +193,13 @@ async fn pagination_matches_reference_across_storage_layouts_and_equal_block_bou
                                 expected,
                                 "historical={historical} compact={compact} indexed={indexed} order={order:?} limit={limit:?} offset={offset}"
                             );
+                            let accounted = execute_log_filter_on_snapshot_with_memory(
+                                &snapshot, &filter, None, &memory,
+                            )
+                            .unwrap();
+                            assert_eq!(&*accounted, expected);
+                            drop(accounted);
+                            assert_eq!(memory.used(), 0);
                             let actual = execute_sql_page(
                                 &sql,
                                 &storage,

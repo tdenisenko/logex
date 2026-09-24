@@ -96,7 +96,7 @@ async fn encoded_rpc_allocation_follows_retained_frame_aliases() {
 async fn rpc_capacity_is_explicit_preserves_id_and_recovers_without_storage_failure() {
     let (_temp, state) = state();
     for available in [127, 800] {
-        // Exercise initial allocation and later growth while collect_str writes data.
+        // The shared source budget now rejects this request before encoding.
         let held = state
             .query_memory
             .reserve(state.query_memory.limit() - available, "competing query")
@@ -114,12 +114,9 @@ async fn rpc_capacity_is_explicit_preserves_id_and_recovers_without_storage_fail
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(value["error"]["code"], -32005);
         assert!(value.get("result").is_none());
-        assert!(
-            value["error"]["message"]
-                .as_str()
-                .unwrap()
-                .contains("HTTP query response")
-        );
+        let message = value["error"]["message"].as_str().unwrap();
+        assert!(message.starts_with("query memory capacity exceeded at "));
+        assert!(!message.contains("HTTP query response"));
         assert!(state.storage_failure().is_none());
         assert_eq!(state.query_memory.used(), held.bytes());
         drop(bytes);
@@ -139,6 +136,51 @@ async fn rpc_capacity_is_explicit_preserves_id_and_recovers_without_storage_fail
     drop(bytes);
     assert_eq!(state.query_memory.used(), 0);
     assert_eq!(state.query_control.capacity.available_permits(), 2);
+}
+
+#[tokio::test]
+async fn rpc_encoding_pressure_retains_native_source_and_reports_its_stage() {
+    let (_temp, state) = state();
+    let snapshot = {
+        let storage = state.read_storage().await.unwrap();
+        NativeStorageSnapshot::from_storage(&storage)
+    };
+    let rows = logex_query::execute_log_filter_on_snapshot_with_memory(
+        &snapshot,
+        &logex_storage::native::NativeLogFilter::new(),
+        None,
+        &state.query_memory,
+    )
+    .unwrap();
+    let source_charge = state.query_memory.used();
+    assert!(source_charge > 0);
+    let id = serde_json::value::RawValue::from_string("7".to_owned()).unwrap();
+    for available in [127, 800] {
+        let held = state
+            .query_memory
+            .reserve(
+                state.query_memory.limit() - usize::try_from(source_charge).unwrap() - available,
+                "competing query",
+            )
+            .unwrap();
+        let error = serialize_json(
+            &JsonRpcResponse {
+                jsonrpc: "2.0",
+                result: Some(RpcLogs(&rows)),
+                error: None,
+                id: &*id,
+            },
+            &state.query_memory,
+            None,
+        )
+        .unwrap_err();
+        assert!(is_capacity_error(&error));
+        assert!(error.to_string().contains("HTTP query response"));
+        assert_eq!(state.query_memory.used(), source_charge + held.bytes());
+        drop(held);
+    }
+    drop(rows);
+    assert_eq!(state.query_memory.used(), 0);
 }
 
 #[tokio::test]

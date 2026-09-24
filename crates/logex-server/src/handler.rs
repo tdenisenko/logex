@@ -604,10 +604,11 @@ fn handle_eth_get_logs(
             .min(MAX_LOG_FILTER_LIMIT - filter.offset),
     );
     native_filter.offset = filter.offset;
-    let rows = logex_query::execute_log_filter_on_snapshot_with_cancel(
+    let rows = logex_query::execute_log_filter_on_snapshot_with_memory(
         snapshot,
         &native_filter,
         Some(cancel),
+        memory,
     )?;
     serialize_json(
         &JsonRpcResponse {
