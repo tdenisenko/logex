@@ -2,8 +2,10 @@ use std::any::Any;
 use std::cmp::Ordering as CmpOrdering;
 use std::collections::BTreeMap;
 use std::ops::ControlFlow;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock};
+use std::task::{Context, Poll};
 
 use alloy_primitives::{Address, B256, keccak256};
 use async_trait::async_trait;
@@ -14,21 +16,34 @@ use datafusion::arrow::array::{
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::arrow::record_batch::{RecordBatch, RecordBatchOptions};
 use datafusion::catalog::Session;
-use datafusion::common::{DFSchema, ScalarValue};
+use datafusion::common::config::ConfigOptions;
+use datafusion::common::{DFSchema, ScalarValue, Statistics};
 use datafusion::datasource::TableProvider;
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::execution::context::{SQLOptions, SessionState, TaskContext};
+use datafusion::execution::disk_manager::{DiskManagerBuilder, DiskManagerMode};
+use datafusion::execution::memory_pool::{
+    MemoryConsumer, MemoryLimit, MemoryPool, MemoryReservation, UnboundedMemoryPool,
+};
+use datafusion::execution::runtime_env::RuntimeEnvBuilder;
 use datafusion::logical_expr::expr::InList;
 use datafusion::logical_expr::simplify::SimplifyContext;
 use datafusion::logical_expr::{
     Between, BinaryExpr, Expr as DataFusionExpr, Operator, TableProviderFilterPushDown, TableType,
 };
 use datafusion::optimizer::simplify_expressions::ExprSimplifier;
+use datafusion::physical_expr::Distribution;
 use datafusion::physical_expr::PhysicalExpr;
+use datafusion::physical_expr_common::sort_expr::OrderingRequirements;
+use datafusion::physical_plan::execution_plan::{CardinalityEffect, InvariantLevel};
+use datafusion::physical_plan::metrics::MetricsSet;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::streaming::{PartitionStream, StreamingTableExec};
-use datafusion::physical_plan::{ExecutionPlan, SendableRecordBatchStream};
-use datafusion::prelude::SessionContext;
+use datafusion::physical_plan::{
+    DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, RecordBatchStream,
+    SendableRecordBatchStream, execute_stream, with_new_children_if_necessary,
+};
+use datafusion::prelude::{SessionConfig, SessionContext};
 use datafusion::sql::parser::{DFParser, DFParserBuilder, Statement as DFStatement};
 use datafusion::sql::sqlparser::ast::{
     BinaryOperator as SqlBinaryOperator, CastKind, DataType as SqlDataType, DuplicateTreatment,
@@ -38,7 +53,7 @@ use datafusion::sql::sqlparser::ast::{
 };
 use datafusion::sql::sqlparser::keywords::Keyword;
 use datafusion::sql::sqlparser::tokenizer::Token as SqlToken;
-use futures_util::stream;
+use futures_util::{Stream, TryStreamExt, stream};
 use num_bigint::{BigInt, BigUint};
 use roaring::RoaringBitmap;
 use serde_json::{Map, Value};
@@ -85,6 +100,245 @@ pub struct SqlQueryResult {
 }
 
 pub type QueryCancelCheck = Arc<dyn Fn() -> bool + Send + Sync + 'static>;
+
+/// Keeps request-owned query state alive for the full lifetime of DataFusion execution.
+///
+/// DataFusion copies `SessionConfig` into every `TaskContext`, so the extension below
+/// follows contexts cloned into physical operators. Every physical-plan node is also
+/// wrapped so each produced stream owns the same value. Consequently, background tasks
+/// retain it through the child streams they move into those tasks, including for plans
+/// with no table scan. Stream field order drops the inner work before its request owner.
+struct DataFusionQueryLifetime {
+    _cancel_check: QueryCancelCheck,
+}
+
+#[derive(Debug)]
+struct QueryLifetimeMemoryPool {
+    inner: Arc<dyn MemoryPool>,
+    _lifetime: Arc<DataFusionQueryLifetime>,
+}
+
+impl MemoryPool for QueryLifetimeMemoryPool {
+    fn register(&self, consumer: &MemoryConsumer) {
+        self.inner.register(consumer);
+    }
+
+    fn unregister(&self, consumer: &MemoryConsumer) {
+        self.inner.unregister(consumer);
+    }
+
+    fn grow(&self, reservation: &MemoryReservation, additional: usize) {
+        self.inner.grow(reservation, additional);
+    }
+
+    fn shrink(&self, reservation: &MemoryReservation, shrink: usize) {
+        self.inner.shrink(reservation, shrink);
+    }
+
+    fn try_grow(&self, reservation: &MemoryReservation, additional: usize) -> DataFusionResult<()> {
+        self.inner.try_grow(reservation, additional)
+    }
+
+    fn reserved(&self) -> usize {
+        self.inner.reserved()
+    }
+
+    fn memory_limit(&self) -> MemoryLimit {
+        self.inner.memory_limit()
+    }
+}
+
+impl std::fmt::Debug for DataFusionQueryLifetime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DataFusionQueryLifetime")
+            .finish_non_exhaustive()
+    }
+}
+
+struct QueryLifetimeStream {
+    inner: SendableRecordBatchStream,
+    _lifetime: Arc<DataFusionQueryLifetime>,
+}
+
+#[derive(Debug)]
+struct QueryLifetimeExec {
+    inner: Arc<dyn ExecutionPlan>,
+    lifetime: Arc<DataFusionQueryLifetime>,
+}
+
+impl DisplayAs for QueryLifetimeExec {
+    fn fmt_as(
+        &self,
+        display_type: DisplayFormatType,
+        f: &mut std::fmt::Formatter<'_>,
+    ) -> std::fmt::Result {
+        self.inner.fmt_as(display_type, f)
+    }
+}
+
+impl ExecutionPlan for QueryLifetimeExec {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        // Stay transparent to operators that inspect child plan types at runtime.
+        self.inner.as_any()
+    }
+
+    fn properties(&self) -> &PlanProperties {
+        self.inner.properties()
+    }
+
+    fn check_invariants(&self, check: InvariantLevel) -> DataFusionResult<()> {
+        self.inner.check_invariants(check)
+    }
+
+    fn required_input_distribution(&self) -> Vec<Distribution> {
+        self.inner.required_input_distribution()
+    }
+
+    fn required_input_ordering(&self) -> Vec<Option<OrderingRequirements>> {
+        self.inner.required_input_ordering()
+    }
+
+    fn maintains_input_order(&self) -> Vec<bool> {
+        self.inner.maintains_input_order()
+    }
+
+    fn benefits_from_input_partitioning(&self) -> Vec<bool> {
+        self.inner.benefits_from_input_partitioning()
+    }
+
+    fn repartitioned(
+        &self,
+        target_partitions: usize,
+        config: &ConfigOptions,
+    ) -> DataFusionResult<Option<Arc<dyn ExecutionPlan>>> {
+        self.inner
+            .repartitioned(target_partitions, config)
+            .map(|plan| {
+                plan.map(|inner| {
+                    Arc::new(Self {
+                        inner,
+                        lifetime: Arc::clone(&self.lifetime),
+                    }) as Arc<dyn ExecutionPlan>
+                })
+            })
+    }
+
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        self.inner.children()
+    }
+
+    fn with_new_children(
+        self: Arc<Self>,
+        children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
+        let inner = Arc::clone(&self.inner).with_new_children(children)?;
+        Ok(Arc::new(Self {
+            inner,
+            lifetime: Arc::clone(&self.lifetime),
+        }))
+    }
+
+    fn reset_state(self: Arc<Self>) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
+        let inner = Arc::clone(&self.inner).reset_state()?;
+        Ok(Arc::new(Self {
+            inner,
+            lifetime: Arc::clone(&self.lifetime),
+        }))
+    }
+
+    fn execute(
+        &self,
+        partition: usize,
+        context: Arc<TaskContext>,
+    ) -> DataFusionResult<SendableRecordBatchStream> {
+        let inner = self.inner.execute(partition, context)?;
+        Ok(Box::pin(QueryLifetimeStream {
+            inner,
+            _lifetime: Arc::clone(&self.lifetime),
+        }))
+    }
+
+    fn metrics(&self) -> Option<MetricsSet> {
+        self.inner.metrics()
+    }
+
+    #[allow(deprecated)]
+    fn statistics(&self) -> DataFusionResult<Statistics> {
+        self.inner.statistics()
+    }
+
+    fn partition_statistics(&self, partition: Option<usize>) -> DataFusionResult<Statistics> {
+        self.inner.partition_statistics(partition)
+    }
+
+    fn supports_limit_pushdown(&self) -> bool {
+        self.inner.supports_limit_pushdown()
+    }
+
+    fn with_fetch(&self, limit: Option<usize>) -> Option<Arc<dyn ExecutionPlan>> {
+        self.inner.with_fetch(limit).map(|inner| {
+            Arc::new(Self {
+                inner,
+                lifetime: Arc::clone(&self.lifetime),
+            }) as Arc<dyn ExecutionPlan>
+        })
+    }
+
+    fn fetch(&self) -> Option<usize> {
+        self.inner.fetch()
+    }
+
+    fn cardinality_effect(&self) -> CardinalityEffect {
+        self.inner.cardinality_effect()
+    }
+
+    fn with_new_state(&self, state: Arc<dyn Any + Send + Sync>) -> Option<Arc<dyn ExecutionPlan>> {
+        self.inner.with_new_state(state).map(|inner| {
+            Arc::new(Self {
+                inner,
+                lifetime: Arc::clone(&self.lifetime),
+            }) as Arc<dyn ExecutionPlan>
+        })
+    }
+}
+
+fn retain_query_lifetime_in_plan(
+    plan: Arc<dyn ExecutionPlan>,
+    lifetime: &Arc<DataFusionQueryLifetime>,
+) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
+    let children = plan
+        .children()
+        .into_iter()
+        .map(|child| retain_query_lifetime_in_plan(Arc::clone(child), lifetime))
+        .collect::<DataFusionResult<Vec<_>>>()?;
+    let inner = with_new_children_if_necessary(plan, children)?;
+    Ok(Arc::new(QueryLifetimeExec {
+        inner,
+        lifetime: Arc::clone(lifetime),
+    }))
+}
+
+impl Stream for QueryLifetimeStream {
+    type Item = DataFusionResult<RecordBatch>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.inner.as_mut().poll_next(cx)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
+    }
+}
+
+impl RecordBatchStream for QueryLifetimeStream {
+    fn schema(&self) -> SchemaRef {
+        self.inner.schema()
+    }
+}
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SqlQueryPage {
@@ -467,7 +721,23 @@ async fn execute_sql_page_on_snapshot_inner(
     let total_scanned = Arc::new(AtomicU64::new(0));
     let table = LogexTableProvider::new(snapshot, Arc::clone(&total_scanned), cancel_check.clone());
 
-    let ctx = SessionContext::new();
+    let query_lifetime = Arc::new(DataFusionQueryLifetime {
+        _cancel_check: cancel_check
+            .clone()
+            .expect("snapshot execution always installs a cancellation check"),
+    });
+    let config = SessionConfig::new().with_extension(Arc::clone(&query_lifetime));
+    let memory_pool: Arc<dyn MemoryPool> = Arc::new(QueryLifetimeMemoryPool {
+        inner: Arc::new(UnboundedMemoryPool::default()),
+        _lifetime: Arc::clone(&query_lifetime),
+    });
+    let runtime = RuntimeEnvBuilder::new()
+        .with_memory_pool(memory_pool)
+        .with_disk_manager_builder(
+            DiskManagerBuilder::default().with_mode(DiskManagerMode::Disabled),
+        )
+        .build()?;
+    let ctx = SessionContext::new_with_config_rt(config, Arc::new(runtime));
     ctx.register_table("logs", Arc::new(table))?;
 
     let dataframe = ctx
@@ -485,7 +755,11 @@ async fn execute_sql_page_on_snapshot_inner(
         dataframe
     };
     check_query_canceled(cancel_check.as_ref()).map_err(SqlQueryError::DataFusion)?;
-    let batches = dataframe.collect().await?;
+    let task_context = Arc::new(dataframe.task_ctx());
+    let plan = dataframe.create_physical_plan().await?;
+    let plan = retain_query_lifetime_in_plan(plan, &query_lifetime)?;
+    let stream = execute_stream(plan, task_context)?;
+    let batches = stream.try_collect::<Vec<_>>().await?;
     check_query_canceled(cancel_check.as_ref()).map_err(SqlQueryError::DataFusion)?;
     let rows = record_batches_to_json(&batches)?;
 
@@ -5282,6 +5556,163 @@ mod tests {
     use super::*;
 
     const BATCHED_SUM_TEST_ROWS: usize = 16_385;
+
+    #[test]
+    fn datafusion_task_context_retains_query_lifetime() {
+        let request_owner = Arc::new(());
+        let weak_request_owner = Arc::downgrade(&request_owner);
+        let retained_owner = Arc::clone(&request_owner);
+        let cancel_check: QueryCancelCheck = Arc::new(move || {
+            let _keep_alive = &retained_owner;
+            false
+        });
+        let query_lifetime = Arc::new(DataFusionQueryLifetime {
+            _cancel_check: cancel_check,
+        });
+        let config = SessionConfig::new().with_extension(Arc::clone(&query_lifetime));
+        let context = SessionContext::new_with_config(config);
+        let task_context = context.task_ctx();
+
+        drop(request_owner);
+        drop(query_lifetime);
+        drop(context);
+
+        let task_lifetime = task_context
+            .session_config()
+            .get_extension::<DataFusionQueryLifetime>()
+            .expect("TaskContext must retain the query lifetime extension");
+        assert!(!(task_lifetime._cancel_check)());
+        assert!(weak_request_owner.upgrade().is_some());
+
+        drop(task_lifetime);
+        drop(task_context);
+        assert!(weak_request_owner.upgrade().is_none());
+    }
+
+    #[test]
+    fn datafusion_memory_reservation_retains_query_lifetime() {
+        let request_owner = Arc::new(());
+        let weak_request_owner = Arc::downgrade(&request_owner);
+        let retained_owner = Arc::clone(&request_owner);
+        let query_lifetime = Arc::new(DataFusionQueryLifetime {
+            _cancel_check: Arc::new(move || {
+                let _keep_alive = &retained_owner;
+                false
+            }),
+        });
+        let pool: Arc<dyn MemoryPool> = Arc::new(QueryLifetimeMemoryPool {
+            inner: Arc::new(UnboundedMemoryPool::default()),
+            _lifetime: Arc::clone(&query_lifetime),
+        });
+        let reservation = MemoryConsumer::new("query-lifetime-test").register(&pool);
+
+        drop(request_owner);
+        drop(query_lifetime);
+        drop(pool);
+        assert!(weak_request_owner.upgrade().is_some());
+
+        drop(reservation);
+        assert!(weak_request_owner.upgrade().is_none());
+    }
+
+    #[test]
+    fn datafusion_result_stream_retains_query_lifetime() {
+        let request_owner = Arc::new(());
+        let weak_request_owner = Arc::downgrade(&request_owner);
+        let retained_owner = Arc::clone(&request_owner);
+        let query_lifetime = Arc::new(DataFusionQueryLifetime {
+            _cancel_check: Arc::new(move || {
+                let _keep_alive = &retained_owner;
+                false
+            }),
+        });
+        let inner = Box::pin(RecordBatchStreamAdapter::new(
+            Arc::new(Schema::empty()),
+            stream::empty::<DataFusionResult<RecordBatch>>(),
+        ));
+        let result_stream = QueryLifetimeStream {
+            inner,
+            _lifetime: Arc::clone(&query_lifetime),
+        };
+
+        drop(request_owner);
+        drop(query_lifetime);
+        assert!(weak_request_owner.upgrade().is_some());
+
+        drop(result_stream);
+        assert!(weak_request_owner.upgrade().is_none());
+    }
+
+    #[tokio::test]
+    async fn every_physical_plan_stream_retains_query_lifetime() {
+        let request_owner = Arc::new(());
+        let weak_request_owner = Arc::downgrade(&request_owner);
+        let retained_owner = Arc::clone(&request_owner);
+        let query_lifetime = Arc::new(DataFusionQueryLifetime {
+            _cancel_check: Arc::new(move || {
+                let _keep_alive = &retained_owner;
+                false
+            }),
+        });
+        let config = SessionConfig::new().with_extension(Arc::clone(&query_lifetime));
+        let context = SessionContext::new_with_config(config);
+        let dataframe = context.sql("SELECT 1").await.unwrap();
+        let task_context = Arc::new(dataframe.task_ctx());
+        let plan = dataframe.create_physical_plan().await.unwrap();
+        let plan = retain_query_lifetime_in_plan(plan, &query_lifetime).unwrap();
+
+        let mut leaf = Arc::clone(&plan);
+        loop {
+            let child = leaf.children().first().map(|child| Arc::clone(*child));
+            let Some(child) = child else {
+                break;
+            };
+            leaf = child;
+        }
+        let stream = leaf.execute(0, task_context).unwrap();
+        let (release, retained) = tokio::sync::oneshot::channel::<()>();
+        let retained_task = tokio::spawn(async move {
+            let _ = retained.await;
+            drop(stream);
+        });
+
+        drop(request_owner);
+        drop(query_lifetime);
+        drop(leaf);
+        drop(plan);
+        drop(context);
+        assert!(weak_request_owner.upgrade().is_some());
+
+        release.send(()).unwrap();
+        retained_task.await.unwrap();
+        assert!(weak_request_owner.upgrade().is_none());
+    }
+
+    #[tokio::test]
+    async fn query_lifetime_wrappers_preserve_recursive_cte_state() {
+        let (_tmp, storage) = setup_storage();
+        let result = execute_sql(
+            "WITH RECURSIVE r AS (\
+             SELECT 1 AS n \
+             UNION ALL \
+             SELECT n + 1 FROM r JOIN logs ON block_number = 100 WHERE n < 4\
+             ) SELECT n FROM r ORDER BY n",
+            &storage,
+            storage.head_block(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            result.rows,
+            vec![
+                serde_json::json!({"n": 1}),
+                serde_json::json!({"n": 2}),
+                serde_json::json!({"n": 3}),
+                serde_json::json!({"n": 4}),
+            ]
+        );
+    }
 
     #[tokio::test]
     async fn datafusion_arithmetic_returns_exact_decimal_values() {

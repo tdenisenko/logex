@@ -130,6 +130,24 @@ The query engine exposes:
 - Dashboard and metrics: `GET /status`
 - Health check: `GET /health`
 
+Query admission uses one shared concurrency limit across REST SQL, JSON-RPC
+`eth_getLogs`, and gRPC SQL/native log queries. Configure it with
+`sync --query-max-concurrent <N>` or TOML `query_max_concurrent`; the default is
+8 and the value must be positive and within the platform semaphore capacity.
+Explicit CLI values override config, including an explicit `8`.
+
+Excess queries fail immediately: REST returns HTTP 503 with `query_capacity`
+and resource `concurrency`, JSON-RPC returns `-32005`, and gRPC returns
+`RESOURCE_EXHAUSTED`. Slots remain owned through query workers and encoded
+response bytes; disconnecting a caller does not free a slot while its worker
+continues. Metadata, status, cancellation and subscription operations are
+exempt. REST's existing exclusive-query behavior still applies.
+
+This is an admission limit, not a shared query memory budget. Memory accounting
+across native readers, SQL operators and response conversion remains unfinished;
+one admitted query can still consume substantial memory. SQL execution has disk
+spill disabled, and admission rejection never silently truncates results.
+
 SQL requests are limited to 256 KiB of text, 128 syntax tokens (identifiers,
 keywords, operators and opening delimiters) and a parser recursion budget of 16.
 Literal values, comments, whitespace and list separators do not consume the
@@ -316,6 +334,7 @@ Global options:
 
 | Option | Default | Use |
 | --- | --- | --- |
+| `--query-max-concurrent <N>` | `8` | Shared admission limit for REST SQL, JSON-RPC logs and gRPC SQL/native queries. Excess requests fail immediately; does not bound query memory. |
 | `--http-host <IP>` | `127.0.0.1` | HTTP bind host for dashboard, `/status`, `/query`, JSON-RPC, and WebSocket routes. Use `0.0.0.0` only with `--dashboard-password` and network-level protection. |
 | `--http-port <PORT>` | `8577` | HTTP dashboard, REST, JSON-RPC, and WebSocket port. Keep this stable for browser sessions and automation. |
 | `--grpc-host <IP>` | `127.0.0.1` | gRPC bind host. gRPC is unauthenticated; public gRPC requires `--allow-public-grpc`. |
@@ -441,6 +460,7 @@ Example `logex.toml`:
 data_dir = "/var/lib/logex/mainnet"
 log_level = "info"
 partition_target_rows = 1000000
+query_max_concurrent = 8
 checkpoint_sync_url = "https://YOUR-CHECKPOINT-ENDPOINT"
 nat = "extip:203.0.113.10"
 p2p_bind_ip = "0.0.0.0"
@@ -460,6 +480,7 @@ Supported config keys:
 | `data_dir` | string path | Storage directory. |
 | `log_level` | string | Tracing filter. |
 | `partition_target_rows` | integer | Target rows per sealed segment. |
+| `query_max_concurrent` | positive integer | Shared query admission limit during sync; default 8. Explicit CLI values override config. |
 | `checkpoint` | string | Weak-subjectivity checkpoint root, `slot@root`, or descriptor path. |
 | `checkpoint_sync_url` | string | Checkpoint-sync or Beacon API URL. Comma-separated URLs require quorum agreement. |
 | `nat` | string | EL NAT resolver, such as `any` or `extip:203.0.113.10`. |

@@ -33,6 +33,15 @@ fn main() {
     let file_config = file_config.and_then(|r| r.ok()).unwrap_or_default();
 
     cli.apply_config(file_config, &matches);
+    // Validate resolved admission settings before volume probes, path creation,
+    // storage ownership or runtime startup can have side effects.
+    let query_concurrency = match resolved_query_concurrency(&cli.command) {
+        Ok(limit) => limit,
+        Err(error) => {
+            eprintln!("Error: {error}");
+            std::process::exit(1);
+        }
+    };
     drop(matches);
     let log_level = normalize_info_log_filter(cli.log_level);
 
@@ -150,6 +159,7 @@ fn main() {
 
     match cli.command {
         Command::Sync {
+            query_max_concurrent: _,
             http_host,
             http_port,
             grpc_host,
@@ -177,6 +187,8 @@ fn main() {
                 .or_else(|| Some(DEFAULT_CHECKPOINT_SYNC_URL.to_owned()));
             let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
             let shutdown = rt.block_on(runtime::run_sync(runtime::RunSyncOptions {
+                query_concurrency: query_concurrency
+                    .expect("sync admission was validated before startup"),
                 pm_config,
                 storage_monitor: &mut storage_monitor,
                 checkpoint,
@@ -296,6 +308,22 @@ fn normalize_info_log_filter(filter: String) -> String {
         DEFAULT_LOG_FILTER.to_owned()
     } else {
         filter
+    }
+}
+
+fn resolved_query_concurrency(
+    command: &Command,
+) -> Result<Option<logex_server::QueryConcurrencyLimit>, String> {
+    match command {
+        Command::Sync {
+            query_max_concurrent,
+            ..
+        } => logex_server::QueryConcurrencyLimit::new(*query_max_concurrent)
+            .map(Some)
+            .map_err(|error| {
+                format!("invalid --query-max-concurrent / query_max_concurrent: {error}")
+            }),
+        _ => Ok(None),
     }
 }
 

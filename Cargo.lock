@@ -3006,8 +3006,6 @@ dependencies = [
 [[package]]
 name = "datafusion-physical-plan"
 version = "51.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0acf0ad6b6924c6b1aa7d213b181e012e2d3ec0a64ff5b10ee6282ab0f8532ac"
 dependencies = [
  "ahash",
  "arrow",
@@ -5220,7 +5218,9 @@ dependencies = [
  "alloy-primitives",
  "axum",
  "base64",
+ "bytes",
  "hex",
+ "http-body",
  "libc",
  "logex-index",
  "logex-query",

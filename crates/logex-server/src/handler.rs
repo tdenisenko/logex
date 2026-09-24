@@ -13,11 +13,41 @@ use logex_types::{LOGEX_CLIENT_VERSION, SyncStatus};
 
 use crate::eth_filter::{EthFilter, RpcLog};
 use crate::jsonrpc::{JsonRpcDocument, JsonRpcRequest, JsonRpcResponse};
+use crate::query_response::retain_query_lease;
 use crate::storage_metrics::CachedStorageMetrics;
 
 use crate::ws::SubscriptionManager;
 
 pub(crate) const MAX_LOG_FILTER_LIMIT: usize = 10_000;
+
+/// Maximum database queries sharing one server, including unfinished workers
+/// and retained response buffers. Metadata and subscriptions use other domains.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QueryConcurrencyLimit(usize);
+
+impl QueryConcurrencyLimit {
+    pub const DEFAULT: usize = 8;
+
+    pub fn new(value: usize) -> Result<Self, String> {
+        if value == 0 || value > tokio::sync::Semaphore::MAX_PERMITS {
+            return Err(format!(
+                "query-max-concurrent must be between 1 and {}",
+                tokio::sync::Semaphore::MAX_PERMITS
+            ));
+        }
+        Ok(Self(value))
+    }
+
+    pub fn get(self) -> usize {
+        self.0
+    }
+}
+
+impl Default for QueryConcurrencyLimit {
+    fn default() -> Self {
+        Self(Self::DEFAULT)
+    }
+}
 
 /// Shared application state.
 pub struct AppState {
@@ -37,12 +67,21 @@ impl AppState {
         subscriptions: Option<SubscriptionManager>,
         sync_status: SyncStatus,
     ) -> Self {
+        Self::with_query_concurrency(storage, subscriptions, sync_status, Default::default())
+    }
+
+    pub fn with_query_concurrency(
+        storage: PartitionManager,
+        subscriptions: Option<SubscriptionManager>,
+        sync_status: SyncStatus,
+        limit: QueryConcurrencyLimit,
+    ) -> Self {
         Self {
             storage: Arc::new(tokio::sync::RwLock::new(storage)),
             subscriptions,
             sync_status: Arc::new(std::sync::Mutex::new(sync_status)),
             storage_metrics: Arc::new(tokio::sync::Mutex::new(CachedStorageMetrics::default())),
-            query_control: Arc::new(QueryControl::default()),
+            query_control: Arc::new(QueryControl::new(limit)),
             native_query_workers: OnceLock::new(),
         }
     }
@@ -169,6 +208,7 @@ pub(crate) struct QueryControl {
     // user code runs under the lock, so recovering its value after poison is safe.
     active: Mutex<QueryAdmissions>,
     failure: tokio::sync::watch::Sender<Option<String>>,
+    capacity: Arc<tokio::sync::Semaphore>,
 }
 
 #[derive(Debug, Default)]
@@ -180,40 +220,84 @@ struct QueryAdmissions {
 
 impl Default for QueryControl {
     fn default() -> Self {
-        Self {
-            active: Mutex::new(QueryAdmissions::default()),
-            failure: tokio::sync::watch::channel(None).0,
-        }
+        Self::new(QueryConcurrencyLimit::default())
     }
 }
 
-impl QueryControl {
-    pub(crate) fn start(self: &Arc<Self>) -> Option<ActiveQueryGuard> {
-        let mut active = self.active.lock().unwrap_or_else(|err| err.into_inner());
-        if active.failed || active.exclusive.is_some() {
-            return None;
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum QueryAdmissionError {
+    StorageUnavailable(String),
+    Busy,
+    Capacity,
+}
+
+impl QueryAdmissionError {
+    pub(crate) fn into_grpc_status(self) -> tonic::Status {
+        match self {
+            Self::StorageUnavailable(reason) => tonic::Status::unavailable(reason),
+            Self::Busy => tonic::Status::already_exists("another SQL query is already running"),
+            Self::Capacity => tonic::Status::resource_exhausted(Self::CAPACITY_MESSAGE),
         }
-        let canceled = Arc::new(AtomicBool::new(false));
-        active.exclusive = Some(Arc::clone(&canceled));
-        Some(ActiveQueryGuard {
-            control: Arc::clone(self),
-            canceled,
-            exclusive: true,
-        })
     }
 
-    pub(crate) fn start_concurrent(self: &Arc<Self>) -> Result<ActiveQueryGuard, String> {
+    pub(crate) const CAPACITY_MESSAGE: &'static str = "shared query concurrency capacity is exhausted; retry after outstanding queries or responses finish";
+}
+
+/// Separately owned from the request's cancellation guard: a disconnected
+/// request cannot return its slot while a worker or response still uses it.
+#[derive(Debug, Clone)]
+pub(crate) struct QueryLease {
+    _permit: Arc<tokio::sync::OwnedSemaphorePermit>,
+}
+
+impl QueryControl {
+    pub(crate) fn new(limit: QueryConcurrencyLimit) -> Self {
+        Self {
+            active: Mutex::new(QueryAdmissions::default()),
+            failure: tokio::sync::watch::channel(None).0,
+            capacity: Arc::new(tokio::sync::Semaphore::new(limit.get())),
+        }
+    }
+
+    pub(crate) fn start(self: &Arc<Self>) -> Result<ActiveQueryGuard, QueryAdmissionError> {
+        self.admit(true)
+    }
+
+    pub(crate) fn start_concurrent(
+        self: &Arc<Self>,
+    ) -> Result<ActiveQueryGuard, QueryAdmissionError> {
+        self.admit(false)
+    }
+
+    fn admit(self: &Arc<Self>, exclusive: bool) -> Result<ActiveQueryGuard, QueryAdmissionError> {
         let mut active = self.active.lock().unwrap_or_else(|err| err.into_inner());
         if active.failed {
-            return Err(self.failure.borrow().clone().expect("failure is latched"));
+            return Err(QueryAdmissionError::StorageUnavailable(
+                self.failure.borrow().clone().expect("failure is latched"),
+            ));
         }
-        active.concurrent.retain(|token| token.strong_count() > 0);
+        if exclusive && active.exclusive.is_some() {
+            return Err(QueryAdmissionError::Busy);
+        }
+        // No admission queue: only bounded, admitted work can wait for storage
+        // or the narrower native worker gate. The mutex also serializes failure.
+        let permit = Arc::clone(&self.capacity)
+            .try_acquire_owned()
+            .map_err(|_| QueryAdmissionError::Capacity)?;
         let canceled = Arc::new(AtomicBool::new(false));
-        active.concurrent.push(Arc::downgrade(&canceled));
+        if exclusive {
+            active.exclusive = Some(Arc::clone(&canceled));
+        } else {
+            active.concurrent.retain(|token| token.strong_count() > 0);
+            active.concurrent.push(Arc::downgrade(&canceled));
+        }
         Ok(ActiveQueryGuard {
             control: Arc::clone(self),
             canceled,
-            exclusive: false,
+            exclusive,
+            lease: QueryLease {
+                _permit: Arc::new(permit),
+            },
         })
     }
 
@@ -245,12 +329,21 @@ pub(crate) struct ActiveQueryGuard {
     control: Arc<QueryControl>,
     canceled: Arc<AtomicBool>,
     exclusive: bool,
+    lease: QueryLease,
 }
 
 impl ActiveQueryGuard {
     pub(crate) fn cancel_check(&self) -> logex_query::QueryCancelCheck {
         let canceled = Arc::clone(&self.canceled);
-        Arc::new(move || canceled.load(Ordering::Acquire))
+        let lease = self.lease();
+        Arc::new(move || {
+            let _lease = &lease;
+            canceled.load(Ordering::Acquire)
+        })
+    }
+
+    pub(crate) fn lease(&self) -> QueryLease {
+        self.lease.clone()
     }
 
     pub(crate) fn was_canceled(&self) -> bool {
@@ -298,11 +391,15 @@ pub async fn handle_jsonrpc(
         Err(rejection) => return rejection.into_response(),
     };
     let notification = request.id.is_none();
-    let response = dispatch_jsonrpc(state, request).await;
+    let (response, lease) = dispatch_jsonrpc(state, request).await;
     if notification {
         StatusCode::NO_CONTENT.into_response()
     } else {
-        Json(response).into_response()
+        let response = Json(response).into_response();
+        match lease {
+            Some(lease) => retain_query_lease(response, lease),
+            None => response,
+        }
     }
 }
 
@@ -356,24 +453,54 @@ impl RpcMethod {
     }
 }
 
-async fn dispatch_jsonrpc(state: Arc<AppState>, request: JsonRpcRequest) -> JsonRpcResponse {
+async fn dispatch_jsonrpc(
+    state: Arc<AppState>,
+    request: JsonRpcRequest,
+) -> (JsonRpcResponse, Option<QueryLease>) {
     let id = request.id.unwrap_or_default();
     let method = match RpcMethod::parse(&request.method, request.params) {
         Ok(method) => method,
-        Err(error) => return JsonRpcResponse::invalid_params(id, error),
+        Err(error) => return (JsonRpcResponse::invalid_params(id, error), None),
     };
     // Metadata methods remain available without opening storage.
     match method {
         RpcMethod::ClientVersion => {
-            return JsonRpcResponse::success(id, LOGEX_CLIENT_VERSION.into());
+            return (
+                JsonRpcResponse::success(id, LOGEX_CLIENT_VERSION.into()),
+                None,
+            );
         }
-        RpcMethod::NetworkVersion => return JsonRpcResponse::success(id, "1".into()),
-        RpcMethod::Unknown => return JsonRpcResponse::method_not_found(id),
+        RpcMethod::NetworkVersion => return (JsonRpcResponse::success(id, "1".into()), None),
+        RpcMethod::Unknown => return (JsonRpcResponse::method_not_found(id), None),
+        RpcMethod::BlockNumber => {
+            let storage = match state.read_storage().await {
+                Ok(storage) => storage,
+                Err(reason) => return (JsonRpcResponse::internal_error(id, reason), None),
+            };
+            return (
+                JsonRpcResponse::success(
+                    id,
+                    serde_json::Value::String(format!("0x{:x}", storage.head_block().unwrap_or(0))),
+                ),
+                None,
+            );
+        }
         _ => {}
     }
     let query = match state.query_control.start_concurrent() {
         Ok(query) => query,
-        Err(reason) => return JsonRpcResponse::internal_error(id, reason),
+        Err(QueryAdmissionError::Capacity) => {
+            return (
+                JsonRpcResponse::error(id, -32005, QueryAdmissionError::CAPACITY_MESSAGE.into()),
+                None,
+            );
+        }
+        Err(QueryAdmissionError::StorageUnavailable(reason)) => {
+            return (JsonRpcResponse::internal_error(id, reason), None);
+        }
+        Err(QueryAdmissionError::Busy) => {
+            unreachable!("concurrent admission has no exclusive owner")
+        }
     };
     let response = match method {
         RpcMethod::GetLogs(filter) => {
@@ -383,27 +510,21 @@ async fn dispatch_jsonrpc(state: Arc<AppState>, request: JsonRpcRequest) -> Json
                 })
                 .await
         }
-        RpcMethod::BlockNumber => {
-            let storage = match state.read_storage().await {
-                Ok(storage) => storage,
-                Err(reason) => return JsonRpcResponse::internal_error(id, reason),
-            };
-            Ok(serde_json::Value::String(format!(
-                "0x{:x}",
-                storage.head_block().unwrap_or(0)
-            )))
-        }
-        RpcMethod::ClientVersion | RpcMethod::NetworkVersion | RpcMethod::Unknown => {
+        RpcMethod::BlockNumber
+        | RpcMethod::ClientVersion
+        | RpcMethod::NetworkVersion
+        | RpcMethod::Unknown => {
             unreachable!("metadata returned before query admission")
         }
     };
-    if let Some(reason) = state.storage_failure() {
-        return JsonRpcResponse::internal_error(id, reason);
-    }
-    match response {
-        Ok(result) => JsonRpcResponse::success(id, result),
-        Err(error) => JsonRpcResponse::internal_error(id, error.to_string()),
-    }
+    let response = match state.storage_failure() {
+        Some(reason) => JsonRpcResponse::internal_error(id, reason),
+        None => match response {
+            Ok(result) => JsonRpcResponse::success(id, result),
+            Err(error) => JsonRpcResponse::internal_error(id, error.to_string()),
+        },
+    };
+    (response, Some(query.lease()))
 }
 
 fn handle_eth_get_logs(
@@ -517,10 +638,15 @@ mod tests {
         drop(exclusive);
         drop(concurrent);
         control.fail_storage("later failure".into());
-        assert!(control.start().is_none());
+        assert!(matches!(
+            control.start(),
+            Err(QueryAdmissionError::StorageUnavailable(_))
+        ));
         assert_eq!(
-            control.start_concurrent().err().as_deref(),
-            Some("volume unavailable")
+            control.start_concurrent().err(),
+            Some(QueryAdmissionError::StorageUnavailable(
+                "volume unavailable".into()
+            ))
         );
         assert!(retained());
     }
@@ -618,7 +744,7 @@ mod tests {
             for _ in 0..20_000 {
                 ready.wait();
                 let query = loop {
-                    if let Some(query) = control.start() {
+                    if let Ok(query) = control.start() {
                         break query;
                     }
                     std::hint::spin_loop();
@@ -642,7 +768,7 @@ mod tests {
         let first = control.start().unwrap();
         let first_check = first.cancel_check();
         assert!(!first_check());
-        assert!(control.start().is_none());
+        assert!(matches!(control.start(), Err(QueryAdmissionError::Busy)));
         drop(first);
         assert!(first_check(), "abandoned work must stay canceled");
         assert!(!control.cancel_active());
@@ -654,7 +780,10 @@ mod tests {
         assert!(control.cancel_active());
         assert!(control.cancel_active(), "cancellation is idempotent");
         assert!(second_check());
-        assert!(control.start().is_none(), "cancel is not completion");
+        assert!(
+            matches!(control.start(), Err(QueryAdmissionError::Busy)),
+            "cancel is not completion"
+        );
         drop(second);
         let third = control.start().unwrap();
         assert!(!third.was_canceled());
@@ -677,7 +806,7 @@ mod tests {
                         let query = control.start();
                         admitted.wait();
                         canceled.wait();
-                        if let Some(query) = query {
+                        if let Ok(query) = query {
                             assert!(query.was_canceled());
                             1
                         } else {
@@ -694,7 +823,7 @@ mod tests {
         });
         assert_eq!(owners, 1);
         assert!(!control.cancel_active());
-        assert!(control.start().is_some());
+        assert!(control.start().is_ok());
     }
 
     fn make_test_rows() -> Vec<LogRow> {
@@ -868,7 +997,12 @@ mod tests {
         use std::task::Poll;
 
         let (_tmp, storage) = setup_storage();
-        let state = Arc::new(AppState::new(storage, None, SyncStatus::default()));
+        let state = Arc::new(AppState::with_query_concurrency(
+            storage,
+            None,
+            SyncStatus::default(),
+            QueryConcurrencyLimit::new(1).unwrap(),
+        ));
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .max_blocking_threads(1)
@@ -900,6 +1034,10 @@ mod tests {
                     .await
                     .is_pending()
             );
+            assert!(matches!(
+                state.query_control.start_concurrent(),
+                Err(QueryAdmissionError::Capacity)
+            ));
             drop(request);
             resume_tx.send(()).unwrap();
             occupied.await.unwrap();
@@ -907,6 +1045,9 @@ mod tests {
             // queue ordering. It must be dropped without being invoked.
             assert!(operation_rx.await.is_err());
             assert!(!ran.load(Ordering::Acquire));
+            let returned = state.query_control.capacity.acquire().await.unwrap();
+            drop(returned);
+            assert!(state.query_control.start_concurrent().is_ok());
         });
     }
 
@@ -1069,3 +1210,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod admission_tests;

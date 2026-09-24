@@ -407,3 +407,89 @@ fn expected_volume_options_follow_cli_file_precedence_for_every_command() {
         assert_eq!(cli.expected_volume_uuid.as_deref(), Some("abcd-1234"));
     }
 }
+
+#[test]
+fn query_admission_defaults_and_explicit_default_override_config() {
+    for (arguments, configured, expected) in [
+        (vec!["logex", "sync"], None, 8),
+        (vec!["logex", "sync"], Some(3), 3),
+        (
+            vec!["logex", "sync", "--query-max-concurrent", "8"],
+            Some(3),
+            8,
+        ),
+        (
+            vec!["logex", "sync", "--query-max-concurrent", "2"],
+            Some(3),
+            2,
+        ),
+    ] {
+        let cli = resolve(
+            &arguments,
+            Config {
+                query_max_concurrent: configured,
+                ..Default::default()
+            },
+        );
+        let limit = super::super::resolved_query_concurrency(&cli.command)
+            .unwrap()
+            .unwrap();
+        assert_eq!(limit.get(), expected);
+    }
+    let parsed: Config = toml::from_str("query_max_concurrent = 4").unwrap();
+    assert_eq!(parsed.query_max_concurrent, Some(4));
+}
+
+#[test]
+fn invalid_resolved_query_admission_is_rejected_without_creating_data() {
+    let temp = tempfile::tempdir().unwrap();
+    let missing = temp.path().join("must-not-create");
+    for invalid in [0, tokio::sync::Semaphore::MAX_PERMITS + 1, usize::MAX] {
+        let cli = resolve(
+            &["logex", "sync"],
+            Config {
+                data_dir: Some(missing.clone()),
+                query_max_concurrent: Some(invalid),
+                ..Default::default()
+            },
+        );
+        let error = super::super::resolved_query_concurrency(&cli.command)
+            .err()
+            .unwrap();
+        assert!(error.contains("query-max-concurrent"), "{error}");
+        assert!(!missing.exists());
+        let value = invalid.to_string();
+        let cli = resolve(
+            &["logex", "sync", "--query-max-concurrent", &value],
+            Config {
+                data_dir: Some(missing.clone()),
+                query_max_concurrent: Some(8),
+                ..Default::default()
+            },
+        );
+        assert!(super::super::resolved_query_concurrency(&cli.command).is_err());
+        assert!(!missing.exists());
+    }
+    assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn repair_health_only_mode_does_not_apply_query_admission_configuration() {
+    let cli = resolve(
+        &["logex", "repair", "--dry-run"],
+        Config {
+            query_max_concurrent: Some(0),
+            ..Default::default()
+        },
+    );
+    assert!(
+        super::super::resolved_query_concurrency(&cli.command)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        Cli::command()
+            .try_get_matches_from(["logex", "repair", "--query-max-concurrent", "2"])
+            .is_err()
+    );
+}

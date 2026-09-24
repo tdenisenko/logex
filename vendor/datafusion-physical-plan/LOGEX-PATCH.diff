@@ -1,0 +1,98 @@
+--- a/src/sorts/sort.rs
++++ b/src/sorts/sort.rs
+@@ -693,6 +693,18 @@
+                     // stream into batches of `self.batch_size` rows.
+                     false,
+                 )?;
++                // `spawn_buffered` moves this stream into a background task. Keep the
++                // query runtime alive until that task has actually released its input,
++                // including after the sort future releases its memory reservation and
++                // yields the sorted batch to the channel.
++                let schema = input.schema();
++                let runtime = Arc::clone(&self.runtime);
++                let input = input.map(move |item| {
++                    let _keep_runtime_alive = &runtime;
++                    item
++                });
++                let input: SendableRecordBatchStream =
++                    Box::pin(RecordBatchStreamAdapter::new(schema, input));
+                 Ok(spawn_buffered(input, 1))
+             })
+             .collect::<Result<_>>()?;
+@@ -1386,6 +1398,7 @@
+     use datafusion_common::test_util::batches_to_string;
+     use datafusion_common::{DataFusionError, Result, ScalarValue};
+     use datafusion_execution::config::SessionConfig;
++    use datafusion_execution::disk_manager::{DiskManagerBuilder, DiskManagerMode};
+     use datafusion_execution::runtime_env::RuntimeEnvBuilder;
+     use datafusion_execution::RecordBatchStream;
+     use datafusion_physical_expr::expressions::{Column, Literal};
+@@ -1535,6 +1548,68 @@
+             "The sort should have returned all memory used back to the memory manager"
+         );
+ 
++        Ok(())
++    }
++
++    #[tokio::test(flavor = "current_thread")]
++    async fn logex_internal_sort_stream_retains_runtime_until_drop() -> Result<()> {
++        let schema = Arc::new(Schema::new(vec![Field::new("i", DataType::Int32, false)]));
++        let ordering = [PhysicalSortExpr {
++            expr: col("i", &schema)?,
++            options: SortOptions::default(),
++        }]
++        .into();
++        let metrics = ExecutionPlanMetricsSet::new();
++        let runtime = RuntimeEnvBuilder::new()
++            .with_disk_manager_builder(
++                DiskManagerBuilder::default().with_mode(DiskManagerMode::Disabled),
++            )
++            .build_arc()?;
++        let weak_runtime = Arc::downgrade(&runtime);
++        let config = SessionConfig::new();
++        let mut sorter = ExternalSorter::new(
++            0,
++            Arc::clone(&schema),
++            ordering,
++            1,
++            config.options().execution.sort_spill_reservation_bytes,
++            0,
++            config.spill_compression(),
++            &metrics,
++            Arc::clone(&runtime),
++        )?;
++        for values in [[2, 1], [4, 3]] {
++            sorter
++                .insert_batch(RecordBatch::try_new(
++                    Arc::clone(&schema),
++                    vec![Arc::new(Int32Array::from(values.to_vec()))],
++                )?)
++                .await?;
++        }
++
++        let mut stream = sorter.sort().await?;
++        drop(sorter);
++        drop(runtime);
++
++        assert!(
++            weak_runtime.upgrade().is_some(),
++            "internal multi-batch sort streams must retain their query runtime"
++        );
++        let first_batch = stream
++            .next()
++            .await
++            .transpose()?
++            .expect("multi-batch sort must produce output");
++        assert_eq!(first_batch.num_rows(), 1);
++        assert!(
++            weak_runtime.upgrade().is_some(),
++            "runtime ownership must survive the internal sort future's first yield"
++        );
++        drop(stream);
++        assert!(
++            weak_runtime.upgrade().is_none(),
++            "the query runtime must release when the internal sort stream releases"
++        );
+         Ok(())
+     }
+ 
