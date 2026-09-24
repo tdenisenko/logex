@@ -5076,7 +5076,7 @@ fn build_topics_array(
     let topic_count = [&topic0, &topic1, &topic2, &topic3]
         .into_iter()
         .map(|topics| topics.iter().filter(|topic| topic.is_some()).count())
-        .try_fold(0usize, |total, count| checked_add(total, count))?;
+        .try_fold(0usize, checked_add)?;
     check_i32_offset(topic_count)?;
     let value_bytes = checked_mul(topic_count, 66)?;
     check_i32_offset(value_bytes)?;
