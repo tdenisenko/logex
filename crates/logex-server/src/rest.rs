@@ -1369,6 +1369,7 @@ mod tests {
             crate::HttpServerConfig {
                 dashboard_enabled: false,
                 dashboard_password: None,
+                ..Default::default()
             },
         );
 
@@ -1391,6 +1392,7 @@ mod tests {
             crate::HttpServerConfig {
                 dashboard_enabled: true,
                 dashboard_password: Some("secret".to_owned()),
+                ..Default::default()
             },
         );
 
@@ -1479,6 +1481,70 @@ mod tests {
         let result: QueryCancelResponse = serde_json::from_slice(&body).unwrap();
         assert!(result.canceled);
         assert!(active_query.was_canceled());
+    }
+
+    async fn assert_cancel_rejects_foreign_browser_origin(password: Option<&str>) {
+        let (_tmp, storage) = setup_storage();
+        let state = Arc::new(AppState::new(storage, None, SyncStatus::default()));
+        let app = crate::build_router_with_config(
+            Arc::clone(&state),
+            crate::HttpServerConfig {
+                dashboard_password: password.map(str::to_owned),
+                ..Default::default()
+            },
+        );
+        let request = |origin: Option<&str>| {
+            let mut request = Request::builder()
+                .method("POST")
+                .uri("/query/cancel")
+                .header("host", "127.0.0.1:8577");
+            if let Some(origin) = origin {
+                request = request.header("origin", origin);
+            }
+            if let Some(password) = password {
+                request = request.header("authorization", basic_auth_header(password));
+            }
+            request.body(Body::empty()).unwrap()
+        };
+
+        // Native clients and the same-origin dashboard must still cancel the
+        // actual active guard through the complete authenticated router.
+        for origin in [None, Some("http://127.0.0.1:8577")] {
+            let active_query = state.query_control.start().unwrap();
+            let response = app.clone().oneshot(request(origin)).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), 1024)
+                .await
+                .unwrap();
+            let result: QueryCancelResponse = serde_json::from_slice(&body).unwrap();
+            assert!(result.canceled);
+            assert!(active_query.was_canceled());
+            drop(active_query);
+        }
+
+        let active_query = state.query_control.start().unwrap();
+        // An empty cross-origin POST requires no JSON or custom request header
+        // from a browser. Authentication must not replace origin validation.
+        let response = app
+            .oneshot(request(Some("http://127.0.0.1:8578")))
+            .await
+            .unwrap();
+        assert_eq!(
+            (response.status(), active_query.was_canceled()),
+            (StatusCode::FORBIDDEN, false)
+        );
+        assert_eq!(state.query_memory.used(), 0);
+        assert!(state.storage_failure().is_none());
+    }
+
+    #[tokio::test]
+    async fn foreign_origin_cannot_cancel_loopback_query() {
+        assert_cancel_rejects_foreign_browser_origin(None).await;
+    }
+
+    #[tokio::test]
+    async fn foreign_origin_cannot_cancel_authenticated_query() {
+        assert_cancel_rejects_foreign_browser_origin(Some("secret")).await;
     }
 
     #[tokio::test]

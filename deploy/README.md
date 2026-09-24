@@ -4,6 +4,13 @@ These are templates, not an installed service. Set the real executable, config,
 mount and log locations before installation. Production installation and live
 sync are separate deployment steps.
 
+When the dashboard is served through an HTTPS reverse proxy, configure
+`http_allowed_origins` with the external browser origins, including scheme and
+any non-default port. A nonempty list replaces direct HTTP origin matching;
+forwarding headers are not trusted automatically. The same policy applies during
+repair and normal sync. Keep the existing HTTP authentication and network
+protection in place. Native clients without an `Origin` header remain supported.
+
 Set both `expected_volume_mount` and `expected_volume_uuid` in the config. Their
 CLI equivalents are `--expected-volume-mount` and `--expected-volume-uuid`;
 explicit CLI values override the file. Both paths must be absolute, without

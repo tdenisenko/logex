@@ -5,6 +5,7 @@ pub mod grpc;
 pub mod handler;
 pub mod jsonrpc;
 mod maintenance;
+mod origin;
 mod query_encoding;
 mod query_response;
 pub mod rest;
@@ -31,12 +32,15 @@ pub use maintenance::{
     MaintenanceState, MaintenanceStatus, MaintenanceStatusKind, RepairPhase,
     build_maintenance_router, serve_maintenance,
 };
+pub use origin::BrowserOrigin;
 pub use ws::SubscriptionManager;
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct HttpServerConfig {
     pub dashboard_enabled: bool,
     pub dashboard_password: Option<String>,
+    /// Explicit browser origins. Empty permits only the direct HTTP origin.
+    pub allowed_origins: Vec<BrowserOrigin>,
 }
 
 impl Default for HttpServerConfig {
@@ -44,6 +48,7 @@ impl Default for HttpServerConfig {
         Self {
             dashboard_enabled: true,
             dashboard_password: None,
+            allowed_origins: Vec::new(),
         }
     }
 }
@@ -80,8 +85,8 @@ pub fn build_router_with_config(state: Arc<AppState>, config: HttpServerConfig) 
             post(ws::handle_live_transfer_clear),
         )
         .route_layer(middleware::from_fn_with_state(
-            config.clone(),
-            require_dashboard_auth,
+            Arc::new(config),
+            require_http_access,
         ))
         .with_state(Arc::clone(&state));
 
@@ -121,26 +126,26 @@ pub async fn serve_with_config(
         .map_err(std::io::Error::other)
 }
 
-async fn require_dashboard_auth(
-    axum::extract::State(config): axum::extract::State<HttpServerConfig>,
-    headers: HeaderMap,
+async fn require_http_access(
+    axum::extract::State(config): axum::extract::State<Arc<HttpServerConfig>>,
     request: Request,
     next: Next,
 ) -> Response {
-    let Some(password) = config.dashboard_password.as_deref() else {
-        return next.run(request).await;
-    };
-
-    if dashboard_auth_is_valid(&headers, password) {
-        return next.run(request).await;
+    let headers = request.headers();
+    if let Some(password) = config.dashboard_password.as_deref()
+        && !dashboard_auth_is_valid(headers, password)
+    {
+        let mut response = (StatusCode::UNAUTHORIZED, "authentication required").into_response();
+        response.headers_mut().insert(
+            WWW_AUTHENTICATE,
+            HeaderValue::from_static("Basic realm=\"LogEx\", charset=\"UTF-8\""),
+        );
+        return response;
     }
-
-    let mut response = (StatusCode::UNAUTHORIZED, "authentication required").into_response();
-    response.headers_mut().insert(
-        WWW_AUTHENTICATE,
-        HeaderValue::from_static("Basic realm=\"LogEx\", charset=\"UTF-8\""),
-    );
-    response
+    if !origin::request_origin_is_allowed(headers, request.uri(), &config.allowed_origins) {
+        return (StatusCode::FORBIDDEN, "browser origin is not allowed").into_response();
+    }
+    next.run(request).await
 }
 
 fn dashboard_auth_is_valid(headers: &HeaderMap, password: &str) -> bool {

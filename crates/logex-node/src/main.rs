@@ -184,6 +184,7 @@ fn main() {
             cl_max_peers,
             disable_dashboard,
             dashboard_password,
+            http_allowed_origins,
             allow_public_grpc: _,
             disable_historical_sync,
             repair_corrupt_segments,
@@ -218,6 +219,7 @@ fn main() {
                 cl_max_peers,
                 dashboard_enabled,
                 dashboard_password,
+                http_allowed_origins,
                 disable_historical_sync,
                 repair_corrupt_segments,
                 repair_limits,
@@ -234,6 +236,7 @@ fn main() {
             http_port,
             disable_dashboard,
             dashboard_password,
+            http_allowed_origins,
             discovery_port,
             p2p_port,
             max_peers,
@@ -255,6 +258,7 @@ fn main() {
                     http: logex_server::HttpServerConfig {
                         dashboard_enabled: !disable_dashboard,
                         dashboard_password,
+                        allowed_origins: http_allowed_origins,
                     },
                     network: runtime::repair::RepairNetworkOptions {
                         discovery_port,

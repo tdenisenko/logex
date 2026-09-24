@@ -171,6 +171,7 @@ async fn transport_auth_and_unsupported_batches_remain_explicit() {
             HttpServerConfig {
                 dashboard_enabled,
                 dashboard_password: Some("secret".into()),
+                ..Default::default()
             },
         );
         let response = app.oneshot(request("{")).await.unwrap();
@@ -184,6 +185,7 @@ async fn transport_auth_and_unsupported_batches_remain_explicit() {
             HttpServerConfig {
                 dashboard_enabled,
                 dashboard_password: Some("secret".into()),
+                ..Default::default()
             },
         );
         assert_eq!(app.oneshot(valid).await.unwrap().status(), StatusCode::OK);

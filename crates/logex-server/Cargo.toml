@@ -23,6 +23,7 @@ libc = "0.2"
 bytes = "1"
 http-body = "1"
 tower = "0.5"
+url = "=2.5.8"
 
 [dev-dependencies]
 logex-index = { workspace = true }

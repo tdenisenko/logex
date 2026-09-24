@@ -7,7 +7,12 @@ use std::{
     time::{Duration, Instant},
 };
 
-fn reject_setting(root: &Path, arguments: &[&str], setting: &str) -> Output {
+fn reject_setting_with_code(
+    root: &Path,
+    arguments: &[&str],
+    setting: &str,
+    expected_code: i32,
+) -> Output {
     let mut child = Command::new(env!("CARGO_BIN_EXE_logex"))
         .arg("--data-dir")
         .arg(root)
@@ -48,7 +53,7 @@ fn reject_setting(root: &Path, arguments: &[&str], setting: &str) -> Output {
     assert!(!expired, "invalid setting did not terminate promptly");
     assert_eq!(
         output.status.code(),
-        Some(1),
+        Some(expected_code),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
@@ -58,8 +63,60 @@ fn reject_setting(root: &Path, arguments: &[&str], setting: &str) -> Output {
     output
 }
 
+fn reject_setting(root: &Path, arguments: &[&str], setting: &str) -> Output {
+    reject_setting_with_code(root, arguments, setting, 1)
+}
+
 fn reject(root: &Path, arguments: &[&str]) -> Output {
     reject_setting(root, arguments, "query-max-concurrent")
+}
+
+#[test]
+fn invalid_browser_origins_reject_before_sync_or_repair_creates_storage() {
+    for command in ["sync", "repair"] {
+        for from_config in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().join("absent-data");
+            let config = temp.path().join("settings.toml");
+            let contents = "http_allowed_origins = ['https://example.test/dashboard']\n\
+                            dashboard_password = 'private-origin-fixture-value'\n";
+            if from_config {
+                fs::write(&config, contents).unwrap();
+            }
+            let before = fs::metadata(temp.path()).unwrap().modified().unwrap();
+            let config_mtime =
+                from_config.then(|| fs::metadata(&config).unwrap().modified().unwrap());
+            let output = if from_config {
+                reject_setting(
+                    &root,
+                    &["--config", config.to_str().unwrap(), command],
+                    "failed to parse config",
+                )
+            } else {
+                reject_setting_with_code(
+                    &root,
+                    &[
+                        command,
+                        "--http-allowed-origin",
+                        "https://example.test/dashboard",
+                    ],
+                    "--http-allowed-origin",
+                    2,
+                )
+            };
+            assert!(
+                !String::from_utf8_lossy(&output.stderr).contains("private-origin-fixture-value")
+            );
+            assert_eq!(
+                fs::metadata(temp.path()).unwrap().modified().unwrap(),
+                before
+            );
+            if let Some(mtime) = config_mtime {
+                assert_eq!(fs::read_to_string(&config).unwrap(), contents);
+                assert_eq!(fs::metadata(&config).unwrap().modified().unwrap(), mtime);
+            }
+        }
+    }
 }
 
 #[test]
