@@ -1,0 +1,63 @@
+LogEx query bitmap allocation seam (Roaring 0.10.12)
+
+Published crate archive retained without build/cache artifacts, including all
+source, tests, manifests, upstream lockfile and original README. No upgrade.
+Archive SHA-256: 19e8d2cfa184d94d0726d650a9f4a1be7f9b76ac9fdb954219878dc00c1c1e7b
+Published VCS commit: 9496afe1e6ad93a8875f901c2579761f7acdc5b0
+Original 73-file inventory: LOGEX-UPSTREAM-SHA256
+Reviewable modifications and additions: LOGEX-PATCH.diff
+Only existing source modification: std-gated query module/export in bitmap/mod.rs.
+Ordinary upstream decoding, statistics, algorithms and ingestion APIs unchanged.
+
+The published archive declares MIT OR Apache-2.0 but omits standalone license
+files. The original LICENSE-APACHE and LICENSE-MIT were retrieved unchanged from
+that exact official source commit (not substituted from another package):
+https://raw.githubusercontent.com/RoaringBitmap/roaring-rs/9496afe1e6ad93a8875f901c2579761f7acdc5b0/LICENSE-APACHE
+SHA-256: a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2
+https://raw.githubusercontent.com/RoaringBitmap/roaring-rs/9496afe1e6ad93a8875f901c2579761f7acdc5b0/LICENSE-MIT
+SHA-256: 42d3bf7e7d4d49d72c0555d14ed99c3ee7ce9ce3cbffbc38bbafe8c103f50969
+
+New API (std feature only)
+- RoaringBitmap::prepare_deserialize(&[u8]) -> io::Result<bitmap::PreparedBitmap>
+- PreparedBitmap::allocation_bytes() -> usize
+- PreparedBitmap::deserialize(self) -> io::Result<RoaringBitmap>
+- RoaringBitmap::heap_size_bytes() -> io::Result<usize>
+
+Preparation validates cookie/count, keys, exact offsets/extents, sparse ordering,
+dense popcount, and ordered/disjoint/nonoverflowing runs with exact cardinality.
+It borrows immutable bytes and allocates no heap storage on success. The checked
+preflight size counts requested container Vec slots plus normalized array Vecs
+or 8192-byte dense boxes. Decoding has no heap scratch allocations. Sparse runs
+fill exact-cardinality arrays directly; dense runs fill one zeroed bitmap box,
+preventing the ordinary generic run route's oversized array representation.
+Serialized dense data uses the existing full-buffer direct constructor: no new
+zero-fill/intermediate copy and no new unsafe code. Release builds reuse the
+validated cardinality; upstream debug assertions revalidate constructor content.
+
+Heap measurement includes actual container Vec and u16 array Vec capacities plus
+8192 per dense box; it excludes allocator headers/stack/struct size. It does not
+use statistics() (whose historical byte fields have different units). Callers
+reserve preflight bytes before decoding, then reconcile allocator-returned Vec
+capacities while owning both bitmap and reservation. This seam is dependency-
+independent and does not itself impose a budget or process-RSS bound. Setops,
+clones and MultiOps allocation hooks are outside this patch.
+
+Five new lib tests exercise empty/sparse/dense boundaries, key65535, normalized
+singleton/full runs, mixed and unaligned payloads, malformed/truncated geometry,
+array/run/dense content validation, checked arithmetic, and spare heap capacity.
+Run parity checks compare rows and cardinality, not structural Store equality:
+the generic decoder may retain an oversized array whereas the query decoder
+normalizes the same set into a bitmap. Explicit Store shape and independently
+generated expected rows are tested separately.
+Existing upstream tests remain present. Standard validation command:
+CARGO_TARGET_DIR=target/roaring-regressions cargo test --manifest-path vendor/roaring/Cargo.toml --lib --locked
+
+The unmodified published vendor lock requires upstream dev-dependencies, including
+postcard even without enabling serde. An offline run requires those exact locked
+packages cached. Root workspace uses its existing versions via the path override;
+its lock change only removes roaring's registry source/checksum.
+
+Verify inventory against the archive hash above, verify unchanged files against
+LOGEX-UPSTREAM-SHA256, review LOGEX-PATCH.diff and the three added source/license
+file hashes in the repository vendor verifier. Re-audit the private representation
+and constructors before replacing/upgrading the pinned crate or enabling SIMD.

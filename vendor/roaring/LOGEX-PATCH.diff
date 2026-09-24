@@ -1,0 +1,693 @@
+--- a/src/bitmap/mod.rs
++++ b/src/bitmap/mod.rs
+@@ -4,6 +4,10 @@
+ mod multiops;
+ mod proptests;
+ mod statistics;
++#[cfg(feature = "std")]
++mod query_decode;
++#[cfg(feature = "std")]
++pub use query_decode::PreparedBitmap;
+ mod store;
+ mod util;
+ 
+--- /dev/null
++++ b/src/bitmap/query_decode.rs
+@@ -0,0 +1,450 @@
++//! Query-only portable decoding with an allocation-free validated preparation.
++use super::container::{Container, ARRAY_LIMIT};
++use super::store::{ArrayStore, BitmapStore, Store, BITMAP_LENGTH};
++use super::RoaringBitmap;
++use std::io;
++use std::mem::size_of;
++
++const DENSE_BYTES: usize = BITMAP_LENGTH * size_of::<u64>();
++
++/// A validated, immutable portable bitmap and its requested heap allocation.
++///
++/// Preparation borrows the input and allocates no heap storage on success.
++/// Keep the input's own memory charge separately from the decoded allocation.
++/// This query-specific API does not change the ordinary deserializer.
++#[derive(Debug)]
++pub struct PreparedBitmap<'a> {
++    descriptions: &'a [u8],
++    runs: Option<&'a [u8]>,
++    payload: &'a [u8],
++    allocation_bytes: usize,
++}
++
++impl RoaringBitmap {
++    /// Validate a complete portable bitmap without allocating output or scratch.
++    ///
++    /// Validates container keys, offsets, exact extent, sorted array values,
++    /// dense cardinalities and ordered disjoint runs with exact cardinality.
++    /// The returned preparation retains a borrow of these validated bytes.
++    pub fn prepare_deserialize(bytes: &[u8]) -> io::Result<PreparedBitmap<'_>> {
++        let mut cursor = Cursor(bytes);
++        let cookie = cursor.u32()?;
++        let (count, offsets, runs) = if cookie == 12346 {
++            let count = cursor.u32()? as usize;
++            if count > 65536 {
++                return Err(invalid("too many Roaring containers"));
++            }
++            (count, true, None)
++        } else if cookie as u16 == 12347 {
++            let count = ((cookie >> 16) + 1) as usize;
++            (count, count >= 4, Some(cursor.take((count + 7) / 8)?))
++        } else {
++            return Err(invalid("invalid Roaring bitmap cookie"));
++        };
++        let descriptions = cursor.take(multiply(count, 4)?)?;
++        let offsets = if offsets {
++            Some(cursor.take(multiply(count, 4)?)?)
++        } else {
++            None
++        };
++        let payload = cursor.0;
++        let mut allocation_bytes = multiply(count, size_of::<Container>())?;
++        let mut previous_key = None;
++        for (index, description) in descriptions.chunks_exact(4).enumerate() {
++            let key = le_u16(&description[..2]);
++            if previous_key.map_or(false, |previous| previous >= key) {
++                return Err(invalid(
++                    "Roaring container keys are not strictly increasing",
++                ));
++            }
++            previous_key = Some(key);
++            if let Some(offsets) = offsets {
++                let offset = le_u32(&offsets[index * 4..index * 4 + 4]);
++                if offset as u64 != (bytes.len() - cursor.0.len()) as u64 {
++                    return Err(invalid("noncontiguous Roaring container offset"));
++                }
++            }
++            let cardinality = usize::from(le_u16(&description[2..])) + 1;
++            let is_run = runs.map_or(false, |runs| runs[index / 8] & (1 << (index % 8)) != 0);
++            if is_run {
++                let run_count = usize::from(cursor.u16()?);
++                let intervals = cursor.take(multiply(run_count, 4)?)?;
++                let mut previous_end = None;
++                let mut actual = 0usize;
++                for run in intervals.chunks_exact(4) {
++                    let start = le_u16(&run[..2]);
++                    let length = le_u16(&run[2..]);
++                    let end = start
++                        .checked_add(length)
++                        .ok_or_else(|| invalid("Roaring run exceeds its container"))?;
++                    if previous_end.map_or(false, |previous| start <= previous) {
++                        return Err(invalid("Roaring runs overlap or are not ordered"));
++                    }
++                    previous_end = Some(end);
++                    actual = add(actual, usize::from(length) + 1)?;
++                }
++                if actual != cardinality {
++                    return Err(invalid("Roaring run cardinality mismatch"));
++                }
++            } else if cardinality <= ARRAY_LIMIT as usize {
++                let values = cursor.take(multiply(cardinality, size_of::<u16>())?)?;
++                let mut previous = None;
++                for value in values.chunks_exact(2) {
++                    let value = le_u16(value);
++                    if previous.map_or(false, |previous| previous >= value) {
++                        return Err(invalid("Roaring array values are not strictly increasing"));
++                    }
++                    previous = Some(value);
++                }
++            } else {
++                let dense = cursor.take(DENSE_BYTES)?;
++                let actual: u32 = dense
++                    .chunks_exact(8)
++                    .map(|word| u64::from_le_bytes(word.try_into().unwrap()).count_ones())
++                    .sum();
++                if actual as usize != cardinality {
++                    return Err(invalid("Roaring dense cardinality mismatch"));
++                }
++            }
++            allocation_bytes = add(
++                allocation_bytes,
++                if cardinality <= ARRAY_LIMIT as usize {
++                    multiply(cardinality, size_of::<u16>())?
++                } else {
++                    DENSE_BYTES
++                },
++            )?;
++        }
++        if !cursor.0.is_empty() {
++            return Err(invalid("trailing Roaring bitmap payload bytes"));
++        }
++        Ok(PreparedBitmap {
++            descriptions,
++            runs,
++            payload,
++            allocation_bytes,
++        })
++    }
++
++    /// Exact bytes represented by currently retained heap allocation capacities.
++    ///
++    /// Includes the private container Vec, each array Vec, and dense boxes.
++    /// Excludes allocator headers, stack storage and the bitmap struct itself.
++    /// Unlike serialization/statistics sizes, this includes unused Vec capacity.
++    pub fn heap_size_bytes(&self) -> io::Result<usize> {
++        let mut bytes = multiply(self.containers.capacity(), size_of::<Container>())?;
++        for container in &self.containers {
++            bytes = add(
++                bytes,
++                match &container.store {
++                    Store::Array(array) => multiply(array.capacity(), size_of::<u16>())?,
++                    Store::Bitmap(_) => DENSE_BYTES,
++                },
++            )?;
++        }
++        Ok(bytes)
++    }
++}
++
++impl PreparedBitmap<'_> {
++    /// Bytes requested for the output's container vector and normalized stores.
++    ///
++    /// There are no heap scratch allocations during decoding. The allocator can
++    /// return larger Vec capacities; measure the returned bitmap with
++    /// `RoaringBitmap::heap_size_bytes` while it remains owned and charged.
++    pub fn allocation_bytes(&self) -> usize {
++        self.allocation_bytes
++    }
++
++    /// Decode previously validated bytes into normalized containers.
++    ///
++    /// Reserve `allocation_bytes()` before calling. This API reports allocator
++    /// reservation failures but is not itself a memory limiter. Dense serialized
++    /// payloads use the existing direct full-buffer constructor, without another
++    /// zero-fill or intermediate copy. Release-mode decoding reuses validated
++    /// cardinalities; upstream debug assertions may recheck contents.
++    pub fn deserialize(self) -> io::Result<RoaringBitmap> {
++        let count = self.descriptions.len() / 4;
++        let mut containers = Vec::new();
++        containers
++            .try_reserve_exact(count)
++            .map_err(allocation_error)?;
++        let mut cursor = Cursor(self.payload);
++        for (index, description) in self.descriptions.chunks_exact(4).enumerate() {
++            let key = le_u16(&description[..2]);
++            let cardinality = usize::from(le_u16(&description[2..])) + 1;
++            let is_run = self
++                .runs
++                .map_or(false, |runs| runs[index / 8] & (1 << (index % 8)) != 0);
++            let store = if is_run {
++                let count = usize::from(cursor.u16()?);
++                let runs = cursor.take(multiply(count, 4)?)?;
++                if cardinality <= ARRAY_LIMIT as usize {
++                    let mut values = Vec::new();
++                    values
++                        .try_reserve_exact(cardinality)
++                        .map_err(allocation_error)?;
++                    for run in runs.chunks_exact(4) {
++                        let start = le_u16(&run[..2]);
++                        let end = start + le_u16(&run[2..]); // validated before preparation
++                        values.extend(start..=end);
++                    }
++                    Store::Array(ArrayStore::from_vec_unchecked(values))
++                } else {
++                    let mut bitmap = BitmapStore::new();
++                    for run in runs.chunks_exact(4) {
++                        let start = le_u16(&run[..2]);
++                        let end = start + le_u16(&run[2..]);
++                        bitmap.insert_range(start..=end);
++                    }
++                    Store::Bitmap(bitmap)
++                }
++            } else if cardinality <= ARRAY_LIMIT as usize {
++                let bytes = cursor.take(multiply(cardinality, size_of::<u16>())?)?;
++                let mut values = Vec::new();
++                values
++                    .try_reserve_exact(cardinality)
++                    .map_err(allocation_error)?;
++                values.extend(bytes.chunks_exact(2).map(le_u16));
++                Store::Array(ArrayStore::from_vec_unchecked(values))
++            } else {
++                let bytes = cursor.take(DENSE_BYTES)?;
++                Store::Bitmap(BitmapStore::from_lsb0_bytes_unchecked(
++                    bytes,
++                    0,
++                    cardinality as u64,
++                ))
++            };
++            containers.push(Container { key, store });
++        }
++        Ok(RoaringBitmap { containers })
++    }
++}
++
++fn invalid(message: &'static str) -> io::Error {
++    io::Error::new(io::ErrorKind::InvalidData, message)
++}
++fn allocation_error(error: std::collections::TryReserveError) -> io::Error {
++    io::Error::new(io::ErrorKind::Other, error)
++}
++fn add(a: usize, b: usize) -> io::Result<usize> {
++    a.checked_add(b)
++        .ok_or_else(|| invalid("Roaring allocation size overflow"))
++}
++fn multiply(a: usize, b: usize) -> io::Result<usize> {
++    a.checked_mul(b)
++        .ok_or_else(|| invalid("Roaring allocation size overflow"))
++}
++fn le_u16(bytes: &[u8]) -> u16 {
++    u16::from_le_bytes([bytes[0], bytes[1]])
++}
++fn le_u32(bytes: &[u8]) -> u32 {
++    u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
++}
++struct Cursor<'a>(&'a [u8]);
++impl<'a> Cursor<'a> {
++    fn take(&mut self, len: usize) -> io::Result<&'a [u8]> {
++        if len > self.0.len() {
++            return Err(invalid("truncated Roaring bitmap"));
++        }
++        let (head, tail) = self.0.split_at(len);
++        self.0 = tail;
++        Ok(head)
++    }
++    fn u16(&mut self) -> io::Result<u16> {
++        self.take(2).map(le_u16)
++    }
++    fn u32(&mut self) -> io::Result<u32> {
++        self.take(4).map(le_u32)
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    // Build portable containers independently of the decoder. Cardinality is
++    // explicit so malformed content/header disagreements can also be tested.
++    fn portable(parts: &[(u16, u32, bool, Vec<u8>)]) -> Vec<u8> {
++        let has_runs = parts.iter().any(|part| part.2);
++        let mut bytes = Vec::new();
++        if has_runs {
++            bytes.extend_from_slice(&(12347u32 | (((parts.len() - 1) as u32) << 16)).to_le_bytes());
++            let mut mask = vec![0u8; (parts.len() + 7) / 8];
++            for (i, part) in parts.iter().enumerate() {
++                if part.2 {
++                    mask[i / 8] |= 1 << (i % 8);
++                }
++            }
++            bytes.extend(mask);
++        } else {
++            bytes.extend_from_slice(&12346u32.to_le_bytes());
++            bytes.extend_from_slice(&(parts.len() as u32).to_le_bytes());
++        }
++        for (key, cardinality, _, _) in parts {
++            bytes.extend_from_slice(&key.to_le_bytes());
++            bytes.extend_from_slice(&((*cardinality - 1) as u16).to_le_bytes());
++        }
++        if !has_runs || parts.len() >= 4 {
++            let mut offset = bytes.len() + parts.len() * 4;
++            for part in parts {
++                bytes.extend_from_slice(&(offset as u32).to_le_bytes());
++                offset += part.3.len();
++            }
++        }
++        for part in parts {
++            bytes.extend_from_slice(&part.3);
++        }
++        bytes
++    }
++
++    fn run_payload(runs: &[(u16, u16)]) -> Vec<u8> {
++        let mut bytes = (runs.len() as u16).to_le_bytes().to_vec();
++        for (start, length_minus_one) in runs {
++            bytes.extend_from_slice(&start.to_le_bytes());
++            bytes.extend_from_slice(&length_minus_one.to_le_bytes());
++        }
++        bytes
++    }
++
++    #[test]
++    fn logex_prepared_roundtrip_empty_sparse_dense_and_boundaries() {
++        for values in [
++            Vec::new(),
++            vec![0, 65535, 65536, u32::MAX],
++            (0..4096).collect(),
++            (0..4097).collect(),
++            (0xffff0000..=u32::MAX).collect(),
++        ] {
++            let original: RoaringBitmap = values.into_iter().collect();
++            let mut bytes = Vec::new();
++            original.serialize_into(&mut bytes).unwrap();
++            let prepared = RoaringBitmap::prepare_deserialize(&bytes).unwrap();
++            let requested = prepared.allocation_bytes();
++            let result = prepared.deserialize().unwrap();
++            assert_eq!(result, original);
++            assert_eq!(requested, result.heap_size_bytes().unwrap());
++        }
++    }
++
++    #[test]
++    fn logex_runs_are_normalized_without_oversized_array_or_scratch() {
++        for cardinality in [1, 4096, 4097, 5000] {
++            let runs: Vec<_> = (0..cardinality).map(|i| ((i * 2) as u16, 0)).collect();
++            let bytes = portable(&[(65535, cardinality, true, run_payload(&runs))]);
++            let prepared = RoaringBitmap::prepare_deserialize(&bytes).unwrap();
++            let expected_bytes = size_of::<Container>()
++                + if cardinality <= 4096 {
++                    cardinality as usize * 2
++                } else {
++                    DENSE_BYTES
++                };
++            assert_eq!(prepared.allocation_bytes(), expected_bytes);
++            let result = prepared.deserialize().unwrap();
++            assert_eq!(result.heap_size_bytes().unwrap(), expected_bytes);
++            assert_eq!(result.len(), cardinality as u64);
++            assert_eq!(
++                result.iter().collect::<Vec<_>>(),
++                (0..cardinality)
++                    .map(|i| 0xffff0000 + i * 2)
++                    .collect::<Vec<_>>()
++            );
++            // The generic run decoder can retain an oversized ArrayStore.
++            // Upstream equality compares Store variants, so verify set semantics
++            // independently of the normalized representation required here.
++            let legacy = RoaringBitmap::deserialize_from(&bytes[..]).unwrap();
++            assert_eq!(result.len(), legacy.len());
++            assert!(result.iter().eq(legacy.iter()));
++            assert!(
++                matches!(&result.containers[0].store, Store::Array(_)) == (cardinality <= 4096)
++            );
++        }
++        let bytes = portable(&[(65535, 65536, true, run_payload(&[(0, 65535)]))]);
++        let bitmap = RoaringBitmap::prepare_deserialize(&bytes)
++            .unwrap()
++            .deserialize()
++            .unwrap();
++        assert_eq!(bitmap.len(), 65536);
++        assert_eq!(bitmap.max(), Some(u32::MAX));
++    }
++
++    #[test]
++    fn logex_mixed_runs_arrays_and_unaligned_dense_payloads() {
++        let parts = vec![
++            (0, 3, true, run_payload(&[(4, 2)])),
++            (1, 2, false, vec![0, 0, 255, 255]),
++            (17, 65536, false, vec![255; DENSE_BYTES]),
++            (65535, 5000, true, run_payload(&[(0, 4999)])),
++        ];
++        let bytes = portable(&parts);
++        let prepared = RoaringBitmap::prepare_deserialize(&bytes).unwrap();
++        let requested = prepared.allocation_bytes();
++        let bitmap = prepared.deserialize().unwrap();
++        assert_eq!(bitmap.heap_size_bytes().unwrap(), requested);
++        assert_eq!(bitmap, RoaringBitmap::deserialize_from(&bytes[..]).unwrap());
++        // Every proper prefix and a trailing byte must be rejected preallocation.
++        for end in 0..bytes.len() {
++            assert!(RoaringBitmap::prepare_deserialize(&bytes[..end]).is_err());
++        }
++        let mut trailing = bytes;
++        trailing.push(0);
++        assert!(RoaringBitmap::prepare_deserialize(&trailing).is_err());
++    }
++
++    #[test]
++    fn logex_preflight_rejects_corrupt_geometry_and_contents() {
++        let rejects = |bytes: Vec<u8>| {
++            assert_eq!(
++                RoaringBitmap::prepare_deserialize(&bytes)
++                    .unwrap_err()
++                    .kind(),
++                io::ErrorKind::InvalidData
++            );
++        };
++        rejects(vec![0; 8]);
++        let mut count = 12346u32.to_le_bytes().to_vec();
++        count.extend_from_slice(&65537u32.to_le_bytes());
++        rejects(count);
++        rejects(portable(&[(1, 2, false, vec![1, 0, 1, 0])]));
++        rejects(portable(&[(1, 2, false, vec![2, 0, 1, 0])]));
++        rejects(portable(&[
++            (1, 1, false, vec![0, 0]),
++            (1, 1, false, vec![0, 0]),
++        ]));
++        rejects(portable(&[
++            (2, 1, false, vec![0, 0]),
++            (1, 1, false, vec![0, 0]),
++        ]));
++        rejects(portable(&[(1, 4097, false, vec![0; DENSE_BYTES])]));
++        rejects(portable(&[(1, 4, true, run_payload(&[(0, 2)]))]));
++        rejects(portable(&[(1, 4, true, run_payload(&[(0, 1), (1, 1)]))]));
++        rejects(portable(&[(1, 4, true, run_payload(&[(9, 1), (0, 1)]))]));
++        rejects(portable(&[(1, 2, true, run_payload(&[(65535, 1)]))]));
++        rejects(portable(&[(1, 1, true, run_payload(&[]))]));
++        let mut offset = portable(&[(1, 1, false, vec![0, 0])]);
++        offset[12..16].copy_from_slice(&15u32.to_le_bytes());
++        rejects(offset);
++        assert!(add(usize::MAX, 1).is_err());
++        assert!(multiply(usize::MAX, 2).is_err());
++    }
++
++    #[test]
++    fn logex_heap_measurement_counts_spare_capacity_and_dense_bytes() {
++        let mut values = Vec::with_capacity(9000);
++        values.extend([1, 9]);
++        let array_capacity = values.capacity();
++        let mut containers = Vec::with_capacity(5);
++        containers.push(Container {
++            key: 0,
++            store: Store::Array(ArrayStore::from_vec_unchecked(values)),
++        });
++        containers.push(Container {
++            key: 1,
++            store: Store::Bitmap(BitmapStore::full()),
++        });
++        let expected =
++            containers.capacity() * size_of::<Container>() + array_capacity * 2 + DENSE_BYTES;
++        let bitmap = RoaringBitmap { containers };
++        assert_eq!(bitmap.heap_size_bytes().unwrap(), expected);
++    }
++}
+--- /dev/null
++++ b/LICENSE-APACHE
+@@ -0,0 +1,201 @@
++                              Apache License
++                        Version 2.0, January 2004
++                     http://www.apache.org/licenses/
++
++TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
++
++1. Definitions.
++
++   "License" shall mean the terms and conditions for use, reproduction,
++   and distribution as defined by Sections 1 through 9 of this document.
++
++   "Licensor" shall mean the copyright owner or entity authorized by
++   the copyright owner that is granting the License.
++
++   "Legal Entity" shall mean the union of the acting entity and all
++   other entities that control, are controlled by, or are under common
++   control with that entity. For the purposes of this definition,
++   "control" means (i) the power, direct or indirect, to cause the
++   direction or management of such entity, whether by contract or
++   otherwise, or (ii) ownership of fifty percent (50%) or more of the
++   outstanding shares, or (iii) beneficial ownership of such entity.
++
++   "You" (or "Your") shall mean an individual or Legal Entity
++   exercising permissions granted by this License.
++
++   "Source" form shall mean the preferred form for making modifications,
++   including but not limited to software source code, documentation
++   source, and configuration files.
++
++   "Object" form shall mean any form resulting from mechanical
++   transformation or translation of a Source form, including but
++   not limited to compiled object code, generated documentation,
++   and conversions to other media types.
++
++   "Work" shall mean the work of authorship, whether in Source or
++   Object form, made available under the License, as indicated by a
++   copyright notice that is included in or attached to the work
++   (an example is provided in the Appendix below).
++
++   "Derivative Works" shall mean any work, whether in Source or Object
++   form, that is based on (or derived from) the Work and for which the
++   editorial revisions, annotations, elaborations, or other modifications
++   represent, as a whole, an original work of authorship. For the purposes
++   of this License, Derivative Works shall not include works that remain
++   separable from, or merely link (or bind by name) to the interfaces of,
++   the Work and Derivative Works thereof.
++
++   "Contribution" shall mean any work of authorship, including
++   the original version of the Work and any modifications or additions
++   to that Work or Derivative Works thereof, that is intentionally
++   submitted to Licensor for inclusion in the Work by the copyright owner
++   or by an individual or Legal Entity authorized to submit on behalf of
++   the copyright owner. For the purposes of this definition, "submitted"
++   means any form of electronic, verbal, or written communication sent
++   to the Licensor or its representatives, including but not limited to
++   communication on electronic mailing lists, source code control systems,
++   and issue tracking systems that are managed by, or on behalf of, the
++   Licensor for the purpose of discussing and improving the Work, but
++   excluding communication that is conspicuously marked or otherwise
++   designated in writing by the copyright owner as "Not a Contribution."
++
++   "Contributor" shall mean Licensor and any individual or Legal Entity
++   on behalf of whom a Contribution has been received by Licensor and
++   subsequently incorporated within the Work.
++
++2. Grant of Copyright License. Subject to the terms and conditions of
++   this License, each Contributor hereby grants to You a perpetual,
++   worldwide, non-exclusive, no-charge, royalty-free, irrevocable
++   copyright license to reproduce, prepare Derivative Works of,
++   publicly display, publicly perform, sublicense, and distribute the
++   Work and such Derivative Works in Source or Object form.
++
++3. Grant of Patent License. Subject to the terms and conditions of
++   this License, each Contributor hereby grants to You a perpetual,
++   worldwide, non-exclusive, no-charge, royalty-free, irrevocable
++   (except as stated in this section) patent license to make, have made,
++   use, offer to sell, sell, import, and otherwise transfer the Work,
++   where such license applies only to those patent claims licensable
++   by such Contributor that are necessarily infringed by their
++   Contribution(s) alone or by combination of their Contribution(s)
++   with the Work to which such Contribution(s) was submitted. If You
++   institute patent litigation against any entity (including a
++   cross-claim or counterclaim in a lawsuit) alleging that the Work
++   or a Contribution incorporated within the Work constitutes direct
++   or contributory patent infringement, then any patent licenses
++   granted to You under this License for that Work shall terminate
++   as of the date such litigation is filed.
++
++4. Redistribution. You may reproduce and distribute copies of the
++   Work or Derivative Works thereof in any medium, with or without
++   modifications, and in Source or Object form, provided that You
++   meet the following conditions:
++
++   (a) You must give any other recipients of the Work or
++       Derivative Works a copy of this License; and
++
++   (b) You must cause any modified files to carry prominent notices
++       stating that You changed the files; and
++
++   (c) You must retain, in the Source form of any Derivative Works
++       that You distribute, all copyright, patent, trademark, and
++       attribution notices from the Source form of the Work,
++       excluding those notices that do not pertain to any part of
++       the Derivative Works; and
++
++   (d) If the Work includes a "NOTICE" text file as part of its
++       distribution, then any Derivative Works that You distribute must
++       include a readable copy of the attribution notices contained
++       within such NOTICE file, excluding those notices that do not
++       pertain to any part of the Derivative Works, in at least one
++       of the following places: within a NOTICE text file distributed
++       as part of the Derivative Works; within the Source form or
++       documentation, if provided along with the Derivative Works; or,
++       within a display generated by the Derivative Works, if and
++       wherever such third-party notices normally appear. The contents
++       of the NOTICE file are for informational purposes only and
++       do not modify the License. You may add Your own attribution
++       notices within Derivative Works that You distribute, alongside
++       or as an addendum to the NOTICE text from the Work, provided
++       that such additional attribution notices cannot be construed
++       as modifying the License.
++
++   You may add Your own copyright statement to Your modifications and
++   may provide additional or different license terms and conditions
++   for use, reproduction, or distribution of Your modifications, or
++   for any such Derivative Works as a whole, provided Your use,
++   reproduction, and distribution of the Work otherwise complies with
++   the conditions stated in this License.
++
++5. Submission of Contributions. Unless You explicitly state otherwise,
++   any Contribution intentionally submitted for inclusion in the Work
++   by You to the Licensor shall be under the terms and conditions of
++   this License, without any additional terms or conditions.
++   Notwithstanding the above, nothing herein shall supersede or modify
++   the terms of any separate license agreement you may have executed
++   with Licensor regarding such Contributions.
++
++6. Trademarks. This License does not grant permission to use the trade
++   names, trademarks, service marks, or product names of the Licensor,
++   except as required for reasonable and customary use in describing the
++   origin of the Work and reproducing the content of the NOTICE file.
++
++7. Disclaimer of Warranty. Unless required by applicable law or
++   agreed to in writing, Licensor provides the Work (and each
++   Contributor provides its Contributions) on an "AS IS" BASIS,
++   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
++   implied, including, without limitation, any warranties or conditions
++   of TITLE, NON-INFRINGEMENT, MERCHANTABILITY, or FITNESS FOR A
++   PARTICULAR PURPOSE. You are solely responsible for determining the
++   appropriateness of using or redistributing the Work and assume any
++   risks associated with Your exercise of permissions under this License.
++
++8. Limitation of Liability. In no event and under no legal theory,
++   whether in tort (including negligence), contract, or otherwise,
++   unless required by applicable law (such as deliberate and grossly
++   negligent acts) or agreed to in writing, shall any Contributor be
++   liable to You for damages, including any direct, indirect, special,
++   incidental, or consequential damages of any character arising as a
++   result of this License or out of the use or inability to use the
++   Work (including but not limited to damages for loss of goodwill,
++   work stoppage, computer failure or malfunction, or any and all
++   other commercial damages or losses), even if such Contributor
++   has been advised of the possibility of such damages.
++
++9. Accepting Warranty or Additional Liability. While redistributing
++   the Work or Derivative Works thereof, You may choose to offer,
++   and charge a fee for, acceptance of support, warranty, indemnity,
++   or other liability obligations and/or rights consistent with this
++   License. However, in accepting such obligations, You may act only
++   on Your own behalf and on Your sole responsibility, not on behalf
++   of any other Contributor, and only if You agree to indemnify,
++   defend, and hold each Contributor harmless for any liability
++   incurred by, or claims asserted against, such Contributor by reason
++   of your accepting any such warranty or additional liability.
++
++END OF TERMS AND CONDITIONS
++
++APPENDIX: How to apply the Apache License to your work.
++
++   To apply the Apache License to your work, attach the following
++   boilerplate notice, with the fields enclosed by brackets "[]"
++   replaced with your own identifying information. (Don't include
++   the brackets!)  The text should be enclosed in the appropriate
++   comment syntax for the file format. We also recommend that a
++   file or class name and description of purpose be included on the
++   same "printed page" as the copyright notice for easier
++   identification within third-party archives.
++
++Copyright [yyyy] [name of copyright owner]
++
++Licensed under the Apache License, Version 2.0 (the "License");
++you may not use this file except in compliance with the License.
++You may obtain a copy of the License at
++
++	http://www.apache.org/licenses/LICENSE-2.0
++
++Unless required by applicable law or agreed to in writing, software
++distributed under the License is distributed on an "AS IS" BASIS,
++WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++See the License for the specific language governing permissions and
++limitations under the License.
+--- /dev/null
++++ b/LICENSE-MIT
+@@ -0,0 +1,20 @@
++MIT License
++Copyright (c) 2016 The roaring-rs developers.
++
++Permission is hereby granted, free of charge, to any person obtaining a copy of
++this software and associated documentation files (the "Software"), to deal in
++the Software without restriction, including without limitation the rights to
++use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
++of the Software, and to permit persons to whom the Software is furnished to do
++so, subject to the following conditions:
++
++The above copyright notice and this permission notice shall be included in all
++copies or substantial portions of the Software.
++
++THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
++SOFTWARE.

@@ -3,6 +3,7 @@
 //! retains CRC32; page fingerprints use noncryptographic metadata-seeded XXH3. Neither
 //! authenticates a file or establishes that its rows describe a particular
 //! segment, and XXH3 does not provide CRC burst-error guarantees.
+use logex_types::{QueryBuffer, QueryMemoryBudget};
 use std::fs::File;
 use std::io::{self, BorrowedBuf, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::Path;
@@ -110,7 +111,7 @@ fn verify_body(logical: &[u8], checksums: &[u8], context: &FileContext) -> io::R
 /// Own the original physical bytes while exposing only their checked logical
 /// slice. Keeping the header in place avoids shifting the whole allocation.
 pub(crate) struct IndexData {
-    bytes: Vec<u8>,
+    bytes: QueryBuffer<u8>,
     logical: std::ops::Range<usize>,
 }
 
@@ -138,7 +139,22 @@ fn read_at(file: &File, bytes: &mut [u8], offset: u64) -> io::Result<()> {
 /// capacity. The pinned nightly API tracks which spare bytes a reader filled;
 /// the explicit length check defends against an incorrect `Read` implementation
 /// reporting success without satisfying that initialization contract.
+#[cfg(test)]
 fn read_exact_initialized<R: Read>(reader: &mut R, length: usize) -> io::Result<Vec<u8>> {
+    Ok(read_exact_initialized_with_memory(reader, length, None)?
+        .into_parts()
+        .0)
+}
+
+fn read_exact_initialized_with_memory<R: Read>(
+    reader: &mut R,
+    length: usize,
+    memory: Option<&QueryMemoryBudget>,
+) -> io::Result<QueryBuffer<u8>> {
+    let reservation = memory
+        .map(|memory| memory.reserve(length, "index physical input"))
+        .transpose()
+        .map_err(io::Error::other)?;
     let mut bytes = Vec::new();
     bytes
         .try_reserve_exact(length)
@@ -160,7 +176,7 @@ fn read_exact_initialized<R: Read>(reader: &mut R, length: usize) -> io::Result<
     // and the explicit filled-length check proved every byte initialized. All
     // error paths return while the Vec length is still zero.
     unsafe { bytes.set_len(length) };
-    Ok(bytes)
+    QueryBuffer::from_reserved(bytes, reservation)
 }
 
 /// One opened handle and bounded caches of verified bytes. Index publication
@@ -173,18 +189,26 @@ pub(crate) struct IndexFile {
     file_id: Option<[u8; 16]>,
     file_context: FileContext,
     position: u64,
-    page: Box<[u8; PAGE_BYTES]>,
+    page: QueryBuffer<u8>,
     page_index: Option<u64>,
     page_len: usize,
     // Page zero was read with the header but has not passed its checksum yet.
     prefetched_page: bool,
-    checksums: Box<[u8]>,
+    checksums: QueryBuffer<u8>,
+    memory: Option<QueryMemoryBudget>,
     checksum_start: Option<u64>,
     checksum_len: usize,
 }
 
 impl IndexFile {
     pub(crate) fn open(path: &Path) -> io::Result<Self> {
+        Self::open_with_memory(path, None)
+    }
+
+    pub(crate) fn open_with_memory(
+        path: &Path,
+        memory: Option<&QueryMemoryBudget>,
+    ) -> io::Result<Self> {
         let file = File::open(path)?;
         let length = file.metadata()?.len();
         // One bounded read captures the header and first page. A one-page file
@@ -204,11 +228,11 @@ impl IndexFile {
         } else {
             0
         };
-        let mut checksums = Vec::new();
-        checksums
-            .try_reserve_exact(checksum_capacity)
-            .map_err(io::Error::other)?;
-        checksums.resize(checksum_capacity, 0);
+        let mut checksums =
+            QueryBuffer::try_with_capacity(checksum_capacity, memory, "index checksum cache")?;
+        checksums.try_resize(checksum_capacity, 0)?;
+        let mut page = QueryBuffer::try_with_capacity(PAGE_BYTES, memory, "index page cache")?;
+        page.try_resize(PAGE_BYTES, 0)?;
         let mut reader = Self {
             file,
             file_id: protected.then_some(file_id),
@@ -216,11 +240,12 @@ impl IndexFile {
             logical_len,
             protected,
             position: 0,
-            page: Box::new([0; PAGE_BYTES]),
+            page,
             page_index: None,
             page_len: 0,
             prefetched_page: false,
-            checksums: checksums.into_boxed_slice(),
+            checksums,
+            memory: memory.cloned(),
             checksum_start: None,
             checksum_len: 0,
         };
@@ -243,7 +268,15 @@ impl IndexFile {
     }
 
     pub(crate) fn open_bound(path: &Path, expected_file_id: [u8; 16]) -> io::Result<Self> {
-        let reader = Self::open(path)?;
+        Self::open_bound_with_memory(path, expected_file_id, None)
+    }
+
+    pub(crate) fn open_bound_with_memory(
+        path: &Path,
+        expected_file_id: [u8; 16],
+        memory: Option<&QueryMemoryBudget>,
+    ) -> io::Result<Self> {
+        let reader = Self::open_with_memory(path, memory)?;
         if reader.file_id != Some(expected_file_id) {
             return Err(invalid(
                 "index artifact does not match its publication binding",
@@ -266,25 +299,41 @@ impl IndexFile {
     /// Read only the opened handle's actual extent; pinned nightly BorrowedBuf
     /// tracks initialized spare capacity, avoiding a separate whole-file zero fill.
     pub(crate) fn read_all_from_path(path: &Path) -> io::Result<IndexData> {
-        Self::read_all_from_path_expected(path, None)
+        Self::read_all_from_path_with_memory(path, None)
     }
 
     pub(crate) fn read_all_from_path_bound(
         path: &Path,
         expected_file_id: [u8; 16],
     ) -> io::Result<IndexData> {
-        Self::read_all_from_path_expected(path, Some(expected_file_id))
+        Self::read_all_from_path_bound_with_memory(path, expected_file_id, None)
+    }
+
+    pub(crate) fn read_all_from_path_with_memory(
+        path: &Path,
+        memory: Option<&QueryMemoryBudget>,
+    ) -> io::Result<IndexData> {
+        Self::read_all_from_path_expected(path, None, memory)
+    }
+
+    pub(crate) fn read_all_from_path_bound_with_memory(
+        path: &Path,
+        expected_file_id: [u8; 16],
+        memory: Option<&QueryMemoryBudget>,
+    ) -> io::Result<IndexData> {
+        Self::read_all_from_path_expected(path, Some(expected_file_id), memory)
     }
 
     fn read_all_from_path_expected(
         path: &Path,
         expected_file_id: Option<[u8; 16]>,
+        memory: Option<&QueryMemoryBudget>,
     ) -> io::Result<IndexData> {
         let mut file = File::open(path)?;
         let length = file.metadata()?.len();
         let capacity = usize::try_from(length)
             .map_err(|_| invalid("index file too large for this platform"))?;
-        let bytes = read_exact_initialized(&mut file, capacity)?;
+        let bytes = read_exact_initialized_with_memory(&mut file, capacity, memory)?;
         let parsed = parse_header(&bytes, length)?;
         if let Some(expected) = expected_file_id
             && parsed.map(|(_, file_id)| file_id) != Some(expected)
@@ -330,7 +379,7 @@ impl IndexFile {
 
     /// Full readers need the whole footer, so read it contiguously with the
     /// logical bytes instead of loading checksum cache windows separately.
-    pub(crate) fn read_all(mut self) -> io::Result<Vec<u8>> {
+    pub(crate) fn read_all(mut self) -> io::Result<QueryBuffer<u8>> {
         let logical_len = usize::try_from(self.logical_len)
             .map_err(|_| invalid("index file too large for this platform"))?;
         let length = if self.protected && logical_len > PAGE_BYTES {
@@ -339,10 +388,9 @@ impl IndexFile {
         } else {
             logical_len
         };
-        let mut data = Vec::new();
-        data.try_reserve_exact(length)
-            .map_err(|_| invalid("index allocation failed"))?;
-        data.resize(length, 0);
+        let mut data =
+            QueryBuffer::try_with_capacity(length, self.memory.as_ref(), "index whole input")?;
+        data.try_resize(length, 0)?;
         if length == logical_len {
             // Reuse the already prefetched bytes and footer for one-page files.
             self.seek(SeekFrom::Start(0))?;
@@ -674,6 +722,97 @@ mod tests {
     }
 
     #[test]
+    fn accounted_inputs_and_caches_retain_actual_capacity() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index");
+        let expected = vec![9; PAGE_BYTES + 17];
+        write(&path, &expected);
+        let memory = QueryMemoryBudget::new(logex_types::QueryMemoryLimit::new(64 * 1024).unwrap());
+        let input = IndexFile::read_all_from_path_with_memory(&path, Some(&memory)).unwrap();
+        assert_eq!(input.as_slice(), expected);
+        assert_eq!(memory.used(), input.bytes.capacity() as u128);
+        // Protected physical input includes its header and checksum footer.
+        assert!(input.bytes.capacity() > expected.len());
+        drop(input);
+        assert_eq!(memory.used(), 0);
+        let mut reader = IndexFile::open_with_memory(&path, Some(&memory)).unwrap();
+        let cache_bytes = reader.page.capacity() + reader.checksums.capacity();
+        assert_eq!(memory.used(), cache_bytes as u128);
+        let mut byte = [0];
+        reader.read_exact(&mut byte).unwrap();
+        reader.seek(SeekFrom::Start(PAGE_BYTES as u64)).unwrap();
+        reader.read_exact(&mut byte).unwrap();
+        assert_eq!(memory.used(), cache_bytes as u128);
+        let output = reader.read_all().unwrap();
+        assert_eq!(&*output, expected);
+        assert!(output.capacity() > output.len()); // Footer was truncated, not freed.
+        assert_eq!(memory.used(), output.capacity() as u128);
+        drop(output);
+        assert_eq!(memory.used(), 0);
+    }
+
+    #[test]
+    fn accounted_whole_read_footer_failure_releases_cache_and_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index");
+        write(&path, &vec![7; PAGE_BYTES + 1]);
+        let mut bytes = fs::read(&path).unwrap();
+        *bytes.last_mut().unwrap() ^= 1;
+        fs::write(&path, bytes).unwrap();
+        let memory = QueryMemoryBudget::new(logex_types::QueryMemoryLimit::new(64 * 1024).unwrap());
+        let reader = IndexFile::open_with_memory(&path, Some(&memory)).unwrap();
+        assert!(memory.used() > 0);
+        let error = reader.read_all().unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(memory.used(), 0);
+    }
+
+    #[test]
+    fn accounted_denial_and_invalid_inputs_release_owners() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index");
+        write(&path, &vec![7; PAGE_BYTES + 1]);
+        let memory = QueryMemoryBudget::new(logex_types::QueryMemoryLimit::new(64 * 1024).unwrap());
+        let pressure = memory.reserve(memory.limit() - 1, "pressure").unwrap();
+        let error = IndexFile::open_with_memory(&path, Some(&memory))
+            .err()
+            .unwrap();
+        assert!(
+            error
+                .get_ref()
+                .unwrap()
+                .is::<logex_types::QueryMemoryError>()
+        );
+        let error = IndexFile::read_all_from_path_with_memory(&path, Some(&memory))
+            .err()
+            .unwrap();
+        assert!(
+            error
+                .get_ref()
+                .unwrap()
+                .is::<logex_types::QueryMemoryError>()
+        );
+        assert_eq!(memory.used(), pressure.bytes());
+        drop(pressure);
+        assert!(IndexFile::open_bound_with_memory(&path, [0; 16], Some(&memory)).is_err());
+        assert_eq!(memory.used(), 0);
+        let mut short = Cursor::new(b"short");
+        assert!(read_exact_initialized_with_memory(&mut short, 10, Some(&memory)).is_err());
+        assert_eq!(memory.used(), 0);
+        let mut bytes = fs::read(&path).unwrap();
+        bytes[HEADER_BYTES] ^= 1;
+        fs::write(&path, bytes).unwrap();
+        assert!(IndexFile::read_all_from_path_with_memory(&path, Some(&memory)).is_err());
+        assert_eq!(memory.used(), 0);
+        let mut reader = IndexFile::open_with_memory(&path, Some(&memory)).unwrap();
+        let retained = memory.used();
+        assert!(reader.read_exact(&mut [0]).is_err());
+        assert_eq!(memory.used(), retained);
+        drop(reader);
+        assert_eq!(memory.used(), 0);
+    }
+
+    #[test]
     fn initialized_exact_read_handles_zero_exact_extra_and_short_inputs() {
         let mut empty = Cursor::new(Vec::<u8>::new());
         assert!(read_exact_initialized(&mut empty, 0).unwrap().is_empty());
@@ -920,7 +1059,7 @@ mod tests {
         reader.read_exact(&mut all).unwrap();
         assert_eq!(all, expected);
         assert_eq!(
-            IndexFile::open(&path).unwrap().read_all().unwrap(),
+            &*IndexFile::open(&path).unwrap().read_all().unwrap(),
             expected
         );
     }

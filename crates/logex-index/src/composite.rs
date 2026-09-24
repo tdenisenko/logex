@@ -1,3 +1,5 @@
+use logex_types::QueryMemoryBudget;
+
 use crate::builder::validate_source_rows;
 use std::fs;
 use std::path::Path;
@@ -293,6 +295,20 @@ impl CompositeQuery {
         BTreeIndexReader::get_from_file_bound(path, expected_file_id, &key)
     }
 
+    /// Read an owned point result under the shared query memory budget.
+    pub fn get_address_topic0_from_file_bound_with_memory(
+        path: &Path,
+        expected_file_id: [u8; 16],
+        address: &[u8; 20],
+        topic0: &[u8; 32],
+        memory: &QueryMemoryBudget,
+    ) -> std::io::Result<Option<crate::QueryBitmap>> {
+        let mut key = [0u8; ADDR_TOPIC0_KEY_SIZE];
+        key[..20].copy_from_slice(address);
+        key[20..].copy_from_slice(topic0);
+        BTreeIndexReader::get_from_file_bound_with_memory(path, expected_file_id, &key, memory)
+    }
+
     /// Look up (address, topic0, topic1) in the composite index.
     pub fn get_address_topic0_topic1(
         reader: &BTreeIndexReader,
@@ -335,6 +351,22 @@ impl CompositeQuery {
         BTreeIndexReader::get_from_file_bound(path, expected_file_id, &key)
     }
 
+    /// Read an owned point result under the shared query memory budget.
+    pub fn get_address_topic0_topic1_from_file_bound_with_memory(
+        path: &Path,
+        expected_file_id: [u8; 16],
+        address: &[u8; 20],
+        topic0: &[u8; 32],
+        topic1: &[u8; 32],
+        memory: &QueryMemoryBudget,
+    ) -> std::io::Result<Option<crate::QueryBitmap>> {
+        let mut key = [0u8; ADDR_TOPIC0_TOPIC1_KEY_SIZE];
+        key[..20].copy_from_slice(address);
+        key[20..52].copy_from_slice(topic0);
+        key[52..].copy_from_slice(topic1);
+        BTreeIndexReader::get_from_file_bound_with_memory(path, expected_file_id, &key, memory)
+    }
+
     /// Look up (address, topic0, topic2) in the composite index.
     pub fn get_address_topic0_topic2(
         reader: &BTreeIndexReader,
@@ -375,6 +407,22 @@ impl CompositeQuery {
         key[20..52].copy_from_slice(topic0);
         key[52..].copy_from_slice(topic2);
         BTreeIndexReader::get_from_file_bound(path, expected_file_id, &key)
+    }
+
+    /// Read an owned point result under the shared query memory budget.
+    pub fn get_address_topic0_topic2_from_file_bound_with_memory(
+        path: &Path,
+        expected_file_id: [u8; 16],
+        address: &[u8; 20],
+        topic0: &[u8; 32],
+        topic2: &[u8; 32],
+        memory: &QueryMemoryBudget,
+    ) -> std::io::Result<Option<crate::QueryBitmap>> {
+        let mut key = [0u8; ADDR_TOPIC0_TOPIC2_KEY_SIZE];
+        key[..20].copy_from_slice(address);
+        key[20..52].copy_from_slice(topic0);
+        key[52..].copy_from_slice(topic2);
+        BTreeIndexReader::get_from_file_bound_with_memory(path, expected_file_id, &key, memory)
     }
 
     /// Prefix scan: all rows for a given address across all topic0 values.
@@ -482,6 +530,20 @@ impl CompositeQuery {
         BTreeIndexReader::get_from_file_bound(path, expected_file_id, &key)
     }
 
+    /// Read an owned point result under the shared query memory budget.
+    pub fn get_topic0_topic1_from_file_bound_with_memory(
+        path: &Path,
+        expected_file_id: [u8; 16],
+        topic0: &[u8; 32],
+        topic1: &[u8; 32],
+        memory: &QueryMemoryBudget,
+    ) -> std::io::Result<Option<crate::QueryBitmap>> {
+        let mut key = [0u8; TOPIC0_TOPIC1_KEY_SIZE];
+        key[..32].copy_from_slice(topic0);
+        key[32..].copy_from_slice(topic1);
+        BTreeIndexReader::get_from_file_bound_with_memory(path, expected_file_id, &key, memory)
+    }
+
     /// Prefix scan: all rows for a given topic0 across all topic1 values.
     pub fn scan_by_topic0(reader: &BTreeIndexReader, topic0: &[u8; 32]) -> roaring::RoaringBitmap {
         let mut start = [0u8; TOPIC0_TOPIC1_KEY_SIZE];
@@ -499,6 +561,57 @@ mod tests {
     use logex_storage::ColumnFile;
     use logex_types::{LogRow, Source};
     use tempfile::TempDir;
+
+    #[test]
+    fn accounted_composite_points_retain_results_and_propagate_capacity() {
+        use logex_types::{QueryMemoryError, QueryMemoryLimit};
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("composite.bptree");
+        let address = [7; 20];
+        let topic0 = [9; 32];
+        let topic1 = [11; 32];
+        let topic2 = [13; 32];
+        for kind in 0..4 {
+            let key = match kind {
+                0 => [&address[..], &topic0[..]].concat(),
+                1 => [&address[..], &topic0[..], &topic1[..]].concat(),
+                2 => [&address[..], &topic0[..], &topic2[..]].concat(),
+                _ => [&topic0[..], &topic1[..]].concat(),
+            };
+            let mut index = crate::BTreeIndex::new(key.len());
+            for row in [3, 17, 65537] {
+                index.insert(&key, row);
+            }
+            index.write_to_file(&path).unwrap();
+            let id = crate::index_file::IndexFile::protected_file_id(&path).unwrap();
+            let read = |memory: &QueryMemoryBudget| match kind {
+                0 => CompositeQuery::get_address_topic0_from_file_bound_with_memory(
+                    &path, id, &address, &topic0, memory,
+                ),
+                1 => CompositeQuery::get_address_topic0_topic1_from_file_bound_with_memory(
+                    &path, id, &address, &topic0, &topic1, memory,
+                ),
+                2 => CompositeQuery::get_address_topic0_topic2_from_file_bound_with_memory(
+                    &path, id, &address, &topic0, &topic2, memory,
+                ),
+                _ => CompositeQuery::get_topic0_topic1_from_file_bound_with_memory(
+                    &path, id, &topic0, &topic1, memory,
+                ),
+            };
+            let memory = QueryMemoryBudget::new(QueryMemoryLimit::new(32 * 1024).unwrap());
+            let result = read(&memory).unwrap().unwrap();
+            assert!(result.iter().eq([3, 17, 65537]));
+            assert!(memory.used() > 0);
+            drop(result);
+            assert_eq!(memory.used(), 0);
+            let pressure = memory.reserve(memory.limit() - 1, "other query").unwrap();
+            let error = read(&memory).unwrap_err();
+            assert!(error.get_ref().unwrap().is::<QueryMemoryError>());
+            assert_eq!(memory.used(), pressure.bytes());
+            drop(pressure);
+            assert_eq!(memory.used(), 0);
+        }
+    }
 
     fn assert_prefix_scan_matches_rows<const PREFIX: usize>(
         scan: impl Fn(&BTreeIndexReader, &[u8; PREFIX]) -> roaring::RoaringBitmap,
