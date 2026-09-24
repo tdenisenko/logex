@@ -36,6 +36,20 @@ class Package:
 
 PACKAGES = (
     Package(
+        name="roaring",
+        inventory_checksum="4cdab6d18c570608ea985d40d97631990bff7f1c88d32256802329b72bdc4c12",
+        modified={
+            PurePosixPath("src/bitmap/mod.rs"): "4d2694f2773645d8a476cff93b2310ca9e42c33ee5e120553d4eb6e27590a288",
+        },
+        patch_checksum="73f4605eadf3621636524494864087f10b26e469c9d674264977f8715da43095",
+        added={
+            PurePosixPath("src/bitmap/query_decode.rs"): "bab697cb900bdbf350c11dfa64f26344264b8eff6334f0eba7e7eb094defb870",
+            PurePosixPath("LICENSE-APACHE"): "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
+            PurePosixPath("LICENSE-MIT"): "42d3bf7e7d4d49d72c0555d14ed99c3ee7ce9ce3cbffbc38bbafe8c103f50969",
+        },
+        provenance_note=PurePosixPath("LOGEX-PATCH.txt"),
+    ),
+    Package(
         name="libp2p-connection-limits",
         inventory_checksum="54fcaffc6672e5d0c25eb32c003ea55580a132df050cf3f9873254a31611d359",
         modified={

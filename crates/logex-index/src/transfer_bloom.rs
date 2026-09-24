@@ -4,6 +4,7 @@ use std::path::Path;
 
 use alloy_primitives::{Address, B256, keccak256};
 use logex_storage::SegmentReader;
+use logex_types::QueryMemoryBudget;
 
 use crate::index_file::{IndexFile, write_index_file};
 
@@ -137,6 +138,20 @@ impl Erc20EventBloomReader {
     pub fn open_bound(path: &Path, expected_file_id: [u8; 16]) -> io::Result<Self> {
         let (reader, bit_mask) = open_bloom(
             IndexFile::open_bound(path, expected_file_id)?,
+            ERC20_EVENTS_MAGIC,
+        )?;
+        Ok(Self { reader, bit_mask })
+    }
+
+    /// Account the selected-page and checksum caches of a published bloom.
+    /// Keep the caller's publication checkpoint guard for the reader lifetime.
+    pub fn open_bound_with_memory(
+        path: &Path,
+        expected_file_id: [u8; 16],
+        memory: &QueryMemoryBudget,
+    ) -> io::Result<Self> {
+        let (reader, bit_mask) = open_bloom(
+            IndexFile::open_bound_with_memory(path, expected_file_id, Some(memory))?,
             ERC20_EVENTS_MAGIC,
         )?;
         Ok(Self { reader, bit_mask })
@@ -276,6 +291,20 @@ impl TransferBloomReader {
         Ok(Self { reader, bit_mask })
     }
 
+    /// Account the selected-page and checksum caches of a published bloom.
+    /// Keep the caller's publication checkpoint guard for the reader lifetime.
+    pub fn open_bound_with_memory(
+        path: &Path,
+        expected_file_id: [u8; 16],
+        memory: &QueryMemoryBudget,
+    ) -> io::Result<Self> {
+        let (reader, bit_mask) = open_bloom(
+            IndexFile::open_bound_with_memory(path, expected_file_id, Some(memory))?,
+            TRANSFER_MAGIC,
+        )?;
+        Ok(Self { reader, bit_mask })
+    }
+
     pub fn may_contain(
         &mut self,
         address: &Address,
@@ -389,6 +418,58 @@ mod tests {
         let mut topic = [0u8; 32];
         topic[12..].copy_from_slice(Address::repeat_byte(byte).as_slice());
         B256::from(topic)
+    }
+
+    #[test]
+    fn accounted_bloom_readers_charge_caches_without_loading_the_bitset() {
+        use logex_types::{QueryMemoryError, QueryMemoryLimit};
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("events.bloom");
+        let address = Address::repeat_byte(7);
+        let topic = topic_address(11);
+        let topic0 = transfer_topic0();
+        let memory = QueryMemoryBudget::new(QueryMemoryLimit::new(32 * 1024).unwrap());
+        let mut bloom = Erc20EventBloom::new(1000);
+        bloom.insert(&topic0, &address, 1, &topic);
+        bloom.write_to_file(&path).unwrap();
+        let id = IndexFile::protected_file_id(&path).unwrap();
+        assert!(std::fs::metadata(&path).unwrap().len() > memory.limit() as u64);
+        let mut reader = Erc20EventBloomReader::open_bound_with_memory(&path, id, &memory).unwrap();
+        let retained = memory.used();
+        assert!(retained > 0 && retained < memory.limit() as u128);
+        assert!(reader.may_contain(&topic0, &address, 1, &topic).unwrap());
+        assert_eq!(memory.used(), retained);
+        let pressure = memory
+            .reserve(memory.limit() - retained as usize, "other query")
+            .unwrap();
+        let error = Erc20EventBloomReader::open_bound_with_memory(&path, id, &memory)
+            .err()
+            .unwrap();
+        assert!(error.get_ref().unwrap().is::<QueryMemoryError>());
+        assert_eq!(memory.used(), retained + pressure.bytes());
+        drop(pressure);
+        drop(reader);
+        assert_eq!(memory.used(), 0);
+
+        let mut bloom = TransferBloom::new(1000);
+        bloom.insert(&address, 2, &topic);
+        bloom.write_to_file(&path).unwrap();
+        let id = IndexFile::protected_file_id(&path).unwrap();
+        let mut reader = TransferBloomReader::open_bound_with_memory(&path, id, &memory).unwrap();
+        assert!(reader.may_contain(&address, 2, &topic).unwrap());
+        let retained = memory.used();
+        let pressure = memory
+            .reserve(memory.limit() - retained as usize, "other query")
+            .unwrap();
+        let error = TransferBloomReader::open_bound_with_memory(&path, id, &memory)
+            .err()
+            .unwrap();
+        assert!(error.get_ref().unwrap().is::<QueryMemoryError>());
+        drop(pressure);
+        drop(reader);
+        assert_eq!(memory.used(), 0);
+        assert!(TransferBloomReader::open_bound_with_memory(&path, [0; 16], &memory).is_err());
+        assert_eq!(memory.used(), 0);
     }
 
     #[test]

@@ -90,6 +90,9 @@ jobs:
           --config max_width=90,skip_children=true
           vendor/datafusion-physical-plan/src/sorts/sort.rs
 
+      - name: Check query bitmap decoder formatting
+        run: rustfmt --check --edition 2021 --config skip_children=true vendor/roaring/src/bitmap/query_decode.rs
+
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
@@ -123,6 +126,11 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo test --workspace --all-targets --locked
       - run: cargo test --workspace --doc --locked
+      - name: Check pinned bitmap decode ownership
+        env:
+          CARGO_TARGET_DIR: target/roaring-regressions
+        run: cargo test --manifest-path vendor/roaring/Cargo.toml --lib logex_ --locked
+
       - name: Check pinned query execution ownership
         env:
           CARGO_TARGET_DIR: target/physical-plan-regressions
@@ -171,6 +179,11 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo test --workspace --all-targets --locked
       - run: cargo test --workspace --doc --locked
+      - name: Check pinned bitmap decode ownership
+        env:
+          CARGO_TARGET_DIR: target/roaring-regressions
+        run: cargo test --manifest-path vendor/roaring/Cargo.toml --lib logex_ --locked
+
       - name: Check pinned query execution ownership
         env:
           CARGO_TARGET_DIR: target/physical-plan-regressions

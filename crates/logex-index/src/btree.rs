@@ -2,8 +2,10 @@ use std::collections::BTreeMap;
 use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
+use logex_types::{QueryBuffer, QueryMemoryBudget};
 use roaring::{MultiOps, RoaringBitmap};
 
+use crate::QueryBitmap;
 use crate::index_file::{IndexFile, write_index_file};
 
 /// Magic bytes identifying a LogEx B+ tree index file.
@@ -166,43 +168,14 @@ impl BTreeIndexReader {
     fn open_data(data: &[u8]) -> io::Result<Self> {
         // The actual file extent bounds this slice; validate counts before
         // allocating keys, entry descriptors or decoded bitmaps.
-        let header = IndexHeader::parse(data)?;
-        header.validate_geometry(data.len() as u64)?;
-        let count = usize::try_from(header.entry_count)
+        let mut input = IndexEntries::new(data)?;
+        let count = usize::try_from(input.header.entry_count)
             .map_err(|_| invalid_index("too many index entries"))?;
         let mut entries = Vec::new();
         entries
             .try_reserve_exact(count)
             .map_err(|_| invalid_index("index entry allocation failed"))?;
-        let mut position = INDEX_HEADER_LEN;
-        let mut payload_position = if header.version == 2 {
-            usize::try_from(table_end(header.key_size, header.entry_count)?)
-                .map_err(|_| invalid_index("index table too large"))?
-        } else {
-            INDEX_HEADER_LEN
-        };
-        for _ in 0..count {
-            let key = take_bytes(data, &mut position, header.key_size)?;
-            if entries
-                .last()
-                .is_some_and(|(previous, _): &(Vec<u8>, RoaringBitmap)| previous.as_slice() >= key)
-            {
-                return Err(invalid_index("index keys are not strictly increasing"));
-            }
-            if header.version == 2 {
-                let offset =
-                    u64::from_le_bytes(take_bytes(data, &mut position, 8)?.try_into().unwrap());
-                if offset != payload_position as u64 {
-                    return Err(invalid_index("noncontiguous index bitmap payload"));
-                }
-            }
-            let len = u32::from_le_bytes(take_bytes(data, &mut position, 4)?.try_into().unwrap())
-                as usize;
-            let bitmap_data = if header.version == 2 {
-                take_bytes(data, &mut payload_position, len)?
-            } else {
-                take_bytes(data, &mut position, len)?
-            };
+        while let Some((key, bitmap_data)) = input.next_entry()? {
             let bitmap = decode_bitmap(bitmap_data)?;
             let mut owned_key = Vec::new();
             owned_key
@@ -211,16 +184,8 @@ impl BTreeIndexReader {
             owned_key.extend_from_slice(key);
             entries.push((owned_key, bitmap));
         }
-        let consumed = if header.version == 2 {
-            payload_position
-        } else {
-            position
-        };
-        if consumed != data.len() {
-            return Err(invalid_index("trailing index file bytes"));
-        }
         Ok(Self {
-            key_size: header.key_size,
+            key_size: input.header.key_size,
             entries,
         })
     }
@@ -242,6 +207,91 @@ impl BTreeIndexReader {
         Self::get_from_index_file(IndexFile::open_bound(path, expected_file_id)?, key)
     }
 
+    /// Account index input, lookup caches and the returned bitmap. The result
+    /// retains its decoded capacity after the input file and scratch are dropped.
+    pub fn get_from_file_with_memory(
+        path: &Path,
+        key: &[u8],
+        memory: &QueryMemoryBudget,
+    ) -> io::Result<Option<QueryBitmap>> {
+        Self::get_from_index_file_with_memory(
+            IndexFile::open_with_memory(path, Some(memory))?,
+            key,
+            memory,
+        )
+    }
+
+    /// Account a published point lookup while preserving its registered identity.
+    /// The caller must retain the publication checkpoint guard throughout the read.
+    pub fn get_from_file_bound_with_memory(
+        path: &Path,
+        expected_file_id: [u8; 16],
+        key: &[u8],
+        memory: &QueryMemoryBudget,
+    ) -> io::Result<Option<QueryBitmap>> {
+        Self::get_from_index_file_with_memory(
+            IndexFile::open_bound_with_memory(path, expected_file_id, Some(memory))?,
+            key,
+            memory,
+        )
+    }
+
+    fn get_from_index_file_with_memory(
+        mut file: IndexFile,
+        key: &[u8],
+        memory: &QueryMemoryBudget,
+    ) -> io::Result<Option<QueryBitmap>> {
+        if single_entry_bulk_route_hint(&file, key) {
+            return Self::get_from_complete_data_with_memory(&file.read_all()?, key, memory, true);
+        }
+        let mut bytes = [0u8; INDEX_HEADER_LEN];
+        file.read_exact(&mut bytes)?;
+        let header = IndexHeader::parse(&bytes)?;
+        header.validate_geometry(file.logical_len())?;
+        validate_lookup_key(&header, key)?;
+        if !file.is_protected() || header.version == 1 {
+            return Self::get_from_complete_data_with_memory(&file.read_all()?, key, memory, false);
+        }
+        let Some((offset, len)) = find_point_payload(&mut file, &header, key, Some(memory))? else {
+            return Ok(None);
+        };
+        let len = usize::try_from(len).map_err(|_| invalid_index("bitmap too large"))?;
+        let mut payload = QueryBuffer::try_with_capacity(len, Some(memory), "index bitmap input")?;
+        payload.try_resize(len, 0)?;
+        file.seek(SeekFrom::Start(offset))?;
+        file.read_exact(&mut payload)?;
+        QueryBitmap::decode(&payload, memory).map(Some)
+    }
+
+    fn get_from_complete_data_with_memory(
+        data: &[u8],
+        key: &[u8],
+        memory: &QueryMemoryBudget,
+        single_entry: bool,
+    ) -> io::Result<Option<QueryBitmap>> {
+        let mut input = IndexEntries::new(data)?;
+        validate_lookup_key(&input.header, key)?;
+        if single_entry && input.header.entry_count != 1 {
+            return Err(invalid_index(
+                "single-entry route changed during validation",
+            ));
+        }
+        let mut selected = None;
+        // The complete fallback still validates every entry and bitmap, including
+        // entries after the selected one. Only the matching decoded allocation
+        // must survive; other decoded values are released between entries.
+        while let Some((entry_key, payload)) = input.next_entry()? {
+            let bitmap = QueryBitmap::decode(payload, memory)?;
+            if entry_key == key {
+                selected = Some(bitmap);
+            }
+        }
+        if single_entry && selected.is_none() {
+            return Err(invalid_index("single-entry route key mismatch"));
+        }
+        Ok(selected)
+    }
+
     fn get_from_index_file(mut file: IndexFile, key: &[u8]) -> io::Result<Option<RoaringBitmap>> {
         if single_entry_bulk_route_hint(&file, key) {
             let reader = Self::open_file(file)?;
@@ -260,60 +310,22 @@ impl BTreeIndexReader {
         file.read_exact(&mut bytes)?;
         let header = IndexHeader::parse(&bytes)?;
         header.validate_geometry(file.logical_len())?;
-        if key.len() != header.key_size {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "lookup key has length {}, expected {}",
-                    key.len(),
-                    header.key_size
-                ),
-            ));
-        }
+        validate_lookup_key(&header, key)?;
         if !file.is_protected() || header.version == 1 {
             return Ok(Self::open_file(file)?.get(key).cloned());
         }
-        if header.entry_count == 0 {
+        let Some((offset, len)) = find_point_payload(&mut file, &header, key, None)? else {
             return Ok(None);
-        }
-        let table_end = table_end(header.key_size, header.entry_count)?;
-        // The protected writer establishes global ordering and contiguity.
-        // Check endpoint geometry without rescanning the table on each lookup.
-        let first = read_descriptor(&mut file, &header, 0, table_end)?;
-        let last = if header.entry_count == 1 {
-            first
-        } else {
-            read_descriptor(&mut file, &header, header.entry_count - 1, table_end)?
         };
-        if first.0 != table_end || last.0 + u64::from(last.1) != file.logical_len() {
-            return Err(invalid_index("invalid index payload extent"));
-        }
-        let mut lo = 0;
-        let mut hi = header.entry_count;
-        let mut current_key = vec![0u8; key.len()];
-        while lo < hi {
-            let mid = lo + (hi - lo) / 2;
-            file.seek(SeekFrom::Start(entry_offset(&header, mid)?))?;
-            file.read_exact(&mut current_key)?;
-            match current_key.as_slice().cmp(key) {
-                std::cmp::Ordering::Less => lo = mid + 1,
-                std::cmp::Ordering::Greater => hi = mid,
-                std::cmp::Ordering::Equal => {
-                    let (offset, len) = read_descriptor(&mut file, &header, mid, table_end)?;
-                    let len =
-                        usize::try_from(len).map_err(|_| invalid_index("bitmap too large"))?;
-                    let mut payload = Vec::new();
-                    payload
-                        .try_reserve_exact(len)
-                        .map_err(|_| invalid_index("bitmap allocation failed"))?;
-                    payload.resize(len, 0);
-                    file.seek(SeekFrom::Start(offset))?;
-                    file.read_exact(&mut payload)?;
-                    return decode_bitmap(&payload).map(Some);
-                }
-            }
-        }
-        Ok(None)
+        let len = usize::try_from(len).map_err(|_| invalid_index("bitmap too large"))?;
+        let mut payload = Vec::new();
+        payload
+            .try_reserve_exact(len)
+            .map_err(|_| invalid_index("bitmap allocation failed"))?;
+        payload.resize(len, 0);
+        file.seek(SeekFrom::Start(offset))?;
+        file.read_exact(&mut payload)?;
+        decode_bitmap(&payload).map(Some)
     }
 
     /// Point lookup: find row IDs for an exact key.
@@ -467,6 +479,134 @@ impl IndexHeader {
         }
         Ok(())
     }
+}
+
+/// Borrowed traversal shared by complete index reads. Decoding remains the
+/// caller's responsibility, and every caller must exhaust this traversal to
+/// validate the final extent. No key or descriptor copies are needed here.
+struct IndexEntries<'a> {
+    data: &'a [u8],
+    header: IndexHeader,
+    position: usize,
+    payload_position: usize,
+    remaining: u64,
+    previous_key: Option<&'a [u8]>,
+}
+
+impl<'a> IndexEntries<'a> {
+    fn new(data: &'a [u8]) -> io::Result<Self> {
+        let header = IndexHeader::parse(data)?;
+        header.validate_geometry(data.len() as u64)?;
+        let payload_position = if header.version == 2 {
+            usize::try_from(table_end(header.key_size, header.entry_count)?)
+                .map_err(|_| invalid_index("index table too large"))?
+        } else {
+            INDEX_HEADER_LEN
+        };
+        Ok(Self {
+            data,
+            remaining: header.entry_count,
+            header,
+            position: INDEX_HEADER_LEN,
+            payload_position,
+            previous_key: None,
+        })
+    }
+
+    fn next_entry(&mut self) -> io::Result<Option<(&'a [u8], &'a [u8])>> {
+        if self.remaining == 0 {
+            let consumed = if self.header.version == 2 {
+                self.payload_position
+            } else {
+                self.position
+            };
+            if consumed != self.data.len() {
+                return Err(invalid_index("trailing index file bytes"));
+            }
+            return Ok(None);
+        }
+        let key = take_bytes(self.data, &mut self.position, self.header.key_size)?;
+        if self.previous_key.is_some_and(|previous| previous >= key) {
+            return Err(invalid_index("index keys are not strictly increasing"));
+        }
+        if self.header.version == 2 {
+            let offset = u64::from_le_bytes(
+                take_bytes(self.data, &mut self.position, 8)?
+                    .try_into()
+                    .unwrap(),
+            );
+            if offset != self.payload_position as u64 {
+                return Err(invalid_index("noncontiguous index bitmap payload"));
+            }
+        }
+        let len = u32::from_le_bytes(
+            take_bytes(self.data, &mut self.position, 4)?
+                .try_into()
+                .unwrap(),
+        ) as usize;
+        let payload = if self.header.version == 2 {
+            take_bytes(self.data, &mut self.payload_position, len)?
+        } else {
+            take_bytes(self.data, &mut self.position, len)?
+        };
+        self.previous_key = Some(key);
+        self.remaining -= 1;
+        Ok(Some((key, payload)))
+    }
+}
+
+fn validate_lookup_key(header: &IndexHeader, key: &[u8]) -> io::Result<()> {
+    if key.len() != header.key_size {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "lookup key has length {}, expected {}",
+                key.len(),
+                header.key_size
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// Published protected files establish global ordering and contiguity. Preserve
+/// logarithmic point reads, checking endpoint geometry and each accessed page.
+fn find_point_payload(
+    file: &mut IndexFile,
+    header: &IndexHeader,
+    key: &[u8],
+    memory: Option<&QueryMemoryBudget>,
+) -> io::Result<Option<(u64, u32)>> {
+    if header.entry_count == 0 {
+        return Ok(None);
+    }
+    let table_end = table_end(header.key_size, header.entry_count)?;
+    let first = read_descriptor(file, header, 0, table_end)?;
+    let last = if header.entry_count == 1 {
+        first
+    } else {
+        read_descriptor(file, header, header.entry_count - 1, table_end)?
+    };
+    if first.0 != table_end || last.0 + u64::from(last.1) != file.logical_len() {
+        return Err(invalid_index("invalid index payload extent"));
+    }
+    let mut lo = 0;
+    let mut hi = header.entry_count;
+    let mut current_key = QueryBuffer::try_with_capacity(key.len(), memory, "index lookup key")?;
+    current_key.try_resize(key.len(), 0)?;
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        file.seek(SeekFrom::Start(entry_offset(header, mid)?))?;
+        file.read_exact(&mut current_key)?;
+        match current_key.as_ref().cmp(key) {
+            std::cmp::Ordering::Less => lo = mid + 1,
+            std::cmp::Ordering::Greater => hi = mid,
+            std::cmp::Ordering::Equal => {
+                return read_descriptor(file, header, mid, table_end).map(Some);
+            }
+        }
+    }
+    Ok(None)
 }
 
 fn table_end(key_size: usize, entry_count: u64) -> io::Result<u64> {
@@ -671,8 +811,29 @@ fn deserialize_bitmap(data: &[u8]) -> io::Result<RoaringBitmap> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use logex_types::{QueryMemoryError, QueryMemoryLimit};
     use std::fs;
     use tempfile::TempDir;
+
+    fn test_memory(bytes: usize) -> QueryMemoryBudget {
+        QueryMemoryBudget::new(QueryMemoryLimit::new(bytes).unwrap())
+    }
+
+    // The established format fixtures also exercise the independently prepared
+    // query decoder. Their expected rows and malformed layouts are unchanged.
+    fn decode_with_budget_parity(data: &[u8]) -> io::Result<RoaringBitmap> {
+        let expected = super::decode_bitmap(data);
+        let memory = test_memory(16 * 1024 * 1024);
+        let actual = QueryBitmap::decode(data, &memory);
+        match (&expected, &actual) {
+            (Ok(expected), Ok(actual)) => assert!(actual.iter().eq(expected.iter())),
+            (Err(_), Err(actual)) => assert_eq!(actual.kind(), io::ErrorKind::InvalidData),
+            _ => panic!("decoder disagreement: legacy={expected:?}, query={actual:?}"),
+        }
+        drop(actual);
+        assert_eq!(memory.used(), 0);
+        expected
+    }
 
     fn integrity_fixture(version: u32, entries: &[(u32, u32)]) -> Vec<u8> {
         assert!(matches!(version, 1 | 2));
@@ -743,6 +904,205 @@ mod tests {
 
     fn write_protected_fixture(path: &Path, data: &[u8]) {
         write_index_file(path, data.len() as u64, |writer| writer.write_all(data)).unwrap();
+    }
+
+    #[test]
+    fn accounted_point_reads_keep_only_selected_result_and_preserve_selectivity() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("selected.bptree");
+        let mut index = BTreeIndex::new(4);
+        for key in 0..1024u32 {
+            for row in 0..100 {
+                index.insert(&key.to_be_bytes(), key * 100 + row);
+            }
+        }
+        index.write_to_file(&path).unwrap();
+        let file_id = IndexFile::protected_file_id(&path).unwrap();
+        let memory = test_memory(32 * 1024);
+        assert!(fs::metadata(&path).unwrap().len() > memory.limit() as u64);
+        for key in [0u32, 503, 1023] {
+            let result = BTreeIndexReader::get_from_file_bound_with_memory(
+                &path,
+                file_id,
+                &key.to_be_bytes(),
+                &memory,
+            )
+            .unwrap()
+            .unwrap();
+            assert!(result.iter().eq(key * 100..key * 100 + 100));
+            assert!(memory.used() > 0 && memory.used() < 4096);
+            // A second reader contends with the retained first result; its
+            // rejection cannot detach or invalidate that existing allocation.
+            let pressure = memory
+                .reserve(memory.limit() - memory.used() as usize, "other query")
+                .unwrap();
+            let error = BTreeIndexReader::get_from_file_bound_with_memory(
+                &path,
+                file_id,
+                &key.to_be_bytes(),
+                &memory,
+            )
+            .unwrap_err();
+            assert!(error.get_ref().unwrap().is::<QueryMemoryError>());
+            assert!(result.iter().eq(key * 100..key * 100 + 100));
+            drop(pressure);
+            drop(result);
+            assert_eq!(memory.used(), 0);
+        }
+        assert!(
+            BTreeIndexReader::get_from_file_bound_with_memory(
+                &path,
+                file_id,
+                &1024u32.to_be_bytes(),
+                &memory,
+            )
+            .unwrap()
+            .is_none()
+        );
+        assert_eq!(memory.used(), 0);
+        let error = BTreeIndexReader::get_from_file_bound_with_memory(
+            &path,
+            [0; 16],
+            &0u32.to_be_bytes(),
+            &memory,
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(memory.used(), 0);
+    }
+
+    #[test]
+    fn accounted_full_point_validates_later_entries_and_retains_selected_capacity() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("complete.bptree");
+        for version in [1, 2] {
+            let pristine = integrity_fixture(version, &[(1, 10), (3, 30)]);
+            for protected in [false, true] {
+                // Protected v1 and both raw formats require full validation.
+                // Protected v2 has its separately tested selective read path.
+                if protected && version == 2 {
+                    continue;
+                }
+                let write = |bytes: &[u8]| {
+                    if protected {
+                        write_protected_fixture(&path, bytes);
+                    } else {
+                        fs::write(&path, bytes).unwrap();
+                    }
+                };
+                write(&pristine);
+                let memory = test_memory(64 * 1024);
+                let result = BTreeIndexReader::get_from_file_with_memory(
+                    &path,
+                    &1u32.to_be_bytes(),
+                    &memory,
+                )
+                .unwrap()
+                .unwrap();
+                assert!(result.iter().eq([10]));
+                assert!(memory.used() > 0);
+                drop(result);
+                assert_eq!(memory.used(), 0);
+
+                let second_payload = pristine.len() - 18;
+                let mut changed_offset = pristine.clone();
+                changed_offset[second_payload + 12..second_payload + 16]
+                    .copy_from_slice(&0u32.to_le_bytes());
+                let mut trailing = pristine.clone();
+                trailing.push(0);
+                for changed in [changed_offset, trailing] {
+                    write(&changed);
+                    for key in [1u32, 2] {
+                        let error = BTreeIndexReader::get_from_file_with_memory(
+                            &path,
+                            &key.to_be_bytes(),
+                            &memory,
+                        )
+                        .unwrap_err();
+                        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+                        assert_eq!(memory.used(), 0);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn accounted_full_point_charges_selected_and_later_decode_together() {
+        let logical = integrity_fixture(2, &[(1, 10), (3, 30)]);
+        let payload = &logical[logical.len() - 18..];
+        let decoded = RoaringBitmap::prepare_deserialize(payload)
+            .unwrap()
+            .allocation_bytes();
+        let memory = test_memory(logical.len() + decoded);
+        let mut input =
+            QueryBuffer::try_with_capacity(logical.len(), Some(&memory), "fixture input").unwrap();
+        input.try_extend_from_slice(&logical).unwrap();
+        // The first selected bitmap fits, but the later valid bitmap cannot be
+        // decoded alongside it. The whole lookup fails, releasing the selection.
+        let error = BTreeIndexReader::get_from_complete_data_with_memory(
+            &input,
+            &1u32.to_be_bytes(),
+            &memory,
+            false,
+        )
+        .unwrap_err();
+        assert!(error.get_ref().unwrap().is::<QueryMemoryError>());
+        assert_eq!(memory.used(), input.capacity() as u128);
+        // An absent key releases each decoded bitmap before the next allocation.
+        assert!(
+            BTreeIndexReader::get_from_complete_data_with_memory(
+                &input,
+                &2u32.to_be_bytes(),
+                &memory,
+                false,
+            )
+            .unwrap()
+            .is_none()
+        );
+        drop(input);
+        assert_eq!(memory.used(), 0);
+    }
+
+    #[test]
+    fn accounted_bulk_point_keeps_result_after_input_and_cache_drop() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("bulk.bptree");
+        let (logical, expected) = single_dense_integrity_fixture(7);
+        write_protected_fixture(&path, &logical);
+        assert!(single_entry_bulk_route_hint(
+            &IndexFile::open(&path).unwrap(),
+            &7u32.to_be_bytes()
+        ));
+        let memory = test_memory(64 * 1024);
+        let result =
+            BTreeIndexReader::get_from_file_with_memory(&path, &7u32.to_be_bytes(), &memory)
+                .unwrap()
+                .unwrap();
+        assert!(result.iter().eq(expected.iter()));
+        let payload = &logical[36..];
+        assert_eq!(
+            memory.used(),
+            RoaringBitmap::prepare_deserialize(payload)
+                .unwrap()
+                .allocation_bytes() as u128
+        );
+        drop(result);
+        assert_eq!(memory.used(), 0);
+        let mut changed = fs::read(&path).unwrap();
+        let start = changed
+            .windows(logical.len())
+            .position(|window| window == logical)
+            .unwrap();
+        changed[start + logical.len() - 1] ^= 1;
+        fs::write(&path, changed).unwrap();
+        assert_eq!(
+            BTreeIndexReader::get_from_file_with_memory(&path, &7u32.to_be_bytes(), &memory,)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(memory.used(), 0);
     }
 
     #[test]
@@ -938,14 +1298,14 @@ mod tests {
     fn bitmap_decode_rejects_excessive_count_and_duplicate_container_keys() {
         let mut excessive_count = 12346u32.to_le_bytes().to_vec();
         excessive_count.extend_from_slice(&u32::MAX.to_le_bytes());
-        assert!(decode_bitmap(&excessive_count).is_err());
+        assert!(decode_with_budget_parity(&excessive_count).is_err());
 
         let bitmap: RoaringBitmap = [1, 65537].into_iter().collect();
         let mut payload = Vec::new();
         bitmap.serialize_into(&mut payload).unwrap();
-        assert_eq!(decode_bitmap(&payload).unwrap(), bitmap);
+        assert_eq!(decode_with_budget_parity(&payload).unwrap(), bitmap);
         payload[12..14].copy_from_slice(&0u16.to_le_bytes());
-        assert!(decode_bitmap(&payload).is_err());
+        assert!(decode_with_budget_parity(&payload).is_err());
     }
 
     type RunFixtureContainer<'a> = (u16, u16, &'a [(u16, u16)]);
@@ -1027,7 +1387,7 @@ mod tests {
                     .map(|&(key, cardinality)| (key, cardinality, cardinality))
                     .collect::<Vec<_>>(),
             );
-            let decoded = decode_bitmap(&fixture).unwrap();
+            let decoded = decode_with_budget_parity(&fixture).unwrap();
             assert!(
                 decoded.iter().eq(containers
                     .iter()
@@ -1049,7 +1409,7 @@ mod tests {
                     .map(|&(key, cardinality)| (key, cardinality, cardinality))
                     .collect::<Vec<_>>(),
             );
-            let decoded = decode_bitmap(&fixture).unwrap();
+            let decoded = decode_with_budget_parity(&fixture).unwrap();
             assert!(
                 decoded.iter().eq(containers
                     .iter()
@@ -1067,13 +1427,13 @@ mod tests {
         expected.insert((u32::from(u16::MAX) << 16) | 65535);
         let mut fixture = Vec::new();
         expected.serialize_into(&mut fixture).unwrap();
-        assert_eq!(decode_bitmap(&fixture).unwrap(), expected);
+        assert_eq!(decode_with_budget_parity(&fixture).unwrap(), expected);
     }
 
     #[test]
     fn bitmap_decode_checks_each_dense_container_cardinality() {
         let fixture = dense_bitmap_fixture(&[(1, 4999, 5000), (8, 5001, 5000)]);
-        assert!(decode_bitmap(&fixture).is_err());
+        assert!(decode_with_budget_parity(&fixture).is_err());
 
         let containers = (0..64)
             .map(|index| {
@@ -1085,7 +1445,7 @@ mod tests {
                 (index as u16, declared, 5000)
             })
             .collect::<Vec<_>>();
-        assert!(decode_bitmap(&dense_bitmap_fixture(&containers)).is_err());
+        assert!(decode_with_budget_parity(&dense_bitmap_fixture(&containers)).is_err());
     }
 
     #[test]
@@ -1093,7 +1453,7 @@ mod tests {
         for actual_cardinality in [0, 17, 4096] {
             let fixture = dense_bitmap_fixture(&[(3, 4097, actual_cardinality)]);
             assert!(
-                decode_bitmap(&fixture).is_err(),
+                decode_with_budget_parity(&fixture).is_err(),
                 "actual cardinality {actual_cardinality}"
             );
         }
@@ -1102,24 +1462,27 @@ mod tests {
     #[test]
     fn bitmap_decode_rejects_run_container_cardinality_mismatch() {
         let valid = run_bitmap_fixture(&[(0, 1, &[(7, 0)])]);
-        assert_eq!(decode_bitmap(&valid).unwrap(), [7].into_iter().collect());
+        assert_eq!(
+            decode_with_budget_parity(&valid).unwrap(),
+            [7].into_iter().collect()
+        );
 
         let empty_run = run_bitmap_fixture(&[(0, 1, &[])]);
         assert_eq!(empty_run.len(), 11);
-        assert!(decode_bitmap(&empty_run).is_err());
+        assert!(decode_with_budget_parity(&empty_run).is_err());
     }
 
     #[test]
     fn bitmap_decode_checks_each_run_container_cardinality() {
         let valid = run_bitmap_fixture(&[(0, 1, &[(7, 0)]), (1, 2, &[(9, 1)])]);
         assert_eq!(
-            decode_bitmap(&valid).unwrap(),
+            decode_with_budget_parity(&valid).unwrap(),
             [7, 65545, 65546].into_iter().collect()
         );
         // The overall cardinality remains three: a total-only comparison would
         // miss the disagreement in both individual container descriptions.
         let mismatch = run_bitmap_fixture(&[(0, 2, &[(7, 0)]), (1, 1, &[(9, 1)])]);
-        assert!(decode_bitmap(&mismatch).is_err());
+        assert!(decode_with_budget_parity(&mismatch).is_err());
     }
 
     #[test]
@@ -1129,10 +1492,10 @@ mod tests {
         bitmap.serialize_into(&mut payload).unwrap();
         assert_eq!(payload.len(), 18);
         assert_eq!(&payload[12..16], &16u32.to_le_bytes());
-        assert_eq!(decode_bitmap(&payload).unwrap(), bitmap);
+        assert_eq!(decode_with_budget_parity(&payload).unwrap(), bitmap);
         // Point the container back into the cookie instead of its two-byte data.
         payload[12..16].copy_from_slice(&0u32.to_le_bytes());
-        assert!(decode_bitmap(&payload).is_err());
+        assert!(decode_with_budget_parity(&payload).is_err());
     }
 
     #[test]
@@ -1140,17 +1503,20 @@ mod tests {
         let array: RoaringBitmap = [7, 9].into_iter().collect();
         let mut payload = Vec::new();
         array.serialize_into(&mut payload).unwrap();
-        assert_eq!(decode_bitmap(&payload).unwrap(), array);
+        assert_eq!(decode_with_budget_parity(&payload).unwrap(), array);
         payload.copy_within(16..18, 18);
-        assert!(decode_bitmap(&payload).is_err(), "duplicate array values");
+        assert!(
+            decode_with_budget_parity(&payload).is_err(),
+            "duplicate array values"
+        );
 
         let dense: RoaringBitmap = (0..5000).collect();
         let mut payload = Vec::new();
         dense.serialize_into(&mut payload).unwrap();
-        assert_eq!(decode_bitmap(&payload).unwrap(), dense);
+        assert_eq!(decode_with_budget_parity(&payload).unwrap(), dense);
         payload[16] ^= 1;
         assert!(
-            decode_bitmap(&payload).is_err(),
+            decode_with_budget_parity(&payload).is_err(),
             "dense cardinality mismatch"
         );
     }
@@ -1164,9 +1530,9 @@ mod tests {
         ] {
             let mut payload = Vec::new();
             bitmap.serialize_into(&mut payload).unwrap();
-            assert_eq!(decode_bitmap(&payload).unwrap(), bitmap);
+            assert_eq!(decode_with_budget_parity(&payload).unwrap(), bitmap);
             payload.pop();
-            assert!(decode_bitmap(&payload).is_err());
+            assert!(decode_with_budget_parity(&payload).is_err());
         }
 
         // Two containers, one run and one array; this run-cookie encoding has
@@ -1177,7 +1543,7 @@ mod tests {
             mixed.extend_from_slice(&value.to_le_bytes());
         }
         assert_eq!(
-            decode_bitmap(&mixed).unwrap(),
+            decode_with_budget_parity(&mixed).unwrap(),
             [7, 65539, 65545, 65548].into_iter().collect()
         );
 
@@ -1188,7 +1554,7 @@ mod tests {
             (3, 1, &[(13, 0)]),
         ]);
         assert_eq!(
-            decode_bitmap(&with_offsets).unwrap(),
+            decode_with_budget_parity(&with_offsets).unwrap(),
             [7, 65545, 131083, 196621].into_iter().collect()
         );
     }
@@ -1202,11 +1568,14 @@ mod tests {
         ] {
             let cardinality = runs.iter().map(|(_, length)| length + 1).sum();
             let payload = run_bitmap_fixture(&[(0, cardinality, &runs)]);
-            assert!(decode_bitmap(&payload).is_err(), "runs {runs:?}");
+            assert!(
+                decode_with_budget_parity(&payload).is_err(),
+                "runs {runs:?}"
+            );
         }
         let adjacent = run_bitmap_fixture(&[(0, 2, &[(5, 0), (6, 0)])]);
         assert_eq!(
-            decode_bitmap(&adjacent).unwrap(),
+            decode_with_budget_parity(&adjacent).unwrap(),
             [5, 6].into_iter().collect()
         );
     }
