@@ -32,6 +32,10 @@ fn state(memory_bytes: usize) -> (tempfile::TempDir, Arc<AppState>) {
 }
 
 fn state_with_log(memory_bytes: usize) -> (tempfile::TempDir, Arc<AppState>) {
+    state_with_logs(memory_bytes, 1)
+}
+
+fn state_with_logs(memory_bytes: usize, row_count: usize) -> (tempfile::TempDir, Arc<AppState>) {
     let temp = tempfile::tempdir().unwrap();
     let mut storage = PartitionManager::open(PartitionManagerConfig {
         data_dir: temp.path().to_owned(),
@@ -39,24 +43,29 @@ fn state_with_log(memory_bytes: usize) -> (tempfile::TempDir, Arc<AppState>) {
         compaction_safety_margin_blocks: 2_048,
     })
     .unwrap();
-    storage
-        .write_batch(&[LogRow {
-            block_number: 1,
-            block_hash: B256::repeat_byte(1),
-            timestamp: 2,
-            tx_hash: B256::repeat_byte(3),
-            tx_index: 0,
-            log_index: 0,
-            address: Address::repeat_byte(4),
-            topic0: Some(B256::repeat_byte(5)),
-            topic1: None,
-            topic2: None,
-            topic3: None,
-            data: bytes!("cafe"),
-            data_len: 2,
-            source: Source::Receipt,
-        }])
-        .unwrap();
+    let template = LogRow {
+        block_number: 1,
+        block_hash: B256::repeat_byte(1),
+        timestamp: 2,
+        tx_hash: B256::repeat_byte(3),
+        tx_index: 0,
+        log_index: 0,
+        address: Address::repeat_byte(4),
+        topic0: Some(B256::repeat_byte(5)),
+        topic1: None,
+        topic2: None,
+        topic3: None,
+        data: bytes!("cafe"),
+        data_len: 2,
+        source: Source::Receipt,
+    };
+    let rows = (0..row_count)
+        .map(|index| LogRow {
+            log_index: index as u32,
+            ..template.clone()
+        })
+        .collect::<Vec<_>>();
+    storage.write_batch(&rows).unwrap();
     storage.checkpoint().unwrap();
     let state = Arc::new(AppState::with_query_limits(
         storage,
@@ -162,11 +171,17 @@ async fn shared_memory_capacity_applies_to_rest_and_grpc_without_latching_storag
 #[tokio::test]
 async fn scan_output_capacity_is_typed_across_protocols_and_recovers() {
     let limit = 1024 * 1024;
-    let (_temp, state) = state_with_log(limit);
+    const ROWS: usize = 128;
+    // Fixed-source materialization peaks near 8 KiB (raw plus decoded values).
+    // It drops the raw input before Arrow construction, which overlaps the
+    // retained ~4 KiB decoded values with ~8.5 KiB of text and offsets. A 10 KiB
+    // allowance therefore admits the source and rejects specifically at output.
+    const ALLOWANCE: usize = 10 * 1024;
+    let (_temp, state) = state_with_logs(limit, ROWS);
     let service = LogExGrpcService::new(Arc::clone(&state));
     let held = state
         .query_memory
-        .reserve(limit - 96, "test fixture")
+        .reserve(limit - ALLOWANCE, "test fixture")
         .unwrap();
 
     let response = rest::handle_query(
@@ -200,7 +215,7 @@ async fn scan_output_capacity_is_typed_across_protocols_and_recovers() {
         .query(tonic::Request::new(grpc_request(SCAN_QUERY)))
         .await
         .unwrap();
-    assert_eq!(response.get_ref().row_count, 1);
+    assert_eq!(response.get_ref().row_count, ROWS as u64);
     drop(response);
     assert_eq!(state.query_memory.used(), 0);
 }
