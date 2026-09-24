@@ -301,6 +301,18 @@ impl TransferBloomReader {
     }
 }
 
+pub(crate) fn encoded_logical_size_for_rows(rows: u64) -> io::Result<u64> {
+    let rows = usize::try_from(rows).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "bloom row count exceeds address space",
+        )
+    })?;
+    HEADER_LEN
+        .checked_add(filter_bytes(rows) as u64)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "bloom size bound overflow"))
+}
+
 // Two indexed topic positions per source row need at most two insertions.
 // Keep at least 128 bits per insertion through 65,536 rows, then retain the
 // previous 2 MiB ceiling. Clamp before multiplication and power-of-two rounding.

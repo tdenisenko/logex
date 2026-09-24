@@ -196,21 +196,9 @@ impl ReadWindow {
 
 impl BundleReader {
     pub(crate) fn remaining_data_extents(&self) -> io::Result<[usize; DATA_STREAMS as usize]> {
-        let mut remaining = [0; DATA_STREAMS as usize];
-        for (id, count) in remaining.iter_mut().enumerate() {
-            let stream = self.stream(id as u8)?;
-            *count = if inline_index(id as u8) {
-                MAX_EXTENTS
-                    - stream
-                        .inline
-                        .len()
-                        .div_ceil(crate::page::PAGE_INDEX_ENTRY_BYTES)
-            } else {
-                MAX_EXTENTS - stream.extents.len()
-            };
-        }
-        Ok(remaining)
+        remaining_extents(&self.streams, false)
     }
+
     pub(crate) fn stream_len(&self, id: u8) -> io::Result<u64> {
         Ok(self.stream(id)?.len)
     }
@@ -402,6 +390,216 @@ impl BundleReader {
             .map_err(|_| invalid("bundle reader lock poisoned"))?;
         file.read_extent(extent, self.reference.end()?, read_ahead)
     }
+}
+
+/// Count a fresh repair bundle using the writer's stream layout, without a file.
+/// Payload bytes are not retained. Inline indexes and extent descriptors are
+/// retained solely to reuse the actual table encoder and its format limits.
+pub(crate) struct BundleSizer(Mutex<SizeState>);
+
+struct SizeState {
+    offset: u64,
+    initial_offset: u64,
+    parent: Option<BundleReference>,
+    streams: BTreeMap<u8, Stream>,
+}
+
+impl BundleSizer {
+    pub(crate) fn new() -> Self {
+        Self(Mutex::new(SizeState {
+            offset: FILE_MAGIC.len() as u64,
+            initial_offset: 0,
+            parent: None,
+            streams: BTreeMap::new(),
+        }))
+    }
+
+    /// Count additional append bytes while retaining the existing stream and
+    /// extent boundaries. No source data or output file is changed.
+    pub(crate) fn append_from(reader: &BundleReader) -> io::Result<Self> {
+        let offset = reader.reference.end()?;
+        Ok(Self(Mutex::new(SizeState {
+            offset,
+            initial_offset: offset,
+            parent: Some(reader.reference.clone()),
+            streams: (*reader.streams).clone(),
+        })))
+    }
+
+    pub(crate) fn append_data(&self, id: u8, bytes: &[u8]) -> io::Result<()> {
+        if id >= DATA_STREAMS {
+            return Err(invalid("invalid bundle data stream"));
+        }
+        self.write_stream(id, bytes, false)
+    }
+
+    pub(crate) fn replace_metadata(&self, id: u8, bytes: &[u8]) -> io::Result<()> {
+        if !(DATA_STREAMS..STREAMS).contains(&id) {
+            return Err(invalid("invalid bundle metadata stream"));
+        }
+        self.write_stream(id, bytes, true)
+    }
+
+    fn write_stream(&self, id: u8, bytes: &[u8], replace: bool) -> io::Result<()> {
+        let mut state = self
+            .0
+            .lock()
+            .map_err(|_| invalid("bundle sizer lock poisoned"))?;
+        if inline_index(id) {
+            let stream = state.streams.entry(id).or_default();
+            if bytes.len() > INDEX_BYTES - stream.inline.len() {
+                return Err(invalid("bundle index limit; rotate before appending"));
+            }
+            stream.inline.extend_from_slice(bytes);
+            stream.len += bytes.len() as u64;
+            return Ok(());
+        }
+        let previous = if replace {
+            None
+        } else {
+            state.streams.get(&id)
+        };
+        let count = previous.map_or(0, |stream| stream.extents.len());
+        if count.saturating_add(bytes.len().div_ceil(MAX_EXTENT_BYTES)) > MAX_EXTENTS {
+            return Err(invalid("bundle extent limit; rotate before appending"));
+        }
+        let len = previous
+            .map_or(0, |stream| stream.len)
+            .checked_add(bytes.len() as u64)
+            .ok_or_else(|| invalid("bundle stream length overflow"))?;
+        let next_offset = state
+            .offset
+            .checked_add(bytes.len() as u64)
+            .ok_or_else(|| invalid("bundle offset overflow"))?;
+        let mut offset = state.offset;
+        let stream = state.streams.entry(id).or_default();
+        if replace {
+            stream.extents.clear();
+        }
+        for chunk in bytes.chunks(MAX_EXTENT_BYTES) {
+            stream.extents.push(Extent {
+                offset,
+                len: chunk.len() as u32,
+                // Table sizing uses its uncompressed length, independent of CRC
+                // values and the scheduling order of concurrent column encoders.
+                checksum: 0,
+            });
+            offset += chunk.len() as u64;
+        }
+        stream.len = len;
+        state.offset = next_offset;
+        Ok(())
+    }
+
+    pub(crate) fn remaining_data_extents(&self) -> io::Result<[usize; DATA_STREAMS as usize]> {
+        let state = self
+            .0
+            .lock()
+            .map_err(|_| invalid("bundle sizer lock poisoned"))?;
+        remaining_extents(&state.streams, true)
+    }
+
+    pub(crate) fn stream_len(&self, id: u8) -> io::Result<u64> {
+        let state = self
+            .0
+            .lock()
+            .map_err(|_| invalid("bundle sizer lock poisoned"))?;
+        state
+            .streams
+            .get(&id)
+            .map(|stream| stream.len)
+            .ok_or_else(|| invalid("missing sized stream"))
+    }
+
+    pub(crate) fn page_index(&self, id: u8) -> io::Result<Vec<crate::page::PageIndexEntry>> {
+        if !inline_index(id) {
+            return Err(invalid("sized stream is not a page index"));
+        }
+        let state = self
+            .0
+            .lock()
+            .map_err(|_| invalid("bundle sizer lock poisoned"))?;
+        let stream = state
+            .streams
+            .get(&id)
+            .ok_or_else(|| invalid("missing sized page index"))?;
+        crate::page::read_page_index(&crate::page::frame_page_index(&stream.inline)?)
+    }
+
+    /// Count an emitted table and advance virtual offsets for another append.
+    /// Table offsets are upper bounds. Encoded payload lengths and extent/index
+    /// counts remain exact, so future row-capacity decisions match real output.
+    pub(crate) fn checkpoint(&self, row_count: u64) -> io::Result<u64> {
+        if row_count > MAX_ROWS {
+            return Err(invalid("invalid bundle snapshot completion"));
+        }
+        let mut state = self
+            .0
+            .lock()
+            .map_err(|_| invalid("bundle sizer lock poisoned"))?;
+        let table = encode_table(row_count, 1, &state.streams, None)?;
+        let parent_bytes = if let Some(parent) = &state.parent {
+            let empty = BTreeMap::new();
+            encode_table(row_count, 1, &empty, Some(parent))?.len()
+                - encode_table(row_count, 1, &empty, None)?.len()
+        } else {
+            0
+        };
+        // Every real table also obeys MAX_TABLE_BYTES. Full resulting streams
+        // plus parent fields dominate either a delta, group summary or full table.
+        let decoded = (table.len() + parent_bytes).min(MAX_TABLE_BYTES as usize);
+        let table_len = decoded as u64 + 5;
+        let end = state
+            .offset
+            .checked_add(table_len)
+            .ok_or_else(|| invalid("bundle size bound overflow"))?;
+        let growth = end
+            .checked_sub(state.initial_offset)
+            .ok_or_else(|| invalid("bundle size bound overflow"))?;
+        state.parent = Some(BundleReference {
+            sequence: 1,
+            row_count,
+            table_offset: state.offset,
+            table_len: table_len as u32,
+            checksum: 0,
+            depth: 1,
+            chain_bytes: decoded as u32,
+        });
+        state.offset = end;
+        state.initial_offset = end;
+        Ok(growth)
+    }
+
+    pub(crate) fn finish(self, row_count: u64) -> io::Result<u64> {
+        self.checkpoint(row_count)
+    }
+}
+
+fn remaining_extents(
+    streams: &BTreeMap<u8, Stream>,
+    allow_missing: bool,
+) -> io::Result<[usize; DATA_STREAMS as usize]> {
+    let mut remaining = [MAX_EXTENTS; DATA_STREAMS as usize];
+    for (id, count) in remaining.iter_mut().enumerate() {
+        let Some(stream) = streams.get(&(id as u8)) else {
+            if allow_missing {
+                continue;
+            }
+            return Err(invalid("missing bundle data stream"));
+        };
+        let used = if inline_index(id as u8) {
+            stream
+                .inline
+                .len()
+                .div_ceil(crate::page::PAGE_INDEX_ENTRY_BYTES)
+        } else {
+            stream.extents.len()
+        };
+        *count = MAX_EXTENTS
+            .checked_sub(used)
+            .ok_or_else(|| invalid("bundle extent capacity exceeded"))?;
+    }
+    Ok(remaining)
 }
 
 struct WriteState {
@@ -946,6 +1144,61 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    #[test]
+    fn append_sizer_covers_delta_and_group_table_growth_without_writes() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("bundle");
+        let mut reference = create(&path);
+        let initial = BundleReader::open(&path, &reference).unwrap();
+        let sizer = BundleSizer::append_from(&initial).unwrap();
+        for rows in 3..=19 {
+            let reader = BundleReader::open(&path, &reference).unwrap();
+            let before = fs::read(&path).unwrap();
+            let modified = fs::metadata(&path).unwrap().modified().unwrap();
+            sizer.append_data(0, &[7; 24]).unwrap();
+            sizer.replace_metadata(28, &[3; 16]).unwrap();
+            let bound = sizer.checkpoint(rows).unwrap();
+            assert_eq!(fs::read(&path).unwrap(), before);
+            assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), modified);
+            let writer = BundleWriter::append_inspected(&path, reader).unwrap();
+            writer.append_data(0, &[7; 24]).unwrap();
+            writer.replace_metadata(28, &[3; 16]).unwrap();
+            reference = writer.finish(rows).unwrap();
+            assert!(reference.end().unwrap() - before.len() as u64 <= bound);
+        }
+    }
+
+    #[test]
+    fn fresh_bundle_sizer_rejects_format_limits_and_overflow_without_files() {
+        assert!(BundleSizer::new().finish(MAX_ROWS + 1).is_err());
+        let sizer = BundleSizer::new();
+        assert!(sizer.append_data(DATA_STREAMS, &[1]).is_err());
+        assert!(sizer.replace_metadata(0, &[1]).is_err());
+        sizer.append_data(14, &vec![0; INDEX_BYTES]).unwrap();
+        assert!(sizer.append_data(14, &[0]).is_err());
+        let sizer = BundleSizer::new();
+        sizer.0.lock().unwrap().streams.insert(
+            0,
+            Stream {
+                len: MAX_EXTENTS as u64,
+                extents: vec![
+                    Extent {
+                        offset: 8,
+                        len: 1,
+                        checksum: 0
+                    };
+                    MAX_EXTENTS
+                ],
+                ..Default::default()
+            },
+        );
+        assert!(sizer.append_data(0, &[1]).is_err());
+        let sizer = BundleSizer::new();
+        sizer.0.lock().unwrap().offset = u64::MAX;
+        assert!(sizer.append_data(0, &[1]).is_err());
+        assert!(sizer.finish(0).is_err());
+    }
 
     fn create(path: &Path) -> BundleReference {
         let writer = BundleWriter::create(path).unwrap();

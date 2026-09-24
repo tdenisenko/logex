@@ -1,6 +1,6 @@
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufReader, BufWriter, Cursor, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use alloy_primitives::{Address, B256, Bytes};
 use logex_types::{LogRow, Source};
@@ -22,12 +22,89 @@ pub struct WriteAheadLog {
     path: PathBuf,
 }
 
+/// Maintenance allowances for the physical WAL and cumulative declared frame rows.
+/// These bound inputs and row counts, not total process memory.
+#[derive(Debug, Clone, Copy)]
+pub struct WalReadLimits {
+    pub max_bytes: u64,
+    pub max_rows: u64,
+}
+
 const WAL_BINARY_MAGIC: &[u8; 4] = b"LXWL";
 const WAL_BINARY_VERSION: u32 = 1;
 // All fixed row fields, including the topic mask, both data lengths and source.
 const WAL_MIN_ROW_BYTES: usize = 118;
 
 impl WriteAheadLog {
+    /// Internal recovery handle after no-create validation under directory ownership.
+    pub(crate) fn existing(path: PathBuf) -> Self {
+        Self { path }
+    }
+    /// Read an existing ordinary WAL without creating files or directories.
+    /// The caller must retain exclusive storage ownership throughout use.
+    /// Missing WALs (including a missing parent) contain no recoverable rows.
+    /// Limits fail with `InvalidInput`; unsupported paths or legacy JSON frames
+    /// fail with `Unsupported`. Ordinary startup retains legacy JSON support.
+    /// A complete final frame header consumes the row allowance even when its
+    /// valid payload has an incomplete checksum and will not be replayed.
+    pub fn read_existing_bounded(path: &Path, limits: WalReadLimits) -> io::Result<Vec<LogRow>> {
+        let parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        match std::fs::symlink_metadata(parent) {
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+            Ok(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "bounded WAL read requires an ordinary parent directory",
+                ));
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        }
+        match std::fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {}
+            Ok(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "bounded WAL read requires an ordinary file",
+                ));
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        }
+        let file = File::open(path)?;
+        let metadata = file.metadata()?;
+        if !metadata.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "bounded WAL read requires an ordinary file",
+            ));
+        }
+        if metadata.len() > limits.max_bytes {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "WAL byte limit exceeded: required={}, limit={}",
+                    metadata.len(),
+                    limits.max_bytes
+                ),
+            ));
+        }
+        read_entries_with_limit(
+            &mut BufReader::new(file),
+            metadata.len(),
+            Some(limits.max_rows),
+        )
+        .map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("cannot inspect WAL {}: {error}", path.display()),
+            )
+        })
+    }
+
     pub fn open(path: PathBuf) -> io::Result<Self> {
         // Ensure parent directory exists
         if let Some(parent) = path.parent() {
@@ -182,12 +259,22 @@ impl EncodedWalBatch {
 
 /// The length is a snapshot, not a substitute for read errors or exclusivity.
 fn read_entries(reader: &mut impl Read, file_len: u64) -> io::Result<Vec<LogRow>> {
+    read_entries_with_limit(reader, file_len, None)
+}
+
+fn read_entries_with_limit(
+    reader: &mut impl Read,
+    file_len: u64,
+    max_rows: Option<u64>,
+) -> io::Result<Vec<LogRow>> {
     let mut all_rows = Vec::new();
     let mut offset = 0;
     while offset < file_len {
-        let entry = read_entry(reader, file_len - offset).map_err(|error| {
-            io::Error::new(error.kind(), format!("entry at byte {offset}: {error}"))
-        })?;
+        let remaining_rows = max_rows.map(|limit| limit.saturating_sub(all_rows.len() as u64));
+        let entry =
+            read_entry_with_limit(reader, file_len - offset, remaining_rows).map_err(|error| {
+                io::Error::new(error.kind(), format!("entry at byte {offset}: {error}"))
+            })?;
         let Some((rows, bytes_read)) = entry else {
             break;
         };
@@ -204,7 +291,11 @@ fn read_entries(reader: &mut impl Read, file_len: u64) -> io::Result<Vec<LogRow>
     Ok(all_rows)
 }
 
-fn read_entry(reader: &mut impl Read, remaining: u64) -> io::Result<Option<(Vec<LogRow>, u64)>> {
+fn read_entry_with_limit(
+    reader: &mut impl Read,
+    remaining: u64,
+    remaining_rows: Option<u64>,
+) -> io::Result<Option<(Vec<LogRow>, u64)>> {
     let mut header = [0; 8];
     if remaining < header.len() as u64 {
         reader.read_exact(&mut header[..remaining as usize])?;
@@ -212,6 +303,16 @@ fn read_entry(reader: &mut impl Read, remaining: u64) -> io::Result<Option<(Vec<
     }
     reader.read_exact(&mut header)?;
     let row_count = u32::from_le_bytes([header[0], header[1], header[2], header[3]]) as usize;
+    if let Some(limit) = remaining_rows
+        && row_count as u64 > limit
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "WAL row limit exceeded: frame requires={row_count}, remaining allowance={limit}"
+            ),
+        ));
+    }
     let data_len = u32::from_le_bytes([header[4], header[5], header[6], header[7]]) as usize;
     let payload_remaining = remaining - header.len() as u64;
     if data_len as u64 > payload_remaining {
@@ -232,6 +333,15 @@ fn read_entry(reader: &mut impl Read, remaining: u64) -> io::Result<Option<(Vec<
     let computed_crc = crc32fast::hash(&data).to_le_bytes();
     if stored_crc[..crc_len] != computed_crc[..crc_len] {
         return Err(invalid_data("WAL checksum mismatch"));
+    }
+    if remaining_rows.is_some() && !data.starts_with(WAL_BINARY_MAGIC) {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "bounded WAL inspection does not decode legacy JSON frames; preserve the WAL for explicit recovery",
+        ));
+    }
+    if remaining_rows.is_some() && data.len() < 8 {
+        return Err(invalid_data("incomplete WAL binary payload header"));
     }
     let rows = decode_rows(&data, row_count)?;
     if crc_len < 4 {
@@ -515,6 +625,192 @@ mod tests {
                 source: Source::Receipt,
             })
             .collect()
+    }
+
+    fn bounded_read(path: &Path, bytes: u64, rows: u64) -> io::Result<Vec<LogRow>> {
+        WriteAheadLog::read_existing_bounded(
+            path,
+            WalReadLimits {
+                max_bytes: bytes,
+                max_rows: rows,
+            },
+        )
+    }
+
+    fn assert_bounded_unchanged(path: &Path, bytes: u64, rows: u64) -> io::Result<Vec<LogRow>> {
+        let before = fs::read(path).unwrap();
+        let modified = fs::metadata(path).unwrap().modified().unwrap();
+        let parent = path.parent().unwrap();
+        let parent_modified = fs::metadata(parent).unwrap().modified().unwrap();
+        let result = bounded_read(path, bytes, rows);
+        assert_eq!(fs::read(path).unwrap(), before);
+        assert_eq!(fs::metadata(path).unwrap().modified().unwrap(), modified);
+        assert_eq!(
+            fs::metadata(parent).unwrap().modified().unwrap(),
+            parent_modified
+        );
+        result
+    }
+
+    #[test]
+    fn bounded_wal_checks_byte_and_cumulative_row_boundaries_without_writes() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("pending.wal");
+        let mut wal = WriteAheadLog::open(path.clone()).unwrap();
+        let rows = make_test_rows(2);
+        wal.append(&rows[..1]).unwrap();
+        wal.append(&rows[1..]).unwrap();
+        let bytes = fs::metadata(&path).unwrap().len();
+        assert_eq!(assert_bounded_unchanged(&path, bytes, 2).unwrap(), rows);
+        for (byte_limit, row_limit) in [(bytes - 1, 2), (bytes, 1), (bytes, 0)] {
+            assert_eq!(
+                assert_bounded_unchanged(&path, byte_limit, row_limit)
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::InvalidInput
+            );
+        }
+        fs::write(&path, []).unwrap();
+        assert!(assert_bounded_unchanged(&path, 0, 0).unwrap().is_empty());
+        // The row budget is checked from the frame header before allocating
+        // its advertised payload or decoding rows.
+        let mut oversized = u32::MAX.to_le_bytes().to_vec();
+        oversized.extend_from_slice(&u32::MAX.to_le_bytes());
+        fs::write(&path, &oversized).unwrap();
+        assert_eq!(
+            assert_bounded_unchanged(&path, 8, 2).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+    }
+
+    #[test]
+    fn bounded_wal_validates_tails_and_never_returns_a_corrupt_prefix() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("pending.wal");
+        let mut wal = WriteAheadLog::open(path.clone()).unwrap();
+        let rows = make_test_rows(1);
+        wal.append(&rows).unwrap();
+        let first = fs::read(&path).unwrap();
+        wal.append(&rows).unwrap();
+        let complete = fs::read(&path).unwrap();
+        for trim in 1..=4 {
+            fs::write(&path, &complete[..complete.len() - trim]).unwrap();
+            assert_eq!(
+                assert_bounded_unchanged(&path, complete.len() as u64, 2).unwrap(),
+                rows
+            );
+            assert_eq!(
+                assert_bounded_unchanged(&path, complete.len() as u64, 1)
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::InvalidInput
+            );
+        }
+        let mut partial_header = first.clone();
+        partial_header.extend_from_slice(&[1, 0, 0]);
+        fs::write(&path, &partial_header).unwrap();
+        assert_eq!(
+            assert_bounded_unchanged(&path, partial_header.len() as u64, 1).unwrap(),
+            rows
+        );
+        let mut corrupt = complete.clone();
+        *corrupt.last_mut().unwrap() ^= 1;
+        fs::write(&path, &corrupt).unwrap();
+        assert_eq!(
+            assert_bounded_unchanged(&path, corrupt.len() as u64, 2)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+        fs::write(&path, &complete[..complete.len() - 5]).unwrap();
+        assert_eq!(
+            assert_bounded_unchanged(&path, complete.len() as u64, 2)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+    }
+
+    #[test]
+    fn bounded_wal_rejects_legacy_json_before_decoding_its_untrusted_row_count() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("pending.wal");
+        let rows = make_test_rows(2);
+        let payload = serde_json::to_vec(&rows).unwrap();
+        for declared in [0u32, 2] {
+            let mut frame = declared.to_le_bytes().to_vec();
+            frame.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+            frame.extend_from_slice(&payload);
+            frame.extend_from_slice(&crc32fast::hash(&payload).to_le_bytes());
+            fs::write(&path, &frame).unwrap();
+            assert_eq!(
+                assert_bounded_unchanged(&path, frame.len() as u64, 2)
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::Unsupported
+            );
+            if declared == 2 {
+                assert_eq!(
+                    WriteAheadLog::open(path.clone())
+                        .unwrap()
+                        .read_all()
+                        .unwrap(),
+                    rows
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn bounded_wal_missing_paths_do_not_create_files_or_directories() {
+        let tmp = TempDir::new().unwrap();
+        let modified = tmp.path().metadata().unwrap().modified().unwrap();
+        for path in [
+            tmp.path().join("absent.wal"),
+            tmp.path().join("missing/pending.wal"),
+        ] {
+            assert!(bounded_read(&path, 0, 0).unwrap().is_empty());
+        }
+        assert_eq!(fs::read_dir(tmp.path()).unwrap().count(), 0);
+        assert_eq!(tmp.path().metadata().unwrap().modified().unwrap(), modified);
+        let directory = tmp.path().join("not-a-file");
+        fs::create_dir(&directory).unwrap();
+        assert_eq!(
+            bounded_read(&directory, 0, 0).unwrap_err().kind(),
+            io::ErrorKind::Unsupported
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_wal_rejects_symlink_file_and_parent_without_touching_targets() {
+        use std::os::unix::fs::symlink;
+        let tmp = TempDir::new().unwrap();
+        let real = tmp.path().join("real");
+        fs::create_dir(&real).unwrap();
+        let target = real.join("pending.wal");
+        fs::write(&target, []).unwrap();
+        let alias = tmp.path().join("alias.wal");
+        symlink(&target, &alias).unwrap();
+        let parent_alias = tmp.path().join("alias-dir");
+        symlink(&real, &parent_alias).unwrap();
+        let dangling = tmp.path().join("dangling.wal");
+        symlink(tmp.path().join("missing"), &dangling).unwrap();
+        let modified = target.metadata().unwrap().modified().unwrap();
+        for path in [
+            alias,
+            parent_alias.join("pending.wal"),
+            parent_alias.join("absent.wal"),
+            dangling,
+        ] {
+            assert_eq!(
+                bounded_read(&path, 0, 0).unwrap_err().kind(),
+                io::ErrorKind::Unsupported
+            );
+        }
+        assert!(fs::read(&target).unwrap().is_empty());
+        assert_eq!(target.metadata().unwrap().modified().unwrap(), modified);
+        assert!(!real.join("absent.wal").exists());
     }
 
     #[test]

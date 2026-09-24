@@ -24,12 +24,12 @@ pub use storage::{
 };
 
 pub use inspection::{
-    InspectedSegmentRole, InspectionLimits, PrimaryDataDisposition, PrimaryDataInspection,
-    SegmentInspection, inspect_primary_data,
+    InspectedSegmentRole, InspectionLimits, NativeRecoveryLimits, PrimaryDataDisposition,
+    PrimaryDataInspection, SegmentInspection, inspect_primary_data,
 };
 pub use repair::{
-    CommittedRepairPublication, PendingRepair, PreparedRepairPublication, RepairCandidateVerifier,
-    RepairCatalogState, RepairInspection, RepairOwnershipPlan, RepairPlanLimits, RepairPublication,
-    RepairReadLimits, RepairRowInput, StagedRepairCandidate, VerifiedRepairCandidate,
-    inspect_pending_repair, inspect_repair,
+    CommittedRepairPublication, IndexRepair, PendingIndexRepair, PendingRepair,
+    PreparedRepairPublication, RepairCandidateVerifier, RepairCatalogState, RepairInspection,
+    RepairOwnershipPlan, RepairPlanLimits, RepairPublication, RepairReadLimits, RepairRowInput,
+    StagedRepairCandidate, VerifiedRepairCandidate, inspect_pending_repair, inspect_repair,
 };

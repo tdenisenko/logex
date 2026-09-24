@@ -1,4 +1,4 @@
-use crate::bundle::{BundleReader, BundleReference, BundleWriter};
+use crate::bundle::{BundleReader, BundleReference, BundleSizer, BundleWriter};
 use crate::column_artifact::{BUNDLE_PATH, ColumnArtifacts, bundle_path, stream_id};
 use crate::durability::{self, Publication};
 use std::fs;
@@ -65,7 +65,39 @@ struct PageOutput<'a> {
     canonical_state: Option<&'a crate::PrefixState>,
     canonical_previous: Option<(u64, crate::commitment::Commitment)>,
     replacements: Option<durability::ReplacementBatch>,
-    bundle: Option<(BundleWriter, u64)>,
+    bundle: Option<(BundleOutput, u64)>,
+}
+
+/// The offline counter shares page encoders without changing the real writer's
+/// buffering or compression. Neither variant adds a heap allocation for dispatch.
+enum BundleOutput {
+    Writer(BundleWriter),
+    Sizer(BundleSizer),
+}
+
+impl BundleOutput {
+    fn append_data(&self, id: u8, bytes: &[u8]) -> std::io::Result<()> {
+        match self {
+            Self::Writer(writer) => writer.append_data(id, bytes),
+            Self::Sizer(sizer) => sizer.append_data(id, bytes),
+        }
+    }
+
+    fn replace_metadata(&self, id: u8, bytes: &[u8]) -> std::io::Result<()> {
+        match self {
+            Self::Writer(writer) => writer.replace_metadata(id, bytes),
+            Self::Sizer(sizer) => sizer.replace_metadata(id, bytes),
+        }
+    }
+
+    fn finish(self, rows: u64) -> std::io::Result<BundleReference> {
+        match self {
+            Self::Writer(writer) => writer.finish(rows),
+            Self::Sizer(_) => Err(std::io::Error::other(
+                "count-only bundle cannot be published",
+            )),
+        }
+    }
 }
 
 pub(crate) struct EncodedColumns {
@@ -130,7 +162,10 @@ impl<'a> PageOutput<'a> {
         }
         if let Some(reader) = bundle {
             output.bundle = Some((
-                BundleWriter::append_inspected(&bundle_path(dir, manifest.generation), reader)?,
+                BundleOutput::Writer(BundleWriter::append_inspected(
+                    &bundle_path(dir, manifest.generation),
+                    reader,
+                )?),
                 manifest.row_count + row_count as u64,
             ));
         }
@@ -390,6 +425,22 @@ pub(crate) fn compacted_segment_has_uncommitted_tail(
     PageOutput::inspect(dir, manifest, &artifacts).map(|(_, tail)| tail)
 }
 
+/// Canonical descriptors selected by catalog-pinned bundles.
+pub(super) fn current_compacted_columns() -> Vec<ColumnDescriptor> {
+    current_column_profile()
+        .iter()
+        .map(|(name, codec)| ColumnDescriptor {
+            name: (*name).to_owned(),
+            codec: *codec,
+            page_rows: MAX_PAGE_ROWS,
+            data_path: format!("columns/{name}.pages"),
+            page_index_path: Some(format!("columns/{name}.pages.idx")),
+            null_bitmap_path: matches!(*name, "topic0" | "topic1" | "topic2" | "topic3")
+                .then(|| format!("columns/{name}.null")),
+        })
+        .collect()
+}
+
 /// Restore only the append suffix. The catalog identifies the complete immutable
 /// table, so recovery never has to decompress and rewrite committed column data.
 pub(crate) fn restore_bundled_checkpoint(
@@ -401,18 +452,7 @@ pub(crate) fn restore_bundled_checkpoint(
         .column_bundle
         .as_ref()
         .ok_or_else(|| std::io::Error::other("missing catalog bundle reference"))?;
-    let columns = current_column_profile()
-        .iter()
-        .map(|(name, codec)| ColumnDescriptor {
-            name: (*name).to_owned(),
-            codec: *codec,
-            page_rows: MAX_PAGE_ROWS,
-            data_path: format!("columns/{name}.pages"),
-            page_index_path: Some(format!("columns/{name}.pages.idx")),
-            null_bitmap_path: matches!(*name, "topic0" | "topic1" | "topic2" | "topic3")
-                .then(|| format!("columns/{name}.null")),
-        })
-        .collect();
+    let columns = current_compacted_columns();
     let prefix = SegmentManifest {
         column_bundle: Some(reference.clone()),
         format_version: super::catalog::STORAGE_FORMAT_VERSION,
@@ -567,7 +607,10 @@ pub(super) fn write_repair_bundle(
     fs::create_dir(segment_dir)?;
     fs::create_dir(segment_dir.join("columns"))?;
     let mut output = PageOutput::new(segment_dir);
-    output.bundle = Some((BundleWriter::create(&segment_dir.join(BUNDLE_PATH))?, count));
+    output.bundle = Some((
+        BundleOutput::Writer(BundleWriter::create(&segment_dir.join(BUNDLE_PATH))?),
+        count,
+    ));
     output.canonical = Some(canonical.clone());
     output.append_canonical(0)?;
     let columns = write_compacted_values(&output, rows)?;
@@ -575,6 +618,222 @@ pub(super) fn write_repair_bundle(
         columns,
         bundle: output.finish()?,
     })
+}
+
+/// Count the same encoded streams as a fresh repair bundle without touching disk.
+/// The final table uses an uncompressed upper bound because encoder scheduling
+/// can change physical offsets and therefore the table's compressed length.
+pub(super) fn estimate_repair_bundle_bytes(
+    rows: &[LogRow],
+    canonical: &NullBitmap,
+) -> std::io::Result<u64> {
+    let count = u64::try_from(rows.len()).map_err(std::io::Error::other)?;
+    if count > crate::bundle::MAX_ROWS || canonical.len() != count {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "repair rows exceed bundle addressing or differ from canonical flags",
+        ));
+    }
+    // Used only for deriving known relative stream names; the Sizer variant
+    // takes every bundled branch and never opens this or any other path.
+    let mut output = PageOutput::new(Path::new(""));
+    output.bundle = Some((BundleOutput::Sizer(BundleSizer::new()), count));
+    output.canonical = Some(canonical.clone());
+    output.append_canonical(0)?;
+    write_compacted_values(&output, rows)?;
+    match output.bundle {
+        Some((BundleOutput::Sizer(sizer), count)) => sizer.finish(count),
+        _ => Err(std::io::Error::other(
+            "repair estimate lost its count-only output",
+        )),
+    }
+}
+
+/// Persistent count-only counterpart of bundle append publication. Source files
+/// are read only during capture. All later offsets are virtual upper bounds;
+/// page bytes, extent counts, indexes and bitmap values use the real encoders.
+pub(super) struct BundleAppendSizer {
+    output: PageOutput<'static>,
+    failed: bool,
+}
+
+impl BundleAppendSizer {
+    pub(super) fn from_existing(dir: &Path, manifest: &SegmentManifest) -> std::io::Result<Self> {
+        let artifacts = ColumnArtifacts::open(dir, Some(manifest))?;
+        let bundle = artifacts.bundle().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "append sizing requires a bundle",
+            )
+        })?;
+        let sizer = BundleSizer::append_from(bundle)?;
+        let (output, _) = PageOutput::inspect(dir, manifest, &artifacts)?;
+        Ok(Self {
+            output: PageOutput {
+                dir: Path::new(""),
+                existing_rows: output.existing_rows,
+                previous: output.previous,
+                canonical: output.canonical,
+                canonical_binding: output.canonical_binding,
+                canonical_commitment: output.canonical_commitment,
+                canonical_state: None,
+                canonical_previous: output.canonical_previous,
+                replacements: None,
+                bundle: Some((BundleOutput::Sizer(sizer), manifest.row_count)),
+            },
+            failed: false,
+        })
+    }
+
+    pub(super) fn from_rows(
+        rows: &[LogRow],
+        canonical: &NullBitmap,
+    ) -> std::io::Result<(Self, u64)> {
+        if canonical.len() != rows.len() as u64 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "sized canonical flags differ from source rows",
+            ));
+        }
+        let mut output = PageOutput::new(Path::new(""));
+        output.bundle = Some((BundleOutput::Sizer(BundleSizer::new()), rows.len() as u64));
+        output.canonical = Some(canonical.clone());
+        let mut session = Self {
+            output,
+            failed: true,
+        };
+        session.output.append_canonical(0)?;
+        let columns = write_compacted_values(&session.output, rows)?;
+        session.advance(columns, rows, canonical.clone())?;
+        let bytes = session.sizer()?.checkpoint(session.rows())?;
+        session.failed = false;
+        Ok((session, bytes))
+    }
+
+    fn sizer(&self) -> std::io::Result<&BundleSizer> {
+        match &self.output.bundle {
+            Some((BundleOutput::Sizer(sizer), _)) => Ok(sizer),
+            _ => Err(std::io::Error::other(
+                "append estimate lost its count-only output",
+            )),
+        }
+    }
+
+    fn require_valid(&self) -> std::io::Result<()> {
+        if self.failed {
+            return Err(std::io::Error::other(
+                "sizing session failed; recapture its source before retrying",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(super) fn rows(&self) -> u64 {
+        self.output.existing_rows
+    }
+
+    pub(super) fn capacity(&self, rows: &[LogRow]) -> std::io::Result<usize> {
+        self.require_valid()?;
+        capacity_from_extents(self.sizer()?.remaining_data_extents()?, rows)
+    }
+
+    pub(super) fn append(&mut self, rows: &[LogRow]) -> std::io::Result<u64> {
+        self.require_valid()?;
+        self.failed = true;
+        let count = self
+            .rows()
+            .checked_add(rows.len() as u64)
+            .filter(|count| *count <= crate::bundle::MAX_ROWS)
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "append sizing row count exceeds format",
+                )
+            })?;
+        self.output
+            .bundle
+            .as_mut()
+            .ok_or_else(|| std::io::Error::other("missing sizing output"))?
+            .1 = count;
+        let mut canonical = self
+            .output
+            .canonical
+            .clone()
+            .ok_or_else(|| std::io::Error::other("missing sizing canonical flags"))?;
+        for _ in rows {
+            canonical.push(true);
+        }
+        self.output.append_canonical(rows.len())?;
+        let columns = write_compacted_values(&self.output, rows)?;
+        self.advance(columns, rows, canonical)?;
+        let bytes = self.sizer()?.checkpoint(count)?;
+        self.failed = false;
+        Ok(bytes)
+    }
+
+    /// Size one metadata-only publication, preserving row and extent capacity.
+    pub(super) fn rewrite_canonical(&mut self, canonical: &NullBitmap) -> std::io::Result<u64> {
+        self.require_valid()?;
+        if canonical.len() != self.rows() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "canonical rewrite changes sized row count",
+            ));
+        }
+        self.failed = true;
+        self.output.canonical = Some(canonical.clone());
+        self.output.append_canonical(0)?;
+        let bytes = self.sizer()?.checkpoint(self.rows())?;
+        self.failed = false;
+        Ok(bytes)
+    }
+
+    fn advance(
+        &mut self,
+        columns: Vec<ColumnDescriptor>,
+        rows: &[LogRow],
+        canonical: NullBitmap,
+    ) -> std::io::Result<()> {
+        for column in columns {
+            let encoded_bytes = self.sizer()?.stream_len(stream_id(&column.data_path)?)?;
+            let entries = self.sizer()?.page_index(stream_id(
+                column
+                    .page_index_path
+                    .as_ref()
+                    .ok_or_else(|| std::io::Error::other("sized page index missing"))?,
+            )?)?;
+            let nulls = if column.null_bitmap_path.is_some() {
+                let mut nulls = self.output.previous_nulls(&column.name)?;
+                for row in rows {
+                    let present = match column.name.as_str() {
+                        "topic0" => row.topic0.is_some(),
+                        "topic1" => row.topic1.is_some(),
+                        "topic2" => row.topic2.is_some(),
+                        "topic3" => row.topic3.is_some(),
+                        _ => {
+                            return Err(std::io::Error::other("unexpected nullable sizing column"));
+                        }
+                    };
+                    nulls.push(present);
+                }
+                Some(nulls)
+            } else {
+                None
+            };
+            self.output.previous.insert(
+                column.name.clone(),
+                ExistingPages {
+                    column,
+                    entries,
+                    encoded_bytes,
+                    nulls,
+                },
+            );
+        }
+        self.output.existing_rows = canonical.len();
+        self.output.canonical = Some(canonical);
+        Ok(())
+    }
 }
 
 /// Only new historical bundles may overlap hashing with column encoding. Check
@@ -619,7 +878,7 @@ fn write_bundled_rows_with_callback<T>(
     fs::create_dir_all(segment_dir.join("columns"))?;
     let mut output = PageOutput::new(segment_dir);
     output.bundle = Some((
-        BundleWriter::create(&segment_dir.join(BUNDLE_PATH))?,
+        BundleOutput::Writer(BundleWriter::create(&segment_dir.join(BUNDLE_PATH))?),
         rows.len() as u64,
     ));
     output.append_canonical(rows.len())?;
@@ -751,7 +1010,10 @@ pub(crate) fn repack_sparse_bundle(
         return Ok(None);
     };
     let mut output = PageOutput::new(&dir);
-    output.bundle = Some((BundleWriter::create(&replacement)?, descriptor.row_count));
+    output.bundle = Some((
+        BundleOutput::Writer(BundleWriter::create(&replacement)?),
+        descriptor.row_count,
+    ));
     output.canonical = Some(canonical);
     output.append_canonical(0)?;
     let columns = write_compacted_values(&output, &rows)?;
@@ -866,7 +1128,7 @@ pub(crate) fn bundled_row_capacity(
     generation: u64,
     rows: &[LogRow],
 ) -> std::io::Result<(usize, Option<BundleReader>)> {
-    use crate::bundle::{DATA_STREAMS, MAX_EXTENT_BYTES, MAX_EXTENTS};
+    use crate::bundle::{DATA_STREAMS, MAX_EXTENTS};
     let reader = reference
         .map(|reference| BundleReader::open(&bundle_path(dir, generation), reference))
         .transpose()?;
@@ -875,6 +1137,14 @@ pub(crate) fn bundled_row_capacity(
         .map(BundleReader::remaining_data_extents)
         .transpose()?
         .unwrap_or([MAX_EXTENTS; DATA_STREAMS as usize]);
+    Ok((capacity_from_extents(capacity, rows)?, reader))
+}
+
+fn capacity_from_extents(
+    capacity: [usize; crate::bundle::DATA_STREAMS as usize],
+    rows: &[LogRow],
+) -> std::io::Result<usize> {
+    use crate::bundle::MAX_EXTENT_BYTES;
     let mut pages = capacity[..13]
         .iter()
         .chain(&capacity[14..])
@@ -930,7 +1200,7 @@ pub(crate) fn bundled_row_capacity(
             break;
         }
     }
-    Ok((accepted, reader))
+    Ok(accepted)
 }
 
 #[cfg(test)]
@@ -2549,6 +2819,196 @@ mod tests {
             ),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn persistent_bundle_sizing_advances_pages_bitmaps_and_canonical_rewrites() {
+        let tmp = TempDir::new().unwrap();
+        let paths = StorageCatalogPaths::new(tmp.path().to_owned());
+        let config = super::super::catalog::NativeStorageConfig {
+            data_dir: tmp.path().to_owned(),
+            ..Default::default()
+        };
+        let (mut catalog, _) =
+            super::super::catalog::NativeStorageCatalog::open_or_create(&config).unwrap();
+        let mut descriptor = catalog.allocate_segment(SegmentKind::Sealed).unwrap();
+        let dir = paths.segment_dir(descriptor.id);
+        let mut rows = descending_rows()[..20].to_vec();
+        for (index, row) in rows.iter_mut().enumerate() {
+            row.topic0 = (index % 2 == 0).then(|| B256::repeat_byte(7));
+            row.topic1 = (index % 3 == 0).then(|| B256::repeat_byte(8));
+        }
+        let mut canonical = NullBitmap::new();
+        canonical.push(true);
+        let (mut session, initial_bound) =
+            BundleAppendSizer::from_rows(&rows[..1], &canonical).unwrap();
+        assert!(!dir.exists());
+        apply_rows_to_descriptor(&mut descriptor, &rows[..1]);
+        let columns = write_bundled_rows(&dir, &rows[..1])
+            .unwrap()
+            .apply_to(&mut descriptor);
+        persist_segment_manifest_with_columns(&paths, &descriptor, columns).unwrap();
+        assert!(descriptor.column_bundle.as_ref().unwrap().end().unwrap() <= initial_bound);
+        for row in &rows[1..] {
+            let path = bundle_path(&dir, descriptor.generation);
+            let before = fs::read(&path).unwrap();
+            let modified = fs::metadata(&path).unwrap().modified().unwrap();
+            let chunk = std::slice::from_ref(row);
+            let (capacity, inspected) = bundled_row_capacity(
+                &dir,
+                descriptor.column_bundle.as_ref(),
+                descriptor.generation,
+                chunk,
+            )
+            .unwrap();
+            assert_eq!(session.capacity(chunk).unwrap(), capacity);
+            let estimate = session.append(chunk).unwrap();
+            assert_eq!(fs::read(&path).unwrap(), before);
+            assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), modified);
+            let encoded = append_compacted_rows(
+                &dir,
+                descriptor.row_count,
+                chunk,
+                Publication::Ordered,
+                inspected,
+            )
+            .unwrap();
+            apply_rows_to_descriptor(&mut descriptor, chunk);
+            let columns = encoded.apply_to(&mut descriptor);
+            persist_segment_manifest_with_columns(&paths, &descriptor, columns).unwrap();
+            assert_eq!(session.rows(), descriptor.row_count);
+            assert!(
+                descriptor.column_bundle.as_ref().unwrap().end().unwrap() - before.len() as u64
+                    <= estimate
+            );
+            canonical.push(true);
+        }
+        canonical.set(0, false);
+        let before = descriptor.column_bundle.as_ref().unwrap().end().unwrap();
+        let estimate = session.rewrite_canonical(&canonical).unwrap();
+        let reference = append_bundled_canonical(
+            &dir,
+            descriptor.column_bundle.as_ref().unwrap(),
+            descriptor.generation,
+            &canonical,
+        )
+        .unwrap();
+        assert!(reference.end().unwrap() - before <= estimate);
+        descriptor.column_bundle = Some(reference);
+        let actual = BundleReader::open(
+            &bundle_path(&dir, descriptor.generation),
+            descriptor.column_bundle.as_ref().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            session.sizer().unwrap().remaining_data_extents().unwrap(),
+            actual.remaining_data_extents().unwrap()
+        );
+        let sized = session.output.canonical.as_ref().unwrap();
+        assert_eq!(sized.len(), canonical.len());
+        assert!((0..canonical.len()).all(|row| sized.is_present(row) == canonical.is_present(row)));
+    }
+
+    #[test]
+    fn persistent_sizing_tracks_compressible_repeated_append_near_extent_capacity() {
+        let tmp = TempDir::new().unwrap();
+        let config = super::super::catalog::NativeStorageConfig {
+            data_dir: tmp.path().to_owned(),
+            ..Default::default()
+        };
+        let (mut catalog, paths) =
+            super::super::catalog::NativeStorageCatalog::open_or_create(&config).unwrap();
+        let mut descriptor = catalog.allocate_segment(SegmentKind::Sealed).unwrap();
+        let dir = paths.segment_dir(descriptor.id);
+        let mut initial = descending_rows()[..1].to_vec();
+        let mut state = 0x9e3779b97f4a7c15u64;
+        let payload: Vec<u8> = (0..8192)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state as u8
+            })
+            .collect();
+        initial[0].data = payload.into();
+        initial[0].data_len = 8192;
+        apply_rows_to_descriptor(&mut descriptor, &initial);
+        let columns = write_bundled_rows(&dir, &initial)
+            .unwrap()
+            .apply_to(&mut descriptor);
+        let path = bundle_path(&dir, descriptor.generation);
+        let source = BundleReader::open(&path, descriptor.column_bundle.as_ref().unwrap()).unwrap();
+        // Fragment only the existing variable-byte stream. This creates a valid
+        // almost-full extent registry with a few KiB, not a multi-GiB fixture.
+        let fragmented = dir.join("fragmented.bundle");
+        let writer = BundleWriter::create(&fragmented).unwrap();
+        for id in 0..33 {
+            let bytes = source.read_stream(id).unwrap();
+            if id == 13 {
+                let split = crate::bundle::MAX_EXTENTS - 3;
+                assert!(bytes.len() > split);
+                for byte in &bytes[..split] {
+                    writer.append_data(id, std::slice::from_ref(byte)).unwrap();
+                }
+                writer.append_data(id, &bytes[split..]).unwrap();
+            } else if id < crate::bundle::DATA_STREAMS {
+                writer.append_data(id, &bytes).unwrap();
+            } else {
+                writer.replace_metadata(id, &bytes).unwrap();
+            }
+        }
+        descriptor.column_bundle = Some(writer.finish(1).unwrap());
+        drop(source);
+        fs::rename(&fragmented, &path).unwrap();
+        persist_segment_manifest_with_columns(&paths, &descriptor, columns).unwrap();
+        let manifest = SegmentManifest::load(&paths.segment_manifest_path(descriptor.id))
+            .unwrap()
+            .unwrap();
+        let before = fs::read(&path).unwrap();
+        let modified = fs::metadata(&path).unwrap().modified().unwrap();
+        let mut session = BundleAppendSizer::from_existing(&dir, &manifest).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), modified);
+        let mut row = initial[0].clone();
+        row.data = vec![0; 700 * 1024].into();
+        row.data_len = 700 * 1024;
+        let rows = vec![row; 3];
+        let mut offset = 0;
+        let mut takes = Vec::new();
+        while offset < rows.len() {
+            let (take, inspected) = bundled_row_capacity(
+                &dir,
+                descriptor.column_bundle.as_ref(),
+                descriptor.generation,
+                &rows[offset..],
+            )
+            .unwrap();
+            assert_eq!(session.capacity(&rows[offset..]).unwrap(), take);
+            assert!(take > 0);
+            takes.push(take);
+            let chunk = &rows[offset..offset + take];
+            let before = fs::read(&path).unwrap();
+            let estimate = session.append(chunk).unwrap();
+            assert_eq!(fs::read(&path).unwrap(), before);
+            let encoded = append_compacted_rows(
+                &dir,
+                descriptor.row_count,
+                chunk,
+                Publication::Ordered,
+                inspected,
+            )
+            .unwrap();
+            apply_rows_to_descriptor(&mut descriptor, chunk);
+            let columns = encoded.apply_to(&mut descriptor);
+            persist_segment_manifest_with_columns(&paths, &descriptor, columns).unwrap();
+            assert!(
+                descriptor.column_bundle.as_ref().unwrap().end().unwrap() - before.len() as u64
+                    <= estimate
+            );
+            offset += take;
+        }
+        assert_eq!(takes, vec![2, 1]);
+        assert_eq!(session.rows(), 4);
     }
 
     #[test]

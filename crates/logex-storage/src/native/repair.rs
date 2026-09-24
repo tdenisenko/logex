@@ -5,11 +5,13 @@
 //! primary data; the sync coordinator retains authenticated fetch transcripts
 //! and guards the catalog switch. Pending journal evidence blocks ordinary open
 //! until explicit repair resumption completes original-artifact quarantine.
+pub(super) mod indexes;
 mod input;
 pub(super) mod journal;
 mod overlap;
 pub(super) mod publication;
 mod staging;
+pub use indexes::{IndexRepair, PendingIndexRepair};
 pub use input::{RepairReadLimits, RepairRowInput};
 pub use publication::{
     CommittedRepairPublication, PendingRepair, PreparedRepairPublication, RepairCatalogState,

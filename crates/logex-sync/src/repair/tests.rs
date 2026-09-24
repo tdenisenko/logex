@@ -9,9 +9,9 @@ use std::collections::BTreeMap;
 pub(super) struct Scripted {
     headers: BTreeMap<B256, Header>,
     payloads: BTreeMap<B256, (EthereumBody, Vec<ReceiptWithBloom<LogexReceipt>>)>,
-    header_calls: Vec<(B256, u64)>,
+    pub(super) header_calls: Vec<(B256, u64)>,
     pub(super) body_calls: Vec<u64>,
-    receipt_calls: Vec<u64>,
+    pub(super) receipt_calls: Vec<u64>,
     partial: bool,
     empty_headers: bool,
     overlong_headers: bool,

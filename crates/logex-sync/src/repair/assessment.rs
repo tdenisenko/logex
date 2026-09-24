@@ -72,6 +72,12 @@ pub enum RepairAssessmentReport {
         state: RepairCatalogState,
         quarantine_dir: PathBuf,
     },
+    PendingIndexes {
+        operation: FixedBytes<16>,
+        segments: Vec<u64>,
+        required_artifacts: Vec<String>,
+        quarantine_dir: PathBuf,
+    },
     /// Pending WAL/ingestion/reorg evidence must be verified before inspecting
     /// stable primary rows. This does not assert that replay can repair damage.
     RecoveryRequired { artifacts: Vec<PathBuf> },
@@ -87,9 +93,20 @@ pub enum RepairAssessmentReport {
 pub struct RepairAssessment {
     inspection: RepairInspection,
     report: RepairAssessmentReport,
+    limits: RepairAssessmentLimits,
 }
 
 impl RepairAssessment {
+    pub(super) fn uses_limits(&self, limits: RepairAssessmentLimits) -> bool {
+        self.limits.primary.max_segment_rows == limits.primary.max_segment_rows
+            && self.limits.primary.max_retained_artifact_bytes
+                == limits.primary.max_retained_artifact_bytes
+            && self.limits.primary.max_decoded_payload_bytes
+                == limits.primary.max_decoded_payload_bytes
+            && self.limits.max_index_logical_bytes_per_segment
+                == limits.max_index_logical_bytes_per_segment
+    }
+
     pub fn report(&self) -> &RepairAssessmentReport {
         &self.report
     }
@@ -111,10 +128,24 @@ pub fn assess_repair(
     index_profile: IndexBuildProfile,
 ) -> io::Result<RepairAssessment> {
     let inspection = inspect_repair(root, limits.primary)?;
+    assess_owned(inspection, limits, index_profile)
+}
+
+pub(super) fn assess_owned(
+    inspection: RepairInspection,
+    limits: RepairAssessmentLimits,
+    index_profile: IndexBuildProfile,
+) -> io::Result<RepairAssessment> {
     let report = match &inspection {
         RepairInspection::Pending(pending) => RepairAssessmentReport::PendingPublication {
             operation: pending.operation_id(),
             state: pending.state(),
+            quarantine_dir: pending.quarantine_dir(),
+        },
+        RepairInspection::PendingIndexes(pending) => RepairAssessmentReport::PendingIndexes {
+            operation: pending.operation_id(),
+            segments: pending.segment_ids().collect(),
+            required_artifacts: pending.required_artifacts().to_vec(),
             quarantine_dir: pending.quarantine_dir(),
         },
         RepairInspection::Primary(primary) if !primary.recovery_prerequisites.is_empty() => {
@@ -123,7 +154,7 @@ pub fn assess_repair(
             }
         }
         RepairInspection::Primary(primary) => {
-            let paths = StorageCatalogPaths::new(std::path::absolute(root)?);
+            let paths = StorageCatalogPaths::new(primary.root().to_owned());
             let segments = primary
                 .segments
                 .iter()
@@ -188,7 +219,11 @@ pub fn assess_repair(
             }
         }
     };
-    Ok(RepairAssessment { inspection, report })
+    Ok(RepairAssessment {
+        inspection,
+        report,
+        limits,
+    })
 }
 
 fn assess_indexes(

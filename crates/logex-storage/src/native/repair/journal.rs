@@ -17,9 +17,9 @@ use serde::{Deserialize, Serialize};
 pub(in crate::native) const JOURNAL_FILE: &str = "repair.journal";
 const MAGIC: &[u8; 8] = b"LXRPJR01";
 const HEADER: usize = 36;
-const MAX_CATALOG: usize = 64 * 1024 * 1024;
+pub(super) const MAX_CATALOG: usize = 64 * 1024 * 1024;
 const MAX_METADATA: usize = 8 * 1024 * 1024;
-const MAX_BYTES: usize = 2 * MAX_CATALOG + MAX_METADATA;
+pub(super) const MAX_BYTES: usize = 2 * MAX_CATALOG + MAX_METADATA;
 pub(super) const MAX_ENTRIES: usize = 4096;
 
 #[derive(Clone, Debug, PartialEq, Eq)]

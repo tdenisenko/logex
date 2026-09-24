@@ -8,9 +8,312 @@ use super::catalog::{SegmentDescriptor, SegmentKind, StorageCatalogPaths};
 use crate::durability;
 use crate::wal::EncodedWalBatch;
 
+pub(super) struct MaintenanceWork {
+    pub rows: Vec<logex_types::LogRow>,
+    pub journal: Option<RecoveryJournal>,
+}
+
+/// Bound maintenance inputs before invoking the unchanged startup state machine.
+/// Raw tails can be sized without requiring a complete current publication.
+/// Compressed artifacts are sized at both catalog-pinned and published positions
+/// before recovery can read either source representation.
+pub(super) fn preflight_maintenance(
+    paths: &StorageCatalogPaths,
+    catalog: &super::catalog::NativeStorageCatalog,
+    limits: super::inspection::NativeRecoveryLimits,
+) -> io::Result<MaintenanceWork> {
+    use std::fs;
+    let root = paths.root();
+    for name in [
+        super::repair::journal::JOURNAL_FILE,
+        super::repair::indexes::JOURNAL_FILE,
+        "wal/ingestion.json",
+    ] {
+        match fs::symlink_metadata(root.join(name)) {
+            Ok(_) => {
+                return Err(io::Error::new(
+                    if name == "wal/ingestion.json" {
+                        io::ErrorKind::Unsupported
+                    } else {
+                        io::ErrorKind::WouldBlock
+                    },
+                    format!(
+                        "recovery blocked by {name}; preserve evidence and use its explicit recovery workflow (legacy ingestion journals have no supported decoder)"
+                    ),
+                ));
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    super::storage::verify_recent_headers(&catalog.state)?;
+    if let Some(intent) = &catalog.state.canonical_reorg {
+        intent.validate(&catalog.state)?;
+    }
+    // Check the directory and evidence path shapes again instead of trusting
+    // mutable report fields or following an unsupported recovery artifact.
+    super::inspection::recovery_prerequisites(paths, catalog)?;
+    let journal_path = RecoveryJournal::path(paths);
+    match fs::symlink_metadata(&journal_path) {
+        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {}
+        Ok(_) => {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "recovery journal must be an ordinary file",
+            ));
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    let journal = RecoveryJournal::load(paths)?;
+    let wal =
+        crate::WriteAheadLog::read_existing_bounded(&root.join("wal/pending.wal"), limits.wal)?;
+    let wal_rows = wal.len() as u64;
+    let wal_payload = wal.iter().try_fold(0u64, |bytes, row| {
+        bytes
+            .checked_add(row.data.len() as u64)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "WAL payload size overflow"))
+    })?;
+    // Replay may encode each row in its own variable-byte page. Reserve its
+    // two eight-byte offsets and four-byte framing as well as the actual data,
+    // before a subsequent recovery/reorg read can inspect generated pages.
+    let wal_payload = wal_rows
+        .checked_mul(20)
+        .and_then(|framing| framing.checked_add(wal_payload))
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "WAL decoded framing size overflow",
+            )
+        })?;
+    maintenance_limit("replayed rows", wal_rows, limits.primary.max_segment_rows)?;
+    maintenance_limit(
+        "replayed payload bytes",
+        wal_payload,
+        limits.primary.max_decoded_payload_bytes,
+    )?;
+    if catalog.state.canonical_reorg.is_some() && !wal.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "pending WAL rows and reorg intent cannot be admitted together; preserve both artifacts for explicit recovery",
+        ));
+    }
+    for descriptor in &catalog.segments {
+        let dir = paths.segment_dir(descriptor.id);
+        let result = (|| {
+            maintenance_limit(
+                "committed segment rows",
+                descriptor.row_count,
+                limits.primary.max_segment_rows,
+            )?;
+            // Conservative allowance for any segment receiving this WAL suffix,
+            // including a later reorg's full hash/bitmap scan after replay.
+            let possible_rows = descriptor.row_count.checked_add(wal_rows).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "recovery row count overflow")
+            })?;
+            maintenance_limit(
+                "segment rows including WAL",
+                possible_rows,
+                limits.primary.max_segment_rows,
+            )?;
+            let mut artifacts = 0;
+            size_raw_recovery_tree(
+                &dir,
+                &dir,
+                &mut artifacts,
+                limits.primary.max_retained_artifact_bytes,
+                0,
+            )?;
+            let manifest =
+                super::catalog::SegmentManifest::load(&paths.segment_manifest_path(descriptor.id))
+                    .map_err(io::Error::from)?;
+            if let Some(manifest) = &manifest {
+                maintenance_limit(
+                    "published segment rows",
+                    manifest.row_count,
+                    limits.primary.max_segment_rows,
+                )?;
+            }
+            if descriptor.column_bundle.is_some() {
+                // Startup restores this exact immutable table even when a later
+                // manifest describes an interrupted append. Never infer its
+                // column layout or canonical state from the advanced manifest.
+                let columns = super::segment::current_compacted_columns();
+                let pinned = super::segment::manifest_with_columns(descriptor, columns);
+                preflight_compressed_reader(
+                    crate::SegmentReader::open_for_inspection_manifest(&dir, pinned.clone())?,
+                    limits.primary,
+                    wal_payload,
+                )?;
+                if let Some(published) = manifest
+                    && published != pinned
+                {
+                    preflight_compressed_reader(
+                        crate::SegmentReader::open_for_inspection_manifest(&dir, published)?,
+                        limits.primary,
+                        wal_payload,
+                    )?;
+                }
+                return Ok(());
+            }
+            if let Some(manifest) = &manifest
+                && (manifest.column_bundle.is_some()
+                    || manifest
+                        .columns
+                        .iter()
+                        .any(|column| column.page_index_path.is_some()))
+            {
+                // Paged sources retain the raw publication fence. A matching
+                // interrupted prefix rewrite can only be captured with the
+                // existing catalog-bound recovery capability (never zero-row
+                // initialization, which would create directories in preflight).
+                match crate::SegmentReader::open_for_inspection(&dir) {
+                    Ok(reader) => preflight_compressed_reader(reader, limits.primary, wal_payload)?,
+                    Err(error) => {
+                        let Some(namespace) = descriptor
+                            .source_namespace
+                            .filter(|_| descriptor.row_count != 0)
+                        else {
+                            return Err(error);
+                        };
+                        let owner = crate::column::begin_prefix_recovery(
+                            &dir,
+                            namespace.0,
+                            descriptor.row_count,
+                            descriptor.generation,
+                            descriptor.id,
+                            descriptor.kind,
+                            descriptor.source_commitment,
+                        )?;
+                        let reader = crate::SegmentReader::open_recovering_prefix(&owner)?;
+                        preflight_compressed_reader(reader, limits.primary, wal_payload)?;
+                    }
+                }
+                return Ok(());
+            }
+            let payload = match fs::metadata(dir.join("data.col")) {
+                Ok(metadata) => metadata.len(),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => 0,
+                Err(error) => return Err(error),
+            };
+            maintenance_limit(
+                "raw payload artifact including framing and WAL",
+                payload.checked_add(wal_payload).ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "recovery payload size overflow")
+                })?,
+                limits.primary.max_decoded_payload_bytes,
+            )?;
+            if descriptor.row_count != 0 {
+                for entry in fs::read_dir(&dir)? {
+                    let entry = entry?;
+                    if entry
+                        .path()
+                        .extension()
+                        .is_some_and(|extension| extension == "col")
+                    {
+                        let mut header = [0; crate::column::ColumnFileHeader::SIZE];
+                        File::open(entry.path())?.read_exact(&mut header)?;
+                        let header = crate::column::ColumnFileHeader::read_from(&header)
+                            .ok_or_else(|| {
+                                io::Error::new(
+                                    io::ErrorKind::InvalidData,
+                                    "invalid recovery column header",
+                                )
+                            })?;
+                        maintenance_limit(
+                            "physical raw column rows",
+                            header.row_count,
+                            limits.primary.max_segment_rows,
+                        )?;
+                        if header.compression != 0 {
+                            return Err(io::Error::new(
+                                io::ErrorKind::Unsupported,
+                                "compressed raw columns require bounded recovery support",
+                            ));
+                        }
+                    }
+                }
+            }
+            Ok(())
+        })();
+        result.map_err(|error: io::Error| {
+            io::Error::new(
+                error.kind(),
+                format!("preflight recovery segment {}: {error}", dir.display()),
+            )
+        })?;
+    }
+    Ok(MaintenanceWork { rows: wal, journal })
+}
+
+fn preflight_compressed_reader(
+    mut reader: crate::SegmentReader,
+    limits: super::inspection::InspectionLimits,
+    wal_payload: u64,
+) -> io::Result<()> {
+    maintenance_limit(
+        "compressed source rows",
+        reader.read_row_count()?,
+        limits.max_segment_rows,
+    )?;
+    reader.inspection_preflight(limits.max_retained_artifact_bytes, limits.max_decoded_payload_bytes - wal_payload).map_err(|error| match error {
+        crate::segment_reader::InspectionPreflightError::Io(error) => error,
+        crate::segment_reader::InspectionPreflightError::LimitExceeded { resource, required, limit } => io::Error::new(io::ErrorKind::InvalidInput, format!("recovery {resource} limit exceeded: required={required}, remaining allowance={limit}")),
+    })
+}
+
+fn maintenance_limit(resource: &str, required: u64, limit: u64) -> io::Result<()> {
+    if required > limit {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("recovery {resource} limit exceeded: required={required}, limit={limit}"),
+        ));
+    }
+    Ok(())
+}
+
+fn size_raw_recovery_tree(
+    root: &std::path::Path,
+    path: &std::path::Path,
+    total: &mut u64,
+    limit: u64,
+    depth: usize,
+) -> io::Result<()> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() || (!metadata.is_file() && !metadata.is_dir()) {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!("recovery requires ordinary artifacts: {}", path.display()),
+        ));
+    }
+    if metadata.is_file() {
+        *total = total.checked_add(metadata.len()).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "recovery artifact size overflow",
+            )
+        })?;
+        return maintenance_limit("source artifact bytes", *total, limit);
+    }
+    if depth > 8 {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "unexpected nesting in recovery source artifacts",
+        ));
+    }
+    for entry in std::fs::read_dir(path)? {
+        let entry = entry?;
+        if path == root && entry.file_name() == "indexes" {
+            continue;
+        }
+        size_raw_recovery_tree(root, &entry.path(), total, limit, depth + 1)?;
+    }
+    Ok(())
+}
+
 const JOURNAL_VERSION: u32 = 1;
 const CHECKPOINT_JOURNAL_VERSION: u32 = 2;
-const MAX_JOURNAL_BYTES: u64 = 16 * 1024;
+pub(super) const MAX_JOURNAL_BYTES: u64 = 16 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

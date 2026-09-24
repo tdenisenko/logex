@@ -376,6 +376,15 @@ impl SegmentReader {
         Self::open_inner(dir, Some(columns))
     }
 
+    /// Maintenance-only capture from an independently authoritative manifest.
+    /// Caller retains directory ownership and validates its catalog binding.
+    pub(crate) fn open_for_inspection_manifest(
+        dir: &Path,
+        manifest: SegmentManifest,
+    ) -> io::Result<Self> {
+        Self::open_manifest_checked(dir, None, Some(manifest), true)
+    }
+
     pub(crate) fn open_recovering_prefix(owner: &PrefixRecoveryGuard) -> io::Result<Self> {
         let dir = owner.dir();
         verify_prefix_recovery_pending(dir, owner)?;

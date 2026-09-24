@@ -13,7 +13,7 @@ use std::{
 use alloy_primitives::B256;
 use eyre::{Result, WrapErr};
 use logex_cl::ConsensusStore;
-use logex_index::{IndexBuildProfile, IndexBuilder};
+use logex_index::{IndexBuildProfile, IndexBuilder, IndexVerificationError};
 use logex_storage::{
     NullBitmap,
     native::{
@@ -408,6 +408,51 @@ impl<'a> ReconstructedRepair<'a> {
         &self.completions
     }
 
+    /// Bound the incremental logical file bytes of one complete publication attempt.
+    /// The same storage page encoders run without writes against reconstructed rows;
+    /// every selected segment includes its fresh bundle, manifest, required index
+    /// profile and one index checkpoint. Storage supplies the journal-rewrite and
+    /// replacement-catalog allowance. Existing originals, retained attempts and
+    /// quarantine renames are not counted again or treated as reclaimed space.
+    ///
+    /// This is finite offline encoding work, not a bound on memory or elapsed time.
+    /// File lengths exclude filesystem allocation/metadata overhead and other disk
+    /// users; the result is not a reservation or a guarantee against a full device.
+    /// Re-estimate and check available space before each new attempt.
+    pub fn estimate_publication_bytes(&self, profile: IndexBuildProfile) -> Result<u64> {
+        check_active(self.deadline, &self.cancellation)?;
+        let mut total = self
+            .plan
+            .estimate_publication_metadata_bytes()
+            .map_err(|error| local_publication_error(error.into()))?;
+        for segment in &self.segments {
+            check_active(self.deadline, &self.cancellation)?;
+            let staging = segment
+                .proof
+                .estimate_staging_bytes(&segment.rows)
+                .map_err(|error| local_publication_error(error.into()))?;
+            let indexes =
+                IndexBuilder::estimate_fresh_index_bytes(segment.descriptor().row_count, profile)
+                    .map_err(|error| local_publication_error(error.into()))?;
+            total = checked_headroom_sum(total, staging)
+                .and_then(|total| checked_headroom_sum(total, indexes))
+                .map_err(|error| local_publication_error(error.into()))?;
+        }
+        check_active(self.deadline, &self.cancellation)?;
+        Ok(total)
+    }
+
+    /// Estimate and check complete-attempt headroom before recording repair intent.
+    /// Keeps the original owner and leaves storage's durable publication/recovery
+    /// checks authoritative. Encoding and index verification still follow staging.
+    pub fn begin_publication(&self, profile: IndexBuildProfile) -> Result<RepairPublication<'a>> {
+        let required = self.estimate_publication_bytes(profile)?;
+        check_active(self.deadline, &self.cancellation)?;
+        self.plan
+            .begin_publication(required)
+            .map_err(|error| local_publication_error(error.into()))
+    }
+
     /// Build one provisional replacement and its selected derived indexes.
     /// Run on the maintenance worker under the retained original directory owner.
     /// The caller reserves a fresh destination beneath an existing staging parent
@@ -434,7 +479,7 @@ impl<'a> ReconstructedRepair<'a> {
             })?;
         let build = || {
             let staged = segment.proof.stage(destination, &segment.rows, limits)?;
-            self.finish_stage(staged, profile)
+            self.finish_stage(staged, profile, u64::MAX)
         };
         build().map_err(|error: eyre::Report| {
             let error = error.wrap_err(format!(
@@ -453,6 +498,7 @@ impl<'a> ReconstructedRepair<'a> {
         &self,
         staged: StagedRepairCandidate<'a>,
         profile: IndexBuildProfile,
+        max_index_logical_bytes: u64,
     ) -> Result<StagedRepairCandidate<'a>> {
         check_active(self.deadline, &self.cancellation)?;
         let dir = staged.segment_dir();
@@ -461,7 +507,7 @@ impl<'a> ReconstructedRepair<'a> {
         IndexBuilder::build_indexes(&dir, profile)?;
         check_active(self.deadline, &self.cancellation)?;
         staged.verify()?;
-        IndexBuilder::verify_indexes(&dir, profile)?;
+        verify_indexes_bounded(&dir, profile, max_index_logical_bytes)?;
         check_active(self.deadline, &self.cancellation)?;
         Ok(staged)
     }
@@ -474,6 +520,7 @@ impl<'a> ReconstructedRepair<'a> {
         segment_id: u64,
         limits: InspectionLimits,
         profile: IndexBuildProfile,
+        max_index_logical_bytes: u64,
     ) -> Result<StagedRepairCandidate<'a>> {
         check_active(self.deadline, &self.cancellation)?;
         ensure_repair!(
@@ -493,7 +540,7 @@ impl<'a> ReconstructedRepair<'a> {
             })?;
         let mut build = || {
             let staged = publication.stage_candidate(&segment.proof, &segment.rows, limits)?;
-            self.finish_stage(staged, profile)
+            self.finish_stage(staged, profile, max_index_logical_bytes)
         };
         build().map_err(local_publication_error)
     }
@@ -509,6 +556,7 @@ impl<'a> ReconstructedRepair<'a> {
         consensus: &ConsensusStore,
         limits: InspectionLimits,
         profile: IndexBuildProfile,
+        max_index_logical_bytes: u64,
     ) -> Result<std::path::PathBuf> {
         check_active(self.deadline, &self.cancellation)?;
         ensure_repair!(
@@ -517,7 +565,9 @@ impl<'a> ReconstructedRepair<'a> {
             "repair publication belongs to another reconstruction plan"
         );
         let prepared = publication
-            .prepare(stages, |dir| IndexBuilder::verify_indexes(dir, profile))
+            .prepare(stages, |dir| {
+                verify_indexes_bounded(dir, profile, max_index_logical_bytes)
+            })
             .map_err(|error| local_publication_error(error.into()))?;
         let committed = self.with_current_anchors(consensus, || {
             prepared
@@ -525,7 +575,9 @@ impl<'a> ReconstructedRepair<'a> {
                 .map_err(|error| local_publication_error(error.into()))
         })?;
         committed
-            .finish(limits, |dir| IndexBuilder::verify_indexes(dir, profile))
+            .finish(limits, |dir| {
+                verify_indexes_bounded(dir, profile, max_index_logical_bytes)
+            })
             .map_err(|error| local_publication_error(error.into()))
     }
 
@@ -595,6 +647,30 @@ pub fn finish_pending_publication(
             }
         })
         .map_err(|error| local_publication_error(error.into()))
+}
+
+fn verify_indexes_bounded(
+    dir: &Path,
+    profile: IndexBuildProfile,
+    max_index_logical_bytes: u64,
+) -> std::io::Result<()> {
+    IndexBuilder::verify_indexes_with_limit(dir, profile, max_index_logical_bytes)
+        .map_err(|error| match error {
+            IndexVerificationError::Io(error) => error,
+            IndexVerificationError::LimitExceeded { required, limit } => std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("index verification exceeds logical byte limit: required={required}, limit={limit}"),
+            ),
+        })
+}
+
+fn checked_headroom_sum(total: u64, additional: u64) -> std::io::Result<u64> {
+    total.checked_add(additional).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "repair publication size bound overflow",
+        )
+    })
 }
 
 fn local_publication_error(error: eyre::Report) -> eyre::Report {

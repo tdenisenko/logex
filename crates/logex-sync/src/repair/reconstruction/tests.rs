@@ -129,6 +129,14 @@ fn tree(root: &Path) -> Tree {
     visit(root, root, &mut result);
     result
 }
+fn file_bytes(snapshot: &Tree) -> u64 {
+    snapshot
+        .values()
+        .filter_map(|(_, bytes)| bytes.as_ref())
+        .map(|bytes| bytes.len() as u64)
+        .sum()
+}
+
 async fn original_rows(logged_blocks: &[u64]) -> Vec<LogRow> {
     let (mut source, headers) = fixture_with_logs(logged_blocks);
     let mut cursor = RepairFetcher::new(
@@ -199,9 +207,14 @@ async fn journaled_publication_preserves_split_owners_empty_blocks_and_indexes()
         let (_directory, store) = consensus(&[anchor(&headers[3])]);
         let quarantine = {
             let plan = plan(report, &seeds);
-            let mut publication = plan.begin_publication(0).unwrap();
             let rebuilt =
                 reconstruct_for_publication(&plan, logged, &store, CancellationToken::new()).await;
+            let before_estimate = tree(tmp.path());
+            let estimate = rebuilt
+                .estimate_publication_bytes(IndexBuildProfile::All)
+                .unwrap();
+            assert_eq!(tree(tmp.path()), before_estimate);
+            let mut publication = rebuilt.begin_publication(IndexBuildProfile::All).unwrap();
             if !logged.is_empty() {
                 assert_eq!(
                     plan.block_ranges(),
@@ -216,7 +229,7 @@ async fn journaled_publication_preserves_split_owners_empty_blocks_and_indexes()
                     4
                 );
             }
-            let stages = plan
+            let stages: Vec<_> = plan
                 .segment_ids()
                 .iter()
                 .map(|&id| {
@@ -226,10 +239,16 @@ async fn journaled_publication_preserves_split_owners_empty_blocks_and_indexes()
                             id,
                             stage_limits(),
                             IndexBuildProfile::All,
+                            u64::MAX,
                         )
                         .unwrap()
                 })
                 .collect();
+            let staged_bytes: u64 = stages
+                .iter()
+                .map(|stage| file_bytes(&tree(&stage.segment_dir())))
+                .sum();
+            assert!(staged_bytes <= estimate - plan.estimate_publication_metadata_bytes().unwrap());
             rebuilt
                 .publish_replacements(
                     publication,
@@ -237,6 +256,7 @@ async fn journaled_publication_preserves_split_owners_empty_blocks_and_indexes()
                     &store,
                     stage_limits(),
                     IndexBuildProfile::All,
+                    u64::MAX,
                 )
                 .unwrap()
         };
@@ -298,6 +318,7 @@ async fn publication_requires_current_anchors_and_active_reconstruction_before_s
                     seed,
                     stage_limits(),
                     IndexBuildProfile::All,
+                    u64::MAX,
                 )
                 .unwrap();
             match cause {
@@ -312,6 +333,7 @@ async fn publication_requires_current_anchors_and_active_reconstruction_before_s
                     &store,
                     stage_limits(),
                     IndexBuildProfile::All,
+                    u64::MAX,
                 )
                 .unwrap_err();
             assert_eq!(
@@ -359,6 +381,7 @@ async fn committed_repair_finishes_after_restart_and_rebuilds_missing_derived_in
                 seed,
                 stage_limits(),
                 IndexBuildProfile::All,
+                u64::MAX,
             )
             .unwrap();
         let prepared = publication
@@ -1052,4 +1075,136 @@ async fn consensus_reconstruction_empty_owner_needs_no_chain_anchor() {
     assert_eq!(kind(&error), RepairFetchErrorKind::Cancelled);
     assert!(source.body_calls.is_empty());
     assert_eq!(tree(tmp.path()), before);
+}
+
+#[tokio::test]
+async fn publication_estimates_cover_profiles_without_writes_and_observe_cancellation() {
+    for logged in [&[][..], &[0, 2, 3][..]] {
+        let rows = original_rows(logged).await;
+        let tmp = write(&rows, 3, &[]);
+        let report = inspect(tmp.path());
+        let seeds: Vec<_> = report
+            .catalog
+            .segments
+            .iter()
+            .map(|segment| segment.id)
+            .collect();
+        let plan = plan(report, &seeds);
+        let (_, headers) = fixture_with_logs(logged);
+        let (_directory, store) = consensus(&[anchor(&headers[3])]);
+        let cancellation = CancellationToken::new();
+        let rebuilt =
+            reconstruct_for_publication(&plan, logged, &store, cancellation.clone()).await;
+        let before = tree(tmp.path());
+        let metadata = plan.estimate_publication_metadata_bytes().unwrap();
+        let parent = tempfile::tempdir().unwrap();
+        let mut previous = 0;
+        for (ordinal, profile) in [
+            IndexBuildProfile::Erc20Transfer,
+            IndexBuildProfile::LogQuery,
+            IndexBuildProfile::All,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let estimate = rebuilt.estimate_publication_bytes(profile).unwrap();
+            assert!(estimate > metadata && estimate > previous);
+            previous = estimate;
+            assert_eq!(tree(tmp.path()), before);
+            // Standalone fresh stages exercise every selected owner and profile
+            // without creating a publication journal as a side effect of sizing.
+            let mut actual = 0;
+            for segment in rebuilt.segments() {
+                let destination = parent.path().join(format!(
+                    "profile-{ordinal}-segment-{}",
+                    segment.descriptor().id
+                ));
+                assert!(!destination.exists());
+                let staged = rebuilt
+                    .stage_segment(
+                        segment.descriptor().id,
+                        &destination,
+                        stage_limits(),
+                        profile,
+                    )
+                    .unwrap();
+                actual += file_bytes(&tree(&staged.segment_dir()));
+            }
+            assert!(actual <= estimate - metadata);
+            assert_eq!(tree(tmp.path()), before);
+        }
+        if !logged.is_empty() {
+            assert!(rebuilt.segments().len() > 1);
+        }
+        cancellation.cancel();
+        let error = rebuilt
+            .estimate_publication_bytes(IndexBuildProfile::All)
+            .unwrap_err();
+        assert_eq!(kind(&error), RepairFetchErrorKind::Cancelled);
+        assert_eq!(tree(tmp.path()), before);
+    }
+}
+
+#[test]
+fn complete_attempt_headroom_sum_rejects_overflow() {
+    assert_eq!(checked_headroom_sum(0, 0).unwrap(), 0);
+    assert_eq!(checked_headroom_sum(u64::MAX - 1, 1).unwrap(), u64::MAX);
+    assert_eq!(
+        checked_headroom_sum(u64::MAX, 1).unwrap_err().kind(),
+        std::io::ErrorKind::InvalidInput
+    );
+}
+
+#[tokio::test]
+async fn index_budget_rejects_staging_and_publication_before_catalog_switch() {
+    for fail_at_staging in [true, false] {
+        let logged = [0, 2, 3];
+        let rows = original_rows(&logged).await;
+        let tmp = write(&rows, 100, &[]);
+        let report = inspect(tmp.path());
+        let seed = report.catalog.active_hot_segment.unwrap();
+        let original_dir = StorageCatalogPaths::new(tmp.path().to_owned()).segment_dir(seed);
+        let original = tree(&original_dir);
+        let catalog = std::fs::read(tmp.path().join("catalog.json")).unwrap();
+        let (_, headers) = fixture_with_logs(&logged);
+        let (_directory, store) = consensus(&[anchor(&headers[3])]);
+        let plan = plan(report, &[seed]);
+        let rebuilt =
+            reconstruct_for_publication(&plan, &logged, &store, CancellationToken::new()).await;
+        let mut publication = rebuilt.begin_publication(IndexBuildProfile::All).unwrap();
+        let staged = rebuilt.stage_publication_segment(
+            &mut publication,
+            seed,
+            stage_limits(),
+            IndexBuildProfile::All,
+            if fail_at_staging { 0 } else { u64::MAX },
+        );
+        let error = if fail_at_staging {
+            staged.expect_err("zero index budget rejects stage")
+        } else {
+            rebuilt
+                .publish_replacements(
+                    publication,
+                    vec![staged.unwrap()],
+                    &store,
+                    stage_limits(),
+                    IndexBuildProfile::All,
+                    0,
+                )
+                .unwrap_err()
+        };
+        assert_eq!(
+            error
+                .chain()
+                .find_map(|cause| cause.downcast_ref::<std::io::Error>())
+                .unwrap()
+                .kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            std::fs::read(tmp.path().join("catalog.json")).unwrap(),
+            catalog
+        );
+        assert_eq!(tree(&original_dir), original);
+    }
 }

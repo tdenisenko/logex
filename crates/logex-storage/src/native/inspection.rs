@@ -5,6 +5,7 @@
 use std::{
     io,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use super::{
@@ -23,6 +24,17 @@ pub struct InspectionLimits {
     /// Payload decode-work allowance, including compressed-page framing.
     /// This is not a bound on total allocations or process RSS.
     pub max_decoded_payload_bytes: u64,
+}
+
+/// Conservative maintenance recovery allowances. Existing raw artifact lengths
+/// include uncommitted tails; these are input bounds, not a process RSS limit.
+/// Payload accounting includes framing, and each segment reserves allowance for
+/// the complete retained WAL. Bundles are inspected at catalog and published
+/// manifest references before existing recovery reads either representation.
+#[derive(Debug, Clone, Copy)]
+pub struct NativeRecoveryLimits {
+    pub primary: InspectionLimits,
+    pub wal: crate::WalReadLimits,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,13 +79,39 @@ pub struct SegmentInspection {
 /// is not evidence authorizing replacement or deletion of stored data.
 #[derive(Debug)]
 pub struct PrimaryDataInspection {
-    _owner: DataDirectoryLock,
+    _owner: Arc<DataDirectoryLock>,
     pub(super) paths: StorageCatalogPaths,
     pub catalog: NativeStorageCatalog,
     pub recovery_prerequisites: Vec<PathBuf>,
     pub segments: Vec<SegmentInspection>,
     /// Always false for this primary-data-only inspection.
     pub derived_indexes_inspected: bool,
+}
+
+impl PrimaryDataInspection {
+    /// Authoritative root retained with this inspection's exclusive owner.
+    pub fn root(&self) -> &Path {
+        self.paths.root()
+    }
+
+    /// Run existing startup recovery under this inspection's continuous owner.
+    /// This discards verified uncommitted tails and retires replayed WAL evidence;
+    /// it does not reconstruct damaged committed rows. Recovery can make durable
+    /// progress before a later error. Errors release the owner and retain the
+    /// existing recovery interlocks for a subsequent inspection/retry.
+    pub fn recover(self, limits: NativeRecoveryLimits) -> io::Result<Self> {
+        super::storage::NativeStorage::recover_inspected(
+            Arc::clone(&self._owner),
+            &self.paths,
+            &self.catalog,
+            limits,
+        )?;
+        self.reinspect(limits.primary)
+    }
+
+    pub(in crate::native) fn reinspect(self, limits: InspectionLimits) -> io::Result<Self> {
+        inspect_owned(self._owner, self.paths, limits)
+    }
 }
 
 fn contextual(stage: &str, path: &Path, error: io::Error) -> io::Error {
@@ -100,7 +138,7 @@ pub fn inspect_primary_data(
 }
 
 pub(super) fn inspect_owned(
-    owner: DataDirectoryLock,
+    owner: impl Into<Arc<DataDirectoryLock>>,
     paths: StorageCatalogPaths,
     limits: InspectionLimits,
 ) -> io::Result<PrimaryDataInspection> {
@@ -135,7 +173,7 @@ pub(super) fn inspect_owned(
         })
         .collect();
     Ok(PrimaryDataInspection {
-        _owner: owner,
+        _owner: owner.into(),
         paths,
         catalog,
         recovery_prerequisites,
@@ -169,6 +207,7 @@ pub(super) fn recovery_prerequisites(
     let mut recovery_prerequisites = Vec::new();
     for (relative, empty_regular_allowed) in [
         (super::repair::journal::JOURNAL_FILE, false),
+        (super::repair::indexes::JOURNAL_FILE, false),
         ("wal/recovery.json", false),
         ("wal/ingestion.json", false),
         ("wal/pending.wal", true),

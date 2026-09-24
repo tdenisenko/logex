@@ -51,6 +51,8 @@ fn legacy_prefix_recovery_hook(before_manifest: bool) {
     }
 }
 
+#[path = "recovery_space.rs"]
+mod recovery_space;
 #[path = "reorg.rs"]
 mod reorg;
 pub use reorg::PendingCanonicalReorg;
@@ -284,19 +286,60 @@ impl NativeStorage {
             read_view: ReadViewEpoch(Arc::new(AtomicBool::new(true))),
         };
 
-        storage.verify_recovery_evidence()?;
+        storage.recover_startup()?;
+        Ok(storage)
+    }
+
+    fn recover_startup(&mut self) -> io::Result<()> {
+        self.verify_recovery_evidence()?;
         // A prior process may have published a sync catalog without completing
         // its device flush. Make the catalog observed on this open durable
         // before recovery or maintenance can retire any of its predecessors.
-        durability::sync_directory(storage.paths.root())?;
-        storage.restore_catalog_checkpoint()?;
-        storage.ensure_active_hot_segment()?;
-        storage.replay_wal()?;
-        storage.repair_recoverable_hot_segment_artifacts()?;
-        storage.repair_recoverable_historical_segment_artifacts()?;
-        storage.verify_integrity()?;
-        storage.finish_canonical_reorg()?;
-        Ok(storage)
+        durability::sync_directory(self.paths.root())?;
+        self.restore_catalog_checkpoint()?;
+        self.ensure_active_hot_segment()?;
+        self.replay_wal()?;
+        self.repair_recoverable_hot_segment_artifacts()?;
+        self.repair_recoverable_historical_segment_artifacts()?;
+        self.verify_integrity()?;
+        self.finish_canonical_reorg()?;
+        Ok(())
+    }
+
+    pub(super) fn recover_inspected(
+        owner: Arc<DataDirectoryLock>,
+        paths: &StorageCatalogPaths,
+        inspected: &NativeStorageCatalog,
+        limits: super::inspection::NativeRecoveryLimits,
+    ) -> io::Result<()> {
+        let catalog = NativeStorageCatalog::load_existing(paths)?;
+        if &catalog != inspected {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "catalog changed since inspection; inspect again before recovery",
+            ));
+        }
+        let work = super::recovery::preflight_maintenance(paths, &catalog, limits)?;
+        let mut storage = Self {
+            config: NativeStorageConfig {
+                data_dir: paths.root().to_owned(),
+                hot_target_rows: catalog.hot_target_rows,
+                ..NativeStorageConfig::default()
+            },
+            paths: paths.clone(),
+            catalog,
+            wal: WriteAheadLog::existing(paths.root().join("wal/pending.wal")),
+            recovery_required: false,
+            pending_checkpoint: None,
+            pending_ingestion: None,
+            published_ingestion: None,
+            directory_lock: owner,
+            read_view: ReadViewEpoch(Arc::new(AtomicBool::new(true))),
+        };
+        let headroom = storage.estimate_recovery_bytes(&work)?;
+        super::repair::publication::check_headroom(paths.root(), headroom)?;
+        drop(work);
+        storage.recover_startup()
     }
 
     pub fn data_dir(&self) -> &Path {
@@ -3034,6 +3077,566 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    fn maintenance_recovery_limits() -> super::super::inspection::NativeRecoveryLimits {
+        super::super::inspection::NativeRecoveryLimits {
+            primary: super::super::inspection::InspectionLimits {
+                max_segment_rows: 100,
+                max_retained_artifact_bytes: 1024 * 1024,
+                max_decoded_payload_bytes: 1024 * 1024,
+            },
+            wal: crate::WalReadLimits {
+                max_bytes: 1024 * 1024,
+                max_rows: 100,
+            },
+        }
+    }
+
+    fn maintenance_tree(
+        root: &Path,
+    ) -> BTreeMap<PathBuf, (std::time::SystemTime, Option<Vec<u8>>)> {
+        fn visit(
+            root: &Path,
+            path: &Path,
+            out: &mut BTreeMap<PathBuf, (std::time::SystemTime, Option<Vec<u8>>)>,
+        ) {
+            let metadata = fs::metadata(path).unwrap();
+            out.insert(
+                path.strip_prefix(root).unwrap().to_owned(),
+                (
+                    metadata.modified().unwrap(),
+                    metadata.is_file().then(|| fs::read(path).unwrap()),
+                ),
+            );
+            if metadata.is_dir() {
+                for entry in fs::read_dir(path).unwrap() {
+                    visit(root, &entry.unwrap().path(), out);
+                }
+            }
+        }
+        let mut out = BTreeMap::new();
+        visit(root, root, &mut out);
+        out
+    }
+
+    fn maintenance_size_fixture(root: &Path, case: usize) -> NativeStorage {
+        if case == 4 {
+            let (mut storage, headers, _) = reorg_fixture(root);
+            storage.catalog.state.canonical_reorg =
+                Some(super::super::catalog::CanonicalReorgIntent {
+                    retained_header_count: 1,
+                    indexed_head: Some(reorg_anchor(&headers[0])),
+                });
+            storage.persist_catalog().unwrap();
+            return storage;
+        }
+        let mut storage = NativeStorage::open(NativeStorageConfig {
+            data_dir: root.to_owned(),
+            hot_target_rows: if matches!(case, 2 | 5) { 100 } else { 4 },
+            ..Default::default()
+        })
+        .unwrap();
+        match case {
+            0 => storage.write_batch(&make_rows(2, 100)).unwrap(),
+            1 => {
+                let header = ingestion_header(100, B256::ZERO);
+                ingest_test_initial_batch(
+                    &mut storage,
+                    false,
+                    &ingestion_rows(2, &header),
+                    &header,
+                )
+                .unwrap();
+            }
+            2 | 5 => {
+                // A supported identified raw historical prefix, as left by older ingestion.
+                let id = storage.ensure_active_historical_segment().unwrap();
+                let index = storage
+                    .catalog
+                    .segments
+                    .iter()
+                    .position(|s| s.id == id)
+                    .unwrap();
+                let mut descriptor = storage.catalog.segments[index].clone();
+                let initial = make_rows(2, 100);
+                let revision = crate::commitment::AppendRevision::new(
+                    descriptor.source_state.as_ref(),
+                    &initial,
+                )
+                .unwrap();
+                let identity =
+                    descriptor
+                        .source_namespace
+                        .map(|namespace| crate::column::SourceIdentity {
+                            namespace: namespace.0,
+                            generation: descriptor.generation,
+                            segment_id: id,
+                            kind: descriptor.kind,
+                        });
+                append_ingest_rows(
+                    &storage.segment_path(id),
+                    0,
+                    &initial,
+                    Publication::Durable,
+                    identity,
+                    &revision,
+                )
+                .unwrap();
+                apply_rows_to_descriptor(&mut descriptor, &initial);
+                descriptor.source_commitment = revision.next;
+                descriptor.source_state = revision.state;
+                persist_ingest_manifest(&storage.paths, &descriptor, Publication::Durable).unwrap();
+                storage.catalog.segments[index] = descriptor;
+                storage.persist_catalog().unwrap();
+            }
+            3 => {}
+            _ => unreachable!(),
+        }
+        if case == 5 {
+            let id = storage.catalog.active_historical_segment.unwrap();
+            let descriptor = storage
+                .catalog
+                .segments
+                .iter()
+                .find(|s| s.id == id)
+                .unwrap()
+                .clone();
+            compact_ingest_segment(&storage.paths, &descriptor, Publication::Durable).unwrap();
+            let dir = storage.segment_path(id);
+            let rewrite = "columns_rewrite_ffffffff_ffffffffffffffff";
+            fs::create_dir(dir.join(rewrite)).unwrap();
+            fs::rename(dir.join("columns"), dir.join(rewrite).join("columns")).unwrap();
+            let mut manifest = SegmentManifest::load(&storage.paths.segment_manifest_path(id))
+                .unwrap()
+                .unwrap();
+            for column in &mut manifest.columns {
+                column.data_path = format!("{rewrite}/{}", column.data_path);
+                if let Some(path) = &mut column.page_index_path {
+                    *path = format!("{rewrite}/{path}");
+                }
+                if let Some(path) = &mut column.null_bitmap_path {
+                    *path = format!("{rewrite}/{path}");
+                }
+            }
+            super::super::segment::persist_segment_manifest_with_columns(
+                &storage.paths,
+                &descriptor,
+                manifest.columns,
+            )
+            .unwrap();
+        }
+        storage.checkpoint_durable().unwrap();
+        let pending = make_rows(if matches!(case, 2 | 5) { 2 } else { 7 }, 200);
+        if case < 2 {
+            storage.begin_wal_batch(&pending).unwrap();
+        } else {
+            storage
+                .begin_checkpoint_batch(&pending, IngestRoute::Historical)
+                .unwrap();
+        }
+        // Model the same hidden startup state used by recover_inspected, retaining
+        // the existing directory owner without an ordinary open or replay.
+        storage.pending_checkpoint = None;
+        storage.pending_ingestion = None;
+        storage.published_ingestion = None;
+        storage.catalog = NativeStorageCatalog::load_existing(&storage.paths).unwrap();
+        storage
+    }
+
+    fn maintenance_logical_growth(
+        before: &BTreeMap<PathBuf, (std::time::SystemTime, Option<Vec<u8>>)>,
+        after: &BTreeMap<PathBuf, (std::time::SystemTime, Option<Vec<u8>>)>,
+    ) -> u64 {
+        // Count every grown/new file independently: deletion or truncation of
+        // original WAL/columns never provides credit against another file.
+        after
+            .iter()
+            .map(|(path, (_, bytes))| {
+                let old = before
+                    .get(path)
+                    .and_then(|(_, bytes)| bytes.as_ref())
+                    .map_or(0, Vec::len);
+                bytes
+                    .as_ref()
+                    .map_or(0, |bytes| bytes.len().saturating_sub(old)) as u64
+            })
+            .sum()
+    }
+
+    #[test]
+    fn maintenance_total_size_covers_replay_routes_and_reorg_without_estimation_writes() {
+        for case in 0..6 {
+            let mut failures = vec![usize::MAX];
+            let mut cursor = 0;
+            while cursor < failures.len() {
+                let failure = failures[cursor];
+                cursor += 1;
+                let tmp = TempDir::new().unwrap();
+                let mut storage = maintenance_size_fixture(tmp.path(), case);
+                let before = maintenance_tree(tmp.path());
+                let work = super::super::recovery::preflight_maintenance(
+                    &storage.paths,
+                    &storage.catalog,
+                    maintenance_recovery_limits(),
+                )
+                .unwrap();
+                let estimate = storage.estimate_recovery_bytes(&work).unwrap();
+                assert_eq!(
+                    maintenance_tree(tmp.path()),
+                    before,
+                    "estimation mutated case {case}"
+                );
+                durability::inject_failure(failure);
+                let result = storage.recover_startup();
+                let events = durability::take_events();
+                let observed = maintenance_logical_growth(&before, &maintenance_tree(tmp.path()));
+                assert!(
+                    observed <= estimate,
+                    "case {case}, failure {failure}: growth={observed}, estimate={estimate}"
+                );
+                if failure == usize::MAX {
+                    result.unwrap();
+                    assert!(observed > 0);
+                    assert_eq!(storage.total_rows(), [9, 9, 4, 7, 4, 4][case]);
+                    match case {
+                        0 | 1 => assert_eq!(
+                            storage
+                                .catalog
+                                .segments
+                                .iter()
+                                .filter(|s| s.row_count > 0)
+                                .count(),
+                            3
+                        ),
+                        2 | 5 => {
+                            let id = storage.catalog.active_historical_segment.unwrap();
+                            assert!(
+                                super::super::segment::segment_is_compacted(&storage.paths, id)
+                                    .unwrap()
+                            );
+                            assert!(
+                                storage
+                                    .catalog
+                                    .segments
+                                    .iter()
+                                    .find(|s| s.id == id)
+                                    .unwrap()
+                                    .column_bundle
+                                    .is_none()
+                            );
+                        }
+                        3 => {
+                            let id = storage.catalog.active_historical_segment.unwrap();
+                            assert_eq!(
+                                storage
+                                    .catalog
+                                    .segments
+                                    .iter()
+                                    .find(|s| s.id == id)
+                                    .unwrap()
+                                    .row_count,
+                                3
+                            );
+                        }
+                        4 => {
+                            assert!(storage.catalog.state.canonical_reorg.is_none());
+                            assert_eq!(reorg_canonical_blocks(&storage), vec![100]);
+                        }
+                        _ => unreachable!(),
+                    }
+                    // Observe retained growth at representative real publication
+                    // boundaries as well as completion. This is not a filesystem
+                    // allocation/reservation test or an exhaustive peak sampler.
+                    for name in ["rename_temporary", "rows_committed", "reorg_rows_applied"] {
+                        if let Some(index) = events.iter().rposition(|(event, _)| *event == name) {
+                            failures.push(index);
+                        }
+                    }
+                    assert!(failures.len() > 1);
+                } else {
+                    assert!(result.is_err(), "case {case}, failure {failure}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn maintenance_size_includes_empty_hot_creation_with_only_incomplete_wal_tail() {
+        let tmp = TempDir::new().unwrap();
+        let mut storage = NativeStorage::open(NativeStorageConfig {
+            data_dir: tmp.path().to_owned(),
+            ..Default::default()
+        })
+        .unwrap();
+        let original = storage.catalog.active_hot_segment.take().unwrap();
+        storage.catalog.segments.clear();
+        storage.catalog.persist(&storage.paths).unwrap();
+        fs::remove_dir_all(storage.segment_path(original)).unwrap();
+        fs::write(tmp.path().join("wal/pending.wal"), [1, 2, 3]).unwrap();
+        let expected_id = storage.catalog.next_segment_id;
+        let before = maintenance_tree(tmp.path());
+        let work = super::super::recovery::preflight_maintenance(
+            &storage.paths,
+            &storage.catalog,
+            maintenance_recovery_limits(),
+        )
+        .unwrap();
+        assert!(work.rows.is_empty());
+        assert!(work.journal.is_none());
+        let estimate = storage.estimate_recovery_bytes(&work).unwrap();
+        let metadata_allowance = 2 * super::super::catalog::MAX_CATALOG_BYTES
+            + 2 * super::super::recovery::MAX_JOURNAL_BYTES;
+        assert!(
+            estimate > metadata_allowance,
+            "new empty hot manifest was not included"
+        );
+        assert_eq!(maintenance_tree(tmp.path()), before);
+        storage.recover_startup().unwrap();
+        let hot = storage.catalog.active_hot_segment().unwrap();
+        assert_eq!(hot.id, expected_id);
+        assert_eq!(hot.row_count, 0);
+        assert_eq!(storage.catalog.segments.len(), 1);
+        assert!(storage.paths.segment_manifest_path(hot.id).is_file());
+        assert_eq!(
+            fs::metadata(tmp.path().join("wal/pending.wal"))
+                .unwrap()
+                .len(),
+            0
+        );
+        assert!(maintenance_logical_growth(&before, &maintenance_tree(tmp.path())) <= estimate);
+    }
+
+    #[test]
+    fn maintenance_wal_and_pending_reorg_reject_before_any_write() {
+        let tmp = TempDir::new().unwrap();
+        let (mut storage, headers, _) = reorg_fixture(tmp.path());
+        storage.begin_wal_batch(&make_rows(1, 200)).unwrap();
+        storage.catalog.state.canonical_reorg = Some(super::super::catalog::CanonicalReorgIntent {
+            retained_header_count: 1,
+            indexed_head: Some(reorg_anchor(&headers[0])),
+        });
+        storage.catalog.persist(&storage.paths).unwrap();
+        drop(storage);
+        let before = maintenance_tree(tmp.path());
+        let limits = maintenance_recovery_limits();
+        let report =
+            super::super::inspection::inspect_primary_data(tmp.path(), limits.primary).unwrap();
+        let error = report.recover(limits).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+        assert!(
+            error.to_string().contains("WAL rows and reorg intent"),
+            "{error}"
+        );
+        assert_eq!(maintenance_tree(tmp.path()), before);
+    }
+
+    #[test]
+    fn maintenance_recovery_replays_interrupted_raw_append_under_same_owner() {
+        let tmp = TempDir::new().unwrap();
+        let config = NativeStorageConfig {
+            data_dir: tmp.path().to_owned(),
+            hot_target_rows: 100,
+            ..Default::default()
+        };
+        let initial = make_rows(2, 100);
+        let pending = make_rows(2, 200);
+        let mut storage = NativeStorage::open(config).unwrap();
+        storage.write_batch(&initial).unwrap();
+        storage.checkpoint_durable().unwrap();
+        storage.mark_non_canonical(initial[0].block_hash).unwrap();
+        let dir = storage.segment_path(storage.catalog.active_hot_segment.unwrap());
+        storage.begin_wal_batch(&pending).unwrap();
+        append_rows(&dir, 2, &pending).unwrap();
+        let bytes = fs::read(dir.join("address.col")).unwrap();
+        let mut prefix = bytes[..ColumnFileHeader::SIZE + 2 * 20].to_vec();
+        prefix[8..16].copy_from_slice(&2u64.to_le_bytes());
+        fs::write(dir.join("address.col"), prefix).unwrap();
+        drop(storage);
+        let limits = maintenance_recovery_limits();
+        let report =
+            super::super::inspection::inspect_primary_data(tmp.path(), limits.primary).unwrap();
+        assert_eq!(
+            DataDirectoryLock::acquire_existing(tmp.path())
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::WouldBlock
+        );
+        let recovered = report.recover(limits).unwrap();
+        assert_eq!(
+            DataDirectoryLock::acquire_existing(tmp.path())
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::WouldBlock
+        );
+        assert!(recovered.recovery_prerequisites.is_empty());
+        let reader = SegmentReader::open(&dir).unwrap();
+        assert_eq!(
+            reader.read_log_rows(None).unwrap(),
+            [initial, pending].concat()
+        );
+        assert!(!reader.read_canonical().unwrap().is_present(0));
+        assert!(
+            fs::read(tmp.path().join("wal/pending.wal"))
+                .unwrap()
+                .is_empty()
+        );
+        drop(recovered);
+        assert!(DataDirectoryLock::acquire_existing(tmp.path()).is_ok());
+    }
+
+    #[test]
+    fn maintenance_recovery_limits_and_unsupported_evidence_fail_before_writes() {
+        for failure in 0..6 {
+            let tmp = TempDir::new().unwrap();
+            let mut storage = NativeStorage::open(NativeStorageConfig {
+                data_dir: tmp.path().to_owned(),
+                ..Default::default()
+            })
+            .unwrap();
+            storage.write_batch(&make_rows(2, 100)).unwrap();
+            storage.checkpoint_durable().unwrap();
+            storage.begin_wal_batch(&make_rows(1, 200)).unwrap();
+            drop(storage);
+            if failure == 5 {
+                fs::write(
+                    tmp.path().join("wal/ingestion.json"),
+                    b"retained unsupported evidence",
+                )
+                .unwrap();
+            }
+            let mut limits = maintenance_recovery_limits();
+            match failure {
+                0 => limits.wal.max_bytes = 0,
+                1 => limits.wal.max_rows = 0,
+                2 => limits.primary.max_segment_rows = 2,
+                3 => limits.primary.max_retained_artifact_bytes = 1,
+                4 => limits.primary.max_decoded_payload_bytes = 1,
+                _ => {}
+            }
+            let before = maintenance_tree(tmp.path());
+            let report =
+                super::super::inspection::inspect_primary_data(tmp.path(), limits.primary).unwrap();
+            let error = report.recover(limits).unwrap_err();
+            assert_eq!(
+                error.kind(),
+                if failure == 5 {
+                    io::ErrorKind::Unsupported
+                } else {
+                    io::ErrorKind::InvalidInput
+                },
+                "failure {failure}: {error}"
+            );
+            assert_eq!(maintenance_tree(tmp.path()), before);
+            assert!(DataDirectoryLock::acquire_existing(tmp.path()).is_ok());
+        }
+    }
+
+    #[test]
+    fn maintenance_recovery_handles_bundled_history_with_live_and_historical_wal() {
+        for historical in [false, true] {
+            let tmp = TempDir::new().unwrap();
+            let mut storage = NativeStorage::open(NativeStorageConfig {
+                data_dir: tmp.path().to_owned(),
+                hot_target_rows: 100,
+                ..Default::default()
+            })
+            .unwrap();
+            let initial = make_rows(3, 100);
+            let pending = make_rows(2, 200);
+            storage.write_historical_batch(&initial).unwrap();
+            storage.checkpoint_durable().unwrap();
+            let historical_id = storage.catalog.active_historical_segment.unwrap();
+            assert!(
+                storage
+                    .catalog
+                    .segments
+                    .iter()
+                    .find(|segment| segment.id == historical_id)
+                    .unwrap()
+                    .column_bundle
+                    .is_some()
+            );
+            if historical {
+                storage
+                    .begin_checkpoint_batch(&pending, IngestRoute::Historical)
+                    .unwrap();
+                // The manifest and bundle advance, but the durable catalog still
+                // selects the original table. Preflight must bound both tables.
+                storage.write_historical_rows(&pending[..1]).unwrap();
+            } else {
+                storage.finalize_historical_segment().unwrap();
+                storage.begin_wal_batch(&pending).unwrap();
+            }
+            drop(storage);
+            let limits = maintenance_recovery_limits();
+            let report =
+                super::super::inspection::inspect_primary_data(tmp.path(), limits.primary).unwrap();
+            assert_eq!(report.root(), tmp.path());
+            let recovered = report.recover(limits).unwrap();
+            assert!(recovered.recovery_prerequisites.is_empty());
+            assert_eq!(
+                recovered
+                    .catalog
+                    .segments
+                    .iter()
+                    .map(|segment| segment.row_count)
+                    .sum::<u64>(),
+                5
+            );
+            assert!(recovered.segments.iter().all(|segment| matches!(
+                segment.disposition,
+                super::super::inspection::PrimaryDataDisposition::CommitmentVerified
+            )));
+            let mut actual = Vec::new();
+            for segment in &recovered.catalog.segments {
+                if segment.row_count > 0 {
+                    actual.extend(
+                        SegmentReader::open(
+                            &StorageCatalogPaths::new(tmp.path().to_owned())
+                                .segment_dir(segment.id),
+                        )
+                        .unwrap()
+                        .read_log_rows(None)
+                        .unwrap(),
+                    );
+                }
+            }
+            actual.sort_by_key(|row| row.block_number);
+            assert_eq!(actual, [initial, pending].concat());
+        }
+    }
+
+    #[test]
+    fn maintenance_bundled_payload_limit_rejects_before_recovery_writes() {
+        let tmp = TempDir::new().unwrap();
+        let mut storage = NativeStorage::open(NativeStorageConfig {
+            data_dir: tmp.path().to_owned(),
+            hot_target_rows: 100,
+            ..Default::default()
+        })
+        .unwrap();
+        let mut initial = make_rows(3, 100);
+        for row in &mut initial {
+            row.data = Bytes::from(vec![7; 1024]);
+            row.data_len = 1024;
+        }
+        storage.write_historical_batch(&initial).unwrap();
+        storage.checkpoint_durable().unwrap();
+        storage.begin_wal_batch(&make_rows(1, 200)).unwrap();
+        drop(storage);
+        let mut limits = maintenance_recovery_limits();
+        limits.primary.max_decoded_payload_bytes = 1024;
+        let before = maintenance_tree(tmp.path());
+        let report =
+            super::super::inspection::inspect_primary_data(tmp.path(), limits.primary).unwrap();
+        let error = report.recover(limits).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{error}");
+        assert!(
+            error.to_string().contains("decoded_payload_bytes"),
+            "{error}"
+        );
+        assert_eq!(maintenance_tree(tmp.path()), before);
+    }
 
     #[test]
     fn read_views_invalidate_on_reorg_failure_and_close_but_not_append_or_noop() {

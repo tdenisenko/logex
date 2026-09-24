@@ -585,10 +585,12 @@ impl RepairFetcher {
 }
 
 mod assessment;
+mod execution;
 pub use assessment::{
     RepairAssessment, RepairAssessmentLimits, RepairAssessmentReport, RepairIssue,
     SegmentRepairAssessment, SegmentRepairDisposition, assess_repair,
 };
+pub use execution::{RepairExecutionLimits, RepairExecutionOutcome, execute_repair};
 mod reconstruction;
 pub use reconstruction::{
     ReconstructedRepair, ReconstructedSegment, RepairReconstruction, RepairReconstructionLimits,

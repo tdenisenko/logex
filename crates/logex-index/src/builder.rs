@@ -54,13 +54,71 @@ impl From<io::Error> for IndexVerificationError {
 pub struct IndexBuilder;
 
 impl IndexBuilder {
+    /// Bound incremental file bytes for a fresh selected index profile.
+    /// Includes each derived file's integrity framing and a 4096-byte publication
+    /// checkpoint allowance. This counts logical file lengths, not allocated
+    /// filesystem blocks, and excludes source/bundle/journal files, directory and
+    /// filesystem overhead, retained attempts, and space used by other writers.
+    /// It is neither a disk reservation nor a guarantee that publication succeeds.
+    /// Each current B-tree builder inserts a source row under at most one key.
+    pub fn estimate_fresh_index_bytes(
+        row_count: u64,
+        profile: IndexBuildProfile,
+    ) -> io::Result<u64> {
+        if row_count > u64::from(u32::MAX) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "index source exceeds row ID limit",
+            ));
+        }
+        // Storage's index_checkpoint::MAX_CHECKPOINT_BYTES bounds the complete
+        // publication marker, including its envelope, independently of profile.
+        let mut total = 4096u64;
+        for name in Self::required_index_files(profile) {
+            let logical = if *name == ERC20_EVENTS_BLOOM_FILE {
+                crate::transfer_bloom::encoded_logical_size_for_rows(row_count)?
+            } else {
+                let key_size = match *name {
+                    "address.bptree" => 20,
+                    "topic0.bptree" | "block_hash.bptree" => 32,
+                    "block_number.bptree" | "timestamp.bptree" => 8,
+                    "address_topic0.bptree" => 20 + 32,
+                    "address_topic0_block.bptree" => 20 + 32 + 8,
+                    "topic0_topic1.bptree" => 32 + 32,
+                    "address_topic0_topic1.bptree" | "address_topic0_topic2.bptree" => 20 + 32 + 32,
+                    _ => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            "index profile contains an artifact without a size bound",
+                        ));
+                    }
+                };
+                crate::btree::row_partitioned_logical_size_bound(row_count, key_size)?
+            };
+            total = total
+                .checked_add(crate::index_file::physical_len(logical)?)
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "index profile size bound overflow",
+                    )
+                })?;
+        }
+        Ok(total)
+    }
+
     /// Verify every required published artifact without rebuilding or modifying it.
     /// Holds the checkpoint's read lock while streaming all logical bytes through
     /// the bound reader's page checks. This verifies derived-file integrity, not
     /// the semantic correspondence of index entries to authenticated source rows.
     /// The caller must retain storage ownership for offline source stability.
     pub fn verify_indexes(partition_dir: &Path, profile: IndexBuildProfile) -> io::Result<()> {
-        match Self::verify_indexes_inner(partition_dir, profile, None) {
+        match Self::verify_indexes_inner(
+            partition_dir,
+            &partition_dir.join("indexes"),
+            profile,
+            None,
+        ) {
             Ok(()) => Ok(()),
             Err(IndexVerificationError::Io(error)) => Err(error),
             Err(IndexVerificationError::LimitExceeded { .. }) => {
@@ -84,17 +142,37 @@ impl IndexBuilder {
         profile: IndexBuildProfile,
         max_total_logical_bytes: u64,
     ) -> Result<(), IndexVerificationError> {
-        Self::verify_indexes_inner(partition_dir, profile, Some(max_total_logical_bytes))
+        Self::verify_indexes_at_with_limit(
+            partition_dir,
+            &partition_dir.join("indexes"),
+            profile,
+            max_total_logical_bytes,
+        )
+    }
+
+    /// Verify an explicitly staged index publication against its unchanged source.
+    pub fn verify_indexes_at_with_limit(
+        source_dir: &Path,
+        index_dir: &Path,
+        profile: IndexBuildProfile,
+        max_total_logical_bytes: u64,
+    ) -> Result<(), IndexVerificationError> {
+        Self::verify_indexes_inner(
+            source_dir,
+            index_dir,
+            profile,
+            Some(max_total_logical_bytes),
+        )
     }
 
     fn verify_indexes_inner(
         partition_dir: &Path,
+        index_dir: &Path,
         profile: IndexBuildProfile,
         limit: Option<u64>,
     ) -> Result<(), IndexVerificationError> {
-        let index_dir = partition_dir.join("indexes");
         if limit.is_some() {
-            require_ordinary_index_path(&index_dir, true)?;
+            require_ordinary_index_path(index_dir, true)?;
             let marker = index_dir.join("index-checkpoint");
             match require_ordinary_index_path(&marker, false) {
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {}
@@ -111,7 +189,7 @@ impl IndexBuilder {
             }
         }
         let reader = SegmentReader::open_projected(partition_dir, &[])?;
-        let checkpoint = IndexReadCheckpoint::open(partition_dir, &reader)?.ok_or_else(|| {
+        let checkpoint = IndexReadCheckpoint::open_at(index_dir, &reader)?.ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
                 "index checkpoint is missing or stale",
@@ -218,26 +296,44 @@ impl IndexBuilder {
     /// Build indexes for a partition using the requested index profile.
     pub fn build_indexes(partition_dir: &Path, profile: IndexBuildProfile) -> std::io::Result<()> {
         let checkpoint = Self::begin_publication(partition_dir)?;
+        let index_dir = partition_dir.join("indexes");
+        Self::build_indexes_unpublished(partition_dir, &index_dir, profile)?;
+        Self::publish_at(&index_dir, checkpoint)
+    }
+
+    /// Build a fresh index tree without copying or modifying primary columns.
+    /// Caller ownership must keep the source and staging paths stable. Failure
+    /// retains the partial stage and never withdraws the source's existing indexes.
+    pub fn build_fresh_indexes_at(
+        source_dir: &Path,
+        index_dir: &Path,
+        profile: IndexBuildProfile,
+    ) -> io::Result<()> {
+        let checkpoint = IndexBuildCheckpoint::begin_fresh_at(source_dir, index_dir)?;
+        Self::build_indexes_unpublished(source_dir, index_dir, profile)?;
+        Self::publish_at(index_dir, checkpoint)
+    }
+
+    fn build_indexes_unpublished(
+        partition_dir: &Path,
+        index_dir: &Path,
+        profile: IndexBuildProfile,
+    ) -> io::Result<()> {
         match profile {
             IndexBuildProfile::All => {
-                Self::build_primary_indexes_unpublished(partition_dir)?;
-                CompositeIndexBuilder::build_composite_indexes(partition_dir)?;
-                let index_dir = partition_dir.join("indexes");
-                Erc20EventBloom::build(partition_dir, &index_dir)?;
+                Self::build_primary_indexes_unpublished(partition_dir, index_dir)?;
+                CompositeIndexBuilder::build_log_query_indexes(partition_dir, index_dir)?;
+                Erc20EventBloom::build(partition_dir, index_dir)?;
             }
             IndexBuildProfile::LogQuery => {
-                Self::build_log_query_primary_indexes_unpublished(partition_dir)?;
-                let index_dir = partition_dir.join("indexes");
-                CompositeIndexBuilder::build_log_query_indexes(partition_dir, &index_dir)?;
-                Erc20EventBloom::build(partition_dir, &index_dir)?;
+                Self::build_log_query_primary_indexes_unpublished(partition_dir, index_dir)?;
+                CompositeIndexBuilder::build_log_query_indexes(partition_dir, index_dir)?;
+                Erc20EventBloom::build(partition_dir, index_dir)?;
             }
             IndexBuildProfile::Erc20Transfer => {
-                let index_dir = partition_dir.join("indexes");
-                fs::create_dir_all(&index_dir)?;
-                Erc20EventBloom::build(partition_dir, &index_dir)?;
+                Erc20EventBloom::build(partition_dir, index_dir)?;
             }
         }
-        Self::publish(partition_dir, checkpoint)?;
         Ok(())
     }
 
@@ -309,8 +405,11 @@ impl IndexBuilder {
         Ok(checkpoint)
     }
 
-    fn publish(partition_dir: &Path, mut checkpoint: IndexBuildCheckpoint) -> std::io::Result<()> {
-        let index_dir = partition_dir.join("indexes");
+    fn publish(partition_dir: &Path, checkpoint: IndexBuildCheckpoint) -> std::io::Result<()> {
+        Self::publish_at(&partition_dir.join("indexes"), checkpoint)
+    }
+
+    fn publish_at(index_dir: &Path, mut checkpoint: IndexBuildCheckpoint) -> std::io::Result<()> {
         for name in Self::required_index_files(IndexBuildProfile::All)
             .iter()
             .copied()
@@ -358,17 +457,22 @@ impl IndexBuilder {
     /// Build the primary indexes needed by common log-query access paths.
     pub fn build_log_query_primary_indexes(partition_dir: &Path) -> std::io::Result<()> {
         let checkpoint = Self::begin_publication(partition_dir)?;
-        Self::build_log_query_primary_indexes_unpublished(partition_dir)?;
+        Self::build_log_query_primary_indexes_unpublished(
+            partition_dir,
+            &partition_dir.join("indexes"),
+        )?;
         Self::publish(partition_dir, checkpoint)?;
         Ok(())
     }
 
-    fn build_log_query_primary_indexes_unpublished(partition_dir: &Path) -> std::io::Result<()> {
-        let index_dir = partition_dir.join("indexes");
-        fs::create_dir_all(&index_dir)?;
+    fn build_log_query_primary_indexes_unpublished(
+        partition_dir: &Path,
+        index_dir: &Path,
+    ) -> std::io::Result<()> {
+        fs::create_dir_all(index_dir)?;
 
-        Self::build_block_number_index(partition_dir, &index_dir)?;
-        Self::build_timestamp_index(partition_dir, &index_dir)?;
+        Self::build_block_number_index(partition_dir, index_dir)?;
+        Self::build_timestamp_index(partition_dir, index_dir)?;
 
         Ok(())
     }
@@ -431,20 +535,22 @@ impl IndexBuilder {
     /// Build all primary indexes for a partition and write them to the indexes/ subdirectory.
     pub fn build_primary_indexes(partition_dir: &Path) -> std::io::Result<()> {
         let checkpoint = Self::begin_publication(partition_dir)?;
-        Self::build_primary_indexes_unpublished(partition_dir)?;
+        Self::build_primary_indexes_unpublished(partition_dir, &partition_dir.join("indexes"))?;
         Self::publish(partition_dir, checkpoint)?;
         Ok(())
     }
 
-    fn build_primary_indexes_unpublished(partition_dir: &Path) -> std::io::Result<()> {
-        let index_dir = partition_dir.join("indexes");
-        fs::create_dir_all(&index_dir)?;
+    fn build_primary_indexes_unpublished(
+        partition_dir: &Path,
+        index_dir: &Path,
+    ) -> std::io::Result<()> {
+        fs::create_dir_all(index_dir)?;
 
-        Self::build_address_index(partition_dir, &index_dir)?;
-        Self::build_topic0_index(partition_dir, &index_dir)?;
-        Self::build_block_number_index(partition_dir, &index_dir)?;
-        Self::build_timestamp_index(partition_dir, &index_dir)?;
-        Self::build_block_hash_index(partition_dir, &index_dir)?;
+        Self::build_address_index(partition_dir, index_dir)?;
+        Self::build_topic0_index(partition_dir, index_dir)?;
+        Self::build_block_number_index(partition_dir, index_dir)?;
+        Self::build_timestamp_index(partition_dir, index_dir)?;
+        Self::build_block_hash_index(partition_dir, index_dir)?;
 
         Ok(())
     }
@@ -659,6 +765,199 @@ mod tests {
         let mut entries = std::collections::BTreeMap::new();
         visit(path, path, &mut entries);
         entries
+    }
+
+    #[test]
+    fn fresh_staged_indexes_preserve_source_and_verify_every_profile() {
+        let source = tempfile::tempdir().unwrap();
+        let stages = tempfile::tempdir().unwrap();
+        logex_storage::ColumnFile::write_batch(source.path(), &make_test_rows()).unwrap();
+        IndexBuilder::build_all_indexes(source.path()).unwrap();
+        let before = verification_tree(source.path());
+        for (index, profile) in [
+            IndexBuildProfile::All,
+            IndexBuildProfile::LogQuery,
+            IndexBuildProfile::Erc20Transfer,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let stage = stages.path().join(format!("stage-{index}"));
+            IndexBuilder::build_fresh_indexes_at(source.path(), &stage, profile).unwrap();
+            let staged = verification_tree(&stage);
+            IndexBuilder::verify_indexes_at_with_limit(source.path(), &stage, profile, u64::MAX)
+                .unwrap();
+            assert_eq!(verification_tree(source.path()), before);
+            assert_eq!(verification_tree(&stage), staged);
+            assert_eq!(
+                IndexBuilder::build_fresh_indexes_at(source.path(), &stage, profile)
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::AlreadyExists
+            );
+            assert_eq!(verification_tree(&stage), staged);
+        }
+        logex_storage::ColumnFile::write_batch(source.path(), &make_test_rows()[..1]).unwrap();
+        assert!(
+            IndexBuilder::verify_indexes_at_with_limit(
+                source.path(),
+                &stages.path().join("stage-0"),
+                IndexBuildProfile::All,
+                u64::MAX
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn fresh_staging_failure_preserves_source_and_partial_output() {
+        let source = tempfile::tempdir().unwrap();
+        let stages = tempfile::tempdir().unwrap();
+        logex_storage::ColumnFile::write_batch(source.path(), &make_test_rows()).unwrap();
+        IndexBuilder::build_all_indexes(source.path()).unwrap();
+        fs::remove_file(source.path().join("timestamp.col")).unwrap();
+        let before = verification_tree(source.path());
+        let stage = stages.path().join("stage");
+        assert!(
+            IndexBuilder::build_fresh_indexes_at(
+                source.path(),
+                &stage,
+                IndexBuildProfile::LogQuery
+            )
+            .is_err()
+        );
+        assert!(stage.is_dir());
+        assert!(stage.join("block_number.bptree").is_file());
+        assert!(!stage.join("index-checkpoint").exists());
+        assert_eq!(verification_tree(source.path()), before);
+        let missing = stages.path().join("missing/stage");
+        assert!(
+            IndexBuilder::build_fresh_indexes_at(source.path(), &missing, IndexBuildProfile::All)
+                .is_err()
+        );
+        assert!(!stages.path().join("missing").exists());
+    }
+
+    #[test]
+    fn fresh_index_estimates_cover_real_profiles_and_key_distributions() {
+        // 4097 consecutive matches cross Roaring's array-to-bitmap threshold.
+        for (shape, count) in [
+            ("empty", 0),
+            ("sparse", 17),
+            ("distinct", 96),
+            ("dense", 4097),
+        ] {
+            let prototype = make_test_rows().remove(0);
+            let rows: Vec<_> = (0..count)
+                .map(|index| {
+                    let mut row = prototype.clone();
+                    row.log_index = index;
+                    row.data = bytes!("");
+                    row.data_len = 0;
+                    if shape == "distinct" {
+                        let mut address = [0u8; 20];
+                        address[16..].copy_from_slice(&index.to_be_bytes());
+                        row.address = Address::from(address);
+                        let mut hash = [0u8; 32];
+                        hash[28..].copy_from_slice(&index.to_be_bytes());
+                        row.block_hash = B256::from(hash);
+                        row.block_number += u64::from(index);
+                        row.timestamp += u64::from(index);
+                        row.topic0 = Some(B256::from(hash));
+                        row.topic1 = Some(B256::from(hash));
+                        row.topic2 = Some(B256::from(hash));
+                    } else if shape == "dense" || index % 4 == 0 {
+                        row.topic0 = Some(crate::transfer_topic0());
+                        row.topic1 = Some(B256::repeat_byte(1));
+                        row.topic2 = Some(B256::repeat_byte(2));
+                    } else {
+                        row.topic0 = None;
+                        row.topic1 = None;
+                        row.topic2 = None;
+                    }
+                    row
+                })
+                .collect();
+            for profile in [
+                IndexBuildProfile::All,
+                IndexBuildProfile::LogQuery,
+                IndexBuildProfile::Erc20Transfer,
+            ] {
+                let dir = TempDir::new().unwrap();
+                ColumnFile::write_batch(dir.path(), &rows).unwrap();
+                IndexBuilder::build_indexes(dir.path(), profile).unwrap();
+                IndexBuilder::verify_indexes(dir.path(), profile).unwrap();
+                let entries: Vec<_> = fs::read_dir(dir.path().join("indexes"))
+                    .unwrap()
+                    .map(|entry| entry.unwrap())
+                    .collect();
+                assert_eq!(
+                    entries.len(),
+                    IndexBuilder::required_index_files(profile).len() + 1
+                );
+                let actual: u64 = entries
+                    .iter()
+                    .map(|entry| {
+                        let metadata = fs::symlink_metadata(entry.path()).unwrap();
+                        assert!(metadata.is_file());
+                        metadata.len()
+                    })
+                    .sum();
+                let bound =
+                    IndexBuilder::estimate_fresh_index_bytes(rows.len() as u64, profile).unwrap();
+                assert!(actual <= bound, "{shape} {profile:?}: {actual} > {bound}");
+            }
+        }
+    }
+
+    #[test]
+    fn fresh_index_estimates_check_row_addressing_and_boundaries() {
+        for profile in [
+            IndexBuildProfile::All,
+            IndexBuildProfile::LogQuery,
+            IndexBuildProfile::Erc20Transfer,
+        ] {
+            let mut previous = 0;
+            for rows in [
+                0,
+                1,
+                4096,
+                4097,
+                8192,
+                8193,
+                65536,
+                65537,
+                u64::from(u32::MAX),
+            ] {
+                let estimate = IndexBuilder::estimate_fresh_index_bytes(rows, profile).unwrap();
+                assert!(estimate >= previous);
+                assert!(estimate > 4096);
+                previous = estimate;
+            }
+            for rows in [u64::from(u32::MAX) + 1, u64::MAX] {
+                assert_eq!(
+                    IndexBuilder::estimate_fresh_index_bytes(rows, profile)
+                        .unwrap_err()
+                        .kind(),
+                    io::ErrorKind::InvalidInput
+                );
+            }
+        }
+        let all = IndexBuilder::estimate_fresh_index_bytes(96, IndexBuildProfile::All).unwrap();
+        let query =
+            IndexBuilder::estimate_fresh_index_bytes(96, IndexBuildProfile::LogQuery).unwrap();
+        let bloom =
+            IndexBuilder::estimate_fresh_index_bytes(96, IndexBuildProfile::Erc20Transfer).unwrap();
+        assert!(all > query && query > bloom);
+        let logical = 20u64 + 262144;
+        let expected_empty_bloom = 4096 + 48 + logical + 8 * logical.div_ceil(4096);
+        assert_eq!(
+            IndexBuilder::estimate_fresh_index_bytes(0, IndexBuildProfile::Erc20Transfer).unwrap(),
+            expected_empty_bloom
+        );
+        assert!(crate::btree::row_partitioned_logical_size_bound(u64::MAX, 84).is_err());
+        assert!(crate::btree::row_partitioned_logical_size_bound(1, u64::MAX).is_err());
+        assert!(crate::index_file::physical_len(u64::MAX).is_err());
     }
 
     #[test]
