@@ -17,6 +17,7 @@ fn config() -> HttpServerConfig {
     HttpServerConfig {
         dashboard_enabled: true,
         dashboard_password: Some("secret".into()),
+        ..Default::default()
     }
 }
 async fn json(response: Response) -> serde_json::Value {
@@ -127,6 +128,7 @@ async fn dashboard_policy_and_passwordless_maintenance_match_normal_server() {
             HttpServerConfig {
                 dashboard_enabled: enabled,
                 dashboard_password: None,
+                ..Default::default()
             },
         );
         let response = router

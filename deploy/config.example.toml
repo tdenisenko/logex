@@ -8,4 +8,7 @@ expected_volume_uuid = "REPLACE_WITH_FILESYSTEM_UUID"
 log_level = "info"
 partition_target_rows = 1000000
 http_host = "127.0.0.1"
+# Empty uses direct HTTP origin matching. Behind an HTTPS proxy, list the
+# external browser origins instead, for example ["https://logs.example.com"].
+http_allowed_origins = []
 grpc_host = "127.0.0.1"

@@ -1,5 +1,6 @@
 use super::{Cli, Command, Config};
 use clap::{CommandFactory, FromArgMatches};
+use logex_server::BrowserOrigin;
 use std::path::PathBuf;
 
 fn resolve(args: &[&str], config: Config) -> Cli {
@@ -151,6 +152,59 @@ fn explicit_boolean_permission_wins_over_file() {
         panic!("sync");
     };
     assert!(allow_public_grpc);
+}
+
+#[test]
+fn browser_origin_cli_list_replaces_file_list_for_sync_and_repair() {
+    fn origins(cli: Cli) -> Vec<BrowserOrigin> {
+        match cli.command {
+            Command::Sync {
+                http_allowed_origins,
+                ..
+            }
+            | Command::Repair {
+                http_allowed_origins,
+                ..
+            } => http_allowed_origins,
+            _ => unreachable!(),
+        }
+    }
+
+    for command in ["sync", "repair"] {
+        let configured =
+            || toml::from_str("http_allowed_origins = ['https://configured.example']").unwrap();
+        assert_eq!(
+            origins(resolve(&["logex", command], configured())),
+            vec![
+                "https://configured.example"
+                    .parse::<BrowserOrigin>()
+                    .unwrap()
+            ]
+        );
+        assert_eq!(
+            origins(resolve(
+                &[
+                    "logex",
+                    command,
+                    "--http-allowed-origin",
+                    "https://first.example",
+                    "--http-allowed-origin",
+                    "http://127.0.0.1:8577",
+                ],
+                configured(),
+            )),
+            vec![
+                "https://first.example".parse::<BrowserOrigin>().unwrap(),
+                "http://127.0.0.1:8577".parse::<BrowserOrigin>().unwrap(),
+            ]
+        );
+        for config in [
+            Config::default(),
+            toml::from_str("http_allowed_origins = []").unwrap(),
+        ] {
+            assert!(origins(resolve(&["logex", command], config)).is_empty());
+        }
+    }
 }
 
 #[test]

@@ -2,6 +2,7 @@ use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
 use clap::{ArgMatches, Args, Parser, Subcommand, ValueEnum, parser::ValueSource};
+use logex_server::BrowserOrigin;
 use serde::Deserialize;
 
 #[derive(Parser, Debug)]
@@ -56,7 +57,7 @@ pub struct Cli {
     /// Supported keys: data_dir, expected_volume_mount, expected_volume_uuid,
     /// log_level, partition_target_rows, checkpoint,
     /// checkpoint_sync_url, nat, p2p_bind_ip, execution_bootnodes, execution_discv5_port,
-    /// http_host, grpc_host, allow_public_grpc, dashboard_enabled, dashboard_password,
+    /// http_host, http_allowed_origins, grpc_host, allow_public_grpc, dashboard_enabled, dashboard_password,
     /// repair_corrupt_segments, query_max_concurrent, query_memory_bytes.
     #[arg(long, global = true)]
     pub config: Option<PathBuf>,
@@ -120,6 +121,7 @@ impl Cli {
                 execution_discv5_port,
                 disable_dashboard,
                 dashboard_password,
+                http_allowed_origins,
                 ..
             }
             | Command::Repair {
@@ -130,6 +132,7 @@ impl Cli {
                 execution_discv5_port,
                 disable_dashboard,
                 dashboard_password,
+                http_allowed_origins,
                 ..
             } => {
                 let (_, command_matches) = matches
@@ -157,6 +160,12 @@ impl Cli {
                 );
                 *disable_dashboard |= file_config.dashboard_enabled == Some(false);
                 *dashboard_password = dashboard_password.take().or(file_config.dashboard_password);
+                apply_file_default(
+                    http_allowed_origins,
+                    file_config.http_allowed_origins,
+                    command_matches,
+                    "http_allowed_origins",
+                );
             }
             _ => {}
         }
@@ -458,6 +467,16 @@ Security:
         #[arg(long, value_name = "PASSWORD")]
         dashboard_password: Option<String>,
 
+        /// Accepted browser origin; repeat for additional origins.
+        ///
+        /// With no configured origins, browser requests must match the direct HTTP
+        /// origin. A configured list replaces that default; use the external
+        /// HTTPS origin behind a reverse proxy. Native clients without an
+        /// Origin header remain supported. Explicit CLI values replace the
+        /// complete list from the config file.
+        #[arg(long = "http-allowed-origin", value_name = "ORIGIN")]
+        http_allowed_origins: Vec<BrowserOrigin>,
+
         /// Allow unauthenticated gRPC to listen on a non-loopback interface.
         ///
         /// This only disables LogEx's startup guard; use firewalling or a
@@ -504,6 +523,10 @@ Output:
         /// HTTP Basic authentication password (username: logex).
         #[arg(long, value_name = "PASSWORD")]
         dashboard_password: Option<String>,
+        /// Accepted browser origin; repeat for additional origins.
+        /// A configured list replaces direct HTTP origin matching.
+        #[arg(long = "http-allowed-origin", value_name = "ORIGIN")]
+        http_allowed_origins: Vec<BrowserOrigin>,
         /// Execution-layer discv4 UDP discovery port.
         #[arg(long, default_value = "30303")]
         discovery_port: u16,
@@ -657,6 +680,8 @@ pub struct Config {
     pub dashboard_enabled: Option<bool>,
     #[serde(default)]
     pub dashboard_password: Option<String>,
+    #[serde(default)]
+    pub http_allowed_origins: Option<Vec<BrowserOrigin>>,
 }
 
 impl Config {

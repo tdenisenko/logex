@@ -1203,6 +1203,98 @@ mod tests {
         )
     }
 
+    async fn assert_basic_header_compatibility(valid_headers: &[&str]) {
+        let (_tmp, storage) = setup_storage();
+        let state = Arc::new(AppState::new(storage, None, SyncStatus::default()));
+        let config = crate::HttpServerConfig {
+            dashboard_password: Some("secret".to_owned()),
+            ..Default::default()
+        };
+        let maintenance = Arc::new(crate::MaintenanceState::new(crate::RepairPhase::Inspecting));
+        let routers = [
+            (
+                crate::build_router_with_config(state, config.clone()),
+                StatusCode::OK,
+            ),
+            (
+                crate::build_maintenance_router(maintenance, config),
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
+        ];
+        let request = |authorization: &str, origin: Option<&str>| {
+            let mut request = Request::builder()
+                .uri("/status")
+                .header("host", "127.0.0.1:8577")
+                .header("authorization", authorization);
+            if let Some(origin) = origin {
+                request = request.header("origin", origin);
+            }
+            request.body(Body::empty()).unwrap()
+        };
+        let mut observed = Vec::new();
+        let mut expected = Vec::new();
+        for (index, (router, accepted)) in routers.into_iter().enumerate() {
+            // Establish both real route responses before testing valid variants.
+            let response = router
+                .clone()
+                .oneshot(request("Basic bG9nZXg6c2VjcmV0", None))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), accepted);
+            for malformed in [
+                "Bearer bG9nZXg6c2VjcmV0",
+                "Basic",
+                "Basic ",
+                "BasicbG9nZXg6c2VjcmV0",
+                "Basic\tbG9nZXg6c2VjcmV0",
+                "Basic \tbG9nZXg6c2VjcmV0",
+                "Basic invalid",
+                "Basic d3Jvbmc6c2VjcmV0",
+                "Basic bG9nZXg6d3Jvbmc=",
+            ] {
+                let response = router
+                    .clone()
+                    .oneshot(request(malformed, None))
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{malformed:?}");
+                assert!(response.headers().contains_key("www-authenticate"));
+            }
+            for authorization in valid_headers {
+                let response = router
+                    .clone()
+                    .oneshot(request(authorization, None))
+                    .await
+                    .unwrap();
+                observed.push((index, *authorization, response.status()));
+                expected.push((index, *authorization, accepted));
+            }
+            // A valid variant must reach origin admission, not bypass it. The
+            // case test uses mixed-case Basic here; the spacing test isolates SP.
+            let authorization = valid_headers.last().unwrap();
+            let response = router
+                .oneshot(request(authorization, Some("http://127.0.0.1:8578")))
+                .await
+                .unwrap();
+            observed.push((index, "foreign origin", response.status()));
+            expected.push((index, "foreign origin", StatusCode::FORBIDDEN));
+        }
+        // Collect both routers so the before-fix failure records every path.
+        assert_eq!(observed, expected);
+    }
+
+    #[tokio::test]
+    async fn basic_auth_scheme_is_case_insensitive_on_both_routers() {
+        assert_basic_header_compatibility(&["basic bG9nZXg6c2VjcmV0", "bAsIc bG9nZXg6c2VjcmV0"])
+            .await;
+    }
+
+    #[tokio::test]
+    async fn basic_auth_accepts_repeated_ascii_spaces_on_both_routers() {
+        assert_basic_header_compatibility(&["Basic  bG9nZXg6c2VjcmV0", "Basic   bG9nZXg6c2VjcmV0"])
+            .await;
+    }
+
     #[test]
     fn historical_rate_decays_after_stale_progress() {
         assert_eq!(historical_rate_for_age(500.0, 9_999), 500.0);
@@ -1369,6 +1461,7 @@ mod tests {
             crate::HttpServerConfig {
                 dashboard_enabled: false,
                 dashboard_password: None,
+                ..Default::default()
             },
         );
 
@@ -1391,6 +1484,7 @@ mod tests {
             crate::HttpServerConfig {
                 dashboard_enabled: true,
                 dashboard_password: Some("secret".to_owned()),
+                ..Default::default()
             },
         );
 
@@ -1479,6 +1573,70 @@ mod tests {
         let result: QueryCancelResponse = serde_json::from_slice(&body).unwrap();
         assert!(result.canceled);
         assert!(active_query.was_canceled());
+    }
+
+    async fn assert_cancel_rejects_foreign_browser_origin(password: Option<&str>) {
+        let (_tmp, storage) = setup_storage();
+        let state = Arc::new(AppState::new(storage, None, SyncStatus::default()));
+        let app = crate::build_router_with_config(
+            Arc::clone(&state),
+            crate::HttpServerConfig {
+                dashboard_password: password.map(str::to_owned),
+                ..Default::default()
+            },
+        );
+        let request = |origin: Option<&str>| {
+            let mut request = Request::builder()
+                .method("POST")
+                .uri("/query/cancel")
+                .header("host", "127.0.0.1:8577");
+            if let Some(origin) = origin {
+                request = request.header("origin", origin);
+            }
+            if let Some(password) = password {
+                request = request.header("authorization", basic_auth_header(password));
+            }
+            request.body(Body::empty()).unwrap()
+        };
+
+        // Native clients and the same-origin dashboard must still cancel the
+        // actual active guard through the complete authenticated router.
+        for origin in [None, Some("http://127.0.0.1:8577")] {
+            let active_query = state.query_control.start().unwrap();
+            let response = app.clone().oneshot(request(origin)).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), 1024)
+                .await
+                .unwrap();
+            let result: QueryCancelResponse = serde_json::from_slice(&body).unwrap();
+            assert!(result.canceled);
+            assert!(active_query.was_canceled());
+            drop(active_query);
+        }
+
+        let active_query = state.query_control.start().unwrap();
+        // An empty cross-origin POST requires no JSON or custom request header
+        // from a browser. Authentication must not replace origin validation.
+        let response = app
+            .oneshot(request(Some("http://127.0.0.1:8578")))
+            .await
+            .unwrap();
+        assert_eq!(
+            (response.status(), active_query.was_canceled()),
+            (StatusCode::FORBIDDEN, false)
+        );
+        assert_eq!(state.query_memory.used(), 0);
+        assert!(state.storage_failure().is_none());
+    }
+
+    #[tokio::test]
+    async fn foreign_origin_cannot_cancel_loopback_query() {
+        assert_cancel_rejects_foreign_browser_origin(None).await;
+    }
+
+    #[tokio::test]
+    async fn foreign_origin_cannot_cancel_authenticated_query() {
+        assert_cancel_rejects_foreign_browser_origin(Some("secret")).await;
     }
 
     #[tokio::test]

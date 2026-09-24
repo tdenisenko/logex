@@ -392,6 +392,25 @@ When `--http-host 0.0.0.0` is used, open the dashboard at
 `logex`. Prefer firewalling, SSH tunneling, or TLS termination for public
 servers.
 
+Browser requests to protected HTTP routes, including WebSocket upgrades, must
+come from an accepted origin. With no configured allowlist, the origin must match
+the direct HTTP request's scheme, host and port. For an HTTPS reverse proxy, set
+`sync --http-allowed-origin https://logs.example.com` or TOML
+`http_allowed_origins = ["https://logs.example.com"]`. Repeat the CLI option or add
+array entries to accept more origins. A nonempty list replaces direct-origin
+matching; list every browser origin you intend to use. An empty list restores the
+direct HTTP default. Explicit CLI origins replace the complete config-file list.
+The same option applies to `repair` and automatic maintenance before sync.
+
+Origins include the scheme and optional port, without credentials, query,
+fragment or an application path. Proxy forwarding headers do not establish
+trusted origins. Native clients without an `Origin` header remain supported;
+this check supplements authentication and network protection. After required
+authentication, rejected origins receive HTTP 403 before query cancellation,
+subscription changes or WebSocket upgrade. Public health checks remain available.
+The allowlist does not enable
+cross-origin HTTP response sharing through CORS.
+
 ## P2P Address Selection And IPv6
 
 By default, `--nat any` chooses the safest reachable P2P mode automatically.
@@ -480,6 +499,7 @@ Global options:
 | `--cl-max-peers <N>` | `32` | Maximum dialable CL peers retained from discovery. |
 | `--disable-dashboard` | false | Disable the embedded HTML dashboard while leaving HTTP query APIs available. |
 | `--dashboard-password <PASSWORD>` | none | Require HTTP Basic auth for dashboard, `/status`, `/query`, JSON-RPC, and WebSocket routes. Username is `logex`. Required for public HTTP. |
+| `--http-allowed-origin <ORIGIN>` | direct HTTP origin | Repeat to configure accepted browser origins, including the external HTTPS origin behind a proxy. A nonempty list replaces the direct-origin default; native clients without `Origin` remain supported. |
 | `--allow-public-grpc` | false | Allow gRPC to bind to a non-loopback host. This only disables LogEx's startup guard; use a private network or firewall. |
 | `--disable-historical-sync` | false | Fresh-data-dir only. Follow verified CL anchors forward from the checkpoint pivot and skip reverse historical EL backfill. Restart later without the flag to resume normal historical sync. |
 | `--repair-corrupt-segments` | false | Inspect existing storage and run exclusive offline repair before normal startup. Uses the same coordinator and `--repair-*` work limits as `repair`. |
@@ -597,6 +617,7 @@ p2p_bind_ip = "0.0.0.0"
 execution_bootnodes = []
 execution_discv5_port = 9200
 http_host = "127.0.0.1"
+http_allowed_origins = []
 grpc_host = "127.0.0.1"
 allow_public_grpc = false
 dashboard_enabled = true
@@ -619,6 +640,7 @@ Supported config keys:
 | `execution_bootnodes` | string array | Extra EL bootnodes as `enode://...` records with IP literals or DNS names, or signed `enr:...` records. |
 | `execution_discv5_port` | integer | EL discv5 UDP port used for IPv6 execution discovery. |
 | `http_host` | IP string | HTTP bind host. |
+| `http_allowed_origins` | HTTP(S) origin array | Browser-origin allowlist for sync and repair. Empty means direct HTTP origin matching; nonempty replaces that default. Explicit CLI origins replace the full list. |
 | `grpc_host` | IP string | gRPC bind host. |
 | `allow_public_grpc` | boolean | Permit non-loopback gRPC binding. |
 | `dashboard_enabled` | boolean | Enable or disable the embedded dashboard. |

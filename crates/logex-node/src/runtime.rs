@@ -164,6 +164,7 @@ pub struct RunSyncOptions<'a> {
     pub cl_max_peers: usize,
     pub dashboard_enabled: bool,
     pub dashboard_password: Option<String>,
+    pub http_allowed_origins: Vec<logex_server::BrowserOrigin>,
     pub disable_historical_sync: bool,
     pub repair_corrupt_segments: bool,
     pub repair_limits: crate::cli::RepairLimitsArgs,
@@ -198,6 +199,7 @@ pub async fn run_sync(options: RunSyncOptions<'_>) -> cleanup::RuntimeShutdown {
         cl_max_peers,
         dashboard_enabled,
         dashboard_password,
+        http_allowed_origins,
         disable_historical_sync,
         repair_corrupt_segments,
         repair_limits,
@@ -217,6 +219,7 @@ pub async fn run_sync(options: RunSyncOptions<'_>) -> cleanup::RuntimeShutdown {
                     http: logex_server::HttpServerConfig {
                         dashboard_enabled,
                         dashboard_password: dashboard_password.clone(),
+                        allowed_origins: http_allowed_origins.clone(),
                     },
                     network: repair::RepairNetworkOptions {
                         discovery_port,
@@ -622,6 +625,7 @@ pub async fn run_sync(options: RunSyncOptions<'_>) -> cleanup::RuntimeShutdown {
         logex_server::HttpServerConfig {
             dashboard_enabled,
             dashboard_password,
+            allowed_origins: http_allowed_origins,
         },
     );
     let grpc_addr = SocketAddr::new(grpc_host, grpc_port);

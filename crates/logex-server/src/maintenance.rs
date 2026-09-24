@@ -13,7 +13,7 @@ use axum::{
 use serde::Serialize;
 use tokio::{net::TcpListener, sync::watch};
 
-use crate::{HttpServerConfig, require_dashboard_auth, rest, shutdown_signal};
+use crate::{HttpServerConfig, require_http_access, rest, shutdown_signal};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -110,7 +110,7 @@ async fn health(State(state): State<Arc<MaintenanceState>>) -> Response {
         .into_response()
 }
 
-/// Maintenance mirrors normal HTTP authentication and dashboard policy, but
+/// Maintenance mirrors normal HTTP authentication, origin and dashboard policy, but
 /// every data route terminates here without reading bodies or upgrading sockets.
 pub fn build_maintenance_router(state: Arc<MaintenanceState>, config: HttpServerConfig) -> Router {
     let root = if config.dashboard_enabled {
@@ -131,8 +131,8 @@ pub fn build_maintenance_router(state: Arc<MaintenanceState>, config: HttpServer
             any(status),
         )
         .route_layer(middleware::from_fn_with_state(
-            config,
-            require_dashboard_auth,
+            Arc::new(config),
+            require_http_access,
         ))
         .with_state(Arc::clone(&state));
     protected.merge(
