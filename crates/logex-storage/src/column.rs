@@ -669,12 +669,19 @@ impl RawCanonicalMetadata {
     }
 
     pub(crate) fn bitmap(self, bytes: &[u8]) -> io::Result<NullBitmap> {
+        let range = self.bitmap_range(bytes)?;
+        NullBitmap::read_from(&bytes[range])
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "corrupt canonical bitmap"))
+    }
+
+    /// Borrow the validated bitmap encoding without cloning its bit payload.
+    pub(crate) fn bitmap_range(self, bytes: &[u8]) -> io::Result<std::ops::Range<usize>> {
         self.validate_payload_bytes(bytes)?;
         let end = self.bitmap_end()?;
-        NullBitmap::read_from(bytes.get(self.offset..end).ok_or_else(|| {
+        bytes.get(self.offset..end).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidData, "truncated canonical bitmap")
-        })?)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "corrupt canonical bitmap"))
+        })?;
+        Ok(self.offset..end)
     }
 
     fn bitmap_end(self) -> io::Result<usize> {

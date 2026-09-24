@@ -476,6 +476,26 @@ impl CompositeQuery {
         reader.range_inclusive(&start, &end)
     }
 
+    /// Inclusive published composite range with query-owned source and result.
+    pub fn range_address_topic0_blocks_inclusive_from_file_bound_with_memory(
+        path: &Path,
+        expected_file_id: [u8; 16],
+        address: &[u8; 20],
+        topic0: &[u8; 32],
+        from_block: u64,
+        to_block: u64,
+        memory: &QueryMemoryBudget,
+    ) -> std::io::Result<crate::QueryBitmap> {
+        let (start, end) = Self::address_topic0_block_bounds(address, topic0, from_block, to_block);
+        BTreeIndexReader::range_inclusive_from_file_bound_with_memory(
+            path,
+            expected_file_id,
+            &start,
+            &end,
+            memory,
+        )
+    }
+
     fn address_topic0_block_bounds(
         address: &[u8; 20],
         topic0: &[u8; 32],
@@ -611,6 +631,37 @@ mod tests {
             drop(pressure);
             assert_eq!(memory.used(), 0);
         }
+    }
+
+    #[test]
+    fn accounted_composite_range_includes_maximum_block() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("range.bptree");
+        let address = [7; 20];
+        let topic0 = [9; 32];
+        let mut index = crate::BTreeIndex::new(ADDR_TOPIC0_BLOCK_KEY_SIZE);
+        for (row, block) in [10, 11, u64::MAX].into_iter().enumerate() {
+            let (key, _) =
+                CompositeQuery::address_topic0_block_bounds(&address, &topic0, block, block);
+            index.insert(&key, row as u32);
+        }
+        index.write_to_file(&path).unwrap();
+        let id = crate::index_file::IndexFile::protected_file_id(&path).unwrap();
+        let memory = QueryMemoryBudget::new(logex_types::QueryMemoryLimit::new(64 * 1024).unwrap());
+        let bitmap =
+            CompositeQuery::range_address_topic0_blocks_inclusive_from_file_bound_with_memory(
+                &path,
+                id,
+                &address,
+                &topic0,
+                11,
+                u64::MAX,
+                &memory,
+            )
+            .unwrap();
+        assert!(bitmap.iter().eq([1, 2]));
+        drop(bitmap);
+        assert_eq!(memory.used(), 0);
     }
 
     fn assert_prefix_scan_matches_rows<const PREFIX: usize>(

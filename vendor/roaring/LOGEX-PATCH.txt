@@ -6,7 +6,8 @@ Archive SHA-256: 19e8d2cfa184d94d0726d650a9f4a1be7f9b76ac9fdb954219878dc00c1c1e7
 Published VCS commit: 9496afe1e6ad93a8875f901c2579761f7acdc5b0
 Original 73-file inventory: LOGEX-UPSTREAM-SHA256
 Reviewable modifications and additions: LOGEX-PATCH.diff
-Only existing source modification: std-gated query module/export in bitmap/mod.rs.
+Existing source modifications: std-gated query modules/exports in bitmap/mod.rs,
+plus additive preallocated-output hooks in ArrayStore and its VecWriter.
 Ordinary upstream decoding, statistics, algorithms and ingestion APIs unchanged.
 
 The published archive declares MIT OR Apache-2.0 but omits standalone license
@@ -39,8 +40,8 @@ Heap measurement includes actual container Vec and u16 array Vec capacities plus
 use statistics() (whose historical byte fields have different units). Callers
 reserve preflight bytes before decoding, then reconcile allocator-returned Vec
 capacities while owning both bitmap and reservation. This seam is dependency-
-independent and does not itself impose a budget or process-RSS bound. Setops,
-clones and MultiOps allocation hooks are outside this patch.
+independent and does not itself impose a budget or process-RSS bound. Controlled clone, union/intersection and narrow reference MultiOps are described
+below. Range construction, filtering, difference and XOR are outside this patch.
 
 Five new lib tests exercise empty/sparse/dense boundaries, key65535, normalized
 singleton/full runs, mixed and unaligned payloads, malformed/truncated geometry,
@@ -58,6 +59,64 @@ packages cached. Root workspace uses its existing versions via the path override
 its lock change only removes roaring's registry source/checksum.
 
 Verify inventory against the archive hash above, verify unchanged files against
-LOGEX-UPSTREAM-SHA256, review LOGEX-PATCH.diff and the three added source/license
+LOGEX-UPSTREAM-SHA256, review LOGEX-PATCH.diff and the added source/license
 file hashes in the repository vendor verifier. Re-audit the private representation
 and constructors before replacing/upgrading the pinned crate or enabling SIMD.
+
+B3b controlled operations (query_ops.rs, std only)
+- QuerySetOp::{Union,Intersection}
+- prepare_clone() -> PreparedClone; allocation_bytes(), materialize(observer)
+- prepare_assign(&mut self, &rhs, op) -> PreparedAssign;
+  additional_allocation_bytes(), apply(observer)
+- prepare_owned_assign(&mut self, &mut rhs, op) -> PreparedOwnedAssign;
+  additional_allocation_bytes(), apply(observer); empties RHS on success
+- RoaringBitmap::prepare_union_refs(&[&RoaringBitmap]) -> PreparedUnionRefs;
+  allocation_bytes(), materialize(observer); rejects key spans >=8
+All preparation/application methods are fallible. The observer receives requested
+and actual capacity bytes once for each newly created Vec before filling or
+installation. An observer failure drops that locally owned allocation before
+returning. Keep input allocations and their charges alive through mutation;
+owned operations require both input charges to remain held, even after a store
+moves. On error or unwind, an apply-only drop guard resets mutable operands to empty
+after local temporary values unwind, preserving public bitmap invariants. Dropping
+a preparation without applying leaves operands unchanged. Borrowed RHS never
+changes. No catch-unwind is used in production.
+On success dispose RHS backing and reconcile the combined charge to actual heap.
+
+Allowances are checked requested-capacity envelopes: explicit destination-vector
+replacement plus concrete per-container union allocations; intersection's largest
+single-container scratch overlap (with cumulative SIMD retained tail allowance).
+No blanket dense-per-key allowance applies to pairwise sparse union. Allocator
+excess is observed after allocation; callers must account it immediately and
+retain that excess until final heap reconciliation. This deliberately matches
+cooperative allocation accounting, not a hard RSS cap. Fixed dense boxes require
+8192 bytes; allocator headers, stack and control structs are excluded.
+
+Owned union preserves the row-cardinality swap, disjoint container moves and
+mixed-store dense reuse. Owned intersection preserves the container-count swap,
+smaller-array reuse, and inplace scalar retention. Borrowed operations preserve
+borrowed payload cloning. The existing scalar/SIMD kernels are reused through
+preallocated VecWriter storage; SIMD receives seven u16 spare tail slots because
+its vector visitor writes eight lanes before truncation. Ordinary methods and
+operator implementations are unchanged.
+
+Reference union keeps upstream prefix sorting (all inputs up to50; first10 when
+larger) and Cow lazy dense promotion. Explicit reference/Cow/output vector
+capacities and dense-to-array overlap are included. Inputs are borrowed from a
+stable reference slice, whose caller-owned allocation is separately charged.
+The key-span restriction is validated before materialization.
+
+Six focused logex_query_ops tests cover owned/borrowed set semantics, sparse
+allowances, moved allocation identities, threshold normalization/spare capacity,
+reference prefix boundaries and lazy promotions, and observer rejection/unwind points, including valid-empty reset semantics.
+These are additive; upstream tests remain unchanged. SIMD retains its existing
+nightly-only feature requirement and needs a compatible toolchain for execution.
+
+SIMD validation limitation (explicit, unchanged upstream code): enabling --features
+simd on repository-pinned nightly-2026-08-24 fails before tests at original
+store/array_store/vector.rs:16: core::simd::LaneCount and SupportedLaneCount are
+no longer exported (E0432). The default non-SIMD feature path is tested. SIMD is
+not enabled by LogEx; no toolchain change, runtime feature change or upstream SIMD
+compatibility rewrite is included. The controlled cfg path retains dispatch and
+its audited seven-element temporary vector-store allowance, but is not claimed
+runtime-validated on this compiler.

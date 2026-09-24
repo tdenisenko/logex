@@ -236,6 +236,133 @@ impl BTreeIndexReader {
         )
     }
 
+    /// Read a published interval. The caller must retain its checkpoint guard.
+    pub fn range_from_file_bound_with_memory(
+        path: &Path,
+        expected_file_id: [u8; 16],
+        start: &[u8],
+        end: &[u8],
+        memory: &QueryMemoryBudget,
+    ) -> io::Result<QueryBitmap> {
+        Self::range_from_index_file_with_memory(
+            IndexFile::open_bound_with_memory(path, expected_file_id, Some(memory))?,
+            start,
+            end,
+            false,
+            memory,
+        )
+    }
+
+    /// Read a published interval including an all-0xff upper endpoint.
+    /// The caller must retain its checkpoint guard.
+    pub fn range_inclusive_from_file_bound_with_memory(
+        path: &Path,
+        expected_file_id: [u8; 16],
+        start: &[u8],
+        end: &[u8],
+        memory: &QueryMemoryBudget,
+    ) -> io::Result<QueryBitmap> {
+        Self::range_from_index_file_with_memory(
+            IndexFile::open_bound_with_memory(path, expected_file_id, Some(memory))?,
+            start,
+            end,
+            true,
+            memory,
+        )
+    }
+
+    fn range_from_index_file_with_memory(
+        mut file: IndexFile,
+        start: &[u8],
+        end: &[u8],
+        inclusive: bool,
+        memory: &QueryMemoryBudget,
+    ) -> io::Result<QueryBitmap> {
+        let mut bytes = [0; INDEX_HEADER_LEN];
+        file.read_exact(&mut bytes)?;
+        let header = IndexHeader::parse(&bytes)?;
+        header.validate_geometry(file.logical_len())?;
+        validate_lookup_key(&header, start)?;
+        validate_lookup_key(&header, end)?;
+        let matches = |key: &[u8]| key >= start && (key < end || inclusive && key == end);
+        if !file.is_protected() || header.version == 1 {
+            let data = file.read_all()?;
+            let mut entries = IndexEntries::new(&data)?;
+            let mut selected =
+                QueryBuffer::try_with_capacity(0, Some(memory), "index range owners")?;
+            while let Some((key, payload)) = entries.next_entry()? {
+                // Validate all legacy content, even outside the requested interval.
+                let bitmap = QueryBitmap::decode(payload, memory)?;
+                if matches(key) {
+                    selected.try_push(bitmap)?;
+                }
+            }
+            return QueryBitmap::union_all(&selected, memory);
+        }
+        let table_end = table_end(header.key_size, header.entry_count)?;
+        if header.entry_count == 0 {
+            return QueryBitmap::union_all(&[], memory);
+        }
+        let first = read_descriptor(&mut file, &header, 0, table_end)?;
+        let last = read_descriptor(&mut file, &header, header.entry_count - 1, table_end)?;
+        if first.0 != table_end || last.0 + u64::from(last.1) != file.logical_len() {
+            return Err(invalid_index("invalid index payload extent"));
+        }
+        let mut key =
+            QueryBuffer::try_with_capacity(header.key_size, Some(memory), "index range key")?;
+        key.try_resize(header.key_size, 0)?;
+        let lo = find_key_boundary(&mut file, &header, start, false, &mut key)?;
+        let hi = if start > end {
+            lo
+        } else {
+            find_key_boundary(&mut file, &header, end, inclusive, &mut key)?
+        };
+        if hi < lo {
+            return Err(invalid_index("invalid index range ordering"));
+        }
+        // Check adjacent descriptors/keys around each searched boundary, even
+        // for an empty selection; unrelated payloads remain unread.
+        validate_range_boundary(&mut file, &header, lo, table_end, start, false, &mut key)?;
+        if start <= end {
+            validate_range_boundary(&mut file, &header, hi, table_end, end, inclusive, &mut key)?;
+        }
+        if hi == lo {
+            return QueryBitmap::empty(memory);
+        }
+        let count =
+            usize::try_from(hi - lo).map_err(|_| invalid_index("too many range entries"))?;
+        let mut selected =
+            QueryBuffer::try_with_capacity(count, Some(memory), "index range owners")?;
+        let mut previous_key = QueryBuffer::try_with_capacity(
+            header.key_size,
+            Some(memory),
+            "index range previous key",
+        )?;
+        let mut previous_end = None;
+        for entry in lo..hi {
+            file.seek(SeekFrom::Start(entry_offset(&header, entry)?))?;
+            file.read_exact(&mut key)?;
+            if !matches(&key) || (!previous_key.is_empty() && previous_key.as_ref() >= key.as_ref())
+            {
+                return Err(invalid_index("invalid selected index key ordering"));
+            }
+            let (offset, len) = read_descriptor(&mut file, &header, entry, table_end)?;
+            if previous_end.is_some_and(|end| end != offset) {
+                return Err(invalid_index("noncontiguous selected index payload"));
+            }
+            previous_end = Some(offset + u64::from(len));
+            previous_key.clear();
+            previous_key.try_extend_from_slice(&key)?;
+            let mut payload =
+                QueryBuffer::try_with_capacity(len as usize, Some(memory), "index bitmap input")?;
+            payload.try_resize(len as usize, 0)?;
+            file.seek(SeekFrom::Start(offset))?;
+            file.read_exact(&mut payload)?;
+            selected.try_push(QueryBitmap::decode(&payload, memory)?)?;
+        }
+        QueryBitmap::union_all(&selected, memory)
+    }
+
     fn get_from_index_file_with_memory(
         mut file: IndexFile,
         key: &[u8],
@@ -609,6 +736,60 @@ fn find_point_payload(
     Ok(None)
 }
 
+fn find_key_boundary(
+    file: &mut IndexFile,
+    header: &IndexHeader,
+    bound: &[u8],
+    after_equal: bool,
+    key: &mut [u8],
+) -> io::Result<u64> {
+    let (mut lo, mut hi) = (0, header.entry_count);
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        file.seek(SeekFrom::Start(entry_offset(header, mid)?))?;
+        file.read_exact(key)?;
+        if &*key < bound || after_equal && &*key == bound {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    Ok(lo)
+}
+
+fn validate_range_boundary(
+    file: &mut IndexFile,
+    header: &IndexHeader,
+    boundary: u64,
+    table_end: u64,
+    bound: &[u8],
+    after_equal: bool,
+    key: &mut [u8],
+) -> io::Result<()> {
+    let mut predecessor_end = None;
+    if boundary > 0 {
+        file.seek(SeekFrom::Start(entry_offset(header, boundary - 1)?))?;
+        file.read_exact(key)?;
+        if !(&*key < bound || after_equal && &*key == bound) {
+            return Err(invalid_index("invalid range predecessor key"));
+        }
+        let (offset, len) = read_descriptor(file, header, boundary - 1, table_end)?;
+        predecessor_end = Some(offset + u64::from(len));
+    }
+    if boundary < header.entry_count {
+        file.seek(SeekFrom::Start(entry_offset(header, boundary)?))?;
+        file.read_exact(key)?;
+        if &*key < bound || after_equal && &*key == bound {
+            return Err(invalid_index("invalid range successor key"));
+        }
+        let (offset, _) = read_descriptor(file, header, boundary, table_end)?;
+        if predecessor_end.is_some_and(|end| end != offset) {
+            return Err(invalid_index("noncontiguous index range boundary"));
+        }
+    }
+    Ok(())
+}
+
 fn table_end(key_size: usize, entry_count: u64) -> io::Result<u64> {
     (key_size as u64)
         .checked_add(INDEX_V2_ENTRY_TRAILER_LEN as u64)
@@ -904,6 +1085,93 @@ mod tests {
 
     fn write_protected_fixture(path: &Path, data: &[u8]) {
         write_index_file(path, data.len() as u64, |writer| writer.write_all(data)).unwrap();
+    }
+
+    #[test]
+    fn accounted_ranges_preserve_selectivity_endpoints_and_result_ownership() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("ranges");
+        let mut index = BTreeIndex::new(4);
+        for key in 0..1024u32 {
+            for row in 0..100 {
+                index.insert(&key.to_be_bytes(), key * 100 + row);
+            }
+        }
+        index.insert(&u32::MAX.to_be_bytes(), u32::MAX);
+        index.write_to_file(&path).unwrap();
+        let id = IndexFile::protected_file_id(&path).unwrap();
+        let memory = test_memory(64 * 1024);
+        assert!(fs::metadata(&path).unwrap().len() > memory.limit() as u64);
+        for (start, end, inclusive, expected) in [
+            (503u32, 504u32, false, (50300..50400).collect::<Vec<_>>()),
+            (503, 504, true, (50300..50500).collect()),
+            (0, 0, false, vec![]),
+            (4, 3, true, vec![]),
+            (u32::MAX, u32::MAX, true, vec![u32::MAX]),
+        ] {
+            let result = BTreeIndexReader::range_from_index_file_with_memory(
+                IndexFile::open_bound_with_memory(&path, id, Some(&memory)).unwrap(),
+                &start.to_be_bytes(),
+                &end.to_be_bytes(),
+                inclusive,
+                &memory,
+            )
+            .unwrap();
+            assert!(result.iter().eq(expected));
+            drop(result);
+            assert_eq!(memory.used(), 0);
+        }
+        let pressure = memory.reserve(memory.limit() - 1, "other query").unwrap();
+        let error = BTreeIndexReader::range_from_file_bound_with_memory(
+            &path,
+            id,
+            &1u32.to_be_bytes(),
+            &2u32.to_be_bytes(),
+            &memory,
+        )
+        .unwrap_err();
+        assert!(error.get_ref().unwrap().is::<QueryMemoryError>());
+        assert_eq!(memory.used(), pressure.bytes());
+    }
+
+    #[test]
+    fn accounted_ranges_validate_legacy_unselected_and_protected_boundaries() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("ranges");
+        let memory = test_memory(64 * 1024);
+        for version in [1, 2] {
+            let mut data = integrity_fixture(version, &[(1, 10), (3, 30)]);
+            let second_payload = data.len() - 18;
+            data[second_payload + 12..second_payload + 16].copy_from_slice(&0u32.to_le_bytes());
+            fs::write(&path, &data).unwrap();
+            let error = BTreeIndexReader::range_from_index_file_with_memory(
+                IndexFile::open_with_memory(&path, Some(&memory)).unwrap(),
+                &1u32.to_be_bytes(),
+                &2u32.to_be_bytes(),
+                false,
+                &memory,
+            )
+            .unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+            assert_eq!(memory.used(), 0);
+        }
+        let mut data = integrity_fixture(2, &[(1, 10), (3, 30), (5, 50)]);
+        // Keep outer integrity valid but create a gap at the adjacent payload.
+        let offset = INDEX_HEADER_LEN + 16 + 4;
+        let old = u64::from_le_bytes(data[offset..offset + 8].try_into().unwrap());
+        data[offset..offset + 8].copy_from_slice(&(old + 1).to_le_bytes());
+        write_protected_fixture(&path, &data);
+        let id = IndexFile::protected_file_id(&path).unwrap();
+        let error = BTreeIndexReader::range_from_file_bound_with_memory(
+            &path,
+            id,
+            &1u32.to_be_bytes(),
+            &2u32.to_be_bytes(),
+            &memory,
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(memory.used(), 0);
     }
 
     #[test]
