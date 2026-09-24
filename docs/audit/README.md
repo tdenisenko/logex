@@ -1,10 +1,92 @@
 # Code audit
 
-This ledger tracks the audit requested in September 2026. A passing test suite
-is a baseline, not evidence that the whole system has been audited. Production
-data and running deployments are not modified by the benchmark suite.
+This ledger records the offline audit begun at PR #120 in September 2026. All
+review areas have the offline dispositions below. Production data and running
+deployments were not used as disposable audit fixtures. The closing PR records
+its exact final source, merge gates and remaining limits; this ledger does not
+declare a stable release. A minimum **48-hour live-sync acceptance test** follows
+offline completion and must pass before a release-readiness claim or stable tag.
 
-The current [consensus cache lifecycle review](consensus-cache-lifecycle.md) fixes
+## Current offline dispositions
+
+The later PRs supersede the open-work statements in historical milestones below.
+An offline disposition means the relevant code, failure paths and practical
+controls were reviewed, with confirmed defects corrected. It does not prove the
+absence of all bugs, uniform throughput or physical-device failure behavior.
+
+| Batch | Final offline disposition | Evidence |
+| --- | --- | --- |
+| 0 / 0a | Baseline, dependency inventory, toolchain and CI reviewed; compatible dependency fixes applied. Remaining advisories have explicit feature/call-path dispositions. | PRs #120–121; [fresh dependency recheck](dependency-remediation.md), including Rustls 0.23.45. |
+| 1 | Checkpoint, consensus, execution and extraction trust boundaries reviewed and corrected; official fork fixtures retained. | PRs #122–128, #153 and #156; [fork conformance](consensus-fork-conformance.md). |
+| 2 | Recovery, durability, persisted formats, bounded decoding and reader lifetimes reviewed and corrected. | PR #130 and [storage boundary disposition](storage-boundary-disposition.md), PR #225; [recorded storage acceptance](pr130-acceptance.md). |
+| 3 | Consensus framing, scheduling, persistence and ownership reviewed; history journal, gossip retention and capacity policies implemented. | [History journal](consensus-history-journal.md); PRs #234–237, #242–246 and [#254](https://github.com/tdenisenko/logex/pull/254). |
+| 4 | Execution requests, partial progress, retry ownership, serving, cache and peer lifecycles reviewed and corrected. | [Final execution response disposition](execution-response-lifecycle.md), PR #227. |
+| 5 | Live/historical ingestion, selection, reorg and coverage publication reviewed and corrected. | [Sync selection integration](sync-selection-integration.md), PR #223; reorg delivery in PR #233. |
+| 6 | Index structure, binding, lifecycle, bloom behavior and fallback reviewed and corrected. | [Index lifecycle](index-lifecycle-integration.md), PR #224; canonical bitmap integrity in [#241](https://github.com/tdenisenko/logex/pull/241). |
+| 7 | Query semantics, pagination, snapshots, aggregates, cancellation and shared memory ownership reviewed and corrected. | Earlier query reports below; PRs #259–276, ending with [composed memory ownership](https://github.com/tdenisenko/logex/pull/276). |
+| 8 | Cross-protocol filters, request correlation, response ownership, authentication, browser origins and subscriptions reviewed and corrected. | PRs #228–233, #259–268, #276 and [HTTP access](https://github.com/tdenisenko/logex/pull/277). |
+| 9 | Dashboard, status, health and reconnect behavior reviewed and corrected; maintenance integration completed. | [Dashboard review](dashboard-observability.md), PR #238; repair startup in PR #257. |
+| 10 | Runtime/configuration, worker failures, shutdown and expected-volume supervision reviewed and corrected. | [Runtime disposition](runtime-config-review.md), PR #219; [volume supervision](expected-volume-supervision.md), PRs #207–208; repair handoff in PR #257. |
+| 11 | Inspection, classification, verified refetch, staging, journaled publication, quarantine and CLI/automatic repair implemented and reviewed. | PRs #239–240, #247–250, #252–253 and #255–258; [independent repair equivalence](https://github.com/tdenisenko/logex/pull/258). |
+| 12 | Integrated fixture coverage, dependency follow-up and platform/deployment evidence reviewed. No additional implementation defect or necessary omnibus fixture was identified beyond the final TLS patch. | Integrated controls and accepted limits below; exact final validation in the closing PR. Live acceptance remains separate. |
+
+## Integrated offline evidence and limits
+
+The normal workspace suite already composes the important subsystem boundaries.
+These controls use independent expected rows or explicit state/publication
+invariants; they do not merely compare two wrappers around the same operation.
+
+| Composition | Practical evidence |
+| --- | --- |
+| Live/historical writes, concurrent queries, indexing, compaction and reopen | [Audit harness](../../crates/logex-query/tests/audit_harness.rs): ordinary sparse/dense fixtures with exact result oracles, real query threads, page boundaries, append/rotation and historical restart. |
+| Query capture versus append, reorg, index publication and compaction | [Snapshot controls](../../crates/logex-query/tests/snapshots.rs) and [pagination controls](../../crates/logex-query/tests/pagination.rs) check exact results or explicit invalidation at observed publication points. |
+| Peer outcomes versus selected-chain and storage publication | [Selection integration](sync-selection-integration.md), historical fetch supervision and anchored cancellation controls cover obsolete work, partial outcomes, queued cancellation and started-write ownership. |
+| Repair, unavailable history, retry and query equivalence | [Repair equivalence](../../crates/logex-sync/src/repair/execution/equivalence_tests.rs) and [retry controls](../../crates/logex-sync/src/repair/execution/retry_tests.rs) cover hot/sealed owners, overlaps, empty blocks, preserved originals, native-query oracles and repeated reopen. Test-owned trust anchors do not substitute for consensus-proof validation. |
+| Interrupted publication and subsequent operation | [Repair publication controls](../../crates/logex-storage/src/native/repair/publication/tests.rs) interrupt observed durability boundaries, resume the journal, preserve quarantine and check appends after repair. |
+| Storage failure, shutdown and repair-to-sync handoff | Node runtime/CLI controls and [expected-volume fixtures](expected-volume-supervision.md) exercise failed workers/probes, signal ownership, deadlines, missing/wrong volumes, remount and cleanup. They start no production sync. |
+
+The same shared query budget covers admitted source/candidate/group/result and
+response ownership. The [documented exclusions](../../README.md#storage-and-query-engine)
+still apply to parser/manifest/control metadata, selected engine temporaries,
+allocator effects and cooperative synchronous operations. It is not a process-RSS
+ceiling. Subscription notifications are transient; reconnect/restart is not a
+durable replay contract. Successful queries are never silently truncated to fit
+capacity.
+
+Retain the historical performance evidence without treating host variation as a
+uniform acceptance result. In particular, grouping measured sparse historical
+ingestion +13.70% combined (+6.12% confirmation), isolated dense reopen +15.84%
+and small-list membership +5.01%. Decoding measured dense compaction p95 +6.02%
+and concurrent-query p95 +5.79%, with fixed confirmations -0.24%/-1.04%.
+Artifact binding measured sparse concurrent-query p95 +11.47% and ordered-query
+p95 +5.93%; the concurrent confirmation was +7.55% and steady diagnostic -4.95%.
+Conversion's mixed sparse concurrent observation was +6.04% versus +0.87% isolated
+median; metadata pooled p95 was +6.30%; syntax count p95 was initially +5.39%,
+then -1.11% confirmation and +2.39% combined. Earlier larger spikes and all samples
+remain in their linked reports. Identical-executable controls show material host
+variation but do not prove every tail harmless. The owner accepted the best
+tested implementation and ended further timing campaigns absent a concrete
+opportunity for substantial code improvement. No new end-to-end performance
+comparison or live-throughput guarantee is claimed by this final review.
+
+Current local and hosted macOS evidence is ARM64 macOS 26.6.2. The hosted
+`macos-latest` job in [PR #277's CI](https://github.com/tdenisenko/logex/actions/runs/36068871294)
+used image `macos-26-arm64`, version `20260907.0351.1`, and restored a dependency
+cache. Linux CI runs workspace/vendor checks, release linking and ten disposable
+ext4 volume/template controls. Earlier ARM/Intel ExFAT component evidence remains
+scoped to the sources and fixtures in its reports. Historical native-C deployment
+target warnings are not reproduced in the latest local release log, but cached
+local/CI builds cannot certify clean native dependencies or an older macOS minimum.
+Build and test on the intended deployment OS before distributing binaries for it.
+Service templates are validated templates; production installation and the
+48-hour live-sync acceptance test remain subsequent work.
+
+## Historical milestones
+
+These reports retain their original source identities, failures, measurements
+and then-open follow-ups. The current dispositions above identify their closure.
+
+The earlier [consensus cache lifecycle review](consensus-cache-lifecycle.md) fixes
 expired duplicate-ID reads and idle heartbeat retention (B3-68). Three original
 controls fail before the correction and pass afterward; focused integration and
 independent review pass. Source `1310497a` passes all twelve local gates
@@ -113,7 +195,7 @@ protected metadata are separate open ownership work.
 | 9 | Dashboard, metrics, health, status | Offline review complete: [dashboard/status fixes](dashboard-observability.md), PR #238 (`77d03349`), close B9-01–13 after all twelve local gates, six CI jobs and ten Linux controls. 2,074 Rust tests / 24 existing ignores and 36 browser controls pass; native browser layout/keyboard checks pass. Repair-state integration remains in batch 11. |
 | 10 | CLI/runtime and volume supervision | [Sync-mode persistence](sync-mode-persistence.md) makes startup policy publication durable and rejects unavailable storage/unexpected markers; merged in PR #206 (`0b611c2d`) after eight local gates (1,781 tests, 24 ignored) and six CI jobs. [Configuration precedence](config-precedence.md) fixes explicit option overrides and config diagnostics; merged in PR #205 (`c63d9c27`) after eight local gates (1,765 tests, 24 ignored) and six CI jobs. [Storage health probes](storage-health-probes.md) retain failed/timed-out checks and keep the supervisor responsive; merged in PR #202 (`ba4957f2`) after eight local gates (1,722 tests, 24 ignored) and six CI jobs. [Cleanup deadlines and results](runtime-cleanup-deadlines.md) cover ordinary shutdown through runtime destruction and preserve cleanup failures; merged in PR #200 (`0e94d900`) after eight local gates (1,700 tests, 24 ignored) and six CI jobs. [Node worker supervision](node-worker-supervision.md) fixes lost HTTP/gRPC and checkpoint errors and shutdown-unwind reporting; merged in PR #199 (`4915ad57`) after eight local gates (1,687 tests, 24 ignored) and six CI jobs. Directory exclusivity prerequisite implemented with journal recovery; [Expected-volume supervision](expected-volume-supervision.md) implements identity preflight, anchored paths, failure admission and service templates; merged in PR #207 (`43b4f182`) after eight local gates (1,829 tests / 24 ignored), six CI jobs and real ExFAT/Linux lifecycle controls. [Independent ordinary-storage monitoring](independent-storage-health.md) corrects the remaining same-poll health delay; original regression, all 203 node tests and eight local gates (1,828 workspace tests / 24 ignored) pass; all six CI jobs passed before PR #208 merged as `17b044f9`. [Background index inspection](indexer-storage-locks.md) releases the ingestion guard before freshness checks and moves all index I/O to blocking workers; original regression and all eight final-source local gates pass (1,832 tests / 24 ignored); all six CI jobs passed before PR #209 merged as `d6e71722`. Remaining runtime review continues separately. [Compaction inspection](compaction-plan-locks.md) moves manifest/backlog I/O outside bounded storage guards and corrects unfinished-ingestion counts (B10-21/B10-22); original regression and all eight final-source local gates pass (1,836 tests / 24 ignored); all six CI jobs passed before PR #210 merged as `6d0c272e`. [Blocking maintenance workers](maintenance-worker-supervision.md) propagates compaction/index join failures into node supervision (B10-23); all nine final-source local gates pass (1,848 tests / 24 ignored); all six CI jobs passed before PR #212 merged as `4b0b1437`. |
 | 11 | Offline automatic segment repair | Pending; dry-run, quarantine, verified refetch, resumable publication, exclusive access. |
-| 12 | Integrated regression and performance | Pending; deterministic mixed workloads, failure injection and platform validation. Further performance experiments require a concrete implementation opportunity. Live sync and the 24-hour staging soak follow offline completion. |
+| 12 | Integrated regression and performance | Historical scope; completed offline disposition and retained limits are recorded above. Further performance experiments require a concrete implementation opportunity. The minimum 48-hour live-sync acceptance test follows offline completion. |
 
 The [query scan execution correction](query-scan-execution.md) addresses B7-30,
 missing recursive-query iterations. All nine local gates pass on `86c7e6f8`
@@ -162,10 +244,10 @@ All six CI jobs and ten Linux controls passed before PR #220 merged as `4635cbda
 
 ## Offline completion boundary
 
-The remaining work is partitioned into the review areas above and outcome-based
-items in the local roadmap. Continue each area through a recorded disposition:
-verified without changes, fixed with regression evidence, or explicitly blocked
-with the remaining condition. A merged fix does not close the rest of its area.
+Each review area now has the current disposition above: reviewed without changes
+where sufficient, or corrected with practical regression evidence. Historical
+follow-ups in the milestone narrative below are closed by those later PRs.
+The intentionally local roadmap records final validation and publication status.
 The [page row-count fix](page-row-count.md) merged in PR #131 as `003df476`
 after all six CI gates passed. [Segment-reader integrity](segment-read-integrity.md)
 merged in PR #132 as `7ebc3795`, also with all six CI jobs passing. [Query pagination](query-pagination.md) merged in PR #133 as `6ffc1201` after all
@@ -180,8 +262,8 @@ six CI jobs passed. PR #140 merged [SQL expression growth limits](sql-expression
 as `84a7889d` after all six CI jobs passed. PR #141 merged [custom aggregate predicates, nulls and integer semantics](sql-aggregate-semantics.md) as `f45f2640` after all six CI jobs passed. PR #142 merged [identifier and alias binding](sql-identifier-binding.md) as `99beaa83` after all six CI jobs passed. PR #143 merged [metadata predicate semantics](sql-metadata-semantics.md) as `2d443187` after all six CI jobs passed. PR #144 merged [named-subquery scope](sql-query-scope.md) as `c78e519c` after all six CI jobs passed. PR #145 merged [parsed syntax eligibility](sql-syntax-eligibility.md) as `c24d56b6` after all six CI jobs passed. PR #146 merged [grouping and membership semantics](sql-grouping-aggregates.md) as `afc7c7dc` after all six CI jobs passed. PR #147 merged [storage page decoding and metadata bounds](storage-decode-bounds.md) as `ae4c01c9` after all six CI jobs passed. PR #148 merged [derived-index file integrity](index-file-integrity.md) as `e317a529` after all six CI jobs passed. PR #149 merged index artifact binding as `9c0a58fc`; PR #150 merged logical source-prefix binding as `8595e040`, each after all six CI jobs passed. PR #151 merged storage allocation and aggregate batch corrections as `29376426` after all six CI jobs passed. PR #152 merged legacy column-reader corrections as `733a248a` after all six CI jobs passed. PR #153 merged trust-path boundaries and independent controls as `037e54ad` after all six CI jobs passed. PR #154 merged consensus-store durability and structural reopen checks as `d0a31b2a` after all six CI jobs passed. PR #155 merged cached-response validation and serving as `d67f9360`. PR #156 merged fork conformance as `e79e2d23`. PR #157 merged consensus request lifecycle and framing as `aa624447`. PR #158 merged peer retention as `c7ef4411`; PR #159 merged peer freshness as `0d5104e6`; PR #160 merged gossip conformance as `10d05727`; PR #161 merged gossip admission as `b72c8a01`. PR #162 merged [RPC participation processing](consensus-rpc-participation.md) as `6e1bb320`. The [artifact cleanup record](artifact-cleanup.md) documents removal of obsolete local and Mac mini test/build artifacts while retaining audit evidence.
 
 Complete deterministic offline validation and merge implementation PRs before
-starting an actual live sync. Live-sync acceptance and the minimum 24-hour
-staging soak are subsequent release gates. Synthetic fixtures do not substitute
+starting an actual live sync. Live-sync acceptance and the minimum 48-hour
+live-sync test are subsequent release gates. Synthetic fixtures do not substitute
 for those gates; this ledger must not imply release readiness before they pass.
 
 Finish and merge each coherent task before starting the next. Record severity,
@@ -282,7 +364,7 @@ The [runtime failure-exit review](runtime-failure-exit.md) records B10-01/B10-02
 preserve failure exit status, bound cleanup after engine/disk failures and tolerate interrupted telemetry updates.
 Merged in PR #198 (`a47ecbd8`) after 124 focused node tests, eight local gates and six CI jobs.
 
-## Baseline findings
+## Baseline findings and final disposition
 
 - **B0-01 — benchmark validity (fixed by this batch):** the old synthetic fixture
   assigned different hashes to rows in one block and used global row offsets as
@@ -291,14 +373,15 @@ Merged in PR #198 (`a47ecbd8`) after 124 focused node tests, eight local gates a
   storage/index/concurrency measurements. These remain synthetic storage rows,
   not cryptographically verified Ethereum blocks.
 - **B0-02 — CI coverage (fixed by this batch):** CI omitted all-target Clippy,
-  explicit doc tests, release linking, and macOS execution. Add those checks;
-  keep the pinned toolchain and existing Linux job names.
-- **B0-03 — dependency advisories (open):** the original lockfile has RustSec
-  findings. See [dependency review](dependencies.md). Review reachability and
-  dependency-compatible remediation before claiming production readiness.
+  explicit doc tests, release linking, and macOS execution. Those checks are now
+  included, with the pinned toolchain and existing Linux job names retained.
+- **B0-03 — dependency advisories (scoped disposition complete):** the original lockfile has RustSec
+  findings. See [initial dependency review](dependencies.md). The final
+  reachability review and compatible remediation are recorded separately; this
+  does not imply all lockfile advisory matches are removed.
   [Compatible remediation](dependency-remediation.md) records subsequent fixes
   and remaining constraints; the initial report is retained as historical evidence.
-- **B0-04 — compiler compatibility (open):** the pinned compiler reports future
+- **B0-04 — compiler compatibility (accepted pinned-toolchain limit):** the pinned compiler reports future
   incompatibilities in discv5 0.10.4, proc-macro-error2 2.0.1, quinn 0.11.9, and
   quinn-udp 0.5.14. These are dependency warnings, not failed workspace Clippy.
   Keep the current pin until replacements pass protocol and platform tests.

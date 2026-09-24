@@ -888,8 +888,9 @@ cargo test -p logex-server
 cargo run -p logex-node -- --help
 ```
 
-The staged [code audit](docs/audit/README.md) records subsystem coverage and
-open findings. See [benchmark instructions](docs/audit/benchmarks.md) for
+The [offline code audit](docs/audit/README.md) records subsystem dispositions,
+validation evidence and accepted limits. A minimum 48-hour live-sync acceptance
+test must pass before the first stable release. See [benchmark instructions](docs/audit/benchmarks.md) for
 deterministic storage, indexing, and query performance comparisons.
 
 Workspace layout:
@@ -897,6 +898,7 @@ Workspace layout:
 | Crate | Role |
 | --- | --- |
 | `logex-node` | CLI, config, runtime wiring, shutdown, disk guard |
+| `logex-fs` | Owned staging paths and shared filesystem operations |
 | `logex-cl` | Native consensus light client and CL P2P networking |
 | `logex-sync` | EL P2P networking, peer management, live sync, historical sync, validation |
 | `logex-storage` | Columnar segments, compression, WAL, metadata, integrity checks |
