@@ -2,15 +2,16 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use alloy_primitives::{Address, B256, Bytes};
-use logex_types::{LogRow, Source};
+use logex_types::{LogRow, QueryBuffer, QueryMemoryBudget, Source};
 
 use crate::column_artifact::ColumnArtifacts;
 use crate::native::{ColumnDescriptor, CompressionCodec, SegmentManifest};
 use crate::page::{
-    PageIndexEntry, decode_fixed_width_page, decode_u8_page, decode_u32_page, decode_u64_page,
-    decode_var_bytes_page_bounded, read_page_index,
+    PageIndexEntry, decode_fixed_width_page_accounted, decode_u8_page_accounted, decode_u32_page,
+    decode_u32_page_accounted, decode_u64_page_accounted, decode_var_bytes_page_bounded,
+    read_page_index, read_page_index_accounted,
 };
-use crate::reader::{RawBytesColumn, RawFixedColumn};
+use crate::reader::{RawBytesColumn, RawFixedColumn, validate_null_bytes};
 use crate::{
     ColumnFileHeader, NullBitmap,
     column::{PrefixRecoveryGuard, read_source_binding, verify_prefix_recovery_pending},
@@ -30,6 +31,7 @@ pub struct SegmentReader {
     source_namespace: Option<[u8; 16]>,
     captured_rows: Option<u64>,
     canonical_metadata: Option<crate::column::RawCanonicalMetadata>,
+    memory: Option<QueryMemoryBudget>,
 }
 
 #[derive(Debug)]
@@ -67,11 +69,11 @@ fn inspection_charge(
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct PageSelection {
     entry: PageIndexEntry,
-    local_rows: Vec<usize>,
-    output_positions: Vec<usize>,
+    local_rows: QueryBuffer<usize>,
+    output_positions: QueryBuffer<usize>,
 }
 
 enum BatchPayload<'a> {
@@ -376,6 +378,22 @@ impl SegmentReader {
         Self::open_inner(dir, Some(columns))
     }
 
+    /// Capture query artifacts with shared accounting retained by fixed read results.
+    /// Variable payload reads remain outside this fixed-source accounting API.
+    pub fn open_projected_with_memory(
+        dir: &Path,
+        columns: &[&str],
+        memory: QueryMemoryBudget,
+    ) -> io::Result<Self> {
+        Self::open_manifest_with_memory(
+            dir,
+            Some(columns),
+            load_manifest(dir)?,
+            false,
+            Some(memory),
+        )
+    }
+
     /// Maintenance-only capture from an independently authoritative manifest.
     /// Caller retains directory ownership and validates its catalog binding.
     pub(crate) fn open_for_inspection_manifest(
@@ -420,6 +438,7 @@ impl SegmentReader {
             source_namespace: Some(owner.namespace()),
             captured_rows: Some(owner.prefix_rows()),
             canonical_metadata: Some(canonical_metadata),
+            memory: None,
         })
     }
 
@@ -438,8 +457,18 @@ impl SegmentReader {
     fn open_manifest_checked(
         dir: &Path,
         projection: Option<&[&str]>,
+        manifest: Option<SegmentManifest>,
+        inspection: bool,
+    ) -> io::Result<Self> {
+        Self::open_manifest_with_memory(dir, projection, manifest, inspection, None)
+    }
+
+    fn open_manifest_with_memory(
+        dir: &Path,
+        projection: Option<&[&str]>,
         mut manifest: Option<SegmentManifest>,
         inspection: bool,
+        memory: Option<QueryMemoryBudget>,
     ) -> io::Result<Self> {
         for _ in 0..3 {
             if let Some(manifest) = &manifest {
@@ -484,7 +513,12 @@ impl SegmentReader {
             let captured = if inspection {
                 ColumnArtifacts::open_for_inspection(dir, manifest.as_ref(), projection)
             } else {
-                ColumnArtifacts::open_projected(dir, manifest.as_ref(), projection)
+                ColumnArtifacts::open_projected_with_memory(
+                    dir,
+                    manifest.as_ref(),
+                    projection,
+                    memory.as_ref(),
+                )
             };
             match captured {
                 Ok(artifacts) => {
@@ -539,6 +573,7 @@ impl SegmentReader {
                         source_namespace,
                         captured_rows: None,
                         canonical_metadata,
+                        memory: memory.clone(),
                     };
                     if reader.manifest.is_none() {
                         reader.captured_rows = Some(reader.read_row_count()?);
@@ -569,6 +604,15 @@ impl SegmentReader {
         path: &str,
         row_ids: Option<&[u32]>,
     ) -> io::Result<RawFixedColumn<WIDTH>> {
+        self.raw_fixed_accounted(path, row_ids, None)
+    }
+
+    fn raw_fixed_accounted<const WIDTH: usize>(
+        &self,
+        path: &str,
+        row_ids: Option<&[u32]>,
+        memory: Option<&QueryMemoryBudget>,
+    ) -> io::Result<RawFixedColumn<WIDTH>> {
         let visible = self
             .manifest
             .as_ref()
@@ -596,33 +640,153 @@ impl SegmentReader {
                     "raw prefix exceeds address space",
                 )
             })?;
-        RawFixedColumn::from_bytes(&self.dir.join(path), self.artifacts.read(path)?, prefix)
+        let data = if memory.is_some() {
+            let rows = if row_ids.is_some_and(|ids| ids.is_empty()) {
+                0
+            } else {
+                prefix.unwrap_or(0)
+            };
+            let length = rows
+                .checked_mul(WIDTH)
+                .and_then(|n| n.checked_add(ColumnFileHeader::SIZE))
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "raw prefix length overflow")
+                })?;
+            return RawFixedColumn::from_accounted(
+                &self.dir.join(path),
+                self.artifacts
+                    .read_range_accounted(path, 0..length as u64)?,
+                Some(rows),
+            );
+        } else {
+            QueryBuffer::unaccounted(self.artifacts.read(path)?)
+        };
+        RawFixedColumn::from_accounted(&self.dir.join(path), data, prefix)
     }
 
     pub fn read_address(&self, row_ids: Option<&[u32]>) -> io::Result<Vec<Address>> {
+        self.read_address_core(row_ids, None)
+            .map(|buffer| buffer.into_parts().0)
+    }
+    pub fn read_address_with_memory(
+        &self,
+        row_ids: Option<&[u32]>,
+    ) -> io::Result<QueryBuffer<Address>> {
+        self.read_address_core(row_ids, self.memory.as_ref())
+    }
+    fn read_address_core(
+        &self,
+        row_ids: Option<&[u32]>,
+        memory: Option<&QueryMemoryBudget>,
+    ) -> io::Result<QueryBuffer<Address>> {
         if self.compacted_column("address").is_none() {
             return self
-                .raw_fixed::<20>("address.col", row_ids)?
-                .materialize(row_ids, |_, value| Address::from(*value));
+                .raw_fixed_accounted::<20>("address.col", row_ids, memory)?
+                .materialize_accounted(row_ids, memory, |_, value| Address::from(*value));
         }
-
-        self.read_fixed_width_values("address", 20, row_ids)?
-            .into_iter()
-            .map(|bytes| Ok(Address::from_slice(&bytes)))
-            .collect()
+        self.read_fixed_typed::<20, Address>("address", row_ids, memory, |value| {
+            Address::from(*value)
+        })
     }
 
     pub fn read_b256(&self, column: &str, row_ids: Option<&[u32]>) -> io::Result<Vec<B256>> {
+        self.read_b256_core(column, row_ids, None)
+            .map(|buffer| buffer.into_parts().0)
+    }
+    pub fn read_b256_with_memory(
+        &self,
+        column: &str,
+        row_ids: Option<&[u32]>,
+    ) -> io::Result<QueryBuffer<B256>> {
+        self.read_b256_core(column, row_ids, self.memory.as_ref())
+    }
+    fn read_b256_core(
+        &self,
+        column: &str,
+        row_ids: Option<&[u32]>,
+        memory: Option<&QueryMemoryBudget>,
+    ) -> io::Result<QueryBuffer<B256>> {
         if self.compacted_column(column).is_none() {
             return self
-                .raw_fixed::<32>(raw_column_path(column), row_ids)?
-                .materialize(row_ids, |_, value| B256::from(*value));
+                .raw_fixed_accounted::<32>(raw_column_path(column), row_ids, memory)?
+                .materialize_accounted(row_ids, memory, |_, value| B256::from(*value));
         }
+        self.read_fixed_typed::<32, B256>(column, row_ids, memory, |value| B256::from(*value))
+    }
 
-        self.read_fixed_width_values(column, 32, row_ids)?
-            .into_iter()
-            .map(|bytes| Ok(B256::from_slice(&bytes)))
-            .collect()
+    pub fn read_u64(&self, column: &str, row_ids: Option<&[u32]>) -> io::Result<Vec<u64>> {
+        self.read_u64_core(column, row_ids, None)
+            .map(|buffer| buffer.into_parts().0)
+    }
+    pub fn read_u64_with_memory(
+        &self,
+        column: &str,
+        row_ids: Option<&[u32]>,
+    ) -> io::Result<QueryBuffer<u64>> {
+        self.read_u64_core(column, row_ids, self.memory.as_ref())
+    }
+    fn read_u64_core(
+        &self,
+        column: &str,
+        row_ids: Option<&[u32]>,
+        memory: Option<&QueryMemoryBudget>,
+    ) -> io::Result<QueryBuffer<u64>> {
+        if self.compacted_column(column).is_none() {
+            return self
+                .raw_fixed_accounted::<8>(raw_column_path(column), row_ids, memory)?
+                .materialize_accounted(row_ids, memory, |_, value| u64::from_le_bytes(*value));
+        }
+        self.read_u64_values_accounted(column, row_ids, memory)
+    }
+
+    pub fn read_u32(&self, column: &str, row_ids: Option<&[u32]>) -> io::Result<Vec<u32>> {
+        self.read_u32_core(column, row_ids, None)
+            .map(|buffer| buffer.into_parts().0)
+    }
+    pub fn read_u32_with_memory(
+        &self,
+        column: &str,
+        row_ids: Option<&[u32]>,
+    ) -> io::Result<QueryBuffer<u32>> {
+        self.read_u32_core(column, row_ids, self.memory.as_ref())
+    }
+    fn read_u32_core(
+        &self,
+        column: &str,
+        row_ids: Option<&[u32]>,
+        memory: Option<&QueryMemoryBudget>,
+    ) -> io::Result<QueryBuffer<u32>> {
+        if self.compacted_column(column).is_none() {
+            return self
+                .raw_fixed_accounted::<4>(raw_column_path(column), row_ids, memory)?
+                .materialize_accounted(row_ids, memory, |_, value| u32::from_le_bytes(*value));
+        }
+        self.read_u32_values_accounted(column, row_ids, memory)
+    }
+
+    pub fn read_u8(&self, column: &str, row_ids: Option<&[u32]>) -> io::Result<Vec<u8>> {
+        self.read_u8_core(column, row_ids, None)
+            .map(|buffer| buffer.into_parts().0)
+    }
+    pub fn read_u8_with_memory(
+        &self,
+        column: &str,
+        row_ids: Option<&[u32]>,
+    ) -> io::Result<QueryBuffer<u8>> {
+        self.read_u8_core(column, row_ids, self.memory.as_ref())
+    }
+    fn read_u8_core(
+        &self,
+        column: &str,
+        row_ids: Option<&[u32]>,
+        memory: Option<&QueryMemoryBudget>,
+    ) -> io::Result<QueryBuffer<u8>> {
+        if self.compacted_column(column).is_none() {
+            return self
+                .raw_fixed_accounted::<1>(raw_column_path(column), row_ids, memory)?
+                .materialize_accounted(row_ids, memory, |_, value| value[0]);
+        }
+        self.read_u8_values_accounted(column, row_ids, memory)
     }
 
     pub fn read_nullable_b256(
@@ -630,72 +794,68 @@ impl SegmentReader {
         column: &str,
         row_ids: Option<&[u32]>,
     ) -> io::Result<Vec<Option<B256>>> {
+        self.read_nullable_b256_core(column, row_ids, None)
+            .map(|buffer| buffer.into_parts().0)
+    }
+    pub fn read_nullable_b256_with_memory(
+        &self,
+        column: &str,
+        row_ids: Option<&[u32]>,
+    ) -> io::Result<QueryBuffer<Option<B256>>> {
+        self.read_nullable_b256_core(column, row_ids, self.memory.as_ref())
+    }
+    fn read_nullable_b256_core(
+        &self,
+        column: &str,
+        row_ids: Option<&[u32]>,
+        memory: Option<&QueryMemoryBudget>,
+    ) -> io::Result<QueryBuffer<Option<B256>>> {
         if self.compacted_column(column).is_none() {
-            let fixed = self.raw_fixed::<32>(&format!("{column}.col"), row_ids)?;
+            let fixed =
+                self.raw_fixed_accounted::<32>(&format!("{column}.col"), row_ids, memory)?;
             let path = format!("{column}.null");
-            let nulls = fixed.read_nulls_from_bytes(
-                &self.dir.join(&path),
-                &self.artifacts.read(&path)?,
-                self.manifest.is_some() || row_ids.is_some_and(|ids| !ids.is_empty()),
+            let required = fixed.values().len() as u64;
+            let data = if memory.is_some() {
+                self.artifacts
+                    .read_range_accounted(&path, 0..8 + required.div_ceil(8))?
+            } else {
+                QueryBuffer::unaccounted(self.artifacts.read(&path)?)
+            };
+            let rows = validate_null_bytes(
+                &data,
+                self.artifacts.len(&path)?,
+                required,
+                memory.is_some()
+                    || self.manifest.is_some()
+                    || row_ids.is_some_and(|ids| !ids.is_empty()),
             )?;
-            return fixed.materialize(row_ids, |row, value| {
-                nulls.is_present(row as u64).then(|| B256::from(*value))
+            return fixed.materialize_accounted(row_ids, memory, |row, value| {
+                bitmap_present(&data, rows, row as u64).then(|| B256::from(*value))
             });
         }
-
-        let values = self.read_fixed_width_values(column, 32, row_ids)?;
-        let nulls = self.read_null_bitmap(column)?;
-
-        let mut result = Vec::with_capacity(values.len());
-        match row_ids {
-            Some(ids) => {
-                for (idx, bytes) in ids.iter().zip(values) {
-                    if nulls.is_present(*idx as u64) {
-                        result.push(Some(B256::from_slice(&bytes)));
-                    } else {
-                        result.push(None);
-                    }
-                }
-            }
-            None => {
-                for (idx, bytes) in values.into_iter().enumerate() {
-                    if nulls.is_present(idx as u64) {
-                        result.push(Some(B256::from_slice(&bytes)));
-                    } else {
-                        result.push(None);
-                    }
-                }
-            }
+        let values =
+            self.read_fixed_typed::<32, B256>(column, row_ids, memory, |value| B256::from(*value))?;
+        let descriptor = self.compacted_column(column).unwrap();
+        let path = descriptor.null_bitmap_path.as_ref().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "nullable column is missing null bitmap",
+            )
+        })?;
+        let data = if memory.is_some() {
+            self.artifacts.read_accounted(path)?
+        } else {
+            QueryBuffer::unaccounted(self.artifacts.read(path)?)
+        };
+        let rows = validate_null_bytes(&data, data.len() as u64, self.read_row_count()?, true)?;
+        self.validate_bitmap_rows(rows)?;
+        let mut result =
+            QueryBuffer::try_with_capacity(values.len(), memory, "nullable fixed output")?;
+        for (position, value) in values.iter().enumerate() {
+            let row = row_ids.map_or(position as u64, |ids| u64::from(ids[position]));
+            result.try_push(bitmap_present(&data, rows, row).then_some(*value))?;
         }
-
         Ok(result)
-    }
-
-    pub fn read_u64(&self, column: &str, row_ids: Option<&[u32]>) -> io::Result<Vec<u64>> {
-        if self.compacted_column(column).is_none() {
-            return self
-                .raw_fixed::<8>(raw_column_path(column), row_ids)?
-                .materialize(row_ids, |_, value| u64::from_le_bytes(*value));
-        }
-        self.read_u64_values(column, row_ids)
-    }
-
-    pub fn read_u32(&self, column: &str, row_ids: Option<&[u32]>) -> io::Result<Vec<u32>> {
-        if self.compacted_column(column).is_none() {
-            return self
-                .raw_fixed::<4>(raw_column_path(column), row_ids)?
-                .materialize(row_ids, |_, value| u32::from_le_bytes(*value));
-        }
-        self.read_u32_values(column, row_ids)
-    }
-
-    pub fn read_u8(&self, column: &str, row_ids: Option<&[u32]>) -> io::Result<Vec<u8>> {
-        if self.compacted_column(column).is_none() {
-            return self
-                .raw_fixed::<1>(raw_column_path(column), row_ids)?
-                .materialize(row_ids, |_, value| value[0]);
-        }
-        self.read_u8_values(column, row_ids)
     }
 
     pub fn read_var_bytes(&self, column: &str, row_ids: Option<&[u32]>) -> io::Result<Vec<Bytes>> {
@@ -844,7 +1004,7 @@ impl SegmentReader {
         } else {
             let data = self
                 .artifacts
-                .read_range("address.col", 0..ColumnFileHeader::SIZE as u64)?;
+                .read_range_accounted("address.col", 0..ColumnFileHeader::SIZE as u64)?;
             crate::reader::raw_address_row_count(&data, self.artifacts.len("address.col")?)
         }
     }
@@ -1396,136 +1556,141 @@ impl SegmentReader {
             .map_or("canonical.bitmap", |manifest| &manifest.canonical_rows_path)
     }
 
-    fn read_fixed_width_values(
+    fn read_fixed_typed<const WIDTH: usize, T: Copy + Default>(
         &self,
         column: &str,
-        item_size: usize,
         row_ids: Option<&[u32]>,
-    ) -> io::Result<Vec<Vec<u8>>> {
+        memory: Option<&QueryMemoryBudget>,
+        decode: impl Fn(&[u8; WIDTH]) -> T,
+    ) -> io::Result<QueryBuffer<T>> {
         let descriptor = self.compacted_column(column).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "column is not compacted")
         })?;
-        let page_index = self.read_compacted_page_index(descriptor, row_ids)?;
-
-        match row_ids {
-            Some(ids) => {
-                let mut result = vec![None; ids.len()];
-                for selection in build_selections(ids, &page_index)? {
-                    let page_data = self.read_page_payload(descriptor, &selection.entry)?;
-                    let page = decode_fixed_width_page(
-                        &page_data,
-                        selection.entry.row_count as usize,
-                        item_size,
-                        descriptor.codec,
-                    )?;
-                    for (local_row, output_position) in selection
-                        .local_rows
-                        .iter()
-                        .zip(selection.output_positions.iter())
-                    {
-                        let start = local_row * item_size;
-                        let end = start + item_size;
-                        result[*output_position] = Some(page[start..end].to_vec());
-                    }
-                }
-                materialize_selected(result)
+        let index = self.read_compacted_page_index_accounted(descriptor, row_ids, memory)?;
+        let complete = (row_ids.is_none() && memory.is_none())
+            .then(|| self.artifacts.read(&descriptor.data_path))
+            .transpose()?;
+        read_selected_pages_accounted(row_ids, &index, memory, |entry| {
+            let payload;
+            let bytes = if let Some(data) = complete.as_ref() {
+                self.slice_page(data, entry)?
+            } else {
+                payload = self.read_page_payload_accounted(descriptor, entry, memory)?;
+                &payload
+            };
+            let page = decode_fixed_width_page_accounted(
+                bytes,
+                entry.row_count as usize,
+                WIDTH,
+                descriptor.codec,
+                memory,
+            )?;
+            let mut values = QueryBuffer::try_with_capacity(
+                entry.row_count as usize,
+                memory,
+                "fixed decoded values",
+            )?;
+            for value in page.as_chunks::<WIDTH>().0 {
+                values.try_push(decode(value))?;
             }
-            None => {
-                let data = self.artifacts.read(&descriptor.data_path)?;
-                let mut result = Vec::with_capacity(self.read_row_count()? as usize);
-                for entry in page_index {
-                    let page = decode_fixed_width_page(
-                        self.slice_page(&data, &entry)?,
-                        entry.row_count as usize,
-                        item_size,
-                        descriptor.codec,
-                    )?;
-                    result.extend(page.chunks_exact(item_size).map(|chunk| chunk.to_vec()));
-                }
-                Ok(result)
-            }
-        }
+            Ok(values)
+        })
     }
 
-    fn read_u64_values(&self, column: &str, row_ids: Option<&[u32]>) -> io::Result<Vec<u64>> {
+    fn read_u64_values_accounted(
+        &self,
+        column: &str,
+        row_ids: Option<&[u32]>,
+        memory: Option<&QueryMemoryBudget>,
+    ) -> io::Result<QueryBuffer<u64>> {
         let descriptor = self.compacted_column(column).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "column is not compacted")
         })?;
-        let page_index = self.read_compacted_page_index(descriptor, row_ids)?;
-
-        match row_ids {
-            Some(_) => read_selected_pages(row_ids, &page_index, |entry| {
-                decode_u64_page(
-                    &self.read_page_payload(descriptor, entry)?,
+        let index = self.read_compacted_page_index_accounted(descriptor, row_ids, memory)?;
+        let complete = (row_ids.is_none() && memory.is_none())
+            .then(|| self.artifacts.read(&descriptor.data_path))
+            .transpose()?;
+        read_selected_pages_accounted(row_ids, &index, memory, |entry| {
+            if let Some(data) = complete.as_ref() {
+                decode_u64_page_accounted(
+                    self.slice_page(data, entry)?,
                     entry.row_count as usize,
                     descriptor.codec,
+                    memory,
                 )
-            }),
-            None => {
-                let data = self.artifacts.read(&descriptor.data_path)?;
-                read_selected_pages(None, &page_index, |entry| {
-                    decode_u64_page(
-                        self.slice_page(&data, entry)?,
-                        entry.row_count as usize,
-                        descriptor.codec,
-                    )
-                })
+            } else {
+                decode_u64_page_accounted(
+                    &self.read_page_payload_accounted(descriptor, entry, memory)?,
+                    entry.row_count as usize,
+                    descriptor.codec,
+                    memory,
+                )
             }
-        }
+        })
     }
 
-    fn read_u32_values(&self, column: &str, row_ids: Option<&[u32]>) -> io::Result<Vec<u32>> {
+    fn read_u32_values_accounted(
+        &self,
+        column: &str,
+        row_ids: Option<&[u32]>,
+        memory: Option<&QueryMemoryBudget>,
+    ) -> io::Result<QueryBuffer<u32>> {
         let descriptor = self.compacted_column(column).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "column is not compacted")
         })?;
-        let page_index = self.read_compacted_page_index(descriptor, row_ids)?;
-
-        match row_ids {
-            Some(_) => read_selected_pages(row_ids, &page_index, |entry| {
-                decode_u32_page(
-                    &self.read_page_payload(descriptor, entry)?,
+        let index = self.read_compacted_page_index_accounted(descriptor, row_ids, memory)?;
+        let complete = (row_ids.is_none() && memory.is_none())
+            .then(|| self.artifacts.read(&descriptor.data_path))
+            .transpose()?;
+        read_selected_pages_accounted(row_ids, &index, memory, |entry| {
+            if let Some(data) = complete.as_ref() {
+                decode_u32_page_accounted(
+                    self.slice_page(data, entry)?,
                     entry.row_count as usize,
                     descriptor.codec,
+                    memory,
                 )
-            }),
-            None => {
-                let data = self.artifacts.read(&descriptor.data_path)?;
-                read_selected_pages(None, &page_index, |entry| {
-                    decode_u32_page(
-                        self.slice_page(&data, entry)?,
-                        entry.row_count as usize,
-                        descriptor.codec,
-                    )
-                })
+            } else {
+                decode_u32_page_accounted(
+                    &self.read_page_payload_accounted(descriptor, entry, memory)?,
+                    entry.row_count as usize,
+                    descriptor.codec,
+                    memory,
+                )
             }
-        }
+        })
     }
 
-    fn read_u8_values(&self, column: &str, row_ids: Option<&[u32]>) -> io::Result<Vec<u8>> {
+    fn read_u8_values_accounted(
+        &self,
+        column: &str,
+        row_ids: Option<&[u32]>,
+        memory: Option<&QueryMemoryBudget>,
+    ) -> io::Result<QueryBuffer<u8>> {
         let descriptor = self.compacted_column(column).ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "column is not compacted")
         })?;
-        let page_index = self.read_compacted_page_index(descriptor, row_ids)?;
-
-        match row_ids {
-            Some(_) => read_selected_pages(row_ids, &page_index, |entry| {
-                decode_u8_page(
-                    &self.read_page_payload(descriptor, entry)?,
+        let index = self.read_compacted_page_index_accounted(descriptor, row_ids, memory)?;
+        let complete = (row_ids.is_none() && memory.is_none())
+            .then(|| self.artifacts.read(&descriptor.data_path))
+            .transpose()?;
+        read_selected_pages_accounted(row_ids, &index, memory, |entry| {
+            if let Some(data) = complete.as_ref() {
+                decode_u8_page_accounted(
+                    self.slice_page(data, entry)?,
                     entry.row_count as usize,
                     descriptor.codec,
+                    memory,
                 )
-            }),
-            None => {
-                let data = self.artifacts.read(&descriptor.data_path)?;
-                read_selected_pages(None, &page_index, |entry| {
-                    decode_u8_page(
-                        self.slice_page(&data, entry)?,
-                        entry.row_count as usize,
-                        descriptor.codec,
-                    )
-                })
+            } else {
+                decode_u8_page_accounted(
+                    &self.read_page_payload_accounted(descriptor, entry, memory)?,
+                    entry.row_count as usize,
+                    descriptor.codec,
+                    memory,
+                )
             }
-        }
+        })
     }
 
     fn read_var_bytes_values(
@@ -1625,8 +1790,10 @@ impl SegmentReader {
                 descriptor.codec,
                 expected,
             )?;
-            for (&local_row, &output_position) in
-                selection.local_rows.iter().zip(&selection.output_positions)
+            for (&local_row, &output_position) in selection
+                .local_rows
+                .iter()
+                .zip(selection.output_positions.iter())
             {
                 values[output_position] = Some(page[local_row].clone());
                 lengths[output_position] = Some(expected[local_row]);
@@ -1639,36 +1806,32 @@ impl SegmentReader {
         ))
     }
 
-    fn read_null_bitmap(&self, column: &str) -> io::Result<NullBitmap> {
-        let descriptor = self.compacted_column(column).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidInput, "column is not compacted")
-        })?;
-        let null_path = descriptor.null_bitmap_path.as_ref().ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("nullable column {column} is missing a null bitmap"),
-            )
-        })?;
-        let data = self.artifacts.read(null_path)?;
-        let bitmap = NullBitmap::read_from(&data)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "corrupt null bitmap"))?;
-        self.validate_bitmap_rows(bitmap.len())?;
-        Ok(bitmap)
-    }
-
     fn read_compacted_page_index(
         &self,
         descriptor: &ColumnDescriptor,
         row_ids: Option<&[u32]>,
     ) -> io::Result<Vec<PageIndexEntry>> {
+        self.read_compacted_page_index_accounted(descriptor, row_ids, None)
+            .map(|buffer| buffer.into_parts().0)
+    }
+    fn read_compacted_page_index_accounted(
+        &self,
+        descriptor: &ColumnDescriptor,
+        row_ids: Option<&[u32]>,
+        memory: Option<&QueryMemoryBudget>,
+    ) -> io::Result<QueryBuffer<PageIndexEntry>> {
         let path = descriptor.page_index_path.as_ref().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
                 "compacted column is missing a page index",
             )
         })?;
-        let data = self.artifacts.read(path)?;
-        let mut entries = read_page_index(&data)?;
+        let data = if memory.is_some() {
+            self.artifacts.read_accounted(path)?
+        } else {
+            QueryBuffer::unaccounted(self.artifacts.read(path)?)
+        };
+        let mut entries = read_page_index_accounted(&data, memory)?;
         let visible_rows = self.read_row_count()?;
         let required_rows = row_ids
             .and_then(|ids| ids.iter().max())
@@ -1682,7 +1845,7 @@ impl SegmentReader {
         let mut rows = 0u64;
         let mut offset = 0u64;
         let mut visible_entries = 0;
-        for entry in &entries {
+        for entry in entries.iter() {
             if rows >= required_rows {
                 break;
             }
@@ -1735,6 +1898,25 @@ impl SegmentReader {
         })
     }
 
+    fn read_page_payload_accounted(
+        &self,
+        descriptor: &ColumnDescriptor,
+        entry: &PageIndexEntry,
+        memory: Option<&QueryMemoryBudget>,
+    ) -> io::Result<QueryBuffer<u8>> {
+        if memory.is_none() {
+            return self
+                .read_page_payload(descriptor, entry)
+                .map(QueryBuffer::unaccounted);
+        }
+        let end = entry
+            .offset
+            .checked_add(u64::from(entry.encoded_len))
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "page range overflow"))?;
+        self.artifacts
+            .read_range_accounted(&descriptor.data_path, entry.offset..end)
+    }
+
     fn read_page_payload(
         &self,
         descriptor: &ColumnDescriptor,
@@ -1778,11 +1960,20 @@ fn build_selections(
     row_ids: &[u32],
     page_index: &[PageIndexEntry],
 ) -> io::Result<Vec<PageSelection>> {
+    build_selections_accounted(row_ids, page_index, None).map(|buffer| buffer.into_parts().0)
+}
+
+fn build_selections_accounted(
+    row_ids: &[u32],
+    page_index: &[PageIndexEntry],
+    memory: Option<&QueryMemoryBudget>,
+) -> io::Result<QueryBuffer<PageSelection>> {
     if row_ids.is_empty() {
-        return Ok(Vec::new());
+        return QueryBuffer::try_with_capacity(0, memory, "page selections");
     }
 
-    let mut selections: Vec<PageSelection> = Vec::new();
+    let mut selections =
+        QueryBuffer::<PageSelection>::try_with_capacity(0, memory, "page selections")?;
     let mut page_cursor = 0usize;
 
     // Scan pages in physical order, then scatter into the caller's order. SQL
@@ -1792,7 +1983,9 @@ fn build_selections(
     let sorted_positions = if row_ids.is_sorted() {
         None
     } else {
-        let mut positions: Vec<_> = (0..row_ids.len()).collect();
+        let mut positions =
+            QueryBuffer::try_with_capacity(row_ids.len(), memory, "selection order")?;
+        positions.try_extend(0..row_ids.len())?;
         positions.sort_unstable_by_key(|position| row_ids[*position]);
         Some(positions)
     };
@@ -1826,31 +2019,45 @@ fn build_selections(
         if let Some(last) = selections.last_mut()
             && last.entry == *entry
         {
-            last.local_rows.push(local_row);
-            last.output_positions.push(output_position);
+            last.local_rows.try_push(local_row)?;
+            last.output_positions.try_push(output_position)?;
         } else {
-            selections.push(PageSelection {
+            let mut local_rows = QueryBuffer::try_with_capacity(1, memory, "local selection rows")?;
+            let mut output_positions =
+                QueryBuffer::try_with_capacity(1, memory, "selection output positions")?;
+            local_rows.try_push(local_row)?;
+            output_positions.try_push(output_position)?;
+            selections.try_push(PageSelection {
                 entry: *entry,
-                local_rows: vec![local_row],
-                output_positions: vec![output_position],
-            });
+                local_rows,
+                output_positions,
+            })?;
         }
     }
 
     Ok(selections)
 }
 
-fn read_selected_pages<T, F>(
+#[cfg(test)]
+fn read_selected_pages<T: Copy + Default>(
     row_ids: Option<&[u32]>,
     page_index: &[PageIndexEntry],
-    mut decode_page: F,
-) -> io::Result<Vec<T>>
-where
-    T: Clone,
-    F: FnMut(&PageIndexEntry) -> io::Result<Vec<T>>,
-{
-    let mut decode_checked_page = |entry: &PageIndexEntry| {
-        let page = decode_page(entry)?;
+    mut decode: impl FnMut(&PageIndexEntry) -> io::Result<Vec<T>>,
+) -> io::Result<Vec<T>> {
+    read_selected_pages_accounted(row_ids, page_index, None, |entry| {
+        decode(entry).map(QueryBuffer::unaccounted)
+    })
+    .map(|buffer| buffer.into_parts().0)
+}
+
+fn read_selected_pages_accounted<T: Copy + Default>(
+    row_ids: Option<&[u32]>,
+    page_index: &[PageIndexEntry],
+    memory: Option<&QueryMemoryBudget>,
+    mut decode: impl FnMut(&PageIndexEntry) -> io::Result<QueryBuffer<T>>,
+) -> io::Result<QueryBuffer<T>> {
+    let mut decode_checked = |entry: &PageIndexEntry| {
+        let page = decode(entry)?;
         if page.len() != entry.row_count as usize {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -1859,29 +2066,44 @@ where
         }
         Ok(page)
     };
+    let count = match row_ids {
+        Some(ids) => ids.len(),
+        None => page_index.iter().try_fold(0usize, |total, entry| {
+            total.checked_add(entry.row_count as usize).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "page row count overflow")
+            })
+        })?,
+    };
+    let mut result = QueryBuffer::try_with_capacity(count, memory, "selected fixed output")?;
     match row_ids {
         Some(ids) => {
-            let mut result = vec![None; ids.len()];
-            for selection in build_selections(ids, page_index)? {
-                let page = decode_checked_page(&selection.entry)?;
-                for (local_row, output_position) in selection
+            let selections = build_selections_accounted(ids, page_index, memory)?;
+            result.try_resize(count, T::default())?;
+            for selection in selections.iter() {
+                let page = decode_checked(&selection.entry)?;
+                for (&local, &output) in selection
                     .local_rows
                     .iter()
                     .zip(selection.output_positions.iter())
                 {
-                    result[*output_position] = Some(page[*local_row].clone());
+                    result[output] = page[local];
                 }
             }
-            materialize_selected(result)
         }
         None => {
-            let mut result = Vec::new();
             for entry in page_index {
-                result.extend(decode_checked_page(entry)?);
+                result.try_extend_from_slice(&decode_checked(entry)?)?;
             }
-            Ok(result)
         }
     }
+    Ok(result)
+}
+
+fn bitmap_present(data: &[u8], rows: u64, row: u64) -> bool {
+    row < rows
+        && data
+            .get(8 + (row / 8) as usize)
+            .is_some_and(|byte| byte & (1 << (row % 8)) != 0)
 }
 
 fn materialize_selected<T>(values: Vec<Option<T>>) -> io::Result<Vec<T>> {
@@ -2162,6 +2384,257 @@ mod tests {
 
     fn after_artifact_capture(action: impl FnOnce() + 'static) {
         AFTER_ARTIFACT_CAPTURE.with_borrow_mut(|hook| *hook = Some(Box::new(action)));
+    }
+
+    /// Disposable raw, legacy paged and bundled fixtures exercise the same
+    /// selected-read contract and retain output credit beyond reader lifetime.
+    #[test]
+    fn accounted_fixed_reads_match_all_layouts_and_release_owners() {
+        let fixture_rows = make_rows();
+        let raw = TempDir::new().unwrap();
+        ColumnFile::write_batch(raw.path(), &fixture_rows).unwrap();
+        let (_paged, paged_dir) = compacted_fixture();
+        let bundled = TempDir::new().unwrap();
+        let mut storage = crate::native::NativeStorage::open(crate::native::NativeStorageConfig {
+            data_dir: bundled.path().to_path_buf(),
+            hot_target_rows: 20,
+            compaction_safety_margin_blocks: 0,
+        })
+        .unwrap();
+        let appended = storage.write_historical_batch(&fixture_rows).unwrap();
+        let bundle_dir = appended[0].path.clone();
+        drop(storage);
+        for dir in [raw.path(), paged_dir.as_path(), bundle_dir.as_path()] {
+            let memory = QueryMemoryBudget::new(
+                logex_types::QueryMemoryLimit::new(4 * 1024 * 1024).unwrap(),
+            );
+            let columns = [
+                "address",
+                "block_number",
+                "block_hash",
+                "timestamp",
+                "tx_hash",
+                "tx_index",
+                "log_index",
+                "source",
+                "data_len",
+                "topic0",
+                "topic1",
+                "topic2",
+                "topic3",
+            ];
+            let reader =
+                SegmentReader::open_projected_with_memory(dir, &columns, memory.clone()).unwrap();
+            let reference = SegmentReader::open_projected(dir, &columns).unwrap();
+            for ids in [
+                None,
+                Some(&[19, 0, 19, 7][..]),
+                Some(&[0, 0, 7, 19][..]),
+                Some(&[][..]),
+            ] {
+                let selected: Vec<&LogRow> = match ids {
+                    Some(ids) => ids.iter().map(|id| &fixture_rows[*id as usize]).collect(),
+                    None => fixture_rows.iter().collect(),
+                };
+                macro_rules! same {
+                    ($accounted:expr, $reference:expr, $expected:expr) => {{
+                        let actual = $accounted.unwrap();
+                        assert_eq!(&*actual, $reference.unwrap().as_slice());
+                        assert_eq!(&*actual, $expected.as_slice());
+                    }};
+                }
+                same!(
+                    reader.read_address_with_memory(ids),
+                    reference.read_address(ids),
+                    selected.iter().map(|row| row.address).collect::<Vec<_>>()
+                );
+                for name in ["block_number", "timestamp"] {
+                    let expected = selected
+                        .iter()
+                        .map(|row| {
+                            if name == "block_number" {
+                                row.block_number
+                            } else {
+                                row.timestamp
+                            }
+                        })
+                        .collect::<Vec<_>>();
+                    same!(
+                        reader.read_u64_with_memory(name, ids),
+                        reference.read_u64(name, ids),
+                        expected
+                    );
+                }
+                for name in ["block_hash", "tx_hash"] {
+                    let expected = selected
+                        .iter()
+                        .map(|row| {
+                            if name == "block_hash" {
+                                row.block_hash
+                            } else {
+                                row.tx_hash
+                            }
+                        })
+                        .collect::<Vec<_>>();
+                    same!(
+                        reader.read_b256_with_memory(name, ids),
+                        reference.read_b256(name, ids),
+                        expected
+                    );
+                }
+                for name in ["tx_index", "log_index", "data_len"] {
+                    let expected = selected
+                        .iter()
+                        .map(|row| match name {
+                            "tx_index" => row.tx_index,
+                            "log_index" => row.log_index,
+                            _ => row.data_len,
+                        })
+                        .collect::<Vec<_>>();
+                    same!(
+                        reader.read_u32_with_memory(name, ids),
+                        reference.read_u32(name, ids),
+                        expected
+                    );
+                }
+                same!(
+                    reader.read_u8_with_memory("source", ids),
+                    reference.read_u8("source", ids),
+                    selected
+                        .iter()
+                        .map(|row| row.source as u8)
+                        .collect::<Vec<_>>()
+                );
+                for name in ["topic0", "topic1", "topic2", "topic3"] {
+                    let expected = selected
+                        .iter()
+                        .map(|row| match name {
+                            "topic0" => row.topic0,
+                            "topic1" => row.topic1,
+                            "topic2" => row.topic2,
+                            _ => row.topic3,
+                        })
+                        .collect::<Vec<_>>();
+                    same!(
+                        reader.read_nullable_b256_with_memory(name, ids),
+                        reference.read_nullable_b256(name, ids),
+                        expected
+                    );
+                }
+            }
+            let before = memory.used();
+            assert!(
+                reader
+                    .read_u64_with_memory("block_number", Some(&[20]))
+                    .is_err()
+            );
+            assert_eq!(memory.used(), before);
+            let pressure = memory
+                .reserve(
+                    memory.limit() - usize::try_from(memory.used()).unwrap() - 1,
+                    "test pressure",
+                )
+                .unwrap();
+            assert!(
+                reader
+                    .read_u64_with_memory("block_number", Some(&[0]))
+                    .is_err()
+            );
+            drop(pressure);
+            assert_eq!(memory.used(), before);
+            let retained = reader
+                .read_u64_with_memory("block_number", Some(&[19, 0, 19]))
+                .unwrap();
+            let retained_bytes = retained.capacity() * std::mem::size_of::<u64>();
+            drop(reader);
+            assert_eq!(memory.used(), retained_bytes as u128);
+            assert_eq!(&*retained, &[29, 10, 29]);
+            drop(retained);
+            assert_eq!(memory.used(), 0);
+        }
+    }
+
+    #[test]
+    fn accounted_raw_prefix_does_not_allocate_appended_tail() {
+        let (_tmp, dir, _, rows) = identified_raw_fixture();
+        let memory =
+            QueryMemoryBudget::new(logex_types::QueryMemoryLimit::new(1024 * 1024).unwrap());
+        let reader = SegmentReader::open_projected_with_memory(
+            &dir,
+            &["block_number", "topic0"],
+            memory.clone(),
+        )
+        .unwrap();
+        let appended = vec![rows[0].clone(); 128];
+        ColumnFile::append_batch(&dir, &appended, rows.len() as u64).unwrap();
+        let needed = ColumnFileHeader::SIZE + rows.len() * 8 * 2;
+        let pressure = memory
+            .reserve(
+                memory.limit() - usize::try_from(memory.used()).unwrap() - needed,
+                "test prefix allowance",
+            )
+            .unwrap();
+        let output = reader.read_u64_with_memory("block_number", None).unwrap();
+        assert_eq!(
+            &*output,
+            rows.iter()
+                .map(|row| row.block_number)
+                .collect::<Vec<_>>()
+                .as_slice()
+        );
+        drop(output);
+        drop(pressure);
+        let nullable = reader
+            .read_nullable_b256_with_memory("topic0", Some(&[19, 0, 19]))
+            .unwrap();
+        assert_eq!(
+            &*nullable,
+            &[rows[19].topic0, rows[0].topic0, rows[19].topic0]
+        );
+        drop(nullable);
+        drop(reader);
+        assert_eq!(memory.used(), 0);
+    }
+
+    #[test]
+    fn accounted_fixed_read_errors_release_temporary_buffers() {
+        let tmp = TempDir::new().unwrap();
+        ColumnFile::write_batch(tmp.path(), &make_rows()).unwrap();
+        let memory =
+            QueryMemoryBudget::new(logex_types::QueryMemoryLimit::new(1024 * 1024).unwrap());
+        let reader = SegmentReader::open_projected_with_memory(
+            tmp.path(),
+            &["block_number", "topic0"],
+            memory.clone(),
+        )
+        .unwrap();
+        let baseline = memory.used();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(tmp.path().join("block_number.col"))
+            .unwrap()
+            .set_len(ColumnFileHeader::SIZE as u64)
+            .unwrap();
+        assert!(
+            reader
+                .read_u64_with_memory("block_number", Some(&[19]))
+                .is_err()
+        );
+        assert_eq!(memory.used(), baseline);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(tmp.path().join("topic0.null"))
+            .unwrap()
+            .set_len(8)
+            .unwrap();
+        assert!(
+            reader
+                .read_nullable_b256_with_memory("topic0", Some(&[19]))
+                .is_err()
+        );
+        assert_eq!(memory.used(), baseline);
+        drop(reader);
+        assert_eq!(memory.used(), 0);
     }
 
     #[test]

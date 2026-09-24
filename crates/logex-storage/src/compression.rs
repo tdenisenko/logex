@@ -1,6 +1,27 @@
 use std::io;
 
+use logex_types::{QueryBuffer, QueryMemoryBudget};
 use rustc_hash::FxHashMap;
+
+/// Reserve a decoder's single output vector before invoking it. Callers must
+/// account separate scratch vectors independently while they remain alive.
+pub(crate) fn decode_buffer<T>(
+    capacity: usize,
+    memory: Option<&QueryMemoryBudget>,
+    stage: &'static str,
+    decode: impl FnOnce() -> io::Result<Vec<T>>,
+) -> io::Result<QueryBuffer<T>> {
+    let reservation = memory
+        .map(|memory| {
+            let bytes = QueryMemoryBudget::array_bytes::<T>(capacity, stage)?;
+            memory.reserve(bytes, stage)
+        })
+        .transpose()
+        .map_err(io::Error::other)?;
+    QueryBuffer::from_reserved(decode()?, reservation)
+}
+
+const DECODE_STAGE: &str = "query storage decode";
 
 /// Compression codec identifier stored in column file headers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,6 +132,17 @@ fn encode_dictionary_parts(dict: &[&[u8]], item_size: usize, indices: &[u32]) ->
 }
 
 pub fn dict_decode(data: &[u8], row_count: usize, item_size: usize) -> io::Result<Vec<u8>> {
+    Ok(dict_decode_accounted(data, row_count, item_size, None)?
+        .into_parts()
+        .0)
+}
+
+pub(crate) fn dict_decode_accounted(
+    data: &[u8],
+    row_count: usize,
+    item_size: usize,
+    memory: Option<&QueryMemoryBudget>,
+) -> io::Result<QueryBuffer<u8>> {
     if data.len() < 8 {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "dict too short"));
     }
@@ -148,7 +180,9 @@ pub fn dict_decode(data: &[u8], row_count: usize, item_size: usize) -> io::Resul
     let bits_needed = data[dict_end];
     let packed_start = dict_end + 1;
 
-    let indices = bitunpack_u32(&data[packed_start..], row_count, bits_needed)?;
+    let indices = decode_buffer(row_count, memory, DECODE_STAGE, || {
+        bitunpack_u32(&data[packed_start..], row_count, bits_needed)
+    })?;
     // Validate once before allocating/copying the output. The maximum check can
     // scan index values efficiently without an extra branch per copied value.
     if indices
@@ -169,10 +203,10 @@ pub fn dict_decode(data: &[u8], row_count: usize, item_size: usize) -> io::Resul
             "dictionary output size overflow",
         )
     })?;
-    let mut result = Vec::with_capacity(output_len);
-    for idx in indices {
+    let mut result = QueryBuffer::try_with_capacity(output_len, memory, DECODE_STAGE)?;
+    for &idx in indices.iter() {
         let offset = idx as usize * item_size;
-        result.extend_from_slice(&dict_bytes[offset..offset + item_size]);
+        result.try_extend_from_slice(&dict_bytes[offset..offset + item_size])?;
     }
 
     Ok(result)
@@ -212,9 +246,19 @@ pub fn delta_encode(values: &[u64]) -> Vec<u8> {
 }
 
 pub fn delta_decode(data: &[u8], row_count: usize) -> io::Result<Vec<u64>> {
+    Ok(delta_decode_accounted(data, row_count, None)?
+        .into_parts()
+        .0)
+}
+
+pub(crate) fn delta_decode_accounted(
+    data: &[u8],
+    row_count: usize,
+    memory: Option<&QueryMemoryBudget>,
+) -> io::Result<QueryBuffer<u64>> {
     if row_count == 0 {
         return if data.is_empty() {
-            Ok(Vec::new())
+            Ok(QueryBuffer::unaccounted(Vec::new()))
         } else {
             Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -236,14 +280,16 @@ pub fn delta_decode(data: &[u8], row_count: usize) -> io::Result<Vec<u64>> {
     );
     let bits = data[8];
 
-    let deltas = bitunpack_u64(&data[9..], row_count - 1, bits)?;
+    let deltas = decode_buffer(row_count - 1, memory, DECODE_STAGE, || {
+        bitunpack_u64(&data[9..], row_count - 1, bits)
+    })?;
 
-    let mut result = Vec::with_capacity(row_count);
-    result.push(base);
+    let mut result = QueryBuffer::try_with_capacity(row_count, memory, DECODE_STAGE)?;
+    result.try_push(base)?;
     let mut prev = base;
-    for d in deltas {
+    for &d in deltas.iter() {
         prev = prev.wrapping_add(d);
-        result.push(prev);
+        result.try_push(prev)?;
     }
 
     Ok(result)
@@ -285,9 +331,19 @@ pub fn signed_delta_encode(values: &[u64]) -> Vec<u8> {
 }
 
 pub fn signed_delta_decode(data: &[u8], row_count: usize) -> io::Result<Vec<u64>> {
+    Ok(signed_delta_decode_accounted(data, row_count, None)?
+        .into_parts()
+        .0)
+}
+
+pub(crate) fn signed_delta_decode_accounted(
+    data: &[u8],
+    row_count: usize,
+    memory: Option<&QueryMemoryBudget>,
+) -> io::Result<QueryBuffer<u64>> {
     if row_count == 0 {
         return if data.is_empty() {
-            Ok(Vec::new())
+            Ok(QueryBuffer::unaccounted(Vec::new()))
         } else {
             Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -306,15 +362,17 @@ pub fn signed_delta_decode(data: &[u8], row_count: usize) -> io::Result<Vec<u64>
         io::Error::new(io::ErrorKind::InvalidData, "signed delta header truncated")
     })?);
     let bits = data[8];
-    let deltas = bitunpack_u64(&data[9..], row_count - 1, bits)?;
+    let deltas = decode_buffer(row_count - 1, memory, DECODE_STAGE, || {
+        bitunpack_u64(&data[9..], row_count - 1, bits)
+    })?;
 
-    let mut result = Vec::with_capacity(row_count);
-    result.push(base);
+    let mut result = QueryBuffer::try_with_capacity(row_count, memory, DECODE_STAGE)?;
+    result.try_push(base)?;
     let mut prev = base;
-    for delta in deltas {
+    for &delta in deltas.iter() {
         let signed = zigzag_decode(delta);
         prev = prev.wrapping_add(signed as u64);
-        result.push(prev);
+        result.try_push(prev)?;
     }
 
     Ok(result)
@@ -365,9 +423,19 @@ pub fn delta_of_delta_encode(values: &[u64]) -> Vec<u8> {
 }
 
 pub fn delta_of_delta_decode(data: &[u8], row_count: usize) -> io::Result<Vec<u64>> {
+    Ok(delta_of_delta_decode_accounted(data, row_count, None)?
+        .into_parts()
+        .0)
+}
+
+pub(crate) fn delta_of_delta_decode_accounted(
+    data: &[u8],
+    row_count: usize,
+    memory: Option<&QueryMemoryBudget>,
+) -> io::Result<QueryBuffer<u64>> {
     if row_count == 0 {
         return if data.is_empty() {
-            Ok(Vec::new())
+            Ok(QueryBuffer::unaccounted(Vec::new()))
         } else {
             Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -389,7 +457,7 @@ pub fn delta_of_delta_decode(data: &[u8], row_count: usize) -> io::Result<Vec<u6
     );
     if row_count == 1 {
         return if data.len() == 8 {
-            Ok(vec![base])
+            decode_buffer(1, memory, DECODE_STAGE, || Ok(vec![base]))
         } else {
             Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -412,19 +480,21 @@ pub fn delta_of_delta_decode(data: &[u8], row_count: usize) -> io::Result<Vec<u6
     );
     let bits = data[16];
 
-    let zigzag = bitunpack_u64(&data[17..], row_count - 2, bits)?;
-    let dds: Vec<i64> = zigzag.iter().map(|&v| zigzag_decode(v)).collect();
+    let zigzag = decode_buffer(row_count - 2, memory, DECODE_STAGE, || {
+        bitunpack_u64(&data[17..], row_count - 2, bits)
+    })?;
 
-    let mut result = Vec::with_capacity(row_count);
-    result.push(base);
+    let mut result = QueryBuffer::try_with_capacity(row_count, memory, DECODE_STAGE)?;
+    result.try_push(base)?;
     let mut prev_val = base.wrapping_add(first_delta as u64);
-    result.push(prev_val);
+    result.try_push(prev_val)?;
 
     let mut prev_delta = first_delta;
-    for &dd in &dds {
+    for &encoded_delta in zigzag.iter() {
+        let dd = zigzag_decode(encoded_delta);
         let delta = prev_delta.wrapping_add(dd);
         prev_val = prev_val.wrapping_add(delta as u64);
-        result.push(prev_val);
+        result.try_push(prev_val)?;
         prev_delta = delta;
     }
 
@@ -451,9 +521,7 @@ pub fn zstd_decompress(data: &[u8]) -> io::Result<Vec<u8>> {
 pub(crate) fn zstd_decompress_bounded(data: &[u8], limit: usize) -> io::Result<Vec<u8>> {
     let mut decoder = zstd::bulk::Decompressor::new()
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-    let capacity = zstd::bulk::Decompressor::upper_bound(data)
-        .unwrap_or(limit)
-        .min(limit);
+    let capacity = zstd_output_capacity(data, limit);
     let mut output = Vec::new();
     output
         .try_reserve_exact(capacity)
@@ -466,7 +534,27 @@ pub(crate) fn zstd_decompress_bounded(data: &[u8], limit: usize) -> io::Result<V
     Ok(output)
 }
 
-pub(crate) fn lz4_decompress_bounded(data: &[u8], limit: usize) -> io::Result<Vec<u8>> {
+fn zstd_output_capacity(data: &[u8], limit: usize) -> usize {
+    zstd::bulk::Decompressor::upper_bound(data)
+        .unwrap_or(limit)
+        .min(limit)
+}
+
+pub(crate) fn zstd_decompress_bounded_accounted(
+    data: &[u8],
+    limit: usize,
+    memory: Option<&QueryMemoryBudget>,
+) -> io::Result<QueryBuffer<u8>> {
+    // The native codec context is separate from the accounted output buffer.
+    decode_buffer(
+        zstd_output_capacity(data, limit),
+        memory,
+        DECODE_STAGE,
+        || zstd_decompress_bounded(data, limit),
+    )
+}
+
+fn lz4_output_capacity(data: &[u8], limit: usize) -> io::Result<usize> {
     let size = data
         .get(..4)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "truncated LZ4 size"))?;
@@ -477,6 +565,11 @@ pub(crate) fn lz4_decompress_bounded(data: &[u8], limit: usize) -> io::Result<Ve
             "decoded page exceeds its byte budget",
         ));
     }
+    Ok(size)
+}
+
+pub(crate) fn lz4_decompress_bounded(data: &[u8], limit: usize) -> io::Result<Vec<u8>> {
+    let size = lz4_output_capacity(data, limit)?;
     let mut output = Vec::new();
     output.try_reserve_exact(size).map_err(io::Error::other)?;
     // The enabled safe-decode implementation also initializes its output before
@@ -486,6 +579,19 @@ pub(crate) fn lz4_decompress_bounded(data: &[u8], limit: usize) -> io::Result<Ve
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
     output.truncate(actual);
     Ok(output)
+}
+
+pub(crate) fn lz4_decompress_bounded_accounted(
+    data: &[u8],
+    limit: usize,
+    memory: Option<&QueryMemoryBudget>,
+) -> io::Result<QueryBuffer<u8>> {
+    decode_buffer(
+        lz4_output_capacity(data, limit)?,
+        memory,
+        DECODE_STAGE,
+        || lz4_decompress_bounded(data, limit),
+    )
 }
 
 // ---------------------------------------------------------------------------

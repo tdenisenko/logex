@@ -3,6 +3,7 @@ use std::io::{self, Read};
 use std::path::Path;
 
 use alloy_primitives::{Address, B256, Bytes};
+use logex_types::{QueryBuffer, QueryMemoryBudget};
 
 use crate::column::{COLUMN_VERSION, ColumnFileHeader, NullBitmap};
 
@@ -63,7 +64,7 @@ fn checked_range(data: &[u8], start: usize, end: usize) -> io::Result<&[u8]> {
 /// A validated whole fixed-width column, or a bounds-checked selected prefix.
 /// The file buffer owns the bytes; page encoders can borrow them directly.
 pub(crate) struct RawFixedColumn<const WIDTH: usize> {
-    data: Vec<u8>,
+    data: QueryBuffer<u8>,
 }
 
 impl<const WIDTH: usize> RawFixedColumn<WIDTH> {
@@ -92,7 +93,15 @@ impl<const WIDTH: usize> RawFixedColumn<WIDTH> {
 
     pub(crate) fn from_bytes(
         path: &Path,
-        mut data: Vec<u8>,
+        data: Vec<u8>,
+        prefix: Option<usize>,
+    ) -> io::Result<Self> {
+        Self::from_accounted(path, QueryBuffer::unaccounted(data), prefix)
+    }
+
+    pub(crate) fn from_accounted(
+        path: &Path,
+        mut data: QueryBuffer<u8>,
         prefix: Option<usize>,
     ) -> io::Result<Self> {
         const { assert!(WIDTH > 0, "raw column widths must be positive") };
@@ -162,27 +171,36 @@ impl<const WIDTH: usize> RawFixedColumn<WIDTH> {
                 format!("null bitmap {} does not match its column", path.display()),
             )
         };
-        let rows = self.values().len();
-        let bitmap_rows = usize::try_from(read_le_u64(data, 0)?).map_err(|_| invalid())?;
-        if (selected_prefix && bitmap_rows < rows)
-            || (!selected_prefix && bitmap_rows != rows)
-            || Some(data.len()) != bitmap_rows.div_ceil(8).checked_add(8)
-        {
-            return Err(invalid());
-        }
+        validate_null_bytes(
+            data,
+            data.len() as u64,
+            self.values().len() as u64,
+            selected_prefix,
+        )?;
         NullBitmap::read_from(data).ok_or_else(invalid)
     }
 
     pub(crate) fn materialize<T>(
         &self,
         row_ids: Option<&[u32]>,
-        mut decode: impl FnMut(usize, &[u8; WIDTH]) -> T,
+        decode: impl FnMut(usize, &[u8; WIDTH]) -> T,
     ) -> io::Result<Vec<T>> {
+        self.materialize_accounted(row_ids, None, decode)
+            .map(|buffer| buffer.into_parts().0)
+    }
+
+    pub(crate) fn materialize_accounted<T>(
+        &self,
+        row_ids: Option<&[u32]>,
+        memory: Option<&QueryMemoryBudget>,
+        mut decode: impl FnMut(usize, &[u8; WIDTH]) -> T,
+    ) -> io::Result<QueryBuffer<T>> {
         let values = self.values();
-        let mut result = Vec::new();
-        result
-            .try_reserve_exact(row_ids.map_or(values.len(), <[u32]>::len))
-            .map_err(io::Error::other)?;
+        let mut result = QueryBuffer::try_with_capacity(
+            row_ids.map_or(values.len(), <[u32]>::len),
+            memory,
+            "fixed column output",
+        )?;
         match row_ids {
             Some(ids) => {
                 for &id in ids {
@@ -193,16 +211,16 @@ impl<const WIDTH: usize> RawFixedColumn<WIDTH> {
                             "fixed column row id out of bounds",
                         )
                     })?;
-                    result.push(decode(row, value));
+                    result.try_push(decode(row, value))?;
                 }
             }
             None => {
-                result.extend(
+                result.try_extend(
                     values
                         .iter()
                         .enumerate()
                         .map(|(row, value)| decode(row, value)),
-                );
+                )?;
             }
         }
         Ok(result)
@@ -425,6 +443,37 @@ impl ColumnReader {
     ) -> std::io::Result<Vec<logex_types::LogRow>> {
         crate::SegmentReader::open(dir)?.read_log_rows(row_ids)
     }
+}
+
+pub(crate) fn validate_null_bytes(
+    data: &[u8],
+    complete_len: u64,
+    required_rows: u64,
+    prefix: bool,
+) -> io::Result<u64> {
+    let invalid = || {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "null bitmap does not match its column",
+        )
+    };
+    let header: [u8; 8] = data
+        .get(..8)
+        .ok_or_else(invalid)?
+        .try_into()
+        .map_err(|_| invalid())?;
+    let rows = u64::from_le_bytes(header);
+    if (prefix && rows < required_rows)
+        || (!prefix && rows != required_rows)
+        || rows.div_ceil(8).checked_add(8) != Some(complete_len)
+        || required_rows
+            .div_ceil(8)
+            .checked_add(8)
+            .is_none_or(|n| n > data.len() as u64)
+    {
+        return Err(invalid());
+    }
+    Ok(rows)
 }
 
 #[cfg(test)]
@@ -1047,3 +1096,6 @@ mod tests {
         }
     }
 }
+
+// Validate a borrowed bitmap prefix without allocating another bit vector.
+// The captured complete extent still validates the declared raw bitmap shape.

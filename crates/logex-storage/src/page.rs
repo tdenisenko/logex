@@ -1,11 +1,14 @@
 use std::io;
 
 use alloy_primitives::Bytes;
+use logex_types::{QueryBuffer, QueryMemoryBudget};
 
 use crate::compression::{
-    delta_decode, delta_encode, delta_of_delta_decode, delta_of_delta_encode, dict_decode,
-    dict_encode_raw, lz4_compress, lz4_decompress_bounded, signed_delta_decode,
+    decode_buffer, delta_decode_accounted, delta_encode, delta_of_delta_decode_accounted,
+    delta_of_delta_encode, dict_decode_accounted, dict_encode_raw, lz4_compress,
+    lz4_decompress_bounded, lz4_decompress_bounded_accounted, signed_delta_decode_accounted,
     signed_delta_encode, zstd_compress, zstd_compress_level, zstd_decompress_bounded,
+    zstd_decompress_bounded_accounted,
 };
 use crate::native::CompressionCodec;
 
@@ -23,6 +26,7 @@ const ADAPTIVE_BYTES_ZSTD_U32_OFFSETS: u8 = 1;
 const ZSTD_STORAGE_LEVEL: i32 = 1;
 const DICTIONARY_FAST_PATH_NUMERATOR: usize = 3;
 const DICTIONARY_FAST_PATH_DENOMINATOR: usize = 4;
+const DECODE_STAGE: &str = "query storage decode";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PageIndexEntry {
@@ -65,6 +69,13 @@ pub(crate) fn frame_page_index(entries: &[u8]) -> io::Result<Vec<u8>> {
 }
 
 pub fn read_page_index(data: &[u8]) -> io::Result<Vec<PageIndexEntry>> {
+    Ok(read_page_index_accounted(data, None)?.into_parts().0)
+}
+
+pub(crate) fn read_page_index_accounted(
+    data: &[u8],
+    memory: Option<&QueryMemoryBudget>,
+) -> io::Result<QueryBuffer<PageIndexEntry>> {
     if data.len() < 12 || &data[..4] != PAGE_INDEX_MAGIC {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -90,7 +101,10 @@ pub fn read_page_index(data: &[u8]) -> io::Result<Vec<PageIndexEntry>> {
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "truncated page index"))?,
     ) as usize;
 
-    let expected = 12 + count * 24;
+    let expected = count
+        .checked_mul(PAGE_INDEX_ENTRY_BYTES)
+        .and_then(|bytes| bytes.checked_add(PAGE_INDEX_HEADER_BYTES))
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "page index size overflow"))?;
     if data.len() != expected {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -98,7 +112,7 @@ pub fn read_page_index(data: &[u8]) -> io::Result<Vec<PageIndexEntry>> {
         ));
     }
 
-    let mut entries = Vec::with_capacity(count);
+    let mut entries = QueryBuffer::try_with_capacity(count, memory, "query page index")?;
     let mut cursor = 12;
     for _ in 0..count {
         let first_row = u64::from_le_bytes(data[cursor..cursor + 8].try_into().map_err(|_| {
@@ -122,12 +136,12 @@ pub fn read_page_index(data: &[u8]) -> io::Result<Vec<PageIndexEntry>> {
             })?);
         cursor += 4;
 
-        entries.push(PageIndexEntry {
+        entries.try_push(PageIndexEntry {
             first_row,
             row_count,
             offset,
             encoded_len,
-        });
+        })?;
     }
 
     Ok(entries)
@@ -158,20 +172,39 @@ pub fn encode_fixed_width_page(
     }
 }
 
+#[cfg(test)]
 pub fn decode_fixed_width_page(
     encoded: &[u8],
     row_count: usize,
     item_size: usize,
     codec: CompressionCodec,
 ) -> io::Result<Vec<u8>> {
+    Ok(
+        decode_fixed_width_page_accounted(encoded, row_count, item_size, codec, None)?
+            .into_parts()
+            .0,
+    )
+}
+
+pub(crate) fn decode_fixed_width_page_accounted(
+    encoded: &[u8],
+    row_count: usize,
+    item_size: usize,
+    codec: CompressionCodec,
+    memory: Option<&QueryMemoryBudget>,
+) -> io::Result<QueryBuffer<u8>> {
     let expected = decoded_fixed_len(row_count, item_size)?;
     let raw = match codec {
-        CompressionCodec::None => decode_plain_fixed_width_page(encoded, expected)?,
-        CompressionCodec::Dictionary => dict_decode(encoded, row_count, item_size)?,
-        CompressionCodec::Zstd => zstd_decompress_bounded(encoded, expected)?,
-        CompressionCodec::Lz4 => lz4_decompress_bounded(encoded, expected)?,
+        CompressionCodec::None => decode_buffer(expected, memory, DECODE_STAGE, || {
+            decode_plain_fixed_width_page(encoded, expected)
+        })?,
+        CompressionCodec::Dictionary => {
+            dict_decode_accounted(encoded, row_count, item_size, memory)?
+        }
+        CompressionCodec::Zstd => zstd_decompress_bounded_accounted(encoded, expected, memory)?,
+        CompressionCodec::Lz4 => lz4_decompress_bounded_accounted(encoded, expected, memory)?,
         CompressionCodec::AdaptiveFixed => {
-            decode_adaptive_fixed_width_page(encoded, row_count, item_size)?
+            decode_adaptive_fixed_width_page(encoded, row_count, item_size, memory)?
         }
         other => {
             return Err(io::Error::new(
@@ -240,20 +273,28 @@ fn decode_adaptive_fixed_width_page(
     encoded: &[u8],
     row_count: usize,
     item_size: usize,
-) -> io::Result<Vec<u8>> {
+    memory: Option<&QueryMemoryBudget>,
+) -> io::Result<QueryBuffer<u8>> {
     let (tag, payload) = encoded
         .split_first()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "adaptive page is empty"))?;
 
     match *tag {
         ADAPTIVE_FIXED_NONE => {
-            decode_plain_fixed_width_page(payload, decoded_fixed_len(row_count, item_size)?)
+            let expected = decoded_fixed_len(row_count, item_size)?;
+            decode_buffer(expected, memory, DECODE_STAGE, || {
+                decode_plain_fixed_width_page(payload, expected)
+            })
         }
-        ADAPTIVE_FIXED_DICTIONARY => dict_decode(payload, row_count, item_size),
-        ADAPTIVE_FIXED_ZSTD => {
-            zstd_decompress_bounded(payload, decoded_fixed_len(row_count, item_size)?)
+        ADAPTIVE_FIXED_DICTIONARY => dict_decode_accounted(payload, row_count, item_size, memory),
+        ADAPTIVE_FIXED_ZSTD => zstd_decompress_bounded_accounted(
+            payload,
+            decoded_fixed_len(row_count, item_size)?,
+            memory,
+        ),
+        ADAPTIVE_FIXED_ZSTD_B256_LOW20 => {
+            decode_b256_low20_page(payload, row_count, item_size, memory)
         }
-        ADAPTIVE_FIXED_ZSTD_B256_LOW20 => decode_b256_low20_page(payload, row_count, item_size),
         other => Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("unsupported adaptive fixed-width tag: {other}"),
@@ -265,7 +306,8 @@ fn decode_b256_low20_page(
     payload: &[u8],
     row_count: usize,
     item_size: usize,
-) -> io::Result<Vec<u8>> {
+    memory: Option<&QueryMemoryBudget>,
+) -> io::Result<QueryBuffer<u8>> {
     if item_size != 32 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -273,19 +315,21 @@ fn decode_b256_low20_page(
         ));
     }
 
-    let tails = zstd_decompress_bounded(payload, decoded_fixed_len(row_count, 20)?)?;
-    if tails.len() != row_count * 20 {
+    let tail_len = decoded_fixed_len(row_count, 20)?;
+    let tails = zstd_decompress_bounded_accounted(payload, tail_len, memory)?;
+    if tails.len() != tail_len {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "low20 adaptive page has unexpected length",
         ));
     }
 
-    let mut out = Vec::with_capacity(row_count * 32);
+    let mut out =
+        QueryBuffer::try_with_capacity(decoded_fixed_len(row_count, 32)?, memory, DECODE_STAGE)?;
     let (tail_chunks, _) = tails.as_chunks::<20>();
     for tail in tail_chunks {
-        out.extend_from_slice(&[0u8; 12]);
-        out.extend_from_slice(tail);
+        out.try_extend_from_slice(&[0u8; 12])?;
+        out.try_extend_from_slice(tail)?;
     }
     Ok(out)
 }
@@ -310,24 +354,46 @@ pub fn encode_u64_page(values: &[u64], codec: CompressionCodec) -> io::Result<Ve
     }
 }
 
+#[cfg(test)]
 pub fn decode_u64_page(
     encoded: &[u8],
     row_count: usize,
     codec: CompressionCodec,
 ) -> io::Result<Vec<u64>> {
+    Ok(decode_u64_page_accounted(encoded, row_count, codec, None)?
+        .into_parts()
+        .0)
+}
+
+pub(crate) fn decode_u64_page_accounted(
+    encoded: &[u8],
+    row_count: usize,
+    codec: CompressionCodec,
+    memory: Option<&QueryMemoryBudget>,
+) -> io::Result<QueryBuffer<u64>> {
     match codec {
-        CompressionCodec::None => decode_plain_u64_page(encoded, row_count),
-        CompressionCodec::Delta => delta_decode(encoded, row_count),
-        CompressionCodec::DeltaZigZag => signed_delta_decode(encoded, row_count),
-        CompressionCodec::DeltaOfDelta => delta_of_delta_decode(encoded, row_count),
-        CompressionCodec::Zstd => decode_plain_u64_page(
-            &zstd_decompress_bounded(encoded, decoded_fixed_len(row_count, 8)?)?,
-            row_count,
-        ),
-        CompressionCodec::Lz4 => decode_plain_u64_page(
-            &lz4_decompress_bounded(encoded, decoded_fixed_len(row_count, 8)?)?,
-            row_count,
-        ),
+        CompressionCodec::None => decode_buffer(row_count, memory, DECODE_STAGE, || {
+            decode_plain_u64_page(encoded, row_count)
+        }),
+        CompressionCodec::Delta => delta_decode_accounted(encoded, row_count, memory),
+        CompressionCodec::DeltaZigZag => signed_delta_decode_accounted(encoded, row_count, memory),
+        CompressionCodec::DeltaOfDelta => {
+            delta_of_delta_decode_accounted(encoded, row_count, memory)
+        }
+        CompressionCodec::Zstd | CompressionCodec::Lz4 => {
+            let raw = if codec == CompressionCodec::Zstd {
+                zstd_decompress_bounded_accounted(
+                    encoded,
+                    decoded_fixed_len(row_count, 8)?,
+                    memory,
+                )?
+            } else {
+                lz4_decompress_bounded_accounted(encoded, decoded_fixed_len(row_count, 8)?, memory)?
+            };
+            decode_buffer(row_count, memory, DECODE_STAGE, || {
+                decode_plain_u64_page(&raw, row_count)
+            })
+        }
         other => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("unsupported u64 codec: {other:?}"),
@@ -357,12 +423,29 @@ pub fn decode_u32_page(
     row_count: usize,
     codec: CompressionCodec,
 ) -> io::Result<Vec<u32>> {
+    Ok(decode_u32_page_accounted(encoded, row_count, codec, None)?
+        .into_parts()
+        .0)
+}
+
+pub(crate) fn decode_u32_page_accounted(
+    encoded: &[u8],
+    row_count: usize,
+    codec: CompressionCodec,
+    memory: Option<&QueryMemoryBudget>,
+) -> io::Result<QueryBuffer<u32>> {
     let raw = match codec {
-        CompressionCodec::None => return decode_plain_u32_page(encoded, row_count),
-        CompressionCodec::Zstd => {
-            zstd_decompress_bounded(encoded, decoded_fixed_len(row_count, 4)?)?
+        CompressionCodec::None => {
+            return decode_buffer(row_count, memory, DECODE_STAGE, || {
+                decode_plain_u32_page(encoded, row_count)
+            });
         }
-        CompressionCodec::Lz4 => lz4_decompress_bounded(encoded, decoded_fixed_len(row_count, 4)?)?,
+        CompressionCodec::Zstd => {
+            zstd_decompress_bounded_accounted(encoded, decoded_fixed_len(row_count, 4)?, memory)?
+        }
+        CompressionCodec::Lz4 => {
+            lz4_decompress_bounded_accounted(encoded, decoded_fixed_len(row_count, 4)?, memory)?
+        }
         other => {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -370,7 +453,9 @@ pub fn decode_u32_page(
             ));
         }
     };
-    decode_plain_u32_page(&raw, row_count)
+    decode_buffer(row_count, memory, DECODE_STAGE, || {
+        decode_plain_u32_page(&raw, row_count)
+    })
 }
 
 pub fn encode_u8_page(values: &[u8], codec: CompressionCodec) -> io::Result<Vec<u8>> {
@@ -386,18 +471,34 @@ pub fn encode_u8_page(values: &[u8], codec: CompressionCodec) -> io::Result<Vec<
     }
 }
 
+#[cfg(test)]
 pub fn decode_u8_page(
     encoded: &[u8],
     row_count: usize,
     codec: CompressionCodec,
 ) -> io::Result<Vec<u8>> {
+    Ok(decode_u8_page_accounted(encoded, row_count, codec, None)?
+        .into_parts()
+        .0)
+}
+
+pub(crate) fn decode_u8_page_accounted(
+    encoded: &[u8],
+    row_count: usize,
+    codec: CompressionCodec,
+    memory: Option<&QueryMemoryBudget>,
+) -> io::Result<QueryBuffer<u8>> {
     let raw = match codec {
-        CompressionCodec::None => decode_plain_fixed_width_page(encoded, row_count)?,
-        CompressionCodec::Dictionary => dict_decode(encoded, row_count, 1)?,
+        CompressionCodec::None => decode_buffer(row_count, memory, DECODE_STAGE, || {
+            decode_plain_fixed_width_page(encoded, row_count)
+        })?,
+        CompressionCodec::Dictionary => dict_decode_accounted(encoded, row_count, 1, memory)?,
         CompressionCodec::Zstd => {
-            zstd_decompress_bounded(encoded, decoded_fixed_len(row_count, 1)?)?
+            zstd_decompress_bounded_accounted(encoded, decoded_fixed_len(row_count, 1)?, memory)?
         }
-        CompressionCodec::Lz4 => lz4_decompress_bounded(encoded, decoded_fixed_len(row_count, 1)?)?,
+        CompressionCodec::Lz4 => {
+            lz4_decompress_bounded_accounted(encoded, decoded_fixed_len(row_count, 1)?, memory)?
+        }
         other => {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -744,6 +845,245 @@ fn decode_plain_u32_page(raw: &[u8], row_count: usize) -> io::Result<Vec<u32>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn query_budget(bytes: usize) -> QueryMemoryBudget {
+        QueryMemoryBudget::new(logex_types::QueryMemoryLimit::new(bytes).unwrap())
+    }
+
+    fn is_query_capacity(error: &io::Error) -> bool {
+        error.get_ref().is_some_and(|source| {
+            matches!(
+                source.downcast_ref::<logex_types::QueryMemoryError>(),
+                Some(logex_types::QueryMemoryError::CapacityExceeded { .. })
+            )
+        })
+    }
+
+    #[test]
+    fn accounted_numeric_pages_preserve_values_and_return_credit() {
+        for rows in [0, 1, 2, 17, 512] {
+            let values: Vec<u64> = (0..rows)
+                .map(|i| {
+                    if i % 3 == 0 {
+                        u64::MAX - i as u64
+                    } else {
+                        i as u64
+                    }
+                })
+                .collect();
+            for codec in [
+                CompressionCodec::None,
+                CompressionCodec::Delta,
+                CompressionCodec::DeltaZigZag,
+                CompressionCodec::DeltaOfDelta,
+                CompressionCodec::Zstd,
+                CompressionCodec::Lz4,
+            ] {
+                let encoded = encode_u64_page(&values, codec).unwrap();
+                let budget = query_budget(64 * 1024);
+                let decoded =
+                    decode_u64_page_accounted(&encoded, rows, codec, Some(&budget)).unwrap();
+                assert_eq!(&*decoded, &values, "{codec:?}/{rows}");
+                assert_eq!(budget.used(), (decoded.capacity() * 8) as u128);
+                drop(decoded);
+                assert_eq!(budget.used(), 0);
+            }
+            let values: Vec<u32> = values.iter().map(|&v| v as u32).collect();
+            for codec in [
+                CompressionCodec::None,
+                CompressionCodec::Zstd,
+                CompressionCodec::Lz4,
+            ] {
+                let encoded = encode_u32_page(&values, codec).unwrap();
+                let budget = query_budget(64 * 1024);
+                let decoded =
+                    decode_u32_page_accounted(&encoded, rows, codec, Some(&budget)).unwrap();
+                assert_eq!(&*decoded, &values);
+                assert_eq!(budget.used(), (decoded.capacity() * 4) as u128);
+                drop(decoded);
+                assert_eq!(budget.used(), 0);
+            }
+            let values: Vec<u8> = values.iter().map(|&v| v as u8).collect();
+            for codec in [
+                CompressionCodec::None,
+                CompressionCodec::Dictionary,
+                CompressionCodec::Zstd,
+                CompressionCodec::Lz4,
+            ] {
+                let encoded = encode_u8_page(&values, codec).unwrap();
+                let budget = query_budget(64 * 1024);
+                let decoded =
+                    decode_u8_page_accounted(&encoded, rows, codec, Some(&budget)).unwrap();
+                assert_eq!(&*decoded, &values);
+                assert_eq!(budget.used(), decoded.capacity() as u128);
+                drop(decoded);
+                assert_eq!(budget.used(), 0);
+            }
+        }
+    }
+
+    #[test]
+    fn accounted_fixed_pages_preserve_all_adaptive_representations() {
+        let rows = 17;
+        let values: Vec<u8> = (0..rows)
+            .flat_map(|row| {
+                let mut value = [0u8; 32];
+                value[12..].fill(row as u8);
+                value
+            })
+            .collect();
+        let mut cases: Vec<_> = [
+            CompressionCodec::None,
+            CompressionCodec::Dictionary,
+            CompressionCodec::Zstd,
+            CompressionCodec::Lz4,
+            CompressionCodec::AdaptiveFixed,
+        ]
+        .into_iter()
+        .map(|codec| (codec, encode_fixed_width_page(&values, 32, codec).unwrap()))
+        .collect();
+        // Exercise each valid adaptive representation independently of which
+        // compression strategy the writer selects for this small fixture.
+        let tails: Vec<_> = values
+            .as_chunks::<32>()
+            .0
+            .iter()
+            .flat_map(|value| value[12..].iter().copied())
+            .collect();
+        for (tag, payload) in [
+            (ADAPTIVE_FIXED_NONE, values.clone()),
+            (ADAPTIVE_FIXED_DICTIONARY, dict_encode_raw(&values, 32)),
+            (ADAPTIVE_FIXED_ZSTD, zstd_compress(&values).unwrap()),
+            (
+                ADAPTIVE_FIXED_ZSTD_B256_LOW20,
+                zstd_compress(&tails).unwrap(),
+            ),
+        ] {
+            let mut encoded = vec![tag];
+            encoded.extend(payload);
+            cases.push((CompressionCodec::AdaptiveFixed, encoded));
+        }
+        for (codec, encoded) in cases {
+            let budget = query_budget(64 * 1024);
+            let decoded =
+                decode_fixed_width_page_accounted(&encoded, rows, 32, codec, Some(&budget))
+                    .unwrap();
+            assert_eq!(&*decoded, &values);
+            assert_eq!(budget.used(), decoded.capacity() as u128);
+            drop(decoded);
+            assert_eq!(budget.used(), 0);
+        }
+    }
+
+    #[test]
+    fn accounted_decoding_reserves_coexisting_scratch_and_output() {
+        let values = [13, 17, 11, 29];
+        for codec in [
+            CompressionCodec::Delta,
+            CompressionCodec::DeltaZigZag,
+            CompressionCodec::DeltaOfDelta,
+            CompressionCodec::Zstd,
+            CompressionCodec::Lz4,
+        ] {
+            let encoded = encode_u64_page(&values, codec).unwrap();
+            let budget = query_budget(std::mem::size_of_val(&values));
+            let error = decode_u64_page_accounted(&encoded, values.len(), codec, Some(&budget))
+                .unwrap_err();
+            assert!(is_query_capacity(&error), "{codec:?}: {error}");
+            assert_eq!(budget.used(), 0);
+        }
+        let values = [7u8; 80];
+        let encoded = encode_fixed_width_page(&values, 20, CompressionCodec::Dictionary).unwrap();
+        let budget = query_budget(values.len());
+        let error = decode_fixed_width_page_accounted(
+            &encoded,
+            4,
+            20,
+            CompressionCodec::Dictionary,
+            Some(&budget),
+        )
+        .unwrap_err();
+        assert!(is_query_capacity(&error));
+        assert_eq!(budget.used(), 0);
+
+        let mut encoded = vec![ADAPTIVE_FIXED_ZSTD_B256_LOW20];
+        encoded.extend(zstd_compress(&[5u8; 40]).unwrap());
+        let budget = query_budget(64);
+        let error = decode_fixed_width_page_accounted(
+            &encoded,
+            2,
+            32,
+            CompressionCodec::AdaptiveFixed,
+            Some(&budget),
+        )
+        .unwrap_err();
+        assert!(is_query_capacity(&error));
+        assert_eq!(budget.used(), 0);
+        let budget = query_budget(104);
+        let output = decode_fixed_width_page_accounted(
+            &encoded,
+            2,
+            32,
+            CompressionCodec::AdaptiveFixed,
+            Some(&budget),
+        )
+        .unwrap();
+        assert_eq!(budget.used(), 64);
+        drop(output);
+        assert_eq!(budget.used(), 0);
+    }
+
+    #[test]
+    fn accounted_page_index_uses_resident_entries_and_retains_capacity_after_truncate() {
+        let entries = [PageIndexEntry {
+            first_row: 0,
+            row_count: 1,
+            offset: 0,
+            encoded_len: 8,
+        }];
+        let encoded = write_page_index(&entries);
+        let budget = query_budget(std::mem::size_of::<PageIndexEntry>() - 1);
+        let error = read_page_index_accounted(&encoded, Some(&budget)).unwrap_err();
+        assert!(is_query_capacity(&error));
+        assert_eq!(budget.used(), 0);
+        let budget = query_budget(std::mem::size_of::<PageIndexEntry>());
+        let mut decoded = read_page_index_accounted(&encoded, Some(&budget)).unwrap();
+        assert_eq!(&*decoded, &entries);
+        let held = budget.used();
+        decoded.truncate(0);
+        assert_eq!(budget.used(), held);
+        drop(decoded);
+        assert_eq!(budget.used(), 0);
+    }
+
+    #[test]
+    fn decoder_capacity_failure_precedes_allocation_and_errors_release_credit() {
+        let budget = query_budget(1);
+        let mut called = false;
+        let result = decode_buffer::<u64>(1, Some(&budget), DECODE_STAGE, || {
+            called = true;
+            Ok(vec![7])
+        });
+        assert!(is_query_capacity(&result.unwrap_err()));
+        assert!(!called);
+        assert_eq!(budget.used(), 0);
+        let budget = query_budget(4096);
+        let values = [13, 17, 11, 29];
+        for codec in [
+            CompressionCodec::Delta,
+            CompressionCodec::DeltaZigZag,
+            CompressionCodec::DeltaOfDelta,
+            CompressionCodec::Zstd,
+            CompressionCodec::Lz4,
+        ] {
+            let mut encoded = encode_u64_page(&values, codec).unwrap();
+            encoded.truncate(encoded.len() / 2);
+            let error = decode_u64_page_accounted(&encoded, values.len(), codec, Some(&budget))
+                .unwrap_err();
+            assert!(!is_query_capacity(&error));
+            assert_eq!(budget.used(), 0);
+        }
+    }
 
     #[test]
     fn scalar_pages_require_exact_row_shapes_across_codecs() {
