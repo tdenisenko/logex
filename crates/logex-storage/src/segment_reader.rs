@@ -9,7 +9,7 @@ use crate::native::{ColumnDescriptor, CompressionCodec, SegmentManifest};
 use crate::page::{
     PageIndexEntry, decode_fixed_width_page_accounted, decode_u8_page_accounted, decode_u32_page,
     decode_u32_page_accounted, decode_u64_page_accounted, decode_var_bytes_page_bounded,
-    read_page_index, read_page_index_accounted,
+    decode_var_bytes_page_selected_accounted, read_page_index, read_page_index_accounted,
 };
 use crate::reader::{RawBytesColumn, RawFixedColumn, validate_null_bytes};
 use crate::{
@@ -378,8 +378,8 @@ impl SegmentReader {
         Self::open_inner(dir, Some(columns))
     }
 
-    /// Capture query artifacts with shared accounting retained by fixed read results.
-    /// Variable payload reads remain outside this fixed-source accounting API.
+    /// Capture query artifacts with shared accounting retained by read results.
+    /// Fixed and variable query reads retain their buffers through returned owners.
     pub fn open_projected_with_memory(
         dir: &Path,
         columns: &[&str],
@@ -861,6 +861,158 @@ impl SegmentReader {
     pub fn read_var_bytes(&self, column: &str, row_ids: Option<&[u32]>) -> io::Result<Vec<Bytes>> {
         self.read_var_bytes_with_lengths(column, row_ids)
             .map(|(values, _)| values)
+    }
+
+    /// Read selected variable values with both result headers and shared payload
+    /// backing accounted until their respective final owners are dropped.
+    pub fn read_var_bytes_with_memory(
+        &self,
+        column: &str,
+        row_ids: Option<&[u32]>,
+    ) -> io::Result<QueryBuffer<Bytes>> {
+        let Some(memory) = self.memory.as_ref() else {
+            return self
+                .read_var_bytes(column, row_ids)
+                .map(QueryBuffer::unaccounted);
+        };
+        if self.compacted_column(column).is_none() {
+            let path = raw_column_path(column);
+            let source = RawBytesColumn::from_accounted(
+                &self.dir.join(path),
+                self.artifacts.read_accounted(path)?,
+            )?;
+            let lengths = self.read_u32_with_memory("data_len", row_ids)?;
+            let values = source.materialize_accounted(
+                row_ids,
+                self.manifest
+                    .as_ref()
+                    .map(|manifest| manifest.row_count)
+                    .or(self.captured_rows),
+                Some(memory),
+            )?;
+            validate_data_lengths(&values, &lengths)?;
+            return Ok(values);
+        }
+        let descriptor = self.compacted_column(column).unwrap();
+        let index = self.read_compacted_page_index_accounted(descriptor, row_ids, Some(memory))?;
+        match row_ids {
+            Some(ids) => {
+                self.read_selected_var_bytes_pages_accounted(descriptor, ids, &index, memory)
+            }
+            None => {
+                let lengths = self.read_u32_with_memory("data_len", None)?;
+                let mut values = QueryBuffer::try_with_capacity(
+                    lengths.len(),
+                    Some(memory),
+                    "variable result headers",
+                )?;
+                for entry in index.iter() {
+                    let start = usize::try_from(entry.first_row).map_err(|_| {
+                        io::Error::new(io::ErrorKind::InvalidData, "data row offset overflow")
+                    })?;
+                    let end = start.checked_add(entry.row_count as usize).ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::InvalidData, "data row range overflow")
+                    })?;
+                    let expected = lengths.get(start..end).ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::InvalidData, "data length rows differ")
+                    })?;
+                    let encoded =
+                        self.read_page_payload_accounted(descriptor, entry, Some(memory))?;
+                    let page = decode_var_bytes_page_selected_accounted(
+                        &encoded,
+                        descriptor.codec,
+                        expected,
+                        None,
+                        Some(memory),
+                    )?;
+                    values.try_extend_from_slice(&page)?;
+                }
+                if values.len() != lengths.len() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "decoded data rows differ from data lengths",
+                    ));
+                }
+                Ok(values)
+            }
+        }
+    }
+
+    fn read_selected_var_bytes_pages_accounted(
+        &self,
+        descriptor: &ColumnDescriptor,
+        ids: &[u32],
+        index: &[PageIndexEntry],
+        memory: &QueryMemoryBudget,
+    ) -> io::Result<QueryBuffer<Bytes>> {
+        if ids.is_empty() {
+            return QueryBuffer::try_with_capacity(0, Some(memory), "variable result headers");
+        }
+        let selections = build_selections_accounted(ids, index, Some(memory))?;
+        let coverage_len = selections.iter().try_fold(0usize, |total, selection| {
+            total
+                .checked_add(selection.entry.row_count as usize)
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "data row range overflow")
+                })
+        })?;
+        let mut coverage =
+            QueryBuffer::try_with_capacity(coverage_len, Some(memory), "variable page coverage")?;
+        for selection in selections.iter() {
+            let end = selection
+                .entry
+                .first_row
+                .checked_add(u64::from(selection.entry.row_count))
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "data row range overflow")
+                })?;
+            for row in selection.entry.first_row..end {
+                coverage.try_push(u32::try_from(row).map_err(|_| {
+                    io::Error::new(io::ErrorKind::InvalidData, "data row exceeds addressing")
+                })?)?;
+            }
+        }
+        let lengths = self.read_u32_with_memory("data_len", Some(&coverage))?;
+        if lengths.len() != coverage.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "data length rows differ",
+            ));
+        }
+        let mut values =
+            QueryBuffer::try_with_capacity(ids.len(), Some(memory), "variable result headers")?;
+        values.try_resize(ids.len(), Bytes::new())?;
+        let mut cursor = 0usize;
+        for selection in selections.iter() {
+            let end = cursor
+                .checked_add(selection.entry.row_count as usize)
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "data row range overflow")
+                })?;
+            let expected = lengths.get(cursor..end).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "data length rows differ")
+            })?;
+            let encoded =
+                self.read_page_payload_accounted(descriptor, &selection.entry, Some(memory))?;
+            let page = decode_var_bytes_page_selected_accounted(
+                &encoded,
+                descriptor.codec,
+                expected,
+                Some(&selection.local_rows),
+                Some(memory),
+            )?;
+            if page.len() != selection.output_positions.len() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "selected data rows differ",
+                ));
+            }
+            for (value, &position) in page.iter().zip(selection.output_positions.iter()) {
+                values[position] = value.clone();
+            }
+            cursor = end;
+        }
+        Ok(values)
     }
 
     /// Read strictly increasing, unique selected data rows in bounded batches.
@@ -2634,6 +2786,241 @@ mod tests {
         );
         assert_eq!(memory.used(), baseline);
         drop(reader);
+        assert_eq!(memory.used(), 0);
+    }
+
+    fn rewrite_variable_fixture_pages(dir: &Path, codec: CompressionCodec, values: &[Bytes]) {
+        let mut manifest = load_manifest(dir).unwrap().unwrap();
+        let lengths: Vec<u32> = values.iter().map(|value| value.len() as u32).collect();
+        for (name, ranges) in [
+            ("data", vec![0..11, 11..20]),
+            ("data_len", vec![0..7, 7..13, 13..20]),
+        ] {
+            let descriptor = manifest
+                .columns
+                .iter_mut()
+                .find(|column| column.name == name)
+                .unwrap();
+            if name == "data" {
+                descriptor.codec = codec;
+            }
+            let mut encoded = Vec::new();
+            let mut index = Vec::new();
+            for range in ranges {
+                let page = if name == "data" {
+                    crate::page::encode_var_bytes_page(&values[range.clone()], descriptor.codec)
+                } else {
+                    crate::page::encode_u32_page(&lengths[range.clone()], descriptor.codec)
+                }
+                .unwrap();
+                index.push(PageIndexEntry {
+                    first_row: range.start as u64,
+                    row_count: range.len() as u32,
+                    offset: encoded.len() as u64,
+                    encoded_len: page.len() as u32,
+                });
+                encoded.extend(page);
+            }
+            fs::write(dir.join(&descriptor.data_path), encoded).unwrap();
+            fs::write(
+                dir.join(descriptor.page_index_path.as_ref().unwrap()),
+                crate::page::write_page_index(&index),
+            )
+            .unwrap();
+        }
+        fs::write(
+            dir.join("segment.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn assert_accounted_variable_fixture(dir: &Path, expected: &[Bytes]) {
+        let memory =
+            QueryMemoryBudget::new(logex_types::QueryMemoryLimit::new(4 * 1024 * 1024).unwrap());
+        let reader =
+            SegmentReader::open_projected_with_memory(dir, &["data"], memory.clone()).unwrap();
+        for ids in [
+            None,
+            Some(&[19, 0, 19, 7][..]),
+            Some(&[0, 0, 7, 19][..]),
+            Some(&[][..]),
+        ] {
+            let output = reader.read_var_bytes_with_memory("data", ids).unwrap();
+            let selected: Vec<Bytes> = match ids {
+                Some(ids) => ids
+                    .iter()
+                    .map(|id| expected[*id as usize].clone())
+                    .collect(),
+                None => expected.to_vec(),
+            };
+            assert_eq!(&*output, selected.as_slice());
+        }
+        let baseline = memory.used();
+        assert!(
+            reader
+                .read_var_bytes_with_memory("data", Some(&[20]))
+                .is_err()
+        );
+        assert_eq!(memory.used(), baseline);
+        let pressure = memory
+            .reserve(
+                memory.limit() - usize::try_from(memory.used()).unwrap() - 1,
+                "variable test pressure",
+            )
+            .unwrap();
+        assert!(
+            reader
+                .read_var_bytes_with_memory("data", Some(&[19]))
+                .is_err()
+        );
+        drop(pressure);
+        assert_eq!(memory.used(), baseline);
+        let output = reader
+            .read_var_bytes_with_memory("data", Some(&[19, 7, 19]))
+            .unwrap();
+        let clone = output[0].clone();
+        let slice = clone.slice(1..);
+        drop(clone);
+        drop(output);
+        drop(reader);
+        // Only the selected payload backing survives, not source bytes or result headers.
+        assert!(memory.used() >= expected[19].len() as u128);
+        assert!(memory.used() <= (expected[19].len() * 2) as u128);
+        assert_eq!(slice.as_ref(), &expected[19][1..]);
+        drop(slice);
+        assert_eq!(memory.used(), 0);
+    }
+
+    #[test]
+    fn accounted_variable_sources_preserve_selection_and_aliases_all_layouts() {
+        let mut rows = make_rows();
+        for (index, row) in rows.iter_mut().enumerate() {
+            row.data = Bytes::from(vec![index as u8; index % 7]);
+            row.data_len = row.data.len() as u32;
+        }
+        let expected: Vec<_> = rows.iter().map(|row| row.data.clone()).collect();
+        let raw = TempDir::new().unwrap();
+        ColumnFile::write_batch(raw.path(), &rows).unwrap();
+        assert_accounted_variable_fixture(raw.path(), &expected);
+        for codec in [
+            CompressionCodec::None,
+            CompressionCodec::Lz4,
+            CompressionCodec::Zstd,
+            CompressionCodec::AdaptiveBytes,
+        ] {
+            let (_tmp, dir) = compacted_fixture();
+            rewrite_variable_fixture_pages(&dir, codec, &expected);
+            assert_accounted_variable_fixture(&dir, &expected);
+        }
+        let tmp = TempDir::new().unwrap();
+        let mut storage = crate::native::NativeStorage::open(crate::native::NativeStorageConfig {
+            data_dir: tmp.path().to_path_buf(),
+            hot_target_rows: 20,
+            compaction_safety_margin_blocks: 0,
+        })
+        .unwrap();
+        let appended = storage.write_historical_batch(&rows).unwrap();
+        assert_accounted_variable_fixture(&appended[0].path, &expected);
+    }
+
+    #[test]
+    fn accounted_variable_reads_validate_unselected_offsets_and_page_lengths() {
+        let raw = TempDir::new().unwrap();
+        ColumnFile::write_batch(raw.path(), &make_rows()).unwrap();
+        let path = raw.path().join("data.col");
+        let mut data = fs::read(&path).unwrap();
+        data[ColumnFileHeader::SIZE + 8..ColumnFileHeader::SIZE + 16]
+            .copy_from_slice(&u64::MAX.to_le_bytes());
+        fs::write(path, data).unwrap();
+        let memory =
+            QueryMemoryBudget::new(logex_types::QueryMemoryLimit::new(1024 * 1024).unwrap());
+        let reader =
+            SegmentReader::open_projected_with_memory(raw.path(), &["data"], memory.clone())
+                .unwrap();
+        for ids in [Some(&[19][..]), Some(&[][..])] {
+            assert_eq!(
+                reader
+                    .read_var_bytes_with_memory("data", ids)
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::InvalidData
+            );
+            assert_eq!(memory.used(), 0);
+        }
+        for codec in [
+            CompressionCodec::None,
+            CompressionCodec::Lz4,
+            CompressionCodec::Zstd,
+            CompressionCodec::AdaptiveBytes,
+        ] {
+            let (_tmp, dir) = compacted_fixture();
+            let mut values = vec![bytes!("deadbeef"); 20];
+            rewrite_variable_fixture_pages(&dir, codec, &values);
+            // Keep total payload unchanged while mismatching an unselected row's companion length.
+            values[0] = bytes!("aabbcc");
+            values[1] = bytes!("aabbccddee");
+            let manifest = load_manifest(&dir).unwrap().unwrap();
+            let descriptor = manifest
+                .columns
+                .iter()
+                .find(|column| column.name == "data")
+                .unwrap();
+            let encoded = crate::page::encode_var_bytes_page(&values, codec).unwrap();
+            fs::write(dir.join(&descriptor.data_path), &encoded).unwrap();
+            fs::write(
+                dir.join(descriptor.page_index_path.as_ref().unwrap()),
+                crate::page::write_page_index(&[PageIndexEntry {
+                    first_row: 0,
+                    row_count: 20,
+                    offset: 0,
+                    encoded_len: encoded.len() as u32,
+                }]),
+            )
+            .unwrap();
+            let memory =
+                QueryMemoryBudget::new(logex_types::QueryMemoryLimit::new(1024 * 1024).unwrap());
+            let reader =
+                SegmentReader::open_projected_with_memory(&dir, &["data"], memory.clone()).unwrap();
+            assert_eq!(
+                reader
+                    .read_var_bytes_with_memory("data", Some(&[19]))
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::InvalidData
+            );
+            assert_eq!(memory.used(), 0);
+        }
+    }
+
+    #[test]
+    fn accounted_variable_capture_survives_replacement_and_append() {
+        let raw = TempDir::new().unwrap();
+        let rows = make_rows();
+        ColumnFile::write_batch(raw.path(), &rows).unwrap();
+        let memory =
+            QueryMemoryBudget::new(logex_types::QueryMemoryLimit::new(1024 * 1024).unwrap());
+        let reader =
+            SegmentReader::open_projected_with_memory(raw.path(), &["data"], memory.clone())
+                .unwrap();
+        let mut appended = rows[0].clone();
+        appended.data = bytes!("010203");
+        appended.data_len = 3;
+        ColumnFile::append_batch(raw.path(), &[appended], rows.len() as u64).unwrap();
+        let result = reader.read_var_bytes_with_memory("data", None).unwrap();
+        assert_eq!(
+            &*result,
+            rows.iter()
+                .map(|row| row.data.clone())
+                .collect::<Vec<_>>()
+                .as_slice()
+        );
+        let alias = result[0].clone();
+        drop(result);
+        drop(reader);
+        assert!(memory.used() > 0);
+        assert_eq!(alias, rows[0].data);
+        drop(alias);
         assert_eq!(memory.used(), 0);
     }
 
