@@ -155,10 +155,16 @@ fn dashboard_auth_is_valid(headers: &HeaderMap, password: &str) -> bool {
     else {
         return false;
     };
-    let Some(encoded) = value.strip_prefix("Basic ") else {
+    let Some((scheme, encoded)) = value.split_once(' ') else {
         return false;
     };
-    let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(encoded) else {
+    // HTTP scheme tokens ignore ASCII case; credentials use one or more SP.
+    if !scheme.eq_ignore_ascii_case("Basic") {
+        return false;
+    }
+    let Ok(decoded) =
+        base64::engine::general_purpose::STANDARD.decode(encoded.trim_start_matches(' '))
+    else {
         return false;
     };
     let Ok(credentials) = std::str::from_utf8(&decoded) else {
