@@ -73,9 +73,9 @@ use crate::json::{
 };
 use crate::lexer::{Token, tokenize};
 use crate::native::{
-    StorageSnapshot, candidate_row_ids, candidate_row_ids_for_reader,
-    candidate_row_ids_with_memory, erc20_event_bloom_exclusions, ordered_page_is_complete,
-    partition_matches_filter, retain_ordered_prefix_with_memory, scan_native_partition_with_memory,
+    StorageSnapshot, candidate_row_ids_for_reader, candidate_row_ids_with_memory,
+    erc20_event_bloom_exclusions, ordered_page_is_complete, partition_matches_filter,
+    retain_ordered_prefix_with_memory, scan_native_partition_with_memory,
     sort_native_rows_with_memory,
 };
 use crate::result::{JsonResultBuilder, QueryJsonRows, SQL_RESULT_STAGE};
@@ -110,55 +110,54 @@ pub enum SqlQueryError {
 
 impl From<DataFusionError> for SqlQueryError {
     fn from(error: DataFusionError) -> Self {
-        fn capacity_message(root: &(dyn std::error::Error + 'static)) -> Option<String> {
-            let mut pending = vec![root];
-            while let Some(error) = pending.pop() {
-                if let Some(error) = error.downcast_ref::<QueryMemoryError>() {
-                    match error {
-                        QueryMemoryError::CapacityExceeded { .. }
-                        | QueryMemoryError::SizeOverflow { .. } => {
-                            return Some(error.to_string());
-                        }
-                        QueryMemoryError::InvalidRelease { .. }
-                        | QueryMemoryError::DifferentBudget => {}
-                    }
-                }
-                let datafusion = error.downcast_ref::<DataFusionError>().or_else(|| {
-                    error
-                        .downcast_ref::<Arc<DataFusionError>>()
-                        .map(Arc::as_ref)
-                });
-                if let Some(error) = datafusion {
-                    if let DataFusionError::ResourcesExhausted(message) = error {
-                        return Some(message.clone());
-                    }
-                    if let DataFusionError::Collection(errors) = error {
-                        pending.extend(
-                            errors
-                                .iter()
-                                .map(|error| error as &(dyn std::error::Error + 'static)),
-                        );
-                        continue;
-                    }
-                }
-                if let Some(error) = error.downcast_ref::<std::io::Error>() {
-                    if let Some(inner) = error.get_ref() {
-                        pending.push(inner);
-                    }
-                    continue;
-                }
-                if let Some(source) = error.source() {
-                    pending.push(source);
-                }
-            }
-            None
-        }
-
-        match capacity_message(&error) {
+        match capacity_error_message(&error) {
             Some(message) => Self::Capacity(message),
             None => Self::DataFusion(error),
         }
     }
+}
+
+fn capacity_error_message(root: &(dyn std::error::Error + 'static)) -> Option<String> {
+    let mut pending = vec![root];
+    while let Some(error) = pending.pop() {
+        if let Some(error) = error.downcast_ref::<QueryMemoryError>() {
+            match error {
+                QueryMemoryError::CapacityExceeded { .. }
+                | QueryMemoryError::SizeOverflow { .. } => {
+                    return Some(error.to_string());
+                }
+                QueryMemoryError::InvalidRelease { .. } | QueryMemoryError::DifferentBudget => {}
+            }
+        }
+        let datafusion = error.downcast_ref::<DataFusionError>().or_else(|| {
+            error
+                .downcast_ref::<Arc<DataFusionError>>()
+                .map(Arc::as_ref)
+        });
+        if let Some(error) = datafusion {
+            if let DataFusionError::ResourcesExhausted(message) = error {
+                return Some(message.clone());
+            }
+            if let DataFusionError::Collection(errors) = error {
+                pending.extend(
+                    errors
+                        .iter()
+                        .map(|error| error as &(dyn std::error::Error + 'static)),
+                );
+                continue;
+            }
+        }
+        if let Some(error) = error.downcast_ref::<std::io::Error>() {
+            if let Some(inner) = error.get_ref() {
+                pending.push(inner);
+            }
+            continue;
+        }
+        if let Some(source) = error.source() {
+            pending.push(source);
+        }
+    }
+    None
 }
 
 #[derive(Debug)]
@@ -1244,6 +1243,7 @@ fn try_execute_native_count_aggregate(
     let Some(native_query) = parse_native_count_query(sql)? else {
         return Ok(None);
     };
+    check_query_canceled(cancel_check.as_ref()).map_err(SqlQueryError::DataFusion)?;
     unique_names(
         native_query
             .projections
@@ -1268,15 +1268,22 @@ fn try_execute_native_count_aggregate(
         &native_query.filter,
         native_query.group_by,
         cancel_check.as_ref(),
+        &memory,
     )?;
-    let mut values = native_count_values(&native_query, counts);
-    apply_json_page(&mut values, page);
+    check_query_canceled(cancel_check.as_ref()).map_err(SqlQueryError::DataFusion)?;
+    let (values, value_count) = native_count_values(&native_query, counts);
+    let values = &values[..value_count];
+    let start = page.offset.min(values.len());
+    let end = page.limit.map_or(values.len(), |limit| {
+        start.saturating_add(limit).min(values.len())
+    });
     let rows = materialize_native_count_rows(
         &native_query.projections,
-        &values,
+        &values[start..end],
         memory,
         cancel_check.as_ref(),
     )?;
+    check_query_canceled(cancel_check.as_ref()).map_err(SqlQueryError::DataFusion)?;
 
     Ok(Some(SqlQueryResult {
         rows,
@@ -1493,7 +1500,8 @@ fn execute_native_count_aggregate(
     filter: &NativeLogFilter,
     group_by: NativeCountGroupBy,
     cancel_check: Option<&QueryCancelCheck>,
-) -> Result<(BTreeMap<u8, u64>, u64), SqlQueryError> {
+    memory: &QueryMemoryBudget,
+) -> Result<(NativeCountTotals, u64), SqlQueryError> {
     check_query_canceled(cancel_check).map_err(SqlQueryError::DataFusion)?;
     let partitions: Vec<_> = snapshot
         .partitions_in_order(filter.order)
@@ -1505,7 +1513,7 @@ fn execute_native_count_aggregate(
         .unwrap_or(1)
         .clamp(1, 8);
     let window_size = worker_count.saturating_mul(4).max(1);
-    let mut counts = BTreeMap::new();
+    let mut counts = NativeCountTotals::default();
     let mut total_scanned = 0u64;
 
     for chunk in partitions.chunks(window_size) {
@@ -1513,17 +1521,14 @@ fn execute_native_count_aggregate(
         let chunk_results = std::thread::scope(|scope| {
             let mut handles = Vec::with_capacity(chunk.len());
             for partition in chunk {
-                let path = partition.path.clone();
-                let visible_rows = partition.row_count;
-                let filter = filter.clone();
-                let cancel_check = cancel_check.cloned();
                 handles.push(scope.spawn(move || {
                     scan_native_count_partition(
-                        &path,
-                        &filter,
+                        &partition.path,
+                        filter,
                         group_by,
-                        cancel_check.as_ref(),
-                        visible_rows,
+                        cancel_check,
+                        partition.row_count,
+                        memory,
                     )
                 }));
             }
@@ -1540,18 +1545,38 @@ fn execute_native_count_aggregate(
         for result in chunk_results {
             let (partition_counts, partition_scanned) =
                 result.map_err(map_native_query_io_error)?;
-            for (source, count) in partition_counts {
-                *counts.entry(source).or_insert(0) += count;
+            for (count, partition_count) in
+                counts.by_source.iter_mut().zip(partition_counts.by_source)
+            {
+                *count = count.checked_add(partition_count).ok_or_else(|| {
+                    SqlQueryError::Storage(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "native COUNT source total overflow",
+                    ))
+                })?;
             }
-            total_scanned += partition_scanned;
+            total_scanned = total_scanned
+                .checked_add(partition_scanned)
+                .ok_or_else(|| {
+                    SqlQueryError::Storage(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "native COUNT scanned total overflow",
+                    ))
+                })?;
         }
     }
 
-    if group_by == NativeCountGroupBy::None {
-        counts.insert(0, total_scanned);
-    }
+    counts.total = total_scanned;
 
     Ok((counts, total_scanned))
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct NativeCountTotals {
+    // Indexed by the persisted Source discriminants: Receipt = 0, Trace = 1.
+    // Adding a Source variant requires extending this fixed aggregation shape.
+    by_source: [u64; 2],
+    total: u64,
 }
 
 fn scan_native_count_partition(
@@ -1560,50 +1585,95 @@ fn scan_native_count_partition(
     group_by: NativeCountGroupBy,
     cancel_check: Option<&QueryCancelCheck>,
     visible_rows: u64,
-) -> std::io::Result<(BTreeMap<u8, u64>, u64)> {
+    memory: &QueryMemoryBudget,
+) -> std::io::Result<(NativeCountTotals, u64)> {
     if cancel_check.is_some_and(|is_canceled| is_canceled()) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::Interrupted,
             "query canceled",
         ));
     }
-    let row_ids = candidate_row_ids(path, filter, true, visible_rows)?;
+    let row_ids =
+        candidate_row_ids_with_memory(path, filter, true, visible_rows, memory, cancel_check)?;
     if row_ids.is_empty() {
-        return Ok((BTreeMap::new(), 0));
+        return Ok((NativeCountTotals::default(), 0));
     }
+    let scanned = u64::try_from(row_ids.len()).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "native COUNT candidate count overflow",
+        )
+    })?;
     if group_by == NativeCountGroupBy::None {
-        return Ok((BTreeMap::new(), row_ids.len() as u64));
+        return Ok((NativeCountTotals::default(), scanned));
     }
 
-    let reader = SegmentReader::open_projected(path, &["source"])?;
-    let sources = reader.read_u8("source", Some(&row_ids))?;
-    let mut counts = BTreeMap::new();
-    for source in sources {
-        *counts.entry(source).or_insert(0) += 1;
+    if cancel_check.is_some_and(|is_canceled| is_canceled()) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            "query canceled",
+        ));
     }
-    Ok((counts, row_ids.len() as u64))
+    let reader = SegmentReader::open_projected_with_memory(path, &["source"], memory.clone())?;
+    let sources = reader.read_u8_with_memory("source", Some(&row_ids))?;
+    if sources.len() != row_ids.len() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "selected source rows differ from native COUNT candidates",
+        ));
+    }
+    let mut counts = NativeCountTotals::default();
+    for (index, &source) in sources.iter().enumerate() {
+        if index % DATAFUSION_BATCH_SIZE == 0
+            && cancel_check.is_some_and(|is_canceled| is_canceled())
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "query canceled",
+            ));
+        }
+        let count = counts.by_source.get_mut(source as usize).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("invalid source byte: {source}"),
+            )
+        })?;
+        *count = count.checked_add(1).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "native COUNT source total overflow",
+            )
+        })?;
+    }
+    Ok((counts, scanned))
 }
 
 fn native_count_values(
     query: &NativeCountQuery,
-    counts: BTreeMap<u8, u64>,
-) -> Vec<(Option<u8>, u64)> {
+    counts: NativeCountTotals,
+) -> ([(Option<u8>, u64); 2], usize) {
+    let mut rows = [(None, 0); 2];
     match query.group_by {
         NativeCountGroupBy::None => {
-            let count = counts.get(&0).copied().unwrap_or(0);
-            vec![(None, count)]
+            rows[0] = (None, counts.total);
+            (rows, 1)
         }
         NativeCountGroupBy::Source => {
-            let iter: Box<dyn Iterator<Item = (u8, u64)>> = if query.order_descending {
-                Box::new(counts.into_iter().rev())
+            let sources = if query.order_descending {
+                [1usize, 0]
             } else {
-                Box::new(counts.into_iter())
+                [0usize, 1]
             };
-            let mut rows: Vec<_> = iter.map(|(source, count)| (Some(source), count)).collect();
-            if let Some(limit) = query.sql_limit {
-                rows.truncate(limit);
+            let mut len = 0usize;
+            for source in sources {
+                let count = counts.by_source[source];
+                if count > 0 {
+                    rows[len] = (Some(source as u8), count);
+                    len += 1;
+                }
             }
-            rows
+            len = len.min(query.sql_limit.unwrap_or(len));
+            (rows, len)
         }
     }
 }
@@ -2938,6 +3008,8 @@ fn sql_numeric_bigint_expr(expr: &SqlAstExpr) -> Option<BigInt> {
 fn map_native_query_io_error(err: std::io::Error) -> SqlQueryError {
     if err.kind() == std::io::ErrorKind::Interrupted {
         SqlQueryError::DataFusion(DataFusionError::Execution("query canceled".to_owned()))
+    } else if let Some(message) = capacity_error_message(&err) {
+        SqlQueryError::Capacity(message)
     } else {
         SqlQueryError::Storage(err)
     }
@@ -6349,6 +6421,35 @@ mod tests {
     }
 
     #[test]
+    fn native_io_mapper_preserves_capacity_cancellation_and_storage_kinds() {
+        let capacity = std::io::Error::other(QueryMemoryError::CapacityExceeded {
+            requested: 2,
+            used: 7,
+            limit: 8,
+            stage: "native mapper fixture",
+        });
+        assert!(matches!(
+            map_native_query_io_error(capacity),
+            SqlQueryError::Capacity(message) if message.contains("native mapper fixture")
+        ));
+
+        let canceled = std::io::Error::new(std::io::ErrorKind::Interrupted, "fixture canceled");
+        assert!(matches!(
+            map_native_query_io_error(canceled),
+            SqlQueryError::DataFusion(DataFusionError::Execution(message))
+                if message == "query canceled"
+        ));
+
+        let storage = std::io::Error::new(std::io::ErrorKind::InvalidData, "fixture corruption");
+        assert!(matches!(
+            map_native_query_io_error(storage),
+            SqlQueryError::Storage(error)
+                if error.kind() == std::io::ErrorKind::InvalidData
+                    && error.to_string() == "fixture corruption"
+        ));
+    }
+
+    #[test]
     fn scan_output_owner_preserves_null_slice_until_last_clone_drops() {
         let budget = QueryMemoryBudget::new(QueryMemoryLimit::new(1024 * 1024).unwrap());
         let array = build_nullable_hex_array(
@@ -6814,7 +6915,6 @@ mod tests {
         let snapshot = StorageSnapshot::from_storage(&storage);
         let head = storage.head_block().unwrap_or(0);
         for sql in [
-            "SELECT COUNT(*) AS total FROM logs",
             "SELECT SUM(data) AS total FROM logs",
             "SELECT table_name FROM information_schema.tables",
         ] {
@@ -6931,6 +7031,18 @@ mod tests {
         assert!(memory.used() > 0);
         drop(result);
         assert_eq!(memory.used(), 0);
+    }
+
+    #[test]
+    fn candidate_pressure_select_shape_is_native_eligible() {
+        assert!(
+            parse_native_select_query(
+                "SELECT block_number FROM logs WHERE data_len = 1 \
+                 ORDER BY block_number, tx_index, log_index"
+            )
+            .unwrap()
+            .is_some()
+        );
     }
 
     #[test]
@@ -8517,6 +8629,24 @@ mod tests {
     async fn native_counts_and_groups_by_source() {
         let (_tmp, storage) = setup_source_storage();
 
+        assert!(
+            parse_native_count_query(
+                "SELECT COUNT(1) AS total FROM logs \
+                 WHERE block_number BETWEEN 100 AND 200"
+            )
+            .unwrap()
+            .is_some()
+        );
+        assert!(
+            parse_native_count_query(
+                "SELECT source AS provenance, COUNT(*) AS total FROM logs \
+                 WHERE block_number BETWEEN 100 AND 200 \
+                 GROUP BY source ORDER BY provenance DESC"
+            )
+            .unwrap()
+            .is_some()
+        );
+
         let count = execute_sql_page(
             "SELECT COUNT(1) AS total
              FROM logs
@@ -8549,6 +8679,238 @@ mod tests {
         assert_eq!(grouped.rows[1]["provenance"], Source::Receipt as u8 as u64);
         assert_eq!(grouped.rows[1]["total"], 1);
         assert_eq!(grouped.total_scanned, 2);
+
+        let fallback = execute_sql_page(
+            "SELECT source AS provenance, COUNT(*) + 0 AS total
+             FROM logs
+             WHERE block_number BETWEEN 100 AND 200
+             GROUP BY source
+             ORDER BY provenance DESC",
+            &storage,
+            storage.head_block(),
+            SqlQueryPage::new(None, 0),
+        )
+        .await
+        .unwrap();
+        assert!(
+            parse_native_count_query(
+                "SELECT source AS provenance, COUNT(*) + 0 AS total \
+                 FROM logs GROUP BY source ORDER BY provenance DESC"
+            )
+            .unwrap()
+            .is_none()
+        );
+        assert_eq!(fallback.rows, grouped.rows);
+        assert_eq!(fallback.total_scanned, grouped.total_scanned);
+
+        let second = execute_sql_page(
+            "SELECT source, COUNT(*) AS total
+             FROM logs GROUP BY source ORDER BY source DESC",
+            &storage,
+            storage.head_block(),
+            SqlQueryPage::new(Some(1), 1),
+        )
+        .await
+        .unwrap();
+        assert_eq!(second.rows.len(), 1);
+        assert_eq!(second.rows[0]["source"], Source::Receipt as u8);
+        assert_eq!(second.rows[0]["total"], 1);
+
+        let past_end = execute_sql_page(
+            "SELECT source, COUNT(*) AS total
+             FROM logs GROUP BY source ORDER BY source",
+            &storage,
+            storage.head_block(),
+            SqlQueryPage::new(Some(1), usize::MAX),
+        )
+        .await
+        .unwrap();
+        assert!(past_end.rows.is_empty());
+        assert_eq!(past_end.total_scanned, 2);
+
+        let empty = execute_sql_page(
+            "SELECT source, COUNT(*) AS total
+             FROM logs WHERE block_number = 999 GROUP BY source ORDER BY source",
+            &storage,
+            storage.head_block(),
+            SqlQueryPage::new(None, 0),
+        )
+        .await
+        .unwrap();
+        assert!(empty.rows.is_empty());
+        assert_eq!(empty.total_scanned, 0);
+    }
+
+    #[test]
+    fn native_count_candidates_overlap_accounted_source_and_release() {
+        let (_tmp, storage) = setup_source_storage();
+        let snapshot = StorageSnapshot::from_storage(&storage);
+        let partition = snapshot
+            .partitions_in_order(logex_storage::native::LogOrder::Ascending)
+            .into_iter()
+            .next()
+            .unwrap();
+        let query = parse_native_count_query(
+            "SELECT source, COUNT(*) AS total FROM logs GROUP BY source ORDER BY source",
+        )
+        .unwrap()
+        .expect("native COUNT");
+        let memory = QueryMemoryBudget::new(QueryMemoryLimit::new(64 * 1024 * 1024).unwrap());
+        let row_ids = candidate_row_ids_with_memory(
+            &partition.path,
+            &query.filter,
+            true,
+            partition.row_count,
+            &memory,
+            None,
+        )
+        .unwrap();
+        let candidate_charge = memory.used();
+        assert!(candidate_charge > 0);
+        let available = memory.limit() as u128 - candidate_charge;
+        let competitor = memory
+            .reserve(
+                usize::try_from(available).unwrap(),
+                "native COUNT overlap fixture",
+            )
+            .unwrap();
+        let error =
+            SegmentReader::open_projected_with_memory(&partition.path, &["source"], memory.clone())
+                .and_then(|reader| reader.read_u8_with_memory("source", Some(&row_ids)))
+                .unwrap_err();
+        let classified = SqlQueryError::from(DataFusionError::IoError(error));
+        assert!(matches!(classified, SqlQueryError::Capacity(_)));
+        assert_eq!(memory.used(), candidate_charge + competitor.bytes());
+        drop(competitor);
+        assert_eq!(memory.used(), candidate_charge);
+        drop(row_ids);
+        assert_eq!(memory.used(), 0);
+    }
+
+    #[test]
+    fn native_count_cancellation_after_entry_releases_working_sets() {
+        let (_tmp, storage) = setup_source_storage();
+        let snapshot = StorageSnapshot::from_storage(&storage);
+        let query = parse_native_count_query(
+            "SELECT source, COUNT(*) AS total FROM logs GROUP BY source ORDER BY source",
+        )
+        .unwrap()
+        .expect("native COUNT");
+        let memory = QueryMemoryBudget::new(QueryMemoryLimit::new(64 * 1024 * 1024).unwrap());
+        let observed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let cancellation_observed = Arc::clone(&observed);
+        let observed_memory = memory.clone();
+        let cancel: QueryCancelCheck = Arc::new(move || {
+            if observed_memory.used() > 0 {
+                cancellation_observed.store(true, Ordering::Relaxed);
+                true
+            } else {
+                false
+            }
+        });
+        let error = execute_native_count_aggregate(
+            &snapshot,
+            &query.filter,
+            query.group_by,
+            Some(&cancel),
+            &memory,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            SqlQueryError::DataFusion(DataFusionError::Execution(message))
+                if message == "query canceled"
+        ));
+        assert!(
+            observed.load(Ordering::Relaxed),
+            "cancellation must observe an owned COUNT working allocation"
+        );
+        assert_eq!(memory.used(), 0);
+    }
+
+    #[tokio::test]
+    async fn native_count_uses_captured_rows_after_append() {
+        let (_tmp, mut storage) = setup_source_storage();
+        let snapshot = StorageSnapshot::from_storage(&storage);
+        let mut appended = make_test_rows().remove(0);
+        appended.block_number = 300;
+        appended.log_index = 2;
+        storage.write_batch(&[appended]).unwrap();
+        let memory = QueryMemoryBudget::new(QueryMemoryLimit::new(64 * 1024 * 1024).unwrap());
+        let result = execute_sql_page_on_snapshot_with_memory(
+            "SELECT COUNT(*) AS total FROM logs",
+            snapshot,
+            storage.head_block().unwrap_or(0),
+            SqlQueryPage::default(),
+            None,
+            memory.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.rows[0]["total"], 2);
+        assert_eq!(result.total_scanned, 2);
+        drop(result);
+        assert_eq!(memory.used(), 0);
+    }
+
+    #[test]
+    fn native_count_output_capacity_is_typed_and_recoverable() {
+        let projections = [
+            NativeCountProjection::Source("provenance".to_owned()),
+            NativeCountProjection::Count("total".to_owned()),
+        ];
+        let values = [(Some(Source::Receipt as u8), 2)];
+        let probe = QueryMemoryBudget::new(QueryMemoryLimit::new(64 * 1024 * 1024).unwrap());
+        let rows =
+            materialize_native_count_rows(&projections, &values, probe.clone(), None).unwrap();
+        let charge = usize::try_from(probe.used()).unwrap();
+        assert!(charge > 0);
+        drop(rows);
+        assert_eq!(probe.used(), 0);
+
+        let constrained =
+            QueryMemoryBudget::new(QueryMemoryLimit::new(charge.checked_sub(1).unwrap()).unwrap());
+        let error = materialize_native_count_rows(&projections, &values, constrained.clone(), None)
+            .unwrap_err();
+        assert!(
+            matches!(error, SqlQueryError::Capacity(ref message) if message.contains(SQL_RESULT_STAGE)),
+            "{error}"
+        );
+        assert_eq!(constrained.used(), 0);
+    }
+
+    #[tokio::test]
+    async fn canceled_native_count_limit_zero_and_empty_page_do_not_publish() {
+        let (_tmp, storage) = setup_storage();
+        for (sql, page) in [
+            (
+                "SELECT COUNT(*) AS total FROM logs LIMIT 0",
+                SqlQueryPage::default(),
+            ),
+            (
+                "SELECT COUNT(*) AS total FROM logs",
+                SqlQueryPage::new(Some(0), 0),
+            ),
+        ] {
+            assert!(parse_native_count_query(sql).unwrap().is_some());
+            let memory = QueryMemoryBudget::new(QueryMemoryLimit::new(1024 * 1024).unwrap());
+            let error = execute_sql_page_on_snapshot_with_memory(
+                sql,
+                StorageSnapshot::from_storage(&storage),
+                storage.head_block().unwrap_or(0),
+                page,
+                Some(Arc::new(|| true)),
+                memory.clone(),
+            )
+            .await
+            .unwrap_err();
+            assert!(matches!(
+                error,
+                SqlQueryError::DataFusion(DataFusionError::Execution(message))
+                    if message == "query canceled"
+            ));
+            assert_eq!(memory.used(), 0);
+        }
     }
 
     #[tokio::test]

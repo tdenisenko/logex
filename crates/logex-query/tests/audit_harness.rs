@@ -6,10 +6,13 @@ use std::time::{Duration, Instant};
 
 use alloy_primitives::{Address, B256, Bytes, keccak256};
 use logex_index::IndexBuilder;
-use logex_query::{execute_log_filter, execute_sql};
+use logex_query::{
+    NativeStorageSnapshot, SqlQueryError, SqlQueryPage, execute_log_filter, execute_sql,
+    execute_sql_page_on_snapshot_with_memory,
+};
 use logex_storage::native::{NativeLogFilter, TopicConstraint};
 use logex_storage::{PartitionManager, PartitionManagerConfig};
-use logex_types::{LogRow, Source};
+use logex_types::{LogRow, QueryMemoryBudget, QueryMemoryLimit, Source};
 use serde_json::{Value, json};
 
 const FIRST_BLOCK: u64 = 15_000_000;
@@ -118,6 +121,112 @@ async fn benchmark_datafusion_result_values() {
             );
         }
     }
+}
+
+#[tokio::test]
+async fn native_count_rejects_candidate_working_set_that_exceeds_shared_budget() {
+    const MEMORY_BYTES: usize = 2 * 1024;
+    const ROWS: usize = 1_024;
+    let sql = "SELECT COUNT(*) AS total FROM logs";
+    let limit = QueryMemoryLimit::new(MEMORY_BYTES).unwrap();
+
+    // The same public COUNT result shape fits this budget when there is no scan
+    // working set. Numbers are inline serde_json values, so the larger count
+    // below does not add a retained heap allocation to the result row.
+    let output_memory = QueryMemoryBudget::new(limit);
+    let output = execute_sql_page_on_snapshot_with_memory(
+        sql,
+        NativeStorageSnapshot::default(),
+        0,
+        SqlQueryPage::default(),
+        None,
+        output_memory.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(output.rows[0]["total"], 0);
+    assert!(output_memory.used() > 0);
+    drop(output);
+    assert_eq!(output_memory.used(), 0);
+
+    let tmp = tempfile::tempdir().unwrap();
+    let mut storage = PartitionManager::open(PartitionManagerConfig {
+        data_dir: tmp.path().to_owned(),
+        partition_target_rows: 2_000,
+        compaction_safety_margin_blocks: 0,
+    })
+    .unwrap();
+    storage.write_batch(&fixture(ROWS, Profile::Dense)).unwrap();
+    storage.checkpoint().unwrap();
+
+    let memory = QueryMemoryBudget::new(limit);
+    let error = execute_sql_page_on_snapshot_with_memory(
+        sql,
+        NativeStorageSnapshot::from_storage(&storage),
+        storage.head_block().unwrap_or(0),
+        SqlQueryPage::default(),
+        None,
+        memory.clone(),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(error, SqlQueryError::Capacity(ref message) if !message.contains("structured SQL result")),
+        "COUNT must reject scan working memory before its tiny result: {error}"
+    );
+    assert_eq!(memory.used(), 0);
+}
+
+#[tokio::test]
+async fn native_select_rejects_candidate_working_set_that_exceeds_shared_budget() {
+    const MEMORY_BYTES: usize = 2 * 1024;
+    const ROWS: usize = 1_024;
+    let sql = "SELECT block_number FROM logs \
+               WHERE data_len = 1 \
+               ORDER BY block_number, tx_index, log_index";
+    let limit = QueryMemoryLimit::new(MEMORY_BYTES).unwrap();
+
+    let output_memory = QueryMemoryBudget::new(limit);
+    let output = execute_sql_page_on_snapshot_with_memory(
+        sql,
+        NativeStorageSnapshot::default(),
+        0,
+        SqlQueryPage::default(),
+        None,
+        output_memory.clone(),
+    )
+    .await
+    .unwrap();
+    assert!(output.rows.is_empty());
+    drop(output);
+    assert_eq!(output_memory.used(), 0);
+
+    let tmp = tempfile::tempdir().unwrap();
+    let mut storage = PartitionManager::open(PartitionManagerConfig {
+        data_dir: tmp.path().to_owned(),
+        partition_target_rows: 2_000,
+        compaction_safety_margin_blocks: 0,
+    })
+    .unwrap();
+    storage.write_batch(&fixture(ROWS, Profile::Dense)).unwrap();
+    storage.checkpoint().unwrap();
+
+    let memory = QueryMemoryBudget::new(limit);
+    let error = execute_sql_page_on_snapshot_with_memory(
+        sql,
+        NativeStorageSnapshot::from_storage(&storage),
+        storage.head_block().unwrap_or(0),
+        SqlQueryPage::default(),
+        None,
+        memory.clone(),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(error, SqlQueryError::Capacity(ref message) if !message.contains("structured SQL result")),
+        "SELECT must reject scan working memory before its empty result: {error}"
+    );
+    assert_eq!(memory.used(), 0);
 }
 
 #[derive(Clone, Copy, Debug)]
