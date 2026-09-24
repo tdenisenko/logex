@@ -23,6 +23,24 @@ pub(crate) struct ArrayStore {
 }
 
 impl ArrayStore {
+    /// Query-only output storage, already preallocated and capacity-observed.
+    #[cfg(feature = "std")]
+    pub(crate) fn query_union(&self, rhs: &Self, output: Vec<u16>) -> Self {
+        let mut visitor = VecWriter::from_vec(output);
+        #[cfg(feature = "simd")]
+        vector::or(self.as_slice(), rhs.as_slice(), &mut visitor);
+        #[cfg(not(feature = "simd"))]
+        scalar::or(self.as_slice(), rhs.as_slice(), &mut visitor);
+        Self::from_vec_unchecked(visitor.into_inner())
+    }
+
+    #[cfg(all(feature = "std", feature = "simd"))]
+    pub(crate) fn query_intersection(&self, rhs: &Self, output: Vec<u16>) -> Self {
+        let mut visitor = VecWriter::from_vec(output);
+        vector::and(self.as_slice(), rhs.as_slice(), &mut visitor);
+        Self::from_vec_unchecked(visitor.into_inner())
+    }
+
     pub fn new() -> ArrayStore {
         ArrayStore { vec: vec![] }
     }

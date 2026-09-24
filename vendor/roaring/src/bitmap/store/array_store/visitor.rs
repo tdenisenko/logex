@@ -30,6 +30,11 @@ impl VecWriter {
         VecWriter { vec }
     }
 
+    #[cfg(feature = "std")]
+    pub(super) fn from_vec(vec: Vec<u16>) -> Self {
+        Self { vec }
+    }
+
     pub fn into_inner(self) -> Vec<u16> {
         // Consider shrinking the vec here.
         // Exactly len could be too aggressive. Len rounded up to next power of 2?

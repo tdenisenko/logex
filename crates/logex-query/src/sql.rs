@@ -67,9 +67,9 @@ use logex_types::{
 use crate::json::{record_batches_to_json, unique_names};
 use crate::lexer::{Token, tokenize};
 use crate::native::{
-    StorageSnapshot, candidate_row_ids, candidate_row_ids_for_reader, erc20_event_bloom_exclusions,
-    matches_native_filter, ordered_page_is_complete, partition_matches_filter,
-    retain_ordered_prefix, sort_native_rows,
+    StorageSnapshot, candidate_row_ids, candidate_row_ids_for_reader,
+    candidate_row_ids_with_memory, erc20_event_bloom_exclusions, matches_native_filter,
+    ordered_page_is_complete, partition_matches_filter, retain_ordered_prefix, sort_native_rows,
 };
 
 const DATAFUSION_BATCH_SIZE: usize = 4_096;
@@ -111,7 +111,8 @@ impl From<DataFusionError> for SqlQueryError {
                         | QueryMemoryError::SizeOverflow { .. } => {
                             return Some(error.to_string());
                         }
-                        QueryMemoryError::InvalidRelease { .. } => {}
+                        QueryMemoryError::InvalidRelease { .. }
+                        | QueryMemoryError::DifferentBudget => {}
                     }
                 }
                 let datafusion = error.downcast_ref::<DataFusionError>().or_else(|| {
@@ -507,23 +508,17 @@ impl TableProvider for LogexTableProvider {
                 continue;
             }
 
-            let mut row_ids =
-                candidate_row_ids(&partition.path, &filter, true, partition.row_count)
-                    .map_err(DataFusionError::IoError)?;
+            let mut row_ids = candidate_row_ids_with_memory(
+                &partition.path,
+                &filter,
+                true,
+                partition.row_count,
+                &self.memory,
+                self.cancel_check.as_ref(),
+            )
+            .map_err(DataFusionError::IoError)?;
             if row_ids.is_empty() {
                 continue;
-            }
-            if has_native_constraints(&filter) {
-                row_ids = exact_candidate_row_ids(
-                    &partition.path,
-                    &filter,
-                    row_ids,
-                    self.cancel_check.as_ref(),
-                )
-                .map_err(DataFusionError::IoError)?;
-                if row_ids.is_empty() {
-                    continue;
-                }
             }
 
             scanned_rows += row_ids.len() as u64;
@@ -570,55 +565,11 @@ impl TableProvider for LogexTableProvider {
     }
 }
 
-fn has_native_constraints(filter: &NativeLogFilter) -> bool {
-    filter.block_hash.is_some()
-        || filter.from_block.is_some()
-        || filter.to_block.is_some()
-        || filter.from_timestamp.is_some()
-        || filter.to_timestamp.is_some()
-        || filter.data_len.is_some()
-        || filter.data_min.is_some()
-        || filter.data_max.is_some()
-        || !filter.data_not_equals.is_empty()
-        || !filter.addresses.is_empty()
-        || filter
-            .topics
-            .iter()
-            .any(|constraint| !matches!(constraint, TopicConstraint::Any))
-}
-
 fn check_query_canceled(cancel_check: Option<&QueryCancelCheck>) -> DataFusionResult<()> {
     if cancel_check.is_some_and(|is_canceled| is_canceled()) {
         return Err(DataFusionError::Execution("query canceled".to_owned()));
     }
     Ok(())
-}
-
-fn exact_candidate_row_ids(
-    dir: &std::path::Path,
-    filter: &NativeLogFilter,
-    row_ids: Vec<u32>,
-    cancel_check: Option<&QueryCancelCheck>,
-) -> std::io::Result<Vec<u32>> {
-    if cancel_check.is_some_and(|is_canceled| is_canceled()) {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Interrupted,
-            "query canceled",
-        ));
-    }
-    let reader = SegmentReader::open(dir)?;
-    let rows = reader.read_log_rows(Some(&row_ids))?;
-    if cancel_check.is_some_and(|is_canceled| is_canceled()) {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Interrupted,
-            "query canceled",
-        ));
-    }
-    Ok(row_ids
-        .into_iter()
-        .zip(rows)
-        .filter_map(|(row_id, row)| matches_native_filter(&row, filter).then_some(row_id))
-        .collect())
 }
 
 #[derive(Debug)]
@@ -644,9 +595,10 @@ struct LogSegmentPartition {
     dir: std::path::PathBuf,
     schema: SchemaRef,
     projected_columns: Arc<Vec<String>>,
-    // Keep the original Vec allocation. Executions clone only this Arc, never
-    // the complete selection and never recalculate it against newer storage.
-    row_ids: Arc<Vec<u32>>,
+    // Keep the charged selection allocation. Executions clone only this Arc,
+    // never the complete selection or its reservation, and never recalculate it
+    // against newer storage.
+    row_ids: Arc<QueryBuffer<u32>>,
     cancel_check: Option<QueryCancelCheck>,
     memory: QueryMemoryBudget,
 }
@@ -666,7 +618,7 @@ impl LogSegmentPartition {
         dir: std::path::PathBuf,
         schema: SchemaRef,
         projected_columns: Vec<String>,
-        row_ids: Vec<u32>,
+        row_ids: QueryBuffer<u32>,
         cancel_check: Option<QueryCancelCheck>,
         memory: QueryMemoryBudget,
     ) -> Self {
@@ -760,9 +712,10 @@ pub async fn execute_sql_page_on_snapshot(
 /// Execute one SQL page against a captured storage view using a shared memory budget.
 ///
 /// The view remains subject to optimistic invalidation checks. DataFusion operator
-/// reservations, retained fixed and variable-column scan sources, and retained Arrow
-/// output from custom scans participate in `memory` across concurrent queries. Query
-/// planning, remaining decoder scratch, native fast paths, and result conversion are
+/// reservations, index candidates, exact retained row IDs, fixed and variable-column
+/// scan sources, and retained Arrow output from custom scans participate in `memory`
+/// across concurrent queries. Query planning, small segment-scaled plan/control
+/// objects, remaining decoder scratch, native fast paths, and result conversion are
 /// outside this accounting milestone. Infallible
 /// DataFusion allocations are recorded even when
 /// they temporarily exceed the configured limit. Disk spilling is disabled, so a
@@ -6144,6 +6097,12 @@ mod tests {
             SqlQueryError::from(error),
             SqlQueryError::DataFusion(_)
         ));
+
+        let error = DataFusionError::External(Box::new(QueryMemoryError::DifferentBudget));
+        assert!(matches!(
+            SqlQueryError::from(error),
+            SqlQueryError::DataFusion(_)
+        ));
     }
 
     #[test]
@@ -6559,28 +6518,40 @@ mod tests {
         let raw = setup_storage();
         let bundled = setup_bundled_storage();
         for (kind, (_tmp, storage)) in [("raw", raw), ("bundled", bundled)] {
-            let budget = QueryMemoryBudget::new(QueryMemoryLimit::new(1).unwrap());
-            let result = execute_sql_page_on_snapshot_with_memory(
-                "SELECT block_number FROM logs ORDER BY block_number + 0",
+            let budget = QueryMemoryBudget::new(QueryMemoryLimit::new(64 * 1024 * 1024).unwrap());
+            let provider = LogexTableProvider::new(
                 StorageSnapshot::from_storage(&storage),
-                storage.head_block().unwrap_or(0),
-                SqlQueryPage::default(),
+                Arc::new(AtomicU64::new(0)),
                 None,
                 budget.clone(),
-            )
-            .await;
-
-            assert!(
-                matches!(
-                    result,
-                    Err(SqlQueryError::Capacity(message))
-                        if !message.contains(SCAN_OUTPUT_STAGE)
-                            && (message.contains("fixed")
-                                || message.contains("bundle")
-                                || message.contains("captured column"))
-                ),
-                "{kind} fixed source should reject before Arrow output"
             );
+            let state = SessionContext::new().state();
+            let projection = vec![0];
+            let plan = provider
+                .scan(&state, Some(&projection), &[], None)
+                .await
+                .unwrap();
+            assert!(budget.used() > 0, "{kind} candidate IDs must be retained");
+            let remaining = budget.limit() - usize::try_from(budget.used()).unwrap();
+            let fixture = budget
+                .reserve(remaining, "source rejection fixture")
+                .unwrap();
+            let mut stream = plan.execute(0, Arc::new(TaskContext::default())).unwrap();
+            let error = stream.try_next().await.unwrap_err();
+            let SqlQueryError::Capacity(message) = SqlQueryError::from(error) else {
+                panic!("{kind} fixed source must return typed capacity");
+            };
+            assert!(!message.contains(SCAN_OUTPUT_STAGE));
+            assert!(
+                message.contains("fixed")
+                    || message.contains("bundle")
+                    || message.contains("captured column"),
+                "{kind} fixed source should reject before Arrow output: {message}"
+            );
+            drop(stream);
+            drop(fixture);
+            drop(plan);
+            drop(provider);
             assert_eq!(budget.used(), 0, "{kind}");
         }
     }
@@ -6624,6 +6595,160 @@ mod tests {
                 if message == "query canceled"
         ));
         assert_eq!(budget.used(), 0);
+    }
+
+    #[tokio::test]
+    async fn candidate_ids_remain_charged_through_plan_aliases_and_limit_truncation() {
+        let (_tmp, storage) = setup_storage();
+        let budget = QueryMemoryBudget::new(QueryMemoryLimit::new(64 * 1024 * 1024).unwrap());
+        let scanned = Arc::new(AtomicU64::new(0));
+        let provider = LogexTableProvider::new(
+            StorageSnapshot::from_storage(&storage),
+            scanned.clone(),
+            None,
+            budget.clone(),
+        );
+        let state = SessionContext::new().state();
+        let projection = vec![0];
+        let plan = provider
+            .scan(&state, Some(&projection), &[], Some(1))
+            .await
+            .unwrap();
+
+        assert_eq!(scanned.load(Ordering::Relaxed), 2);
+        assert!(
+            budget.used() >= 2 * std::mem::size_of::<u32>() as u128,
+            "LIMIT must retain the admitted backing capacity, not refund truncated IDs"
+        );
+        let alias = plan.clone();
+        drop(plan);
+        drop(provider);
+        assert!(budget.used() > 0);
+        drop(alias);
+        assert_eq!(budget.used(), 0);
+    }
+
+    #[tokio::test]
+    async fn multiple_segment_candidate_ids_contend_and_clean_up_as_one_plan() {
+        let (_tmp, storage) = setup_two_candidate_segments();
+        let snapshot = StorageSnapshot::from_storage(&storage);
+        let partitions = snapshot.partitions_in_order(logex_storage::native::LogOrder::Ascending);
+        assert_eq!(partitions.len(), 2);
+
+        let calibration_calls = Arc::new(AtomicU64::new(0));
+        let calls = calibration_calls.clone();
+        let calibration_memory =
+            QueryMemoryBudget::new(QueryMemoryLimit::new(64 * 1024 * 1024).unwrap());
+        let calibration = LogexTableProvider::new(
+            snapshot.clone(),
+            Arc::new(AtomicU64::new(0)),
+            Some(Arc::new(move || {
+                calls.fetch_add(1, Ordering::Relaxed);
+                false
+            })),
+            calibration_memory.clone(),
+        );
+        let state = SessionContext::new().state();
+        let projection = vec![0];
+        let first_plan = calibration
+            .scan(&state, Some(&projection), &[], Some(1))
+            .await
+            .unwrap();
+        drop(first_plan);
+        drop(calibration);
+        assert_eq!(calibration_memory.used(), 0);
+        let first_partition_checks = calibration_calls.load(Ordering::Relaxed);
+        let cancellation_calls = Arc::new(AtomicU64::new(0));
+        let calls = cancellation_calls.clone();
+        let canceled_memory =
+            QueryMemoryBudget::new(QueryMemoryLimit::new(64 * 1024 * 1024).unwrap());
+        let canceled = LogexTableProvider::new(
+            snapshot.clone(),
+            Arc::new(AtomicU64::new(0)),
+            Some(Arc::new(move || {
+                calls.fetch_add(1, Ordering::Relaxed) >= first_partition_checks
+            })),
+            canceled_memory.clone(),
+        );
+        let error = canceled
+            .scan(&state, Some(&projection), &[], None)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            DataFusionError::Execution(message) if message == "query canceled"
+        ));
+        assert_eq!(canceled_memory.used(), 0);
+
+        let constrained = QueryMemoryBudget::new(QueryMemoryLimit::new(64 * 1024 * 1024).unwrap());
+        let pressure = Arc::new(Mutex::new(None));
+        let pressure_owner = pressure.clone();
+        let calls = Arc::new(AtomicU64::new(0));
+        let callback_calls = calls.clone();
+        let callback_memory = constrained.clone();
+        let retained_before_pressure = Arc::new(AtomicU64::new(0));
+        let observed = retained_before_pressure.clone();
+        let provider = LogexTableProvider::new(
+            snapshot.clone(),
+            Arc::new(AtomicU64::new(0)),
+            Some(Arc::new(move || {
+                if callback_calls.fetch_add(1, Ordering::Relaxed) >= first_partition_checks {
+                    let mut pressure = pressure_owner
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    if pressure.is_none() {
+                        let used = callback_memory.used();
+                        observed.store(u64::try_from(used).unwrap(), Ordering::Relaxed);
+                        let remaining = callback_memory.limit()
+                            - usize::try_from(used).expect("test budget fits usize");
+                        *pressure = Some(
+                            callback_memory
+                                .reserve(remaining, "competing candidate query")
+                                .unwrap(),
+                        );
+                    }
+                }
+                false
+            })),
+            constrained.clone(),
+        );
+        let error = provider
+            .scan(&state, Some(&projection), &[], None)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            SqlQueryError::from(error),
+            SqlQueryError::Capacity(_)
+        ));
+        assert!(
+            retained_before_pressure.load(Ordering::Relaxed) >= std::mem::size_of::<u32>() as u64,
+            "the first segment selection must still be charged at second-segment admission"
+        );
+        drop(provider);
+        let reservation = pressure
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+            .expect("second-segment callback installs competing pressure");
+        drop(reservation);
+        assert_eq!(constrained.used(), 0);
+
+        let available = QueryMemoryBudget::new(QueryMemoryLimit::new(64 * 1024 * 1024).unwrap());
+        let provider = LogexTableProvider::new(
+            snapshot,
+            Arc::new(AtomicU64::new(0)),
+            None,
+            available.clone(),
+        );
+        let plan = provider
+            .scan(&state, Some(&projection), &[], None)
+            .await
+            .unwrap();
+        assert!(available.used() >= 2 * std::mem::size_of::<u32>() as u128);
+        drop(provider);
+        assert!(available.used() > 0);
+        drop(plan);
+        assert_eq!(available.used(), 0);
     }
 
     #[test]
@@ -6857,7 +6982,7 @@ mod tests {
             path,
             schema.clone(),
             vec!["log_index".to_owned()],
-            (0..count as u32).collect(),
+            QueryBuffer::unaccounted((0..count as u32).collect()),
             Some(Arc::new(move || cancellation.load(Ordering::Relaxed))),
             QueryMemoryBudget::new(QueryMemoryLimit::default()),
         );
@@ -6990,6 +7115,29 @@ mod tests {
         .unwrap();
         storage.write_batch(&make_test_rows()).unwrap();
         IndexBuilder::build_all_indexes(&storage.hot_partition().meta.path).unwrap();
+        storage.checkpoint().unwrap();
+        (tmp, storage)
+    }
+
+    fn setup_two_candidate_segments() -> (TempDir, PartitionManager) {
+        let tmp = TempDir::new().unwrap();
+        let mut storage = PartitionManager::open(PartitionManagerConfig {
+            data_dir: tmp.path().to_path_buf(),
+            partition_target_rows: 1,
+            compaction_safety_margin_blocks: 0,
+        })
+        .unwrap();
+        let template = make_test_rows().remove(0);
+        storage
+            .write_historical_batch(std::slice::from_ref(&template))
+            .unwrap();
+        storage
+            .write_historical_batch(&[LogRow {
+                block_number: template.block_number + 1,
+                block_hash: B256::repeat_byte(0x02),
+                ..template
+            }])
+            .unwrap();
         storage.checkpoint().unwrap();
         (tmp, storage)
     }
@@ -7759,6 +7907,27 @@ mod tests {
         assert_eq!(result.rows.len(), 1);
         assert_eq!(result.rows[0]["block_number"], 100);
         assert_eq!(result.total_scanned, 1);
+    }
+
+    #[tokio::test]
+    async fn unsupported_source_filter_remains_residual_after_exact_candidates() {
+        let (_tmp, storage) = setup_source_storage();
+        let result = execute_sql_page(
+            "SELECT block_number + 0 AS number FROM logs \
+             WHERE address IN (\
+               '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',\
+               '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'\
+             ) AND source = 1 \
+             ORDER BY block_number",
+            &storage,
+            storage.head_block(),
+            SqlQueryPage::new(None, 0),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.rows, vec![serde_json::json!({"number": "200"})]);
+        assert_eq!(result.total_scanned, 2);
     }
 
     #[tokio::test]

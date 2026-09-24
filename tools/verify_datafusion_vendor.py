@@ -39,11 +39,14 @@ PACKAGES = (
         name="roaring",
         inventory_checksum="4cdab6d18c570608ea985d40d97631990bff7f1c88d32256802329b72bdc4c12",
         modified={
-            PurePosixPath("src/bitmap/mod.rs"): "4d2694f2773645d8a476cff93b2310ca9e42c33ee5e120553d4eb6e27590a288",
+            PurePosixPath("src/bitmap/mod.rs"): "2bf38523be2e39007835c97682123658b5aba4c9605100da2adc927b27289859",
+            PurePosixPath("src/bitmap/store/array_store/mod.rs"): "78b4c78ceceb1a57201f438e3db5df63f1df1872f0e35db7669ac9ddd83e9c7e",
+            PurePosixPath("src/bitmap/store/array_store/visitor.rs"): "6081323f1152943f20e777fb540796b4ef2d27e38ba9a856fa8dc6aa81919a38",
         },
-        patch_checksum="b07a40bf521ce2a67980d5a2a56850d6897e6cfa861ea11f3c706693f8e02c7f",
+        patch_checksum="8e806c2b6f6655e4f058df40a00d95fb973d33e9fe7ce48b73c35436beaba2a4",
         added={
             PurePosixPath("src/bitmap/query_decode.rs"): "3328f41937acc7b4fe5d9ecc1244c6cb7e01e3906b4bf4c60556f377dbaf53e4",
+            PurePosixPath("src/bitmap/query_ops.rs"): "056a77042e32bccfdecd5454385a4cc4f5e27b37ca120bbc4dcf548e74b7a991",
             PurePosixPath("LICENSE-APACHE"): "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
             PurePosixPath("LICENSE-MIT"): "42d3bf7e7d4d49d72c0555d14ed99c3ee7ce9ce3cbffbc38bbafe8c103f50969",
         },

@@ -40,6 +40,7 @@ pub enum QueryMemoryError {
         requested: usize,
         reserved: u128,
     },
+    DifferentBudget,
     SizeOverflow {
         stage: &'static str,
     },
@@ -65,6 +66,12 @@ impl std::fmt::Display for QueryMemoryError {
                 "cannot release {requested} query memory bytes from reservation of {reserved}"
             ),
             Self::SizeOverflow { stage } => write!(f, "query memory size overflow at {stage}"),
+            Self::DifferentBudget => {
+                write!(
+                    f,
+                    "cannot combine reservations from different query memory budgets"
+                )
+            }
         }
     }
 }
@@ -138,6 +145,21 @@ impl QueryMemoryReservation {
     }
     pub fn bytes(&self) -> u128 {
         self.bytes
+    }
+    /// Transfer another charge on the same ledger without releasing capacity or
+    /// requesting it twice. Keep all associated allocations alive under an owner
+    /// that drops them before either reservation throughout the transfer.
+    pub fn absorb(&mut self, other: &mut Self) -> Result<(), QueryMemoryError> {
+        if !Arc::ptr_eq(&self.budget.0, &other.budget.0) {
+            return Err(QueryMemoryError::DifferentBudget);
+        }
+        let bytes = self
+            .bytes
+            .checked_add(other.bytes)
+            .ok_or(QueryMemoryError::SizeOverflow { stage: self.stage })?;
+        self.bytes = bytes;
+        other.bytes = 0;
+        Ok(())
     }
     pub fn try_grow(&mut self, additional: usize) -> Result<(), QueryMemoryError> {
         if additional == 0 {
@@ -235,6 +257,30 @@ mod tests {
         a.shrink(usize::MAX).unwrap();
         drop(a);
         assert_eq!(budget.used(), 0);
+    }
+    #[test]
+    fn combining_reservations_preserves_live_capacity_and_rejects_other_ledgers() {
+        let budget = QueryMemoryBudget::new(QueryMemoryLimit::new(12).unwrap());
+        let mut left = budget.reserve(7, "left").unwrap();
+        let mut right = budget.clone().reserve(5, "right").unwrap();
+        left.absorb(&mut right).unwrap();
+        assert_eq!((left.bytes(), right.bytes(), budget.used()), (12, 0, 12));
+        assert!(budget.reserve(1, "competing").is_err());
+        drop(right);
+        assert_eq!(budget.used(), 12);
+
+        let separate = QueryMemoryBudget::new(QueryMemoryLimit::new(12).unwrap());
+        let mut other = separate.reserve(4, "other").unwrap();
+        assert_eq!(
+            left.absorb(&mut other),
+            Err(QueryMemoryError::DifferentBudget)
+        );
+        assert_eq!((left.bytes(), other.bytes()), (12, 4));
+        assert_eq!((budget.used(), separate.used()), (12, 4));
+        drop(left);
+        assert_eq!((budget.used(), separate.used()), (0, 4));
+        drop(other);
+        assert_eq!(separate.used(), 0);
     }
     #[test]
     fn competing_reservations_and_unwind_return_credit() {

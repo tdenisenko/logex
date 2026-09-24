@@ -5,12 +5,12 @@ use alloy_primitives::{Address, B256};
 use roaring::RoaringBitmap;
 
 use logex_index::{
-    BTreeIndexReader, CompositeQuery, ERC20_EVENTS_BLOOM_FILE, Erc20EventBloomReader,
+    BTreeIndexReader, CompositeQuery, ERC20_EVENTS_BLOOM_FILE, Erc20EventBloomReader, QueryBitmap,
     TRANSFER_BLOOM_FILE, TransferBloomReader, is_common_erc20_event_topic0, transfer_topic0,
 };
 use logex_storage::native::{LogOrder, NativeLogFilter, ReadViewToken, TopicConstraint};
 use logex_storage::{IndexReadCheckpoint, PartitionManager, SegmentReader};
-use logex_types::{LogRow, PartitionMeta};
+use logex_types::{LogRow, PartitionMeta, QueryBuffer, QueryMemoryBudget};
 
 /// A bounded optimistic query view. Later appends/new segments are excluded;
 /// representation-only compaction preserves rows. A reorg or storage close
@@ -262,6 +262,108 @@ pub fn candidate_row_ids(
 ) -> std::io::Result<Vec<u32>> {
     // Include every refinement column even when an index is currently available:
     // a stale or busy index must be able to fall back to this same captured source.
+    let columns = candidate_refinement_columns(filter);
+    let reader = SegmentReader::open_projected(dir, &columns)?;
+    candidate_row_ids_for_reader(dir, &reader, filter, use_indexes, false, visible_rows)
+}
+
+/// Build an exact, query-owned SQL candidate selection. Index and source
+/// allocations share `memory`; the returned buffer retains its charge through
+/// physical-plan execution.
+pub(crate) fn candidate_row_ids_with_memory(
+    dir: &Path,
+    filter: &NativeLogFilter,
+    use_indexes: bool,
+    visible_rows: u64,
+    memory: &QueryMemoryBudget,
+    cancel: Option<&crate::QueryCancelCheck>,
+) -> std::io::Result<QueryBuffer<u32>> {
+    check_candidate_canceled(cancel)?;
+    let columns = candidate_refinement_columns(filter);
+    let reader = SegmentReader::open_projected_with_memory(dir, &columns, memory.clone())?;
+    let physical_rows = reader.read_row_count()?;
+    if visible_rows > physical_rows {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "segment is missing rows from the captured query snapshot",
+        ));
+    }
+    if visible_rows > u64::from(u32::MAX) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "segment row count exceeds candidate address space",
+        ));
+    }
+    if filter.min_topic_count > filter.topics.len() || visible_rows == 0 {
+        return QueryBuffer::try_with_capacity(0, Some(memory), "query candidate row ids");
+    }
+
+    let checkpoint = if use_indexes {
+        IndexReadCheckpoint::open(dir, &reader)?
+    } else {
+        None
+    };
+    if let Some(checkpoint) = checkpoint.as_ref()
+        && erc20_event_bloom_excludes_with_memory(&dir.join("indexes"), checkpoint, filter, memory)?
+    {
+        return QueryBuffer::try_with_capacity(0, Some(memory), "query candidate row ids");
+    }
+    check_candidate_canceled(cancel)?;
+
+    let mut row_ids = if let Some(checkpoint) = checkpoint.as_ref() {
+        build_index_candidate_set(dir, checkpoint, filter, Some(memory), cancel)?
+            .map(|candidate| candidate.into_row_ids(memory))
+            .transpose()?
+    } else {
+        None
+    };
+    if let Some(ids) = &mut row_ids {
+        if ids
+            .last()
+            .is_some_and(|row| u64::from(*row) >= physical_rows)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "index row exceeds its source segment",
+            ));
+        }
+        ids.retain(|row| u64::from(*row) < visible_rows);
+        if ids.is_empty() {
+            return Ok(row_ids.expect("candidate selection exists"));
+        }
+    }
+
+    refine_candidate_ids_from_columns(&reader, filter, visible_rows, memory, cancel, &mut row_ids)?;
+    check_candidate_canceled(cancel)?;
+    if filter.canonical_only {
+        let canonical = reader.read_canonical_accounted()?;
+        if canonical.len() < visible_rows {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "canonical bitmap is shorter than the captured query snapshot",
+            ));
+        }
+        if let Some(ids) = &mut row_ids {
+            ids.retain(|row| canonical.is_present(u64::from(*row)));
+        } else {
+            let matches = (0..visible_rows)
+                .filter(|row| canonical.is_present(*row))
+                .count();
+            let mut ids =
+                QueryBuffer::try_with_capacity(matches, Some(memory), "query candidate row ids")?;
+            ids.try_extend(
+                (0..visible_rows)
+                    .filter(|row| canonical.is_present(*row))
+                    .map(|row| row as u32),
+            )?;
+            row_ids = Some(ids);
+        }
+    }
+    check_candidate_canceled(cancel)?;
+    row_ids.map_or_else(|| query_row_id_range(visible_rows, memory), Ok)
+}
+
+fn candidate_refinement_columns(filter: &NativeLogFilter) -> Vec<&'static str> {
     let mut columns = Vec::new();
     for (name, needed) in [
         ("address", !filter.addresses.is_empty()),
@@ -295,8 +397,162 @@ pub fn candidate_row_ids(
             columns.push(name);
         }
     }
-    let reader = SegmentReader::open_projected(dir, &columns)?;
-    candidate_row_ids_for_reader(dir, &reader, filter, use_indexes, false, visible_rows)
+    columns
+}
+
+fn check_candidate_canceled(cancel: Option<&crate::QueryCancelCheck>) -> io::Result<()> {
+    if cancel.is_some_and(|check| check()) {
+        Err(io::Error::new(io::ErrorKind::Interrupted, "query canceled"))
+    } else {
+        Ok(())
+    }
+}
+
+fn query_row_id_range(row_count: u64, memory: &QueryMemoryBudget) -> io::Result<QueryBuffer<u32>> {
+    let capacity = usize::try_from(row_count).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "candidate row count exceeds address space",
+        )
+    })?;
+    let mut result =
+        QueryBuffer::try_with_capacity(capacity, Some(memory), "query candidate row ids")?;
+    result.try_extend(0..row_count as u32)?;
+    Ok(result)
+}
+
+fn refine_candidate_ids_with_values<T>(
+    row_ids: &mut Option<QueryBuffer<u32>>,
+    row_count: u64,
+    memory: &QueryMemoryBudget,
+    values: &QueryBuffer<T>,
+    matches: impl Fn(&T) -> bool,
+) -> io::Result<()> {
+    if let Some(ids) = row_ids {
+        if values.len() != ids.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "selected candidate column returned the wrong row count",
+            ));
+        }
+        let mut position = 0usize;
+        ids.retain(|_| {
+            let keep = matches(&values[position]);
+            position += 1;
+            keep
+        });
+        return Ok(());
+    }
+
+    let expected = usize::try_from(row_count).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "candidate row count exceeds address space",
+        )
+    })?;
+    if values.len() < expected {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "candidate column is shorter than the captured row count",
+        ));
+    }
+    // Appends after snapshot capture may make the pinned physical column longer
+    // than this query's visible prefix. Never admit those later rows.
+    let visible = &values[..expected];
+    let count = visible.iter().filter(|value| matches(value)).count();
+    let mut ids = QueryBuffer::try_with_capacity(count, Some(memory), "query candidate row ids")?;
+    for (row, value) in visible.iter().enumerate() {
+        if matches(value) {
+            ids.try_push(row as u32)?;
+        }
+    }
+    *row_ids = Some(ids);
+    Ok(())
+}
+
+fn refine_candidate_ids_from_columns(
+    reader: &SegmentReader,
+    filter: &NativeLogFilter,
+    row_count: u64,
+    memory: &QueryMemoryBudget,
+    cancel: Option<&crate::QueryCancelCheck>,
+    row_ids: &mut Option<QueryBuffer<u32>>,
+) -> io::Result<()> {
+    macro_rules! refine {
+        ($read:expr, $matches:expr) => {{
+            check_candidate_canceled(cancel)?;
+            let values = $read?;
+            refine_candidate_ids_with_values(row_ids, row_count, memory, &values, $matches)?;
+            if row_ids.as_ref().is_some_and(|ids| ids.is_empty()) {
+                return Ok(());
+            }
+        }};
+    }
+
+    if !filter.addresses.is_empty() {
+        refine!(
+            reader.read_address_with_memory(row_ids.as_deref()),
+            |value| filter.addresses.contains(value)
+        );
+    }
+    if let Some(block_hash) = filter.block_hash {
+        refine!(
+            reader.read_b256_with_memory("block_hash", row_ids.as_deref()),
+            |value| *value == block_hash
+        );
+    }
+    for (index, constraint) in filter.topics.iter().enumerate() {
+        if index >= filter.min_topic_count && matches!(constraint, TopicConstraint::Any) {
+            continue;
+        }
+        let column = format!("topic{index}");
+        refine!(
+            reader.read_nullable_b256_with_memory(&column, row_ids.as_deref()),
+            |topic| {
+                (index >= filter.min_topic_count || topic.is_some())
+                    && topic_matches_constraint(*topic, constraint)
+            }
+        );
+    }
+    if filter.from_block.is_some() || filter.to_block.is_some() {
+        refine!(
+            reader.read_u64_with_memory("block_number", row_ids.as_deref()),
+            |block| filter.from_block.is_none_or(|from| *block >= from)
+                && filter.to_block.is_none_or(|to| *block <= to)
+        );
+    }
+    if filter.from_timestamp.is_some() || filter.to_timestamp.is_some() {
+        refine!(
+            reader.read_u64_with_memory("timestamp", row_ids.as_deref()),
+            |timestamp| filter.from_timestamp.is_none_or(|from| *timestamp >= from)
+                && filter.to_timestamp.is_none_or(|to| *timestamp <= to)
+        );
+    }
+    if let Some(data_len) = filter.data_len {
+        refine!(
+            reader.read_u32_with_memory("data_len", row_ids.as_deref()),
+            |value| *value == data_len
+        );
+    }
+    if filter.data_min.is_some() || filter.data_max.is_some() || !filter.data_not_equals.is_empty()
+    {
+        refine!(
+            reader.read_var_bytes_with_memory("data", row_ids.as_deref()),
+            |data| filter
+                .data_min
+                .as_ref()
+                .is_none_or(|min| data.as_ref() >= min.as_slice())
+                && filter
+                    .data_max
+                    .as_ref()
+                    .is_none_or(|max| data.as_ref() <= max.as_slice())
+                && !filter
+                    .data_not_equals
+                    .iter()
+                    .any(|value| data.as_ref() == value.as_slice())
+        );
+    }
+    Ok(())
 }
 
 pub(crate) fn candidate_row_ids_for_reader(
@@ -433,6 +689,217 @@ pub fn matches_native_filter(row: &LogRow, filter: &NativeLogFilter) -> bool {
         })
 }
 
+enum CandidateSet {
+    Plain(RoaringBitmap),
+    Accounted(QueryBitmap),
+}
+
+impl CandidateSet {
+    fn is_empty(&self) -> bool {
+        match self {
+            Self::Plain(bitmap) => bitmap.is_empty(),
+            Self::Accounted(bitmap) => bitmap.is_empty(),
+        }
+    }
+
+    fn union(self, rhs: Self) -> io::Result<Self> {
+        match (self, rhs) {
+            (Self::Plain(lhs), Self::Plain(rhs)) => Ok(Self::Plain(lhs | rhs)),
+            (Self::Accounted(lhs), Self::Accounted(rhs)) => lhs.union(rhs).map(Self::Accounted),
+            _ => Err(io::Error::other(
+                "candidate sets use different ownership modes",
+            )),
+        }
+    }
+
+    fn intersection(self, rhs: Self) -> io::Result<Self> {
+        match (self, rhs) {
+            (Self::Plain(lhs), Self::Plain(rhs)) => Ok(Self::Plain(lhs & rhs)),
+            (Self::Accounted(lhs), Self::Accounted(rhs)) => {
+                lhs.intersection(rhs).map(Self::Accounted)
+            }
+            _ => Err(io::Error::other(
+                "candidate sets use different ownership modes",
+            )),
+        }
+    }
+
+    fn into_plain(self) -> io::Result<RoaringBitmap> {
+        match self {
+            Self::Plain(bitmap) => Ok(bitmap),
+            Self::Accounted(_) => Err(io::Error::other(
+                "accounted candidate used by an unaccounted query",
+            )),
+        }
+    }
+
+    fn into_row_ids(self, memory: &QueryMemoryBudget) -> io::Result<QueryBuffer<u32>> {
+        match self {
+            Self::Accounted(bitmap) => bitmap.into_row_ids(memory),
+            Self::Plain(_) => Err(io::Error::other(
+                "unaccounted candidate used by an accounted query",
+            )),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct CandidateAccess<'a> {
+    memory: Option<&'a QueryMemoryBudget>,
+    cancel: Option<&'a crate::QueryCancelCheck>,
+}
+
+impl CandidateAccess<'_> {
+    fn empty(self) -> io::Result<CandidateSet> {
+        match self.memory {
+            Some(memory) => QueryBitmap::empty(memory).map(CandidateSet::Accounted),
+            None => Ok(CandidateSet::Plain(RoaringBitmap::new())),
+        }
+    }
+
+    fn point(self, path: &Path, file_id: [u8; 16], key: &[u8]) -> io::Result<Option<CandidateSet>> {
+        check_candidate_canceled(self.cancel)?;
+        match self.memory {
+            Some(memory) => {
+                BTreeIndexReader::get_from_file_bound_with_memory(path, file_id, key, memory)
+                    .map(|value| value.map(CandidateSet::Accounted))
+            }
+            None => BTreeIndexReader::get_from_file_bound(path, file_id, key)
+                .map(|value| value.map(CandidateSet::Plain)),
+        }
+    }
+
+    fn range_inclusive(
+        self,
+        path: &Path,
+        file_id: [u8; 16],
+        start: &[u8],
+        end: &[u8],
+    ) -> io::Result<CandidateSet> {
+        check_candidate_canceled(self.cancel)?;
+        match self.memory {
+            Some(memory) => BTreeIndexReader::range_inclusive_from_file_bound_with_memory(
+                path, file_id, start, end, memory,
+            )
+            .map(CandidateSet::Accounted),
+            None => {
+                let reader = BTreeIndexReader::open_bound(path, file_id)?;
+                Ok(CandidateSet::Plain(reader.range_inclusive(start, end)))
+            }
+        }
+    }
+
+    fn composite_range(
+        self,
+        path: &Path,
+        file_id: [u8; 16],
+        address: &[u8; 20],
+        topic0: &[u8; 32],
+        from: u64,
+        to: u64,
+    ) -> io::Result<CandidateSet> {
+        check_candidate_canceled(self.cancel)?;
+        match self.memory {
+            Some(memory) => {
+                CompositeQuery::range_address_topic0_blocks_inclusive_from_file_bound_with_memory(
+                    path, file_id, address, topic0, from, to, memory,
+                )
+                .map(CandidateSet::Accounted)
+            }
+            None => {
+                let reader = BTreeIndexReader::open_bound(path, file_id)?;
+                Ok(CandidateSet::Plain(
+                    CompositeQuery::range_address_topic0_blocks_inclusive(
+                        &reader, address, topic0, from, to,
+                    ),
+                ))
+            }
+        }
+    }
+
+    fn address_topic0_topic1(
+        self,
+        path: &Path,
+        file_id: [u8; 16],
+        address: &[u8; 20],
+        topic0: &[u8; 32],
+        topic1: &[u8; 32],
+    ) -> io::Result<Option<CandidateSet>> {
+        check_candidate_canceled(self.cancel)?;
+        match self.memory {
+            Some(memory) => CompositeQuery::get_address_topic0_topic1_from_file_bound_with_memory(
+                path, file_id, address, topic0, topic1, memory,
+            )
+            .map(|value| value.map(CandidateSet::Accounted)),
+            None => CompositeQuery::get_address_topic0_topic1_from_file_bound(
+                path, file_id, address, topic0, topic1,
+            )
+            .map(|value| value.map(CandidateSet::Plain)),
+        }
+    }
+
+    fn address_topic0_topic2(
+        self,
+        path: &Path,
+        file_id: [u8; 16],
+        address: &[u8; 20],
+        topic0: &[u8; 32],
+        topic2: &[u8; 32],
+    ) -> io::Result<Option<CandidateSet>> {
+        check_candidate_canceled(self.cancel)?;
+        match self.memory {
+            Some(memory) => CompositeQuery::get_address_topic0_topic2_from_file_bound_with_memory(
+                path, file_id, address, topic0, topic2, memory,
+            )
+            .map(|value| value.map(CandidateSet::Accounted)),
+            None => CompositeQuery::get_address_topic0_topic2_from_file_bound(
+                path, file_id, address, topic0, topic2,
+            )
+            .map(|value| value.map(CandidateSet::Plain)),
+        }
+    }
+
+    fn address_topic0(
+        self,
+        path: &Path,
+        file_id: [u8; 16],
+        address: &[u8; 20],
+        topic0: &[u8; 32],
+    ) -> io::Result<Option<CandidateSet>> {
+        check_candidate_canceled(self.cancel)?;
+        match self.memory {
+            Some(memory) => CompositeQuery::get_address_topic0_from_file_bound_with_memory(
+                path, file_id, address, topic0, memory,
+            )
+            .map(|value| value.map(CandidateSet::Accounted)),
+            None => {
+                CompositeQuery::get_address_topic0_from_file_bound(path, file_id, address, topic0)
+                    .map(|value| value.map(CandidateSet::Plain))
+            }
+        }
+    }
+
+    fn topic0_topic1(
+        self,
+        path: &Path,
+        file_id: [u8; 16],
+        topic0: &[u8; 32],
+        topic1: &[u8; 32],
+    ) -> io::Result<Option<CandidateSet>> {
+        check_candidate_canceled(self.cancel)?;
+        match self.memory {
+            Some(memory) => CompositeQuery::get_topic0_topic1_from_file_bound_with_memory(
+                path, file_id, topic0, topic1, memory,
+            )
+            .map(|value| value.map(CandidateSet::Accounted)),
+            None => {
+                CompositeQuery::get_topic0_topic1_from_file_bound(path, file_id, topic0, topic1)
+                    .map(|value| value.map(CandidateSet::Plain))
+            }
+        }
+    }
+}
+
 fn build_candidate_bitmap(
     dir: &Path,
     segment_reader: &SegmentReader,
@@ -440,8 +907,23 @@ fn build_candidate_bitmap(
     filter: &NativeLogFilter,
     row_count: u64,
 ) -> std::io::Result<RoaringBitmap> {
+    let result = build_index_candidate_set(dir, checkpoint, filter, None, None)?
+        .map(CandidateSet::into_plain)
+        .transpose()?;
+    let result = refine_candidate_bitmap_from_columns(segment_reader, filter, row_count, result)?;
+    Ok(result.unwrap_or_else(|| (0..row_count as u32).collect()))
+}
+
+fn build_index_candidate_set(
+    dir: &Path,
+    checkpoint: &IndexReadCheckpoint,
+    filter: &NativeLogFilter,
+    memory: Option<&QueryMemoryBudget>,
+    cancel: Option<&crate::QueryCancelCheck>,
+) -> std::io::Result<Option<CandidateSet>> {
     let index_dir = dir.join("indexes");
-    let mut result: Option<RoaringBitmap> = None;
+    let access = CandidateAccess { memory, cancel };
+    let mut result: Option<CandidateSet> = None;
     let mut covered_addresses = false;
     let mut covered_topics = [false; 4];
     let mut covered_block_range = false;
@@ -449,14 +931,10 @@ fn build_candidate_bitmap(
     if let Some(block_hash) = filter.block_hash {
         let block_hash_path = index_dir.join("block_hash.bptree");
         if let Some(file_id) = checkpoint.artifact_id("block_hash.bptree") {
-            if let Some(bitmap) = BTreeIndexReader::get_from_file_bound(
-                &block_hash_path,
-                file_id,
-                block_hash.as_slice(),
-            )? {
-                result = Some(intersect_optional(result, bitmap));
+            if let Some(bitmap) = access.point(&block_hash_path, file_id, block_hash.as_slice())? {
+                result = Some(intersect_optional_set(result, bitmap)?);
             } else {
-                return Ok(RoaringBitmap::new());
+                return access.empty().map(Some);
             }
         }
     }
@@ -468,22 +946,26 @@ fn build_candidate_bitmap(
     ) {
         let composite_path = index_dir.join("address_topic0_topic1.bptree");
         if let Some(file_id) = checkpoint.artifact_id("address_topic0_topic1.bptree") {
-            let mut union = RoaringBitmap::new();
+            let mut union = access.empty()?;
             for topic1 in topic1_values {
-                if let Some(bitmap) = CompositeQuery::get_address_topic0_topic1_from_file_bound(
+                let topic1: &[u8; 32] = topic1
+                    .as_slice()
+                    .try_into()
+                    .expect("B256 has a fixed 32-byte width");
+                if let Some(bitmap) = access.address_topic0_topic1(
                     &composite_path,
                     file_id,
                     &address,
                     &topic0,
-                    &topic1,
+                    topic1,
                 )? {
-                    union |= bitmap;
+                    union = union.union(bitmap)?;
                 }
             }
             if union.is_empty() {
-                return Ok(RoaringBitmap::new());
+                return Ok(Some(union));
             }
-            result = Some(intersect_optional(result, union));
+            result = Some(intersect_optional_set(result, union)?);
             covered_addresses = true;
             covered_topics[0] = true;
             covered_topics[1] = true;
@@ -497,22 +979,26 @@ fn build_candidate_bitmap(
     ) {
         let composite_path = index_dir.join("address_topic0_topic2.bptree");
         if let Some(file_id) = checkpoint.artifact_id("address_topic0_topic2.bptree") {
-            let mut union = RoaringBitmap::new();
+            let mut union = access.empty()?;
             for topic2 in topic2_values {
-                if let Some(bitmap) = CompositeQuery::get_address_topic0_topic2_from_file_bound(
+                let topic2: &[u8; 32] = topic2
+                    .as_slice()
+                    .try_into()
+                    .expect("B256 has a fixed 32-byte width");
+                if let Some(bitmap) = access.address_topic0_topic2(
                     &composite_path,
                     file_id,
                     &address,
                     &topic0,
-                    &topic2,
+                    topic2,
                 )? {
-                    union |= bitmap;
+                    union = union.union(bitmap)?;
                 }
             }
             if union.is_empty() {
-                return Ok(RoaringBitmap::new());
+                return Ok(Some(union));
             }
-            result = Some(intersect_optional(result, union));
+            result = Some(intersect_optional_set(result, union)?);
             covered_addresses = true;
             covered_topics[0] = true;
             covered_topics[2] = true;
@@ -528,11 +1014,15 @@ fn build_candidate_bitmap(
         (Some(address), Some(topic0), Some(from), Some(to)) => {
             let composite_path = index_dir.join("address_topic0_block.bptree");
             if let Some(file_id) = checkpoint.artifact_id("address_topic0_block.bptree") {
-                let reader = BTreeIndexReader::open_bound(&composite_path, file_id)?;
-                let bitmap = CompositeQuery::range_address_topic0_blocks_inclusive(
-                    &reader, &address, &topic0, from, to,
-                );
-                result = Some(intersect_optional(result, bitmap));
+                let bitmap = access.composite_range(
+                    &composite_path,
+                    file_id,
+                    &address,
+                    &topic0,
+                    from,
+                    to,
+                )?;
+                result = Some(intersect_optional_set(result, bitmap)?);
                 covered_addresses = true;
                 covered_topics[0] = true;
                 covered_block_range = true;
@@ -541,17 +1031,14 @@ fn build_candidate_bitmap(
         (Some(address), Some(topic0), _, _) => {
             let composite_path = index_dir.join("address_topic0.bptree");
             if let Some(file_id) = checkpoint.artifact_id("address_topic0.bptree") {
-                if let Some(bitmap) = CompositeQuery::get_address_topic0_from_file_bound(
-                    &composite_path,
-                    file_id,
-                    &address,
-                    &topic0,
-                )? {
-                    result = Some(intersect_optional(result, bitmap));
+                if let Some(bitmap) =
+                    access.address_topic0(&composite_path, file_id, &address, &topic0)?
+                {
+                    result = Some(intersect_optional_set(result, bitmap)?);
                     covered_addresses = true;
                     covered_topics[0] = true;
                 } else {
-                    return Ok(RoaringBitmap::new());
+                    return access.empty().map(Some);
                 }
             }
         }
@@ -566,21 +1053,22 @@ fn build_candidate_bitmap(
         if let Some(file_id) = checkpoint.artifact_id("topic0_topic1.bptree")
             && (!covered_topics[0] || !covered_topics[1])
         {
-            let mut union = RoaringBitmap::new();
+            let mut union = access.empty()?;
             for topic1 in topic1_values {
-                if let Some(bitmap) = CompositeQuery::get_topic0_topic1_from_file_bound(
-                    &composite_path,
-                    file_id,
-                    &topic0,
-                    &topic1,
-                )? {
-                    union |= bitmap;
+                let topic1: &[u8; 32] = topic1
+                    .as_slice()
+                    .try_into()
+                    .expect("B256 has a fixed 32-byte width");
+                if let Some(bitmap) =
+                    access.topic0_topic1(&composite_path, file_id, &topic0, topic1)?
+                {
+                    union = union.union(bitmap)?;
                 }
             }
             if union.is_empty() {
-                return Ok(RoaringBitmap::new());
+                return Ok(Some(union));
             }
-            result = Some(intersect_optional(result, union));
+            result = Some(intersect_optional_set(result, union)?);
             covered_topics[0] = true;
             covered_topics[1] = true;
         }
@@ -589,42 +1077,43 @@ fn build_candidate_bitmap(
     if !filter.addresses.is_empty() && !covered_addresses {
         let address_path = index_dir.join("address.bptree");
         if let Some(file_id) = checkpoint.artifact_id("address.bptree") {
-            let mut union = RoaringBitmap::new();
+            let mut union = access.empty()?;
             for address in &filter.addresses {
-                if let Some(bitmap) = BTreeIndexReader::get_from_file_bound(
-                    &address_path,
-                    file_id,
-                    address.as_slice(),
-                )? {
-                    union |= bitmap;
+                if let Some(bitmap) = access.point(&address_path, file_id, address.as_slice())? {
+                    union = union.union(bitmap)?;
                 }
             }
             if union.is_empty() {
-                return Ok(RoaringBitmap::new());
+                return Ok(Some(union));
             }
-            result = Some(intersect_optional(result, union));
+            result = Some(intersect_optional_set(result, union)?);
         }
     }
 
     if !covered_topics[0]
-        && let Some(topic_bitmap) = build_topic0_bitmap(&index_dir, checkpoint, &filter.topics[0])?
+        && let Some(topic_bitmap) =
+            build_topic0_candidate_set(&index_dir, checkpoint, &filter.topics[0], access)?
     {
         if topic_bitmap.is_empty() {
-            return Ok(RoaringBitmap::new());
+            return Ok(Some(topic_bitmap));
         }
-        result = Some(intersect_optional(result, topic_bitmap));
+        result = Some(intersect_optional_set(result, topic_bitmap)?);
     }
 
     if !covered_block_range && (filter.from_block.is_some() || filter.to_block.is_some()) {
         let block_path = index_dir.join("block_number.bptree");
         if let Some(file_id) = checkpoint.artifact_id("block_number.bptree") {
-            let reader = BTreeIndexReader::open_bound(&block_path, file_id)?;
             let from = filter.from_block.unwrap_or(0);
             let to = filter.to_block.unwrap_or(u64::MAX);
-            let bitmap = reader.range_inclusive(&from.to_be_bytes(), &to.to_be_bytes());
-            result = Some(intersect_optional(result, bitmap));
-            if result.as_ref().is_some_and(RoaringBitmap::is_empty) {
-                return Ok(RoaringBitmap::new());
+            let bitmap = access.range_inclusive(
+                &block_path,
+                file_id,
+                &from.to_be_bytes(),
+                &to.to_be_bytes(),
+            )?;
+            result = Some(intersect_optional_set(result, bitmap)?);
+            if result.as_ref().is_some_and(CandidateSet::is_empty) {
+                return Ok(result);
             }
         }
     }
@@ -632,20 +1121,22 @@ fn build_candidate_bitmap(
     if filter.from_timestamp.is_some() || filter.to_timestamp.is_some() {
         let timestamp_path = index_dir.join("timestamp.bptree");
         if let Some(file_id) = checkpoint.artifact_id("timestamp.bptree") {
-            let reader = BTreeIndexReader::open_bound(&timestamp_path, file_id)?;
             let from = filter.from_timestamp.unwrap_or(0);
             let to = filter.to_timestamp.unwrap_or(u64::MAX);
-            let bitmap = reader.range_inclusive(&from.to_be_bytes(), &to.to_be_bytes());
-            result = Some(intersect_optional(result, bitmap));
-            if result.as_ref().is_some_and(RoaringBitmap::is_empty) {
-                return Ok(RoaringBitmap::new());
+            let bitmap = access.range_inclusive(
+                &timestamp_path,
+                file_id,
+                &from.to_be_bytes(),
+                &to.to_be_bytes(),
+            )?;
+            result = Some(intersect_optional_set(result, bitmap)?);
+            if result.as_ref().is_some_and(CandidateSet::is_empty) {
+                return Ok(result);
             }
         }
     }
 
-    result = refine_candidate_bitmap_from_columns(segment_reader, filter, row_count, result)?;
-
-    Ok(result.unwrap_or_else(|| (0..row_count as u32).collect()))
+    Ok(result)
 }
 
 fn erc20_event_bloom_excludes(
@@ -662,6 +1153,32 @@ fn erc20_event_bloom_excludes(
     let legacy_transfer_bloom_path = index_dir.join(TRANSFER_BLOOM_FILE);
     if let Some(file_id) = checkpoint.artifact_id(TRANSFER_BLOOM_FILE) {
         let mut reader = TransferBloomReader::open_bound(&legacy_transfer_bloom_path, file_id)?;
+        return legacy_transfer_bloom_reader_excludes(&mut reader, filter);
+    }
+
+    Ok(false)
+}
+
+fn erc20_event_bloom_excludes_with_memory(
+    index_dir: &Path,
+    checkpoint: &IndexReadCheckpoint,
+    filter: &NativeLogFilter,
+    memory: &QueryMemoryBudget,
+) -> io::Result<bool> {
+    let common_bloom_path = index_dir.join(ERC20_EVENTS_BLOOM_FILE);
+    if let Some(file_id) = checkpoint.artifact_id(ERC20_EVENTS_BLOOM_FILE) {
+        let mut reader =
+            Erc20EventBloomReader::open_bound_with_memory(&common_bloom_path, file_id, memory)?;
+        return erc20_event_bloom_reader_excludes(&mut reader, filter);
+    }
+
+    let legacy_transfer_bloom_path = index_dir.join(TRANSFER_BLOOM_FILE);
+    if let Some(file_id) = checkpoint.artifact_id(TRANSFER_BLOOM_FILE) {
+        let mut reader = TransferBloomReader::open_bound_with_memory(
+            &legacy_transfer_bloom_path,
+            file_id,
+            memory,
+        )?;
         return legacy_transfer_bloom_reader_excludes(&mut reader, filter);
     }
 
@@ -717,7 +1234,7 @@ fn erc20_event_bloom_reader_excludes(
         };
         let mut any_present = false;
         for topic in topics {
-            if reader.may_contain(&topic0, &address, topic_index, &B256::from(topic))? {
+            if reader.may_contain(&topic0, &address, topic_index, topic)? {
                 any_present = true;
                 break;
             }
@@ -749,7 +1266,7 @@ fn legacy_transfer_bloom_reader_excludes(
         };
         let mut any_present = false;
         for topic in topics {
-            if reader.may_contain(&address, topic_index, &B256::from(topic))? {
+            if reader.may_contain(&address, topic_index, topic)? {
                 any_present = true;
                 break;
             }
@@ -928,11 +1445,12 @@ fn topic_matches_constraint(topic: Option<B256>, constraint: &TopicConstraint) -
     }
 }
 
-fn build_topic0_bitmap(
+fn build_topic0_candidate_set(
     index_dir: &Path,
     checkpoint: &IndexReadCheckpoint,
     constraint: &TopicConstraint,
-) -> std::io::Result<Option<RoaringBitmap>> {
+    access: CandidateAccess<'_>,
+) -> std::io::Result<Option<CandidateSet>> {
     let topic_path = index_dir.join("topic0.bptree");
     let Some(file_id) = checkpoint.artifact_id("topic0.bptree") else {
         return Ok(None);
@@ -940,17 +1458,14 @@ fn build_topic0_bitmap(
 
     let bitmap = match constraint {
         TopicConstraint::Any => return Ok(None),
-        TopicConstraint::One(topic) => {
-            BTreeIndexReader::get_from_file_bound(&topic_path, file_id, topic.as_slice())?
-                .unwrap_or_default()
-        }
+        TopicConstraint::One(topic) => access
+            .point(&topic_path, file_id, topic.as_slice())?
+            .map_or_else(|| access.empty(), Ok)?,
         TopicConstraint::AnyOf(topics) => {
-            let mut union = RoaringBitmap::new();
+            let mut union = access.empty()?;
             for topic in topics {
-                if let Some(bitmap) =
-                    BTreeIndexReader::get_from_file_bound(&topic_path, file_id, topic.as_slice())?
-                {
-                    union |= bitmap;
+                if let Some(bitmap) = access.point(&topic_path, file_id, topic.as_slice())? {
+                    union = union.union(bitmap)?;
                 }
             }
             union
@@ -960,10 +1475,13 @@ fn build_topic0_bitmap(
     Ok(Some(bitmap))
 }
 
-fn intersect_optional(existing: Option<RoaringBitmap>, new: RoaringBitmap) -> RoaringBitmap {
+fn intersect_optional_set(
+    existing: Option<CandidateSet>,
+    new: CandidateSet,
+) -> io::Result<CandidateSet> {
     match existing {
-        Some(existing) => existing & new,
-        None => new,
+        Some(existing) => existing.intersection(new),
+        None => Ok(new),
     }
 }
 
@@ -979,13 +1497,10 @@ fn single_topic(constraint: &TopicConstraint) -> Option<[u8; 32]> {
     }
 }
 
-fn topic_values(constraint: &TopicConstraint) -> Option<Vec<[u8; 32]>> {
+fn topic_values(constraint: &TopicConstraint) -> Option<&[B256]> {
     match constraint {
-        TopicConstraint::One(topic) => topic.as_slice().try_into().ok().map(|topic| vec![topic]),
-        TopicConstraint::AnyOf(topics) if !topics.is_empty() => topics
-            .iter()
-            .map(|topic| topic.as_slice().try_into().ok())
-            .collect(),
+        TopicConstraint::One(topic) => Some(std::slice::from_ref(topic)),
+        TopicConstraint::AnyOf(topics) if !topics.is_empty() => Some(topics),
         _ => None,
     }
 }
@@ -1000,9 +1515,9 @@ mod tests {
     use std::path::Path;
 
     use alloy_primitives::{Address, B256, bytes};
-    use logex_index::IndexBuilder;
+    use logex_index::{IndexBuildProfile, IndexBuilder};
     use logex_storage::{ColumnFile, PartitionManagerConfig};
-    use logex_types::Source;
+    use logex_types::{QueryMemoryLimit, Source};
     use tempfile::TempDir;
 
     use super::*;
@@ -1135,6 +1650,261 @@ mod tests {
                 vec![2, 5]
             );
         }
+    }
+
+    #[test]
+    fn accounted_candidates_match_full_row_oracle_for_pushed_predicates() {
+        let topic_x = B256::repeat_byte(0x10);
+        let topic_y = B256::repeat_byte(0x20);
+        let topic_z = B256::repeat_byte(0x21);
+        let topic_q = B256::repeat_byte(0x30);
+        let address_a = Address::repeat_byte(0xaa);
+        let address_b = Address::repeat_byte(0xbb);
+        let address_c = Address::repeat_byte(0xcc);
+        let template = make_test_rows().remove(0);
+        let rows = vec![
+            template.clone(),
+            LogRow {
+                block_number: 101,
+                block_hash: B256::repeat_byte(2),
+                timestamp: template.timestamp + 10,
+                log_index: 1,
+                address: address_b,
+                topic0: Some(topic_x),
+                topic1: Some(topic_z),
+                data: bytes!("cafe"),
+                data_len: 2,
+                source: Source::Trace,
+                ..template.clone()
+            },
+            LogRow {
+                block_number: 102,
+                block_hash: B256::repeat_byte(3),
+                timestamp: template.timestamp + 20,
+                log_index: 2,
+                address: address_a,
+                topic0: Some(topic_x),
+                topic1: Some(topic_y),
+                topic2: Some(topic_q),
+                data: bytes!("beef"),
+                data_len: 2,
+                ..template.clone()
+            },
+            LogRow {
+                block_number: 103,
+                block_hash: B256::repeat_byte(4),
+                timestamp: template.timestamp + 30,
+                log_index: 3,
+                address: address_a,
+                topic0: Some(B256::repeat_byte(0x40)),
+                topic1: None,
+                data: bytes!("01"),
+                data_len: 1,
+                ..template.clone()
+            },
+            LogRow {
+                block_number: 104,
+                block_hash: B256::repeat_byte(5),
+                timestamp: template.timestamp + 40,
+                log_index: 4,
+                address: address_c,
+                topic0: Some(topic_x),
+                topic1: Some(topic_y),
+                topic2: Some(topic_q),
+                data: bytes!(""),
+                data_len: 0,
+                source: Source::Trace,
+                ..template.clone()
+            },
+            LogRow {
+                block_number: 105,
+                block_hash: B256::repeat_byte(6),
+                timestamp: template.timestamp + 50,
+                log_index: 5,
+                address: address_a,
+                topic0: Some(topic_x),
+                topic1: Some(topic_z),
+                topic2: Some(topic_q),
+                data: bytes!("ff"),
+                data_len: 1,
+                ..template
+            },
+        ];
+        let canonical = [true, false, true, true, false, true];
+        let setup = || {
+            let tmp = tempfile::tempdir().unwrap();
+            let mut storage = PartitionManager::open(PartitionManagerConfig {
+                data_dir: tmp.path().to_path_buf(),
+                partition_target_rows: 1_000_000,
+                compaction_safety_margin_blocks: 2_048,
+            })
+            .unwrap();
+            storage.write_batch(&rows).unwrap();
+            assert_eq!(storage.mark_non_canonical(rows[1].block_hash).unwrap(), 1);
+            assert_eq!(storage.mark_non_canonical(rows[4].block_hash).unwrap(), 1);
+            storage.checkpoint().unwrap();
+            (tmp, storage)
+        };
+        let (_tmp, storage) = setup();
+        let path = storage.hot_partition().meta.path.clone();
+        let filters = vec![
+            NativeLogFilter::new().with_block_hash(rows[1].block_hash),
+            NativeLogFilter::new().with_block_range(Some(101), Some(102)),
+            NativeLogFilter::new()
+                .with_timestamp_range(Some(rows[0].timestamp), Some(rows[1].timestamp)),
+            NativeLogFilter {
+                data_len: Some(rows[1].data_len),
+                ..NativeLogFilter::new()
+            },
+            NativeLogFilter {
+                data_min: Some(rows[0].data.to_vec()),
+                data_max: Some(rows[1].data.to_vec()),
+                data_not_equals: vec![rows[0].data.to_vec()],
+                ..NativeLogFilter::new()
+            },
+            NativeLogFilter {
+                data_min: Some(Vec::new()),
+                data_max: Some(Vec::new()),
+                ..NativeLogFilter::new()
+            },
+            NativeLogFilter::new().with_addresses(vec![rows[0].address, rows[1].address]),
+            NativeLogFilter::new()
+                .with_addresses(vec![address_a])
+                .with_topic(0, TopicConstraint::One(topic_x))
+                .with_topic(1, TopicConstraint::AnyOf(vec![topic_y, topic_z])),
+            NativeLogFilter::new()
+                .with_addresses(vec![address_a])
+                .with_topic(0, TopicConstraint::One(topic_x))
+                .with_topic(2, TopicConstraint::One(topic_q)),
+            NativeLogFilter::new()
+                .with_addresses(vec![address_a])
+                .with_topic(0, TopicConstraint::One(topic_x))
+                .with_block_range(Some(102), Some(105)),
+            NativeLogFilter::new()
+                .with_addresses(vec![address_a])
+                .with_topic(0, TopicConstraint::One(topic_x)),
+            NativeLogFilter::new()
+                .with_topic(0, TopicConstraint::One(topic_x))
+                .with_topic(1, TopicConstraint::One(topic_y)),
+            NativeLogFilter::new().with_topic(
+                0,
+                TopicConstraint::AnyOf(vec![topic_x, B256::repeat_byte(0x40)]),
+            ),
+            NativeLogFilter::new().with_topic(0, TopicConstraint::AnyOf(Vec::new())),
+            NativeLogFilter {
+                min_topic_count: 2,
+                from_timestamp: Some(rows[2].timestamp),
+                to_timestamp: Some(rows[5].timestamp),
+                data_min: Some(vec![0xbe]),
+                data_max: Some(vec![0xff]),
+                topics: [
+                    TopicConstraint::One(topic_x),
+                    TopicConstraint::AnyOf(vec![topic_y, topic_z]),
+                    TopicConstraint::Any,
+                    TopicConstraint::Any,
+                ],
+                ..NativeLogFilter::new()
+            },
+            NativeLogFilter::new().with_topic(2, TopicConstraint::One(B256::repeat_byte(0xff))),
+            NativeLogFilter {
+                canonical_only: false,
+                addresses: vec![address_c],
+                ..NativeLogFilter::default()
+            },
+        ];
+
+        for indexed in [false, true] {
+            if indexed {
+                IndexBuilder::build_all_indexes(&path).unwrap();
+            }
+            for filter in &filters {
+                let expected: Vec<u32> = rows
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(row, value)| {
+                        (matches_native_filter(value, filter)
+                            && (!filter.canonical_only || canonical[row]))
+                            .then_some(row as u32)
+                    })
+                    .collect();
+                let memory =
+                    QueryMemoryBudget::new(QueryMemoryLimit::new(16 * 1024 * 1024).unwrap());
+                let actual = candidate_row_ids_with_memory(
+                    &path,
+                    filter,
+                    indexed,
+                    rows.len() as u64,
+                    &memory,
+                    None,
+                )
+                .unwrap();
+                assert_eq!(&*actual, expected, "indexed={indexed}, filter={filter:?}");
+                drop(actual);
+                assert_eq!(memory.used(), 0);
+            }
+        }
+
+        let (_partial_tmp, partial) = setup();
+        let partial_path = partial.hot_partition().meta.path.clone();
+        IndexBuilder::build_indexes(&partial_path, IndexBuildProfile::Erc20Transfer).unwrap();
+        let filter = NativeLogFilter::new().with_addresses(vec![address_a]);
+        let memory = QueryMemoryBudget::new(QueryMemoryLimit::new(16 * 1024 * 1024).unwrap());
+        let actual = candidate_row_ids_with_memory(
+            &partial_path,
+            &filter,
+            true,
+            rows.len() as u64,
+            &memory,
+            None,
+        )
+        .unwrap();
+        assert_eq!(&*actual, &[0, 2, 3, 5]);
+        drop(actual);
+        assert_eq!(memory.used(), 0);
+    }
+
+    #[test]
+    fn accounted_candidate_cancellation_releases_every_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let rows = make_test_rows();
+        write_legacy_source(dir.path(), &rows);
+        IndexBuilder::build_all_indexes(dir.path()).unwrap();
+        let memory = QueryMemoryBudget::new(QueryMemoryLimit::new(1024 * 1024).unwrap());
+        let cancel: crate::QueryCancelCheck = std::sync::Arc::new(|| true);
+        let error = candidate_row_ids_with_memory(
+            dir.path(),
+            &NativeLogFilter::new().with_addresses(vec![rows[0].address]),
+            true,
+            rows.len() as u64,
+            &memory,
+            Some(&cancel),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+        assert_eq!(memory.used(), 0);
+    }
+
+    #[test]
+    fn accounted_refinement_ignores_rows_appended_after_snapshot_capture() {
+        let (_tmp, mut storage) = setup_storage();
+        let path = storage.hot_partition().meta.path.clone();
+        let visible_rows = storage.hot_partition().meta.row_count;
+        let mut appended = make_test_rows().remove(0);
+        appended.block_number += 10;
+        appended.log_index += 10;
+        storage
+            .write_batch(std::slice::from_ref(&appended))
+            .unwrap();
+        assert!(storage.hot_partition().meta.row_count > visible_rows);
+
+        let filter = NativeLogFilter::new().with_addresses(vec![appended.address]);
+        let memory = QueryMemoryBudget::new(QueryMemoryLimit::new(16 * 1024 * 1024).unwrap());
+        let actual =
+            candidate_row_ids_with_memory(&path, &filter, true, visible_rows, &memory, None)
+                .unwrap();
+        assert_eq!(&*actual, &[0]);
+        drop(actual);
+        assert_eq!(memory.used(), 0);
     }
 
     fn make_alternate_rows() -> Vec<LogRow> {

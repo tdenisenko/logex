@@ -8,6 +8,10 @@ mod statistics;
 mod query_decode;
 #[cfg(feature = "std")]
 pub use query_decode::PreparedBitmap;
+#[cfg(feature = "std")]
+mod query_ops;
+#[cfg(feature = "std")]
+pub use query_ops::{PreparedAssign, PreparedClone, PreparedOwnedAssign, PreparedUnionRefs, QuerySetOp};
 mod store;
 mod util;
 

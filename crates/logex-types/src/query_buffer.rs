@@ -93,6 +93,10 @@ impl<T> QueryBuffer<T> {
     pub fn truncate(&mut self, len: usize) {
         self.values.truncate(len);
     }
+    /// Filter in place without releasing the backing allocation or its charge.
+    pub fn retain(&mut self, keep: impl FnMut(&T) -> bool) {
+        self.values.retain(keep);
+    }
     /// Remove a value while retaining the backing capacity and its charge.
     pub fn pop(&mut self) -> Option<T> {
         self.values.pop()

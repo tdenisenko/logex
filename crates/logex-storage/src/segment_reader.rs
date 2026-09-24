@@ -34,6 +34,26 @@ pub struct SegmentReader {
     memory: Option<QueryMemoryBudget>,
 }
 
+/// Immutable canonical bits retaining their accounted encoded backing.
+#[derive(Debug)]
+pub struct CanonicalBitmap {
+    data: QueryBuffer<u8>,
+    bits_offset: usize,
+    rows: u64,
+}
+
+impl CanonicalBitmap {
+    pub fn len(&self) -> u64 {
+        self.rows
+    }
+    pub fn is_empty(&self) -> bool {
+        self.rows == 0
+    }
+    pub fn is_present(&self, row: u64) -> bool {
+        row < self.rows && self.data[self.bits_offset + (row / 8) as usize] & (1 << (row % 8)) != 0
+    }
+}
+
 #[derive(Debug)]
 pub(crate) enum InspectionPreflightError {
     LimitExceeded {
@@ -1097,6 +1117,59 @@ impl SegmentReader {
         };
         self.validate_bitmap_rows(bitmap.len())?;
         Ok(bitmap)
+    }
+
+    /// Read canonicality from a budgeted capture, retaining encoded bytes rather
+    /// than cloning a second bitmap. Padding remains inaccessible past `len()`.
+    pub fn read_canonical_accounted(&self) -> io::Result<CanonicalBitmap> {
+        if self.memory.is_none() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "canonical query reads require a reader captured with memory accounting",
+            ));
+        }
+        let data = self
+            .artifacts
+            .read_accounted(self.canonical_relative_path())?;
+        let range = if self.artifacts.bundle().is_some() {
+            0..data.len()
+        } else {
+            let metadata = match self.canonical_metadata {
+                Some(metadata) => metadata,
+                None => crate::column::RawCanonicalMetadata::parse(&data, data.len() as u64)?
+                    .validate_committed(None, 0)?,
+            };
+            metadata.bitmap_range(&data)?
+        };
+        let bytes = &data[range.clone()];
+        let rows = bytes
+            .get(..8)
+            .and_then(|x| x.try_into().ok())
+            .map(u64::from_le_bytes)
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "corrupt canonical bitmap")
+            })?;
+        let required = usize::try_from(rows.div_ceil(8))
+            .ok()
+            .and_then(|n| n.checked_add(8))
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "canonical bitmap length overflow",
+                )
+            })?;
+        if bytes.len() < required {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "truncated canonical bitmap",
+            ));
+        }
+        self.validate_bitmap_rows(rows)?;
+        Ok(CanonicalBitmap {
+            data,
+            bits_offset: range.start + 8,
+            rows,
+        })
     }
 
     /// Bound the encoded canonical artifact before allocating its body. Raw
@@ -2889,6 +2962,93 @@ mod tests {
         assert!(memory.used() <= (expected[19].len() * 2) as u128);
         assert_eq!(slice.as_ref(), &expected[19][1..]);
         drop(slice);
+        assert_eq!(memory.used(), 0);
+    }
+
+    fn assert_accounted_canonical_fixture(dir: &Path) {
+        let memory =
+            QueryMemoryBudget::new(logex_types::QueryMemoryLimit::new(1024 * 1024).unwrap());
+        let reader = SegmentReader::open_projected_with_memory(dir, &[], memory.clone()).unwrap();
+        let baseline = memory.used();
+        let pressure = memory
+            .reserve(memory.limit() - baseline as usize - 1, "pressure")
+            .unwrap();
+        assert!(reader.read_canonical_accounted().is_err());
+        drop(pressure);
+        assert_eq!(memory.used(), baseline);
+        let bitmap = reader.read_canonical_accounted().unwrap();
+        assert_eq!(bitmap.len(), 20);
+        assert!(!bitmap.is_empty());
+        assert!((0..20).all(|row| bitmap.is_present(row)));
+        assert!(!bitmap.is_present(20));
+        assert!(!bitmap.is_present(u64::MAX));
+        drop(reader);
+        assert_eq!(memory.used(), bitmap.data.capacity() as u128);
+        drop(bitmap);
+        assert_eq!(memory.used(), 0);
+        assert_eq!(
+            SegmentReader::open_projected(dir, &[])
+                .unwrap()
+                .read_canonical_accounted()
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
+    }
+
+    #[test]
+    fn accounted_canonical_retains_backing_across_all_layouts() {
+        let raw = TempDir::new().unwrap();
+        ColumnFile::write_batch(raw.path(), &make_rows()).unwrap();
+        assert_accounted_canonical_fixture(raw.path());
+        let (_tmp, dir, _, _) = identified_raw_fixture();
+        assert_accounted_canonical_fixture(&dir);
+        let (_tmp, dir) = compacted_fixture();
+        assert_accounted_canonical_fixture(&dir);
+        let tmp = TempDir::new().unwrap();
+        let mut storage = crate::native::NativeStorage::open(crate::native::NativeStorageConfig {
+            data_dir: tmp.path().to_path_buf(),
+            hot_target_rows: 20,
+            compaction_safety_margin_blocks: 0,
+        })
+        .unwrap();
+        let appended = storage.write_historical_batch(&make_rows()).unwrap();
+        assert_accounted_canonical_fixture(&appended[0].path);
+    }
+
+    #[test]
+    fn accounted_canonical_checks_captured_body_and_masks_padding() {
+        let raw = TempDir::new().unwrap();
+        ColumnFile::write_batch(raw.path(), &make_rows()).unwrap();
+        // Current writers produce a source-bound checksummed envelope. Build
+        // an actual legacy fixture: no source marker, plain row count and bits.
+        fs::remove_file(raw.path().join(crate::column::SOURCE_MARKER_FILE)).unwrap();
+        let path = raw.path().join("canonical.bitmap");
+        let mut encoded = 20u64.to_le_bytes().to_vec();
+        encoded.extend_from_slice(&[0xfd, 0xff, 0xff]);
+        // Row 1 is absent; high bits of the final byte are legacy padding.
+        fs::write(&path, encoded).unwrap();
+        let memory = QueryMemoryBudget::new(logex_types::QueryMemoryLimit::new(4096).unwrap());
+        let reader =
+            SegmentReader::open_projected_with_memory(raw.path(), &[], memory.clone()).unwrap();
+        let bitmap = reader.read_canonical_accounted().unwrap();
+        assert!(!bitmap.is_present(1));
+        assert!(bitmap.is_present(19));
+        assert!(!bitmap.is_present(20));
+        drop(bitmap);
+        drop(reader);
+        assert_eq!(memory.used(), 0);
+        let (_tmp, dir, _, _) = identified_raw_fixture();
+        let reader = SegmentReader::open_projected_with_memory(&dir, &[], memory.clone()).unwrap();
+        let path = dir.join("canonical.bitmap");
+        let mut bytes = fs::read(&path).unwrap();
+        *bytes.last_mut().unwrap() ^= 1;
+        fs::write(&path, bytes).unwrap();
+        assert_eq!(
+            reader.read_canonical_accounted().unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        drop(reader);
         assert_eq!(memory.used(), 0);
     }
 
