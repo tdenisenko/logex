@@ -197,7 +197,7 @@ async fn wildcard_positions_require_topic_presence_in_http_and_grpc() {
                 .unwrap()
                 .into_inner()
                 .logs
-                .into_iter()
+                .iter()
                 .map(|r| r.log_index)
                 .collect::<Vec<_>>();
             if got != expected {
@@ -401,7 +401,7 @@ async fn independent_filter_oracle_agrees_across_protocols_and_storage_plans() {
                 .unwrap()
                 .into_inner()
                 .logs
-                .into_iter()
+                .iter()
                 .map(|row| row.log_index)
                 .collect::<Vec<_>>();
             assert_eq!(got, expected, "gRPC {mode:?} {}", case.wire);

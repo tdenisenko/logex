@@ -36,6 +36,23 @@ class Package:
 
 PACKAGES = (
     Package(
+        name="tonic",
+        inventory_checksum="ee7a87855a1a3a9d8abefc176a43b679b6c00bdf3238ad68802b91089e1df415",
+        modified={
+            PurePosixPath("Cargo.toml"): "c019caface44617016b8bd54df8ff39f834152af8e8799517535d80008bdba6a",
+            PurePosixPath("src/codec/buffer.rs"): "96921ff4707adc81edc4d72e6b5776c1b85df559912ee36bd97ec20a6443cf2b",
+            PurePosixPath("src/codec/encode.rs"): "ff6f2ac59f6ba4fab850d8045aebb1094b9e3d989f54464a3a75ccac14b4cdbb",
+            PurePosixPath("src/codec/mod.rs"): "4d49f038f583e8c48c370611da436f2a6d02ad80f27f4c532e2ee766c852d88e",
+            PurePosixPath("src/transport/server/io_stream.rs"): "505771e21cd574f3894e63520abc41e7389fe56075f19bec9dd7a895398a4555",
+        },
+        patch_checksum="4af6735dcc5e012a481f7cac509fcf06cc2ad465fd2d777ea36662f1a3a4c963",
+        added={
+            PurePosixPath("src/codec/logex_tests.rs"): "5c509f6683e8ba721e3b31d5a60041e3395200021a2964fbc4c1520dd0d924ec",
+            PurePosixPath("src/codec/owned_buffer.rs"): "ab27ae74bae8fa7bbe4531f69ce838d14e8d53c1061d998aec19f3d5a0ec7cfc",
+        },
+        provenance_note=PurePosixPath("LOGEX-PATCH.txt"),
+    ),
+    Package(
         name="roaring",
         inventory_checksum="4cdab6d18c570608ea985d40d97631990bff7f1c88d32256802329b72bdc4c12",
         modified={

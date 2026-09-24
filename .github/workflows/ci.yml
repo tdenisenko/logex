@@ -96,6 +96,16 @@ jobs:
           vendor/roaring/src/bitmap/query_decode.rs
           vendor/roaring/src/bitmap/query_ops.rs
 
+      - name: Check patched gRPC encoding formatting
+        run: >-
+          rustfmt --check --edition 2021 --config skip_children=true
+          vendor/tonic/src/codec/mod.rs
+          vendor/tonic/src/codec/buffer.rs
+          vendor/tonic/src/codec/encode.rs
+          vendor/tonic/src/codec/owned_buffer.rs
+          vendor/tonic/src/codec/logex_tests.rs
+          vendor/tonic/src/transport/server/io_stream.rs
+
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
@@ -129,6 +139,12 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo test --workspace --all-targets --locked
       - run: cargo test --workspace --doc --locked
+      - name: Check pinned gRPC encoding ownership
+        env:
+          CARGO_TARGET_DIR: target/tonic-regressions
+        run: |
+          cargo test --manifest-path vendor/tonic/Cargo.toml --lib --locked
+          cargo test --manifest-path vendor/tonic/Cargo.toml --lib --features gzip --locked
       - name: Check pinned bitmap ownership
         env:
           CARGO_TARGET_DIR: target/roaring-regressions
@@ -182,6 +198,12 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo test --workspace --all-targets --locked
       - run: cargo test --workspace --doc --locked
+      - name: Check pinned gRPC encoding ownership
+        env:
+          CARGO_TARGET_DIR: target/tonic-regressions
+        run: |
+          cargo test --manifest-path vendor/tonic/Cargo.toml --lib --locked
+          cargo test --manifest-path vendor/tonic/Cargo.toml --lib --features gzip --locked
       - name: Check pinned bitmap ownership
         env:
           CARGO_TARGET_DIR: target/roaring-regressions

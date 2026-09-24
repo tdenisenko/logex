@@ -145,7 +145,7 @@ exempt. REST's existing exclusive-query behavior still applies.
 
 DataFusion operators, index candidates, fallback scan reads, scan output buffers
 and structured SQL results use a shared accounted-memory budget across REST and
-gRPC SQL queries. REST and JSON-RPC query response encoding uses the same budget.
+gRPC SQL queries. REST, JSON-RPC and gRPC query response encoding uses the same budget.
 Configure it with
 `sync --query-memory-bytes <BYTES>` or TOML
 `query_memory_bytes`; the default is 1 GiB (`1073741824` bytes). The value must be
@@ -187,10 +187,23 @@ their whole backing allocation charged through the last response-body or frame
 clone/slice. A failed encoding releases its partial output and returns an explicit
 error. Small error/control responses remain available when the query budget is full.
 
+gRPC query protobuf values reserve their nested vectors and strings before
+construction. Tonic uses preadmitted encoding buffers, charges both allocations
+during growth, and keeps each buffer charged through its last byte alias. Streaming
+messages share ownership of their source allocations until the last source or
+message owner drops. Capacity failures during lazy encoding produce non-success
+gRPC trailers, even if HTTP headers or earlier stream messages were already sent.
+The generated client types, protobuf schema and method routes are unchanged.
+The Rust server response types provide read-only access through an allocation owner.
+Encoding checks query cancellation and storage health before allocation/encoding
+and before publishing a message. One admitted Prost message is encoded
+synchronously; cancellation does not interrupt an individual copy. The controlled
+encoder does not support compression; LogEx does not enable response compression.
+
 This budget is not a process-RAM ceiling. Some DataFusion operators account after
 allocating; planner/scratch allocations, native query source and aggregate working
-sets (including temporary arbitrary-precision formatting buffers), and gRPC
-protocol object/encoding buffers are not yet covered. Captured JSON manifests,
+sets (including temporary arbitrary-precision formatting buffers) are not yet
+covered. Captured JSON manifests,
 paths, codec contexts, fixed builder-control, non-result map nodes and ownership metadata
 are also outside the accounted buffer capacity. Snapshot paths and plan/control
 objects scale with the number of captured or selected segments. One query can
@@ -385,7 +398,7 @@ Global options:
 | Option | Default | Use |
 | --- | --- | --- |
 | `--query-max-concurrent <N>` | `8` | Shared admission limit for REST SQL, JSON-RPC logs and gRPC SQL/native queries. Excess requests fail immediately; does not bound query memory. |
-| `--query-memory-bytes <BYTES>` | `1073741824` | Shared accounted-memory budget for DataFusion operators, index candidates, fallback reads, scan output, structured SQL results and REST/JSON-RPC query response encoding; not a process-RAM ceiling. Native working sets, manifest/control metadata and gRPC protocol encoding are not yet covered. |
+| `--query-memory-bytes <BYTES>` | `1073741824` | Shared accounted-memory budget for DataFusion operators, index candidates, fallback reads, scan output, structured SQL results and REST/JSON-RPC/gRPC query responses; not a process-RAM ceiling. Native working sets and manifest/control metadata are not yet covered. |
 | `--http-host <IP>` | `127.0.0.1` | HTTP bind host for dashboard, `/status`, `/query`, JSON-RPC, and WebSocket routes. Use `0.0.0.0` only with `--dashboard-password` and network-level protection. |
 | `--http-port <PORT>` | `8577` | HTTP dashboard, REST, JSON-RPC, and WebSocket port. Keep this stable for browser sessions and automation. |
 | `--grpc-host <IP>` | `127.0.0.1` | gRPC bind host. gRPC is unauthenticated; public gRPC requires `--allow-public-grpc`. |
