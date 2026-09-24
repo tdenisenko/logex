@@ -1,8 +1,10 @@
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use axum::body::Body;
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::header::CONTENT_TYPE;
+use axum::http::{HeaderValue, StatusCode};
 use axum::response::{Html, IntoResponse, Json, Response};
 
 use logex_query::{self, SqlQueryError, SqlQueryPage};
@@ -10,6 +12,7 @@ use logex_storage::PartitionManager;
 use serde::Serialize;
 
 use crate::handler::{ActiveQueryGuard, AppState, QueryAdmissionError};
+use crate::query_encoding::{is_capacity_error, serialize_json};
 use crate::query_response::retain_query_lease;
 use crate::storage_metrics;
 
@@ -127,7 +130,7 @@ async fn execute_query(
         storage_snapshot,
         head_block,
         page,
-        Some(cancel_check),
+        Some(Arc::clone(&cancel_check)),
         state.query_memory.clone(),
     );
     let result = match tokio::select! {
@@ -146,15 +149,7 @@ async fn execute_query(
                 .into_response();
         }
         Err(SqlQueryError::Capacity(error)) => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({
-                    "status": "query_capacity",
-                    "resource": "memory",
-                    "error": error,
-                })),
-            )
-                .into_response();
+            return query_memory_capacity_response(error);
         }
         Err(SqlQueryError::DataFusion(e))
             if query_guard.was_canceled() || e.to_string().contains("query canceled") =>
@@ -195,7 +190,7 @@ async fn execute_query(
         .filter(|limit| *limit > 0 && row_count == *limit)
         .map(|_| req.offset + row_count);
 
-    Json(QueryResponse {
+    let response = QueryResponse {
         rows: result.rows,
         total_scanned: result.total_scanned,
         row_count,
@@ -203,8 +198,56 @@ async fn execute_query(
         offset: req.offset,
         next_offset,
         max_limit: 0,
-    })
-    .into_response()
+    };
+    let encoded = serialize_json(&response, &state.query_memory, Some(&cancel_check));
+    // Storage failure closes admission and cancels active work. Preserve that service-wide
+    // failure priority even when it arrives during synchronous response encoding.
+    if let Some(reason) = state.storage_failure() {
+        return storage_unavailable_response(reason);
+    }
+    let body = match encoded {
+        Ok(body) => body,
+        Err(error) if is_capacity_error(&error) => {
+            return query_memory_capacity_response(error.to_string());
+        }
+        Err(error)
+            if error.kind() == std::io::ErrorKind::Interrupted || query_guard.was_canceled() =>
+        {
+            return (
+                StatusCode::CONFLICT,
+                Json(ErrorResponse {
+                    error: "query canceled".to_owned(),
+                }),
+            )
+                .into_response();
+        }
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("cannot serialize SQL result: {error}"),
+                }),
+            )
+                .into_response();
+        }
+    };
+    let mut response = Response::new(Body::from(body));
+    response
+        .headers_mut()
+        .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    response
+}
+
+fn query_memory_capacity_response(error: String) -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(serde_json::json!({
+            "status": "query_capacity",
+            "resource": "memory",
+            "error": error,
+        })),
+    )
+        .into_response()
 }
 
 /// Handle POST /query/cancel — request cancellation for the active SQL query.
@@ -687,8 +730,8 @@ mod tests {
     use logex_types::{
         ConsensusDataFork, ConsensusLightClientStatus, ConsensusNetworkStatus, ExecutionAnchor,
         ExecutionBlockMarker, ExecutionNetworkStatus, LightClientBootstrapStatus,
-        LightClientExecutionData, LightClientHeaderSummary, LogRow, NodeState, Source, SyncStatus,
-        WeakSubjectivityCheckpoint,
+        LightClientExecutionData, LightClientHeaderSummary, LogRow, NodeState, QueryMemoryLimit,
+        Source, SyncStatus, WeakSubjectivityCheckpoint,
     };
     use tempfile::TempDir;
     use tower::ServiceExt;
@@ -1027,6 +1070,101 @@ mod tests {
             result.rows,
             vec![serde_json::json!({"maximum":200,"total":2})]
         );
+    }
+
+    #[tokio::test]
+    async fn rest_encoding_capacity_is_typed_and_releases_after_body_drop() {
+        let mut rows = make_test_rows();
+        rows.truncate(1);
+        rows[0].data = vec![0x5a; 16 * 1024].into();
+        rows[0].data_len = rows[0].data.len() as u32;
+        let query = "SELECT data FROM logs";
+
+        let (_probe_tmp, probe_storage) = setup_storage_with_rows(&rows);
+        let probe = Arc::new(AppState::new(probe_storage, None, SyncStatus::default()));
+        let (snapshot, head) = {
+            let storage = probe.storage.read().await;
+            (
+                logex_query::NativeStorageSnapshot::from_storage(&storage),
+                storage.head_block().unwrap_or(0),
+            )
+        };
+        let structured = logex_query::execute_sql_page_on_snapshot_with_memory(
+            query,
+            snapshot,
+            head,
+            SqlQueryPage::default(),
+            None,
+            probe.query_memory.clone(),
+        )
+        .await
+        .unwrap();
+        let structured_charge = usize::try_from(probe.query_memory.used()).unwrap();
+        assert!(structured_charge > 0);
+        drop(structured);
+        assert_eq!(probe.query_memory.used(), 0);
+
+        let response = handle_query(
+            State(probe.clone()),
+            Json(QueryRequest {
+                sql: query.to_owned(),
+                limit: None,
+                offset: 0,
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[CONTENT_TYPE], "application/json");
+        let encoded_charge = usize::try_from(probe.query_memory.used()).unwrap();
+        assert!(encoded_charge > 0);
+        let body = axum::body::to_bytes(response.into_body(), 128 * 1024)
+            .await
+            .unwrap();
+        assert_eq!(probe.query_memory.used(), encoded_charge as u128);
+        let decoded: QueryResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            decoded.rows[0]["data"],
+            format!("0x{}", "5a".repeat(16 * 1024))
+        );
+        drop(body);
+        assert_eq!(probe.query_memory.used(), 0);
+
+        let limit = structured_charge
+            .checked_add(encoded_charge)
+            .and_then(|bytes| bytes.checked_sub(1))
+            .unwrap();
+        assert!(limit > structured_charge.max(encoded_charge));
+        let (_limited_tmp, limited_storage) = setup_storage_with_rows(&rows);
+        let limited = Arc::new(AppState::with_query_limits(
+            limited_storage,
+            None,
+            SyncStatus::default(),
+            Default::default(),
+            QueryMemoryLimit::new(limit).unwrap(),
+        ));
+        let response = handle_query(
+            State(limited.clone()),
+            Json(QueryRequest {
+                sql: query.to_owned(),
+                limit: None,
+                offset: 0,
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let error: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(error["status"], "query_capacity");
+        assert_eq!(error["resource"], "memory");
+        assert!(
+            error["error"]
+                .as_str()
+                .unwrap()
+                .contains("HTTP query response")
+        );
+        assert_eq!(limited.query_memory.used(), 0);
     }
 
     #[tokio::test]
