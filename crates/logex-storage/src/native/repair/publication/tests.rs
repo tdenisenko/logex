@@ -477,3 +477,205 @@ fn every_observed_preparation_boundary_preserves_originals_and_resumes() {
         verify_replacement(temp.path(), &rows, &original);
     }
 }
+
+fn prepared_owners<'a>(
+    plan: &'a RepairOwnershipPlan,
+    owners: &std::collections::BTreeMap<u64, Vec<LogRow>>,
+) -> PreparedRepairPublication<'a> {
+    let mut publication = plan.begin_publication(0).unwrap();
+    let mut stages = Vec::new();
+    for &id in plan.segment_ids() {
+        let rows = &owners[&id];
+        let mut verifier = plan.begin_candidate(id).unwrap();
+        verifier.append(rows).unwrap();
+        let proof = verifier.finish().unwrap();
+        stages.push(
+            publication
+                .stage_candidate(&proof, rows, inspection_limits())
+                .unwrap(),
+        );
+    }
+    publication.prepare(stages, |_| Ok(())).unwrap()
+}
+
+#[test]
+fn overlapping_owners_resume_each_install_and_quarantine_rename_boundary() {
+    // Six rows split inside block 11: selecting the first owner must also retain
+    // the second owner. Exercise observable rename/barrier failures, not a
+    // simulation of physical power loss or filesystem write reordering.
+    for bundled in [false, true] {
+        let mut boundaries = Vec::new();
+        let mut cursor = 0;
+        loop {
+            let failure = if cursor == 0 {
+                usize::MAX
+            } else {
+                boundaries[cursor - 1]
+            };
+            let (temp, rows) = fixture(bundled, 3, true);
+            let report = inspect(temp.path());
+            let before = report.catalog.clone();
+            let paths = StorageCatalogPaths::new(temp.path().to_owned());
+            let before_bytes = fs::read(paths.catalog_path()).unwrap();
+            let descriptors: Vec<_> = before
+                .segments
+                .iter()
+                .filter(|s| s.row_count > 0)
+                .cloned()
+                .collect();
+            assert_eq!(descriptors.len(), 2);
+            assert_eq!(descriptors[0].max_block, descriptors[1].min_block);
+            let owners: std::collections::BTreeMap<_, _> = descriptors
+                .iter()
+                .zip(rows.chunks(3))
+                .map(|(descriptor, rows)| (descriptor.id, rows.to_vec()))
+                .collect();
+            let originals: std::collections::BTreeMap<_, _> = descriptors
+                .iter()
+                .map(|descriptor| (descriptor.id, tree(&paths.segment_dir(descriptor.id))))
+                .collect();
+            let plan = report
+                .into_repair_plan(&[descriptors[0].id], limits())
+                .unwrap();
+            assert_eq!(
+                plan.segment_ids(),
+                descriptors.iter().map(|s| s.id).collect::<Vec<_>>()
+            );
+            // Overlap adds physical owners, not fetched coverage: block 12
+            // remains locally retained carry from the second owner.
+            assert_eq!(plan.block_ranges(), &[(10, 11)]);
+            let ready = prepared_owners(&plan, &owners);
+            let after = ready.publication.journal.after.clone().unwrap();
+            let quarantine = operation_root(&paths, &ready.publication.journal).join("quarantine");
+            durability::inject_failure(failure);
+            let result = ready
+                .commit()
+                .and_then(|committed| committed.finish(inspection_limits(), |_| Ok(())));
+            let events = durability::take_events();
+            if failure == usize::MAX {
+                assert_eq!(result.unwrap(), quarantine);
+                let renames: Vec<_> = events
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, (name, _))| (*name == "repair_rename").then_some(index))
+                    .collect();
+                // Two installs followed by two original-tree quarantine moves.
+                assert_eq!(renames.len(), 4, "{events:?}");
+                for index in renames {
+                    assert_eq!(events[index + 1].0, "sync_directory");
+                    assert_eq!(events[index + 2].0, "sync_directory");
+                    boundaries.extend([index, index + 1, index + 2]);
+                }
+                assert_eq!(boundaries.len(), 12);
+            } else {
+                assert!(
+                    result.is_err(),
+                    "bundled={bundled}, boundary={failure}: {events:?}"
+                );
+                let visible = NativeStorageCatalog::load_existing(&paths).unwrap();
+                assert!(
+                    visible == before || visible == after,
+                    "mixed catalog at boundary {failure}"
+                );
+                if visible == before {
+                    assert_eq!(fs::read(paths.catalog_path()).unwrap(), before_bytes);
+                } else {
+                    assert_eq!(
+                        fs::read(paths.catalog_path()).unwrap(),
+                        after.encode().unwrap()
+                    );
+                }
+                for descriptor in &descriptors {
+                    let source = paths.segment_dir(descriptor.id);
+                    let retained = quarantine.join(format!("s_{:016}", descriptor.id));
+                    assert_ne!(
+                        source.exists(),
+                        retained.exists(),
+                        "one retained original location is required"
+                    );
+                    assert_eq!(
+                        tree(if source.exists() { &source } else { &retained }),
+                        originals[&descriptor.id]
+                    );
+                    if visible == before {
+                        assert!(source.exists());
+                    }
+                }
+            }
+            drop(plan);
+            if failure != usize::MAX {
+                // Check the durable journal interlock after releasing the test's
+                // owner, rather than merely observing directory-lock contention.
+                let unchanged = tree(temp.path());
+                let error = NativeStorage::open(NativeStorageConfig {
+                    data_dir: temp.path().to_owned(),
+                    hot_target_rows: 3,
+                    compaction_safety_margin_blocks: 0,
+                })
+                .err()
+                .expect("pending repair must refuse normal startup");
+                assert!(error.to_string().contains("repair"), "{error}");
+                assert_eq!(tree(temp.path()), unchanged);
+                let pending = inspect_pending_repair(temp.path()).unwrap().unwrap();
+                match pending.state() {
+                    RepairCatalogState::BeforePublication => {
+                        let plan = pending.into_plan(inspection_limits(), limits()).unwrap();
+                        prepared_owners(&plan, &owners)
+                            .commit()
+                            .unwrap()
+                            .finish(inspection_limits(), |_| Ok(()))
+                            .unwrap();
+                    }
+                    RepairCatalogState::AfterPublication => {
+                        pending.finish(inspection_limits(), |_| Ok(())).unwrap();
+                    }
+                }
+            }
+            assert!(!temp.path().join(JOURNAL_FILE).exists());
+            assert_eq!(NativeStorageCatalog::load_existing(&paths).unwrap(), after);
+            assert_eq!(after.state, before.state);
+            assert_eq!(after.anchors, before.anchors);
+            for descriptor in &descriptors {
+                assert_eq!(
+                    tree(&quarantine.join(format!("s_{:016}", descriptor.id))),
+                    originals[&descriptor.id]
+                );
+            }
+            let reopened = NativeStorage::open(NativeStorageConfig {
+                data_dir: temp.path().to_owned(),
+                hot_target_rows: 3,
+                compaction_safety_margin_blocks: 0,
+            })
+            .unwrap();
+            assert_eq!(reopened.total_rows(), rows.len() as u64);
+            let mut actual = Vec::new();
+            let mut canonical = Vec::new();
+            for (original, replacement) in before.segments.iter().zip(after.segments.iter()) {
+                assert_eq!(replacement.row_count, original.row_count);
+                assert_eq!(
+                    (replacement.min_block, replacement.max_block),
+                    (original.min_block, original.max_block)
+                );
+                assert_eq!(
+                    (replacement.min_timestamp, replacement.max_timestamp),
+                    (original.min_timestamp, original.max_timestamp)
+                );
+                assert_eq!(replacement.source_commitment, original.source_commitment);
+                if replacement.row_count == 0 {
+                    continue;
+                }
+                let reader = SegmentReader::open(&paths.segment_dir(replacement.id)).unwrap();
+                actual.extend(reader.read_log_rows(None).unwrap());
+                let flags = reader.read_canonical().unwrap();
+                canonical.extend((0..flags.len()).map(|row| flags.is_present(row)));
+            }
+            assert_eq!(actual, rows);
+            assert_eq!(canonical, [false, false, true, true, true, true]);
+            drop(reopened);
+            cursor += 1;
+            if cursor > boundaries.len() {
+                break;
+            }
+        }
+    }
+}

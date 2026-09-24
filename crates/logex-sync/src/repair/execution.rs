@@ -448,3 +448,6 @@ fn active(limits: &RepairExecutionLimits, cancellation: &CancellationToken) -> i
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod equivalence_tests;

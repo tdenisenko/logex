@@ -5276,6 +5276,7 @@ dependencies = [
  "logex-cl",
  "logex-fs",
  "logex-index",
+ "logex-query",
  "logex-server",
  "logex-storage",
  "logex-types",
