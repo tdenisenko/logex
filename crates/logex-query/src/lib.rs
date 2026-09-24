@@ -1,6 +1,7 @@
 mod json;
 mod lexer;
 mod native;
+mod result;
 mod sql;
 
 pub use native::{
@@ -8,6 +9,7 @@ pub use native::{
     execute_log_filter_on_snapshot_with_cancel, execute_log_filter_with_cancel,
     matches_native_filter,
 };
+pub use result::QueryJsonRows;
 pub use sql::{
     DEFAULT_QUERY_PAGE_SIZE, QueryCancelCheck, SqlQueryError, SqlQueryPage, SqlQueryResult,
     execute_sql, execute_sql_page, execute_sql_page_on_snapshot,

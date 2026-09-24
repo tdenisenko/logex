@@ -36,9 +36,11 @@ pub struct QueryRequest {
 }
 
 /// Response for a successful query.
+/// The server retains the charged row owner through serialization; clients can
+/// deserialize into the default vector representation.
 #[derive(Serialize, serde::Deserialize)]
-pub struct QueryResponse {
-    pub rows: Vec<serde_json::Value>,
+pub struct QueryResponse<Rows = Vec<serde_json::Value>> {
+    pub rows: Rows,
     pub total_scanned: u64,
     pub row_count: usize,
     /// Requested transport page limit. `0` means no transport limit was applied.

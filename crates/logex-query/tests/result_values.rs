@@ -12,7 +12,7 @@ async fn value(sql: &str) -> Value {
     .await
     .unwrap();
     assert_eq!(result.rows.len(), 1, "{sql}");
-    result.rows.into_iter().next().unwrap()
+    result.rows[0].clone()
 }
 
 #[tokio::test]
