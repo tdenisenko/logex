@@ -102,7 +102,7 @@ async fn logex_rows(sql: &str) -> Result<Vec<Value>, String> {
         None,
     )
     .await
-    .map(|result| result.rows)
+    .map(|result| result.rows.as_slice().to_vec())
     .map_err(|error| error.to_string())
 }
 

@@ -64,13 +64,20 @@ use logex_types::{
     QueryBuffer, QueryMemoryBudget, QueryMemoryError, QueryMemoryLimit, QueryMemoryReservation,
 };
 
-use crate::json::{record_batches_to_json, unique_names};
+#[cfg(test)]
+use crate::json::record_batches_to_json;
+use crate::json::{
+    JsonAllocationPlan, allocate_json_array, allocate_json_display, allocate_json_prefixed_hex,
+    allocate_json_prefixed_hex_with_cancel, allocate_json_string, append_record_batch,
+    unique_names,
+};
 use crate::lexer::{Token, tokenize};
 use crate::native::{
     StorageSnapshot, candidate_row_ids, candidate_row_ids_for_reader,
     candidate_row_ids_with_memory, erc20_event_bloom_exclusions, matches_native_filter,
     ordered_page_is_complete, partition_matches_filter, retain_ordered_prefix, sort_native_rows,
 };
+use crate::result::{JsonResultBuilder, QueryJsonRows, SQL_RESULT_STAGE};
 
 const DATAFUSION_BATCH_SIZE: usize = 4_096;
 static DEFAULT_QUERY_MEMORY_BUDGET: LazyLock<QueryMemoryBudget> =
@@ -155,7 +162,7 @@ impl From<DataFusionError> for SqlQueryError {
 
 #[derive(Debug)]
 pub struct SqlQueryResult {
-    pub rows: Vec<Value>,
+    pub rows: QueryJsonRows,
     pub total_scanned: u64,
 }
 
@@ -713,11 +720,12 @@ pub async fn execute_sql_page_on_snapshot(
 ///
 /// The view remains subject to optimistic invalidation checks. DataFusion operator
 /// reservations, index candidates, exact retained row IDs, fixed and variable-column
-/// scan sources, and retained Arrow output from custom scans participate in `memory`
-/// across concurrent queries. Query planning, small segment-scaled plan/control
-/// objects, remaining decoder scratch, native fast paths, and result conversion are
-/// outside this accounting milestone. Infallible
-/// DataFusion allocations are recorded even when
+/// scan sources, retained Arrow output from custom scans, and structured output from
+/// DataFusion and native SQL shortcuts participate in `memory` across concurrent queries.
+/// Query planning, small segment-scaled plan/control objects, remaining decoder scratch,
+/// native working sets and arbitrary-precision formatting scratch, and protocol encoding
+/// remain outside this accounting milestone. Infallible DataFusion allocations are
+/// recorded even when
 /// they temporarily exceed the configured limit. Disk spilling is disabled, so a
 /// fallible operator reservation that exceeds available capacity returns
 /// [`SqlQueryError::Capacity`] without truncating rows.
@@ -764,20 +772,27 @@ async fn execute_sql_page_on_snapshot_inner(
     }
     let sql = rewrite_legacy_sql(sql, head_block)?;
     validate_sql_statement(&sql)?;
-    if let Some(result) = try_execute_introspection(&sql, page)? {
+    if let Some(result) = try_execute_introspection(&sql, page, memory.clone())? {
         return Ok(result);
     }
     validate_supported_tables(&sql)?;
+    if let Some(result) = try_execute_native_count_aggregate(
+        &sql,
+        &snapshot,
+        page,
+        cancel_check.clone(),
+        memory.clone(),
+    )? {
+        return Ok(result);
+    }
     if let Some(result) =
-        try_execute_native_count_aggregate(&sql, &snapshot, page, cancel_check.clone())?
+        try_execute_native_data_sum(&sql, &snapshot, page, cancel_check.clone(), memory.clone())?
     {
         return Ok(result);
     }
-    if let Some(result) = try_execute_native_data_sum(&sql, &snapshot, page, cancel_check.clone())?
+    if let Some(result) =
+        try_execute_native_select(&sql, &snapshot, page, cancel_check.clone(), memory.clone())?
     {
-        return Ok(result);
-    }
-    if let Some(result) = try_execute_native_select(&sql, &snapshot, page, cancel_check.clone())? {
         return Ok(result);
     }
     let total_scanned = Arc::new(AtomicU64::new(0));
@@ -799,7 +814,7 @@ async fn execute_sql_page_on_snapshot_inner(
         .reserve(0, "datafusion query operators")
         .map_err(|error| SqlQueryError::Capacity(error.to_string()))?;
     let memory_pool: Arc<dyn MemoryPool> = Arc::new(QueryLifetimeMemoryPool {
-        budget: memory,
+        budget: memory.clone(),
         reservation: Mutex::new(memory_reservation),
         limit: memory_limit,
         _lifetime: Arc::clone(&query_lifetime),
@@ -832,9 +847,8 @@ async fn execute_sql_page_on_snapshot_inner(
     let plan = dataframe.create_physical_plan().await?;
     let plan = retain_query_lifetime_in_plan(plan, &query_lifetime)?;
     let stream = execute_stream(plan, task_context)?;
-    let batches = stream.try_collect::<Vec<_>>().await?;
+    let rows = collect_json_stream(stream, memory, cancel_check.as_ref()).await?;
     check_query_canceled(cancel_check.as_ref()).map_err(SqlQueryError::DataFusion)?;
-    let rows = record_batches_to_json(&batches)?;
 
     Ok(SqlQueryResult {
         rows,
@@ -842,11 +856,25 @@ async fn execute_sql_page_on_snapshot_inner(
     })
 }
 
+async fn collect_json_stream(
+    mut stream: SendableRecordBatchStream,
+    memory: QueryMemoryBudget,
+    cancel_check: Option<&QueryCancelCheck>,
+) -> Result<QueryJsonRows, SqlQueryError> {
+    let mut rows = JsonResultBuilder::new(memory)?;
+    while let Some(batch) = stream.try_next().await? {
+        check_query_canceled(cancel_check).map_err(SqlQueryError::DataFusion)?;
+        append_record_batch(&batch, &mut rows, cancel_check)?;
+    }
+    Ok(rows.finish())
+}
+
 fn try_execute_native_select(
     sql: &str,
     snapshot: &StorageSnapshot,
     page: SqlQueryPage,
     cancel_check: Option<QueryCancelCheck>,
+    memory: QueryMemoryBudget,
 ) -> Result<Option<SqlQueryResult>, SqlQueryError> {
     let Some(mut native_query) = parse_native_select_query(sql)? else {
         return Ok(None);
@@ -874,10 +902,8 @@ fn try_execute_native_select(
 
     let (rows, total_scanned) =
         execute_native_sql_filter(snapshot, &native_query.filter, cancel_check.as_ref())?;
-    let rows = rows
-        .iter()
-        .map(|row| native_log_row_to_json(row, &native_query.columns))
-        .collect::<DataFusionResult<Vec<_>>>()?;
+    let rows =
+        materialize_native_log_rows(&rows, &native_query.columns, memory, cancel_check.as_ref())?;
 
     Ok(Some(SqlQueryResult {
         rows,
@@ -1265,6 +1291,7 @@ fn try_execute_native_count_aggregate(
     snapshot: &StorageSnapshot,
     page: SqlQueryPage,
     cancel_check: Option<QueryCancelCheck>,
+    memory: QueryMemoryBudget,
 ) -> Result<Option<SqlQueryResult>, SqlQueryError> {
     let Some(native_query) = parse_native_count_query(sql)? else {
         return Ok(None);
@@ -1283,7 +1310,7 @@ fn try_execute_native_count_aggregate(
 
     if native_query.sql_limit == Some(0) || page.limit == Some(0) {
         return Ok(Some(SqlQueryResult {
-            rows: Vec::new(),
+            rows: JsonResultBuilder::new(memory)?.finish(),
             total_scanned: 0,
         }));
     }
@@ -1294,8 +1321,14 @@ fn try_execute_native_count_aggregate(
         native_query.group_by,
         cancel_check.as_ref(),
     )?;
-    let mut rows = native_count_rows(&native_query, counts);
-    apply_json_page(&mut rows, page);
+    let mut values = native_count_values(&native_query, counts);
+    apply_json_page(&mut values, page);
+    let rows = materialize_native_count_rows(
+        &native_query.projections,
+        &values,
+        memory,
+        cancel_check.as_ref(),
+    )?;
 
     Ok(Some(SqlQueryResult {
         rows,
@@ -1603,11 +1636,14 @@ fn scan_native_count_partition(
     Ok((counts, row_ids.len() as u64))
 }
 
-fn native_count_rows(query: &NativeCountQuery, counts: BTreeMap<u8, u64>) -> Vec<Value> {
+fn native_count_values(
+    query: &NativeCountQuery,
+    counts: BTreeMap<u8, u64>,
+) -> Vec<(Option<u8>, u64)> {
     match query.group_by {
         NativeCountGroupBy::None => {
             let count = counts.get(&0).copied().unwrap_or(0);
-            vec![native_count_row(&query.projections, None, count)]
+            vec![(None, count)]
         }
         NativeCountGroupBy::Source => {
             let iter: Box<dyn Iterator<Item = (u8, u64)>> = if query.order_descending {
@@ -1615,9 +1651,7 @@ fn native_count_rows(query: &NativeCountQuery, counts: BTreeMap<u8, u64>) -> Vec
             } else {
                 Box::new(counts.into_iter())
             };
-            let mut rows: Vec<_> = iter
-                .map(|(source, count)| native_count_row(&query.projections, Some(source), count))
-                .collect();
+            let mut rows: Vec<_> = iter.map(|(source, count)| (Some(source), count)).collect();
             if let Some(limit) = query.sql_limit {
                 rows.truncate(limit);
             }
@@ -1626,26 +1660,47 @@ fn native_count_rows(query: &NativeCountQuery, counts: BTreeMap<u8, u64>) -> Vec
     }
 }
 
-fn native_count_row(
+fn materialize_native_count_rows(
     projections: &[NativeCountProjection],
-    source: Option<u8>,
-    count: u64,
-) -> Value {
-    let mut row = Map::with_capacity(projections.len());
-    for projection in projections {
-        match projection {
-            NativeCountProjection::Source(output) => {
-                row.insert((*output).clone(), Value::Number(source.unwrap_or(0).into()));
-            }
-            NativeCountProjection::Count(output) => {
-                row.insert((*output).clone(), Value::Number(count.into()));
-            }
+    values: &[(Option<u8>, u64)],
+    memory: QueryMemoryBudget,
+    cancel_check: Option<&QueryCancelCheck>,
+) -> Result<QueryJsonRows, SqlQueryError> {
+    let mut plan = JsonAllocationPlan::new();
+    for _ in values {
+        plan.add_object(projections.len())?;
+        for projection in projections {
+            let output = match projection {
+                NativeCountProjection::Source(output) | NativeCountProjection::Count(output) => {
+                    output
+                }
+            };
+            plan.add_string_capacity(output.len())?;
         }
     }
-    Value::Object(row)
+    let mut rows = JsonResultBuilder::new(memory)?;
+    let mut batch = rows.begin_batch(plan.bytes(), values.len())?;
+    for (index, (source, count)) in values.iter().enumerate() {
+        if index % 256 == 0 {
+            check_query_canceled(cancel_check).map_err(SqlQueryError::DataFusion)?;
+        }
+        let mut row = Map::new();
+        for projection in projections {
+            let (output, value) = match projection {
+                NativeCountProjection::Source(output) => {
+                    (output, Value::Number(source.unwrap_or(0).into()))
+                }
+                NativeCountProjection::Count(output) => (output, Value::Number((*count).into())),
+            };
+            row.insert(allocate_json_string(output, &mut batch)?, value);
+        }
+        batch.push_row(Value::Object(row));
+    }
+    batch.finish()?;
+    Ok(rows.finish())
 }
 
-fn apply_json_page(rows: &mut Vec<Value>, page: SqlQueryPage) {
+fn apply_json_page<T>(rows: &mut Vec<T>, page: SqlQueryPage) {
     if page.offset > 0 {
         if page.offset >= rows.len() {
             rows.clear();
@@ -1665,6 +1720,7 @@ fn try_execute_native_data_sum(
     snapshot: &StorageSnapshot,
     page: SqlQueryPage,
     cancel_check: Option<QueryCancelCheck>,
+    memory: QueryMemoryBudget,
 ) -> Result<Option<SqlQueryResult>, SqlQueryError> {
     let Some(native_query) = parse_native_data_sum_query(sql)? else {
         return Ok(None);
@@ -1686,7 +1742,7 @@ fn try_execute_native_data_sum(
 
     if native_query.sql_limit == Some(0) || page.limit == Some(0) {
         return Ok(Some(SqlQueryResult {
-            rows: Vec::new(),
+            rows: JsonResultBuilder::new(memory)?.finish(),
             total_scanned: 0,
         }));
     }
@@ -1699,11 +1755,13 @@ fn try_execute_native_data_sum(
         native_query.group_by,
         cancel_check.as_ref(),
     )?;
-    let mut rows = native_data_sum_rows(&native_query, groups);
+    let mut values = native_data_sum_values(&native_query, groups);
     if let Some(limit) = native_query.sql_limit {
-        rows.truncate(limit);
+        values.truncate(limit);
     }
-    apply_json_page(&mut rows, page);
+    apply_json_page(&mut values, page);
+    let rows =
+        materialize_native_data_sum_rows(&native_query, &values, memory, cancel_check.as_ref())?;
 
     Ok(Some(SqlQueryResult {
         rows,
@@ -2461,10 +2519,10 @@ fn scan_native_data_sum_partition(
     Ok((groups, total_scanned))
 }
 
-fn native_data_sum_rows(
+fn native_data_sum_values(
     query: &NativeDataSumQuery,
     groups: BTreeMap<Option<NativeGroupKey>, Vec<NativeSumState>>,
-) -> Vec<Value> {
+) -> Vec<NativeDataSumResultRow> {
     let mut rows = groups
         .into_iter()
         .filter_map(|(group_key, states)| native_data_sum_result_row(query, group_key, &states))
@@ -2489,11 +2547,11 @@ fn native_data_sum_rows(
         });
     }
 
-    rows.into_iter().map(|row| row.value).collect()
+    rows
 }
 
 struct NativeDataSumResultRow {
-    value: Value,
+    group_key: Option<NativeGroupKey>,
     values: Vec<Option<BigInt>>,
 }
 
@@ -2527,47 +2585,106 @@ fn native_data_sum_result_row(
         }
     }
 
-    let mut row = Map::with_capacity(query.projections.len());
-    for (projection_index, projection) in query.projections.iter().enumerate() {
-        match projection {
-            NativeDataSumProjection::GroupColumn {
-                column,
-                output_column,
-            } => {
-                row.insert(
-                    output_column.clone(),
-                    native_group_key_json(group_key, *column)?,
-                );
-            }
-            NativeDataSumProjection::Aggregate(projection) => {
-                row.insert(
-                    projection.output_column.clone(),
-                    values[projection_index]
-                        .as_ref()
-                        .map(|value| Value::String(value.to_string()))
-                        .unwrap_or(Value::Null),
-                );
-            }
-        }
-    }
-
-    Some(NativeDataSumResultRow {
-        value: Value::Object(row),
-        values,
-    })
+    Some(NativeDataSumResultRow { group_key, values })
 }
 
-fn native_group_key_json(
-    group_key: Option<NativeGroupKey>,
-    column: NativeDataSumGroupBy,
-) -> Option<Value> {
-    match (column, group_key) {
-        (NativeDataSumGroupBy::Address, Some(NativeGroupKey::Address(address))) => {
-            Some(Value::String(to_hex_address(&address)))
+fn materialize_native_data_sum_rows(
+    query: &NativeDataSumQuery,
+    source_rows: &[NativeDataSumResultRow],
+    memory: QueryMemoryBudget,
+    cancel_check: Option<&QueryCancelCheck>,
+) -> Result<QueryJsonRows, SqlQueryError> {
+    let mut plan = JsonAllocationPlan::new();
+    for (row_index, row) in source_rows.iter().enumerate() {
+        if row_index % 256 == 0 {
+            check_query_canceled(cancel_check).map_err(SqlQueryError::DataFusion)?;
         }
-        (NativeDataSumGroupBy::None, None) => Some(Value::Null),
-        _ => None,
+        plan.add_object(query.projections.len())?;
+        for (index, projection) in query.projections.iter().enumerate() {
+            match projection {
+                NativeDataSumProjection::GroupColumn {
+                    output_column,
+                    column,
+                } => {
+                    plan.add_string_capacity(output_column.len())?;
+                    if matches!(
+                        (column, row.group_key),
+                        (NativeDataSumGroupBy::Address, Some(_))
+                    ) {
+                        plan.add_prefixed_hex_string(20)?;
+                    }
+                }
+                NativeDataSumProjection::Aggregate(projection) => {
+                    plan.add_string_capacity(projection.output_column.len())?;
+                    if let Some(value) = &row.values[index] {
+                        plan.add_string_capacity(bigint_decimal_bound(value)?)?;
+                    }
+                }
+            }
+        }
     }
+    let mut output = JsonResultBuilder::new(memory)?;
+    let mut batch = output.begin_batch(plan.bytes(), source_rows.len())?;
+    for (row_index, source) in source_rows.iter().enumerate() {
+        if row_index % 256 == 0 {
+            check_query_canceled(cancel_check).map_err(SqlQueryError::DataFusion)?;
+        }
+        let mut object = Map::new();
+        for (index, projection) in query.projections.iter().enumerate() {
+            let (name, value) = match projection {
+                NativeDataSumProjection::GroupColumn {
+                    column,
+                    output_column,
+                } => {
+                    let value = match (column, source.group_key) {
+                        (NativeDataSumGroupBy::Address, Some(NativeGroupKey::Address(address))) => {
+                            Value::String(allocate_json_prefixed_hex(&address, &mut batch)?)
+                        }
+                        (NativeDataSumGroupBy::None, None) => Value::Null,
+                        _ => {
+                            return Err(SqlQueryError::DataFusion(DataFusionError::Internal(
+                                "native SUM group key does not match its projection".to_owned(),
+                            )));
+                        }
+                    };
+                    (output_column, value)
+                }
+                NativeDataSumProjection::Aggregate(projection) => {
+                    let value = match &source.values[index] {
+                        Some(value) => Value::String(allocate_json_display(
+                            bigint_decimal_bound(value)?,
+                            value,
+                            &mut batch,
+                        )?),
+                        None => Value::Null,
+                    };
+                    (&projection.output_column, value)
+                }
+            };
+            object.insert(allocate_json_string(name, &mut batch)?, value);
+        }
+        batch.push_row(Value::Object(object));
+    }
+    batch.finish()?;
+    Ok(output.finish())
+}
+
+fn bigint_decimal_bound(value: &BigInt) -> DataFusionResult<usize> {
+    let digits = u128::from(value.bits())
+        .checked_mul(302)
+        .and_then(|bits| bits.checked_add(999))
+        .map(|bits| bits / 1000)
+        .ok_or_else(|| {
+            DataFusionError::External(Box::new(QueryMemoryError::SizeOverflow {
+                stage: SQL_RESULT_STAGE,
+            }))
+        })?
+        .max(1);
+    usize::try_from(digits + u128::from(value.sign() == num_bigint::Sign::Minus)).map_err(|_| {
+        DataFusionError::External(Box::new(QueryMemoryError::SizeOverflow {
+            stage: SQL_RESULT_STAGE,
+        }))
+    })
 }
 
 fn compare_optional_bigint(left: Option<&BigInt>, right: Option<&BigInt>) -> CmpOrdering {
@@ -3318,50 +3435,130 @@ fn sql_usize(expr: &SqlAstExpr) -> Option<usize> {
     sql_u64(expr).and_then(|value| usize::try_from(value).ok())
 }
 
-fn native_log_row_to_json(
-    row: &logex_types::LogRow,
+fn materialize_native_log_rows(
+    source_rows: &[logex_types::LogRow],
     columns: &[NativeProjectionColumn],
-) -> DataFusionResult<Value> {
-    let mut out = Map::with_capacity(columns.len());
-    for column in columns {
-        let value = match column.source.as_str() {
-            "block_number" => Value::Number(row.block_number.into()),
-            "block_hash" => Value::String(to_hex_hash(row.block_hash)),
-            "timestamp" => Value::Number(row.timestamp.into()),
-            "tx_hash" => Value::String(to_hex_hash(row.tx_hash)),
-            "tx_index" => Value::Number((row.tx_index as u64).into()),
-            "log_index" => Value::Number((row.log_index as u64).into()),
-            "address" => Value::String(to_hex_address(row.address.as_slice())),
-            "topic0" => optional_topic_to_json(row.topic0),
-            "topic1" => optional_topic_to_json(row.topic1),
-            "topic2" => optional_topic_to_json(row.topic2),
-            "topic3" => optional_topic_to_json(row.topic3),
-            "topics" => Value::Array(
-                [row.topic0, row.topic1, row.topic2, row.topic3]
-                    .into_iter()
-                    .flatten()
-                    .map(|topic| Value::String(to_hex_hash(topic)))
-                    .collect(),
-            ),
-            "data" => Value::String(to_hex_bytes(row.data.as_ref())),
-            "data_len" => Value::Number((row.data_len as u64).into()),
-            "source" => Value::Number((row.source as u8 as u64).into()),
-            _ => {
-                return Err(DataFusionError::Plan(format!(
-                    "unknown SQL projection column: {}",
-                    column.source
-                )));
+    memory: QueryMemoryBudget,
+    cancel_check: Option<&QueryCancelCheck>,
+) -> Result<QueryJsonRows, SqlQueryError> {
+    let mut plan = JsonAllocationPlan::new();
+    for (row_index, row) in source_rows.iter().enumerate() {
+        if row_index % 256 == 0 {
+            check_query_canceled(cancel_check).map_err(SqlQueryError::DataFusion)?;
+        }
+        plan.add_object(columns.len())?;
+        for column in columns {
+            plan.add_string_capacity(column.output.len())?;
+            match column.source.as_str() {
+                "block_hash" | "tx_hash" => {
+                    plan.add_prefixed_hex_string(32)?;
+                }
+                "address" => {
+                    plan.add_prefixed_hex_string(20)?;
+                }
+                "topic0" | "topic1" | "topic2" | "topic3" => {
+                    let topic = match column.source.as_str() {
+                        "topic0" => row.topic0,
+                        "topic1" => row.topic1,
+                        "topic2" => row.topic2,
+                        _ => row.topic3,
+                    };
+                    if topic.is_some() {
+                        plan.add_prefixed_hex_string(32)?;
+                    }
+                }
+                "topics" => {
+                    let count = [row.topic0, row.topic1, row.topic2, row.topic3]
+                        .into_iter()
+                        .flatten()
+                        .count();
+                    plan.add_array_capacity(count)?;
+                    for _ in 0..count {
+                        plan.add_prefixed_hex_string(32)?;
+                    }
+                }
+                "data" => {
+                    plan.add_prefixed_hex_string(row.data.len())?;
+                }
+                "block_number" | "timestamp" | "tx_index" | "log_index" | "data_len" | "source" => {
+                }
+                _ => {
+                    return Err(SqlQueryError::DataFusion(DataFusionError::Plan(format!(
+                        "unknown SQL projection column: {}",
+                        column.source
+                    ))));
+                }
             }
-        };
-        out.insert(column.output.clone(), value);
+        }
     }
-    Ok(Value::Object(out))
+    let mut output = JsonResultBuilder::new(memory)?;
+    let mut batch = output.begin_batch(plan.bytes(), source_rows.len())?;
+    for (row_index, row) in source_rows.iter().enumerate() {
+        if row_index % 256 == 0 {
+            check_query_canceled(cancel_check).map_err(SqlQueryError::DataFusion)?;
+        }
+        let mut object = Map::new();
+        for column in columns {
+            let value = match column.source.as_str() {
+                "block_number" => Value::Number(row.block_number.into()),
+                "block_hash" => Value::String(allocate_json_prefixed_hex(
+                    row.block_hash.as_slice(),
+                    &mut batch,
+                )?),
+                "timestamp" => Value::Number(row.timestamp.into()),
+                "tx_hash" => Value::String(allocate_json_prefixed_hex(
+                    row.tx_hash.as_slice(),
+                    &mut batch,
+                )?),
+                "tx_index" => Value::Number((row.tx_index as u64).into()),
+                "log_index" => Value::Number((row.log_index as u64).into()),
+                "address" => Value::String(allocate_json_prefixed_hex(
+                    row.address.as_slice(),
+                    &mut batch,
+                )?),
+                "topic0" => accounted_optional_topic(row.topic0, &mut batch)?,
+                "topic1" => accounted_optional_topic(row.topic1, &mut batch)?,
+                "topic2" => accounted_optional_topic(row.topic2, &mut batch)?,
+                "topic3" => accounted_optional_topic(row.topic3, &mut batch)?,
+                "topics" => {
+                    let topics = [row.topic0, row.topic1, row.topic2, row.topic3];
+                    let mut values =
+                        allocate_json_array(topics.into_iter().flatten().count(), &mut batch)?;
+                    for topic in topics.into_iter().flatten() {
+                        values.push(Value::String(allocate_json_prefixed_hex(
+                            topic.as_slice(),
+                            &mut batch,
+                        )?));
+                    }
+                    Value::Array(values)
+                }
+                "data" => Value::String(allocate_json_prefixed_hex_with_cancel(
+                    row.data.as_ref(),
+                    &mut batch,
+                    cancel_check,
+                )?),
+                "data_len" => Value::Number((row.data_len as u64).into()),
+                "source" => Value::Number((row.source as u8 as u64).into()),
+                _ => unreachable!("projection validated during preflight"),
+            };
+            object.insert(allocate_json_string(&column.output, &mut batch)?, value);
+        }
+        batch.push_row(Value::Object(object));
+    }
+    batch.finish()?;
+    Ok(output.finish())
 }
 
-fn optional_topic_to_json(topic: Option<B256>) -> Value {
-    topic
-        .map(|topic| Value::String(to_hex_hash(topic)))
-        .unwrap_or(Value::Null)
+fn accounted_optional_topic(
+    topic: Option<B256>,
+    output: &mut crate::result::JsonBatchAppender<'_>,
+) -> DataFusionResult<Value> {
+    topic.map_or(Ok(Value::Null), |topic| {
+        Ok(Value::String(allocate_json_prefixed_hex(
+            topic.as_slice(),
+            output,
+        )?))
+    })
 }
 
 #[derive(Clone)]
@@ -3465,6 +3662,7 @@ impl IntrospectionTruth {
 fn try_execute_introspection(
     sql: &str,
     page: SqlQueryPage,
+    memory: QueryMemoryBudget,
 ) -> Result<Option<SqlQueryResult>, SqlQueryError> {
     let mut statements = DFParser::parse_sql(sql).map_err(SqlQueryError::DataFusion)?;
     if statements.len() != 1 {
@@ -3560,10 +3758,7 @@ fn try_execute_introspection(
     rows = apply_row_limit_offset(rows, sql_limit, sql_offset);
     rows = apply_row_limit_offset(rows, page.limit, page.offset);
 
-    let rows = rows
-        .iter()
-        .map(|row| project_introspection_row(row, &projection))
-        .collect::<Result<Vec<_>, _>>()?;
+    let rows = materialize_introspection_rows(&rows, &projection, memory)?;
 
     Ok(Some(SqlQueryResult {
         rows,
@@ -4144,21 +4339,95 @@ fn introspection_projection_columns(
     Ok(columns)
 }
 
-fn project_introspection_row(
-    row: &IntrospectionRow,
+fn materialize_introspection_rows(
+    source_rows: &[IntrospectionRow],
     columns: &[NativeProjectionColumn],
-) -> Result<Value, SqlQueryError> {
-    let mut out = Map::with_capacity(columns.len());
-    for column in columns {
-        let value = row.get(&column.source).ok_or_else(|| {
-            DataFusionError::Internal(format!(
-                "information_schema row lacks column {}",
-                column.source
-            ))
-        })?;
-        out.insert(column.output.clone(), value.clone());
+    memory: QueryMemoryBudget,
+) -> Result<QueryJsonRows, SqlQueryError> {
+    let mut plan = JsonAllocationPlan::new();
+    for row in source_rows {
+        plan.add_object(columns.len())?;
+        for column in columns {
+            plan.add_string_capacity(column.output.len())?;
+            let value = row.get(&column.source).ok_or_else(|| {
+                DataFusionError::Internal(format!(
+                    "information_schema row lacks column {}",
+                    column.source
+                ))
+            })?;
+            plan_existing_json_value(value, &mut plan)?;
+        }
     }
-    Ok(Value::Object(out))
+    let mut output = JsonResultBuilder::new(memory)?;
+    let mut batch = output.begin_batch(plan.bytes(), source_rows.len())?;
+    for row in source_rows {
+        let mut object = Map::new();
+        for column in columns {
+            let value = row.get(&column.source).ok_or_else(|| {
+                DataFusionError::Internal(format!(
+                    "information_schema row lacks column {}",
+                    column.source
+                ))
+            })?;
+            object.insert(
+                allocate_json_string(&column.output, &mut batch)?,
+                clone_accounted_json_value(value, &mut batch)?,
+            );
+        }
+        batch.push_row(Value::Object(object));
+    }
+    batch.finish()?;
+    Ok(output.finish())
+}
+
+fn plan_existing_json_value(value: &Value, plan: &mut JsonAllocationPlan) -> DataFusionResult<()> {
+    match value {
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+        Value::String(value) => plan.add_string_capacity(value.len())?,
+        Value::Array(values) => {
+            plan.add_array_capacity(values.len())?;
+            for value in values {
+                plan_existing_json_value(value, plan)?;
+            }
+        }
+        Value::Object(values) => {
+            plan.add_object(values.len())?;
+            for (key, value) in values {
+                plan.add_string_capacity(key.len())?;
+                plan_existing_json_value(value, plan)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn clone_accounted_json_value(
+    value: &Value,
+    output: &mut crate::result::JsonBatchAppender<'_>,
+) -> DataFusionResult<Value> {
+    Ok(match value {
+        Value::Null => Value::Null,
+        Value::Bool(value) => Value::Bool(*value),
+        Value::Number(value) => Value::Number(value.clone()),
+        Value::String(value) => Value::String(allocate_json_string(value, output)?),
+        Value::Array(values) => {
+            let mut copy = allocate_json_array(values.len(), output)?;
+            for value in values {
+                copy.push(clone_accounted_json_value(value, output)?);
+            }
+            Value::Array(copy)
+        }
+        Value::Object(values) => {
+            let mut copy = Map::new();
+            for (key, value) in values {
+                copy.insert(
+                    allocate_json_string(key, output)?,
+                    clone_accounted_json_value(value, output)?,
+                );
+            }
+            Value::Object(copy)
+        }
+    })
 }
 
 fn limit_offset(
@@ -5948,14 +6217,6 @@ fn to_hex_hash(hash: impl AsRef<[u8]>) -> String {
     format!("0x{}", hex::encode(hash))
 }
 
-fn to_hex_address(address: &[u8]) -> String {
-    format!("0x{}", hex::encode(address))
-}
-
-fn to_hex_bytes(data: &[u8]) -> String {
-    format!("0x{}", hex::encode(data))
-}
-
 #[cfg(test)]
 mod tests {
     use alloy_primitives::{Address, B256, bytes, keccak256};
@@ -6346,7 +6607,7 @@ mod tests {
         }];
         let expected = values
             .iter()
-            .map(|value| to_hex_bytes(value))
+            .map(|value| format!("0x{}", hex::encode(value)))
             .collect::<Vec<_>>();
         let array = build_variable_hex_array(QueryBuffer::unaccounted(values), None).unwrap();
         let strings = array.as_any().downcast_ref::<StringArray>().unwrap();
@@ -6572,6 +6833,8 @@ mod tests {
         .unwrap();
 
         assert!(!result.rows.is_empty());
+        assert!(budget.used() > 0);
+        drop(result);
         assert_eq!(budget.used(), 0);
     }
 
@@ -6595,6 +6858,148 @@ mod tests {
                 if message == "query canceled"
         ));
         assert_eq!(budget.used(), 0);
+    }
+
+    #[tokio::test]
+    async fn native_structured_results_reject_one_byte_short_and_release() {
+        let (_tmp, storage) = setup_storage();
+        let snapshot = StorageSnapshot::from_storage(&storage);
+        let head = storage.head_block().unwrap_or(0);
+        for sql in [
+            "SELECT block_hash, topics, data FROM logs",
+            "SELECT COUNT(*) AS total FROM logs",
+            "SELECT SUM(data) AS total FROM logs",
+            "SELECT table_name FROM information_schema.tables",
+        ] {
+            let probe = QueryMemoryBudget::new(QueryMemoryLimit::new(64 * 1024 * 1024).unwrap());
+            let result = execute_sql_page_on_snapshot_with_memory(
+                sql,
+                snapshot.clone(),
+                head,
+                SqlQueryPage::default(),
+                None,
+                probe.clone(),
+            )
+            .await
+            .unwrap();
+            let charge = usize::try_from(probe.used()).unwrap();
+            assert!(charge > 0, "{sql}");
+            drop(result);
+            assert_eq!(probe.used(), 0, "{sql}");
+
+            let constrained = QueryMemoryBudget::new(
+                QueryMemoryLimit::new(charge.saturating_sub(1).max(1)).unwrap(),
+            );
+            let error = execute_sql_page_on_snapshot_with_memory(
+                sql,
+                snapshot.clone(),
+                head,
+                SqlQueryPage::default(),
+                None,
+                constrained.clone(),
+            )
+            .await
+            .unwrap_err();
+            assert!(
+                matches!(error, SqlQueryError::Capacity(ref message) if message.contains(SQL_RESULT_STAGE)),
+                "{sql}: {error}"
+            );
+            assert_eq!(constrained.used(), 0, "{sql}");
+        }
+    }
+
+    #[tokio::test]
+    async fn incremental_result_drops_each_batch_before_polling_the_next() {
+        let stream_schema = Arc::new(Schema::new(vec![Field::new(
+            "value",
+            DataType::Utf8,
+            false,
+        )]));
+        let budget = QueryMemoryBudget::new(QueryMemoryLimit::new(1024 * 1024).unwrap());
+        let observed_budget = budget.clone();
+        let batches = stream::unfold(
+            (0usize, None::<std::sync::Weak<Schema>>),
+            move |(phase, prior_schema)| {
+                let observed_budget = observed_budget.clone();
+                async move {
+                    match phase {
+                        0 => {
+                            let schema = Arc::new(Schema::new(vec![Field::new(
+                                "value",
+                                DataType::Utf8,
+                                false,
+                            )]));
+                            let weak = Arc::downgrade(&schema);
+                            let batch = RecordBatch::try_new(
+                                schema,
+                                vec![Arc::new(StringArray::from(vec!["first"]))],
+                            )
+                            .unwrap();
+                            Some((Ok::<_, DataFusionError>(batch), (1, Some(weak))))
+                        }
+                        1 => {
+                            assert!(prior_schema.unwrap().upgrade().is_none());
+                            assert!(observed_budget.used() > 0);
+                            let schema = Arc::new(Schema::new(vec![Field::new(
+                                "value",
+                                DataType::Utf8,
+                                false,
+                            )]));
+                            let batch = RecordBatch::try_new(
+                                schema,
+                                vec![Arc::new(StringArray::from(vec!["second"]))],
+                            )
+                            .unwrap();
+                            Some((Ok::<_, DataFusionError>(batch), (2, None)))
+                        }
+                        _ => None,
+                    }
+                }
+            },
+        );
+        let stream: SendableRecordBatchStream =
+            Box::pin(RecordBatchStreamAdapter::new(stream_schema, batches));
+        let rows = collect_json_stream(stream, budget.clone(), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                serde_json::json!({"value": "first"}),
+                serde_json::json!({"value": "second"}),
+            ]
+        );
+        assert!(budget.used() > 0);
+        drop(rows);
+        assert_eq!(budget.used(), 0);
+    }
+
+    #[test]
+    fn native_large_value_conversion_cancels_between_preflight_and_build() {
+        let mut rows = make_test_rows();
+        rows[0].data = vec![0x5a; 128 * 1024].into();
+        rows[0].data_len = 128 * 1024;
+        let columns = vec![NativeProjectionColumn {
+            source: "data".to_owned(),
+            output: "data".to_owned(),
+        }];
+        for threshold in [1, 2] {
+            let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let seen = calls.clone();
+            let cancel: QueryCancelCheck =
+                Arc::new(move || seen.fetch_add(1, Ordering::Relaxed) >= threshold);
+            let budget = QueryMemoryBudget::new(QueryMemoryLimit::new(1024 * 1024).unwrap());
+            let error =
+                materialize_native_log_rows(&rows[..1], &columns, budget.clone(), Some(&cancel))
+                    .unwrap_err();
+            assert!(matches!(
+                error,
+                SqlQueryError::DataFusion(DataFusionError::Execution(message))
+                    if message == "query canceled"
+            ));
+            assert!(calls.load(Ordering::Relaxed) > threshold);
+            assert_eq!(budget.used(), 0);
+        }
     }
 
     #[tokio::test]

@@ -143,8 +143,9 @@ response bytes; disconnecting a caller does not free a slot while its worker
 continues. Metadata, status, cancellation and subscription operations are
 exempt. REST's existing exclusive-query behavior still applies.
 
-DataFusion operators, index candidates, fallback scan reads and scan output buffers
-use a shared accounted-memory budget across REST and gRPC SQL queries. Configure it with
+DataFusion operators, index candidates, fallback scan reads, scan output buffers
+and structured SQL results use a shared accounted-memory budget across REST and
+gRPC SQL queries. Configure it with
 `sync --query-memory-bytes <BYTES>` or TOML
 `query_memory_bytes`; the default is 1 GiB (`1073741824` bytes). The value must be
 positive and fit the platform's signed address space. Explicit CLI values override
@@ -169,10 +170,20 @@ formats retain complete validation. Candidate IDs are refined in place against
 accounted columns and canonical bits. Their charge follows the physical plan
 and its executing streams, including retained capacity after a pushed limit.
 
+SQL output is converted one Arrow batch at a time. Completed JSON rows remain
+charged while the next batch is processed; the previous batch can be released.
+Structured results reserve row, key, string and nested-container allocations
+before construction, including results from native SQL shortcuts. Their immutable
+owner retains the charges through borrowing and protocol conversion. JSON object
+nodes use a conservative allowance derived from the pinned Rust implementation;
+this is not a measurement of allocator overhead. Updating the toolchain or JSON
+map representation requires reviewing that allowance.
+
 This budget is not a process-RAM ceiling. Some DataFusion operators account after
-allocating; planner/scratch allocations, LogEx native fast paths and
-result/response conversion are not yet covered. Captured JSON manifests,
-paths, codec contexts, fixed builder-control, map nodes and ownership metadata
+allocating; planner/scratch allocations, native query source and aggregate working
+sets (including temporary arbitrary-precision formatting buffers), and protocol
+object/encoding buffers are not yet covered. Captured JSON manifests,
+paths, codec contexts, fixed builder-control, non-result map nodes and ownership metadata
 are also outside the accounted buffer capacity. Snapshot paths and plan/control
 objects scale with the number of captured or selected segments. One query can
 still consume substantial unaccounted memory. SQL execution has disk spill
@@ -366,7 +377,7 @@ Global options:
 | Option | Default | Use |
 | --- | --- | --- |
 | `--query-max-concurrent <N>` | `8` | Shared admission limit for REST SQL, JSON-RPC logs and gRPC SQL/native queries. Excess requests fail immediately; does not bound query memory. |
-| `--query-memory-bytes <BYTES>` | `1073741824` | Shared accounted-memory budget for DataFusion operators, index candidates, fallback reads and scan output in REST/gRPC SQL queries; not a process-RAM ceiling. Native paths, manifest/control metadata and result conversion are not yet covered. |
+| `--query-memory-bytes <BYTES>` | `1073741824` | Shared accounted-memory budget for DataFusion operators, index candidates, fallback reads, scan output and structured SQL results in REST/gRPC queries; not a process-RAM ceiling. Native working sets, manifest/control metadata and protocol encoding are not yet covered. |
 | `--http-host <IP>` | `127.0.0.1` | HTTP bind host for dashboard, `/status`, `/query`, JSON-RPC, and WebSocket routes. Use `0.0.0.0` only with `--dashboard-password` and network-level protection. |
 | `--http-port <PORT>` | `8577` | HTTP dashboard, REST, JSON-RPC, and WebSocket port. Keep this stable for browser sessions and automation. |
 | `--grpc-host <IP>` | `127.0.0.1` | gRPC bind host. gRPC is unauthenticated; public gRPC requires `--allow-public-grpc`. |
@@ -514,7 +525,7 @@ Supported config keys:
 | `log_level` | string | Tracing filter. |
 | `partition_target_rows` | integer | Target rows per sealed segment. |
 | `query_max_concurrent` | positive integer | Shared query admission limit during sync; default 8. Explicit CLI values override config. |
-| `query_memory_bytes` | positive integer | Shared SQL operator/candidate/source/scan-output accounted-memory budget in bytes during sync; default 1073741824. Explicit CLI values override config. Coverage limitations are described above. |
+| `query_memory_bytes` | positive integer | Shared SQL operator/candidate/source/scan-output/result accounted-memory budget in bytes during sync; default 1073741824. Explicit CLI values override config. Coverage limitations are described above. |
 | `checkpoint` | string | Weak-subjectivity checkpoint root, `slot@root`, or descriptor path. |
 | `checkpoint_sync_url` | string | Checkpoint-sync or Beacon API URL. Comma-separated URLs require quorum agreement. |
 | `nat` | string | EL NAT resolver, such as `any` or `extip:203.0.113.10`. |

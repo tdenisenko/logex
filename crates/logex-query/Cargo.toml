@@ -16,6 +16,7 @@ futures-util = { workspace = true }
 hex = "0.4"
 num-bigint = "0.4"
 roaring = "0.10"
+serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }

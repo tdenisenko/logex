@@ -143,8 +143,9 @@ impl LogExService for LogExGrpcService {
             .filter(|limit| *limit > 0 && row_count as usize == *limit)
             .map(|_| (offset + row_count as usize) as u64);
         let mut rows = Vec::with_capacity(result.rows.len());
-        for row in result.rows {
-            let json = serde_json::to_string(&row)
+        // Keep the structured row owner charged throughout string conversion.
+        for row in result.rows.iter() {
+            let json = serde_json::to_string(row)
                 .map_err(|err| Status::internal(format!("cannot serialize SQL result: {err}")))?;
             rows.push(QueryRow { json });
         }

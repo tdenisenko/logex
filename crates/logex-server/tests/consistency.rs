@@ -139,7 +139,7 @@ async fn rest_grpc_sql_and_eth_get_logs_stay_consistent() {
             .unwrap()
             .rows
     };
-    let direct_sql = normalize_sql_rows(&direct_sql);
+    let direct_sql = normalize_sql_rows(direct_sql.as_slice());
 
     let rest_request = Request::builder()
         .method("POST")
