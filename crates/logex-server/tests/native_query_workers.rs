@@ -84,7 +84,7 @@ async fn query(state: Arc<AppState>, protocol: Protocol) -> Result<Vec<u64>, Str
             .map_err(|error| error.to_string())?
             .into_inner()
             .logs
-            .into_iter()
+            .iter()
             .map(|row| row.block_number)
             .collect()),
         Protocol::GrpcStream => {

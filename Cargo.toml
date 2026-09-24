@@ -1,6 +1,6 @@
 [workspace]
 members = ["crates/logex-types", "crates/logex-fs", "crates/logex-cl", "crates/logex-storage", "crates/logex-index", "crates/logex-query", "crates/logex-server", "crates/logex-node", "crates/logex-sync"]
-exclude = ["vendor/libp2p-connection-limits", "vendor/libp2p-gossipsub", "vendor/datafusion-functions-aggregate", "vendor/datafusion-functions-aggregate-common", "vendor/datafusion-functions", "vendor/datafusion-functions-nested", "vendor/enr", "vendor/reth-discv5", "vendor/datafusion-optimizer", "vendor/datafusion-sql", "vendor/reth-network", "vendor/datafusion-physical-plan", "vendor/roaring"]
+exclude = ["vendor/libp2p-connection-limits", "vendor/libp2p-gossipsub", "vendor/datafusion-functions-aggregate", "vendor/datafusion-functions-aggregate-common", "vendor/datafusion-functions", "vendor/datafusion-functions-nested", "vendor/enr", "vendor/reth-discv5", "vendor/datafusion-optimizer", "vendor/datafusion-sql", "vendor/reth-network", "vendor/datafusion-physical-plan", "vendor/roaring", "vendor/tonic"]
 resolver = "2"
 
 [workspace.package]
@@ -79,6 +79,7 @@ logex-sync = { path = "crates/logex-sync" }
 logex-node = { path = "crates/logex-node" }
 
 [patch.crates-io]
+tonic = { path = "vendor/tonic" }
 roaring = { path = "vendor/roaring" }
 libp2p-connection-limits = { path = "vendor/libp2p-connection-limits" }
 libp2p-gossipsub = { path = "vendor/libp2p-gossipsub" }

@@ -13,9 +13,24 @@ pub(crate) fn serialize_json<T: Serialize + ?Sized>(
     memory: &QueryMemoryBudget,
     cancel: Option<&QueryCancelCheck>,
 ) -> io::Result<Bytes> {
+    Ok(
+        serialize_json_buffer(value, memory, cancel, "HTTP query response")?
+            .into_bytes()
+            .into(),
+    )
+}
+
+/// Keep the allocation and its reservation together when a protocol needs an
+/// owned string instead of a byte frame.
+pub(crate) fn serialize_json_buffer<T: Serialize + ?Sized>(
+    value: &T,
+    memory: &QueryMemoryBudget,
+    cancel: Option<&QueryCancelCheck>,
+    stage: &'static str,
+) -> io::Result<QueryBuffer<u8>> {
     check_canceled(cancel)?;
     let mut writer = JsonWriter {
-        buffer: QueryBuffer::try_with_capacity(128, Some(memory), "HTTP query response")?,
+        buffer: QueryBuffer::try_with_capacity(128, Some(memory), stage)?,
         cancel,
         until_cancel_check: CANCEL_INTERVAL,
     };
@@ -23,7 +38,7 @@ pub(crate) fn serialize_json<T: Serialize + ?Sized>(
     // the typed memory-capacity error. Do not flatten it into an error string.
     serde_json::to_writer(&mut writer, value).map_err(io::Error::from)?;
     check_canceled(cancel)?;
-    Ok(writer.buffer.into_bytes().into())
+    Ok(writer.buffer)
 }
 
 pub(crate) fn is_capacity_error(error: &io::Error) -> bool {

@@ -173,11 +173,11 @@ async fn rest_grpc_sql_and_eth_get_logs_stay_consistent() {
         .unwrap()
         .into_inner()
         .logs
-        .into_iter()
+        .iter()
         .map(|row| {
             (
                 row.block_number,
-                format!("0x{}", hex::encode(row.address)),
+                format!("0x{}", hex::encode(&row.address)),
                 row.log_index as u64,
             )
         })

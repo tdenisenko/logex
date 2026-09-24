@@ -1,0 +1,52 @@
+LogEx controlled gRPC output ownership (Tonic 0.13.1)
+
+The complete published crate is retained, including its license, original README,
+lockfile and 67-file upstream inventory. No Tonic version upgrade.
+Archive SHA-256: 7e581ba15a835f4d9ea06c55ab1bd4dce26fc53752c69a04aac00703bfb49ba9
+Published VCS commit: b303caa52ba8bbe8172310be7165a80b7c2a53f8
+Inventory: LOGEX-UPSTREAM-SHA256
+Exact local modifications/additions: LOGEX-PATCH.diff
+
+Encoder::uses_prepared_buffers and prepare opt into exact payload preparation.
+PreparedEncode carries an exact unframed length and one allocator identity.
+EncodeBufferAllocator admits requested capacity before returning an empty,
+uniquely owned OwnedEncodeBuffer. The caller reconciles actual capacity and
+retains its guard; backing drops before the opaque guard. Prepared mode starts
+without an output allocation. It checks lengths and configured send limits,
+admits replacement capacity while the old buffer is alive, and restricts every
+EncodeBuf mutation to the prepared span. Incorrect trusted encoder lengths are
+internal errors (infallible BufMut overflow retains its usual panic contract).
+Preparation/allocation statuses, including RESOURCE_EXHAUSTED, are preserved.
+
+Prepared flushes transfer the complete buffer to Bytes::from_owner; no shared
+spare tail is reused. Final clones/slices retain the full backing charge. Batch
+readiness and yield thresholds are preserved. A changed allocator identity is
+rejected before writing. Prepared compression is explicitly unsupported; default
+unconfigured compression remains available. The bytes minimum is now 1.9, which
+introduced from_owner; the workspace remains locked to bytes 1.11.1. The upstream
+standalone lock remains unchanged at bytes 1.10.1. Its tests and the workspace
+integration controls validate both pinned contexts. Reference-count/control
+metadata remains outside allocation-capacity accounting; this is not an RSS cap.
+
+Lifecycle fixes also apply to default encoders: initialize the five-byte header
+before fallible encoding; discard incomplete output on encoder error; latch
+terminal stream/body state for client and server, and drop the pinned source.
+A source error still flushes already-valid buffered data before its non-success
+status. The default BufMut test now initializes its bytes before advancing.
+Safety comments cover the delegated unsafe BufMut contract. The sole unrelated
+source cleanup scopes the server pin macro import to its existing TLS feature,
+so default-feature builds do not gain an unused-import warning from vendoring.
+
+The LogEx codec continues to invoke Prost and uses generated service routing.
+It checks query health/cancellation before preparation, allocation and encoding,
+and after a single admitted synchronous Prost message before publication. That
+message is the cooperative cancellation boundary, not a hard CPU-latency limit.
+No protobuf schema or generated client type change. Metadata-only RPCs keep the
+ordinary codec. Controlled response compression is not enabled by LogEx.
+
+Run default and gzip library controls with the repository's pinned compiler:
+CARGO_TARGET_DIR=target/tonic-regressions cargo test --manifest-path vendor/tonic/Cargo.toml --lib --locked
+CARGO_TARGET_DIR=target/tonic-regressions cargo test --manifest-path vendor/tonic/Cargo.toml --lib --features gzip --locked
+Tests use the pinned compiler's Waker::noop; production additions retain the
+upstream stated MSRV syntax. Existing upstream loopback fixtures require local
+bind permission. All added ownership/lifecycle controls are tiny offline cases.

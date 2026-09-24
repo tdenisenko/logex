@@ -8,21 +8,31 @@ use tonic::{Request, Response, Status};
 
 use logex_query::{self, DEFAULT_QUERY_PAGE_SIZE, SqlQueryError, SqlQueryPage};
 use logex_storage::native::{LogOrder, NativeLogFilter, TopicConstraint};
-use logex_types::LogRow;
 
 use crate::handler::{ActiveQueryGuard, AppState, MAX_LOG_FILTER_LIMIT, QueryAdmissionError};
 pub use crate::query_response::QueryLeaseService;
 
 pub mod pb {
-    #![allow(clippy::result_large_err)]
+    #![allow(
+        clippy::result_large_err,
+        clippy::double_must_use,
+        clippy::mixed_attributes_style
+    )]
 
     tonic::include_proto!("logex");
+    include!(concat!(env!("OUT_DIR"), "/logex.LogExService.rs"));
 }
+
+pub mod protocol;
+use protocol::OwnedResponse;
+
+#[cfg(test)]
+mod transport_tests;
 
 use pb::log_ex_service_server::{LogExService, LogExServiceServer};
 use pb::{
     Empty, GetLogsRequest, GetLogsResponse, HeadBlockResponse, LogEntry, QueryRequest,
-    QueryResponse, QueryRow,
+    QueryResponse,
 };
 
 type BoxStatus = Box<Status>;
@@ -38,11 +48,32 @@ impl LogExGrpcService {
         Self { state }
     }
 
+    fn retain_encoding_state<T>(
+        &self,
+        response: OwnedResponse<T>,
+        query: Arc<ActiveQueryGuard>,
+    ) -> OwnedResponse<T> {
+        let state = Arc::clone(&self.state);
+        // Tonic encodes lazily after this handler returns. Keep the original
+        // query active until the encoding owner drops, checking health first.
+        #[allow(clippy::result_large_err)]
+        response.with_encoding_check(move || {
+            if let Some(reason) = state.storage_failure() {
+                Err(Status::unavailable(reason))
+            } else if query.was_canceled() {
+                Err(Status::cancelled("query canceled"))
+            } else {
+                Ok(())
+            }
+        })
+    }
+
     async fn read_logs(
         &self,
         query: &ActiveQueryGuard,
         filter: NativeLogFilter,
-    ) -> Result<Vec<LogEntry>, BoxStatus> {
+    ) -> Result<OwnedResponse<GetLogsResponse>, BoxStatus> {
+        let memory = self.state.query_memory.clone();
         self.state
             .run_blocking_query(query, move |snapshot, _head, cancel| {
                 let rows = logex_query::execute_log_filter_on_snapshot_with_cancel(
@@ -50,17 +81,13 @@ impl LogExGrpcService {
                     &filter,
                     Some(&cancel),
                 )?;
-                Ok(rows.into_iter().map(log_row_to_proto).collect())
+                protocol::log_response(&rows, &memory, Some(&cancel))
             })
             .await
             .map_err(|error| {
                 Box::new(match self.state.storage_failure() {
                     Some(reason) => Status::unavailable(reason),
-                    None => match error.kind() {
-                        std::io::ErrorKind::WouldBlock => Status::aborted(error.to_string()),
-                        std::io::ErrorKind::Interrupted => Status::cancelled(error.to_string()),
-                        _ => Status::internal(format!("execution error: {error}")),
-                    },
+                    None => protocol::into_status(error),
                 })
             })
     }
@@ -68,16 +95,18 @@ impl LogExGrpcService {
 
 #[tonic::async_trait]
 impl LogExService for LogExGrpcService {
-    type StreamLogsStream = Pin<Box<dyn Stream<Item = Result<LogEntry, Status>> + Send>>;
+    type StreamLogsStream =
+        Pin<Box<dyn Stream<Item = Result<OwnedResponse<LogEntry>, Status>> + Send>>;
 
     async fn query(
         &self,
         request: Request<QueryRequest>,
-    ) -> Result<Response<QueryResponse>, Status> {
+    ) -> Result<Response<OwnedResponse<QueryResponse>>, Status> {
         let query = self
             .state
             .query_control
             .start_concurrent()
+            .map(Arc::new)
             .map_err(QueryAdmissionError::into_grpc_status)?;
         let sql = &request.get_ref().sql;
         tracing::debug!(sql = %sql, "gRPC query");
@@ -107,12 +136,13 @@ impl LogExService for LogExGrpcService {
                 storage.head_block().unwrap_or(0),
             )
         };
+        let cancel = query.cancel_check();
         let execution = logex_query::execute_sql_page_on_snapshot_with_memory(
             sql,
             snapshot,
             head_block,
             SqlQueryPage::new(limit, offset),
-            Some(query.cancel_check()),
+            Some(Arc::clone(&cancel)),
             self.state.query_memory.clone(),
         );
         let result = match tokio::select! {
@@ -138,27 +168,21 @@ impl LogExService for LogExGrpcService {
             }
         };
 
-        let row_count = result.rows.len() as u64;
-        let next_offset = limit
-            .filter(|limit| *limit > 0 && row_count as usize == *limit)
-            .map(|_| (offset + row_count as usize) as u64);
-        let mut rows = Vec::with_capacity(result.rows.len());
-        // Keep the structured row owner charged throughout string conversion.
-        for row in result.rows.iter() {
-            let json = serde_json::to_string(row)
-                .map_err(|err| Status::internal(format!("cannot serialize SQL result: {err}")))?;
-            rows.push(QueryRow { json });
+        let protocol = protocol::query_response(
+            &result,
+            limit,
+            offset,
+            &self.state.query_memory,
+            Some(&cancel),
+        );
+        if let Some(reason) = self.state.storage_failure() {
+            return Err(Status::unavailable(reason));
         }
-
-        let mut response = Response::new(QueryResponse {
-            rows,
-            total_scanned: result.total_scanned,
-            row_count,
-            limit: limit.unwrap_or(0) as u64,
-            offset: offset as u64,
-            next_offset,
-            max_limit: 0,
-        });
+        let mut response =
+            Response::new(self.retain_encoding_state(
+                protocol.map_err(protocol::into_status)?,
+                Arc::clone(&query),
+            ));
         response.extensions_mut().insert(query.lease());
         Ok(response)
     }
@@ -179,11 +203,12 @@ impl LogExService for LogExGrpcService {
     async fn get_logs(
         &self,
         request: Request<GetLogsRequest>,
-    ) -> Result<Response<GetLogsResponse>, Status> {
+    ) -> Result<Response<OwnedResponse<GetLogsResponse>>, Status> {
         let query = self
             .state
             .query_control
             .start_concurrent()
+            .map(Arc::new)
             .map_err(QueryAdmissionError::into_grpc_status)?;
         let filter = proto_filter_to_native_filter(request.get_ref()).map_err(|status| *status)?;
 
@@ -194,9 +219,7 @@ impl LogExService for LogExGrpcService {
         if let Some(reason) = self.state.storage_failure() {
             return Err(Status::unavailable(reason));
         }
-        let row_count = logs.len() as u64;
-
-        let mut response = Response::new(GetLogsResponse { logs, row_count });
+        let mut response = Response::new(self.retain_encoding_state(logs, Arc::clone(&query)));
         response.extensions_mut().insert(query.lease());
         Ok(response)
     }
@@ -209,6 +232,7 @@ impl LogExService for LogExGrpcService {
             .state
             .query_control
             .start_concurrent()
+            .map(Arc::new)
             .map_err(QueryAdmissionError::into_grpc_status)?;
         let filter = proto_filter_to_native_filter(request.get_ref()).map_err(|status| *status)?;
 
@@ -216,20 +240,9 @@ impl LogExService for LogExGrpcService {
             .read_logs(&query, filter)
             .await
             .map_err(|status| *status)?;
-        let state = Arc::clone(&self.state);
         let lease = query.lease();
-        // Tonic requires an unboxed Status as the stream item's error type.
-        #[allow(clippy::result_large_err)]
-        let stream = tokio_stream::StreamExt::map(tokio_stream::iter(entries), move |entry| {
-            // Retain admission until the buffered response stream is dropped.
-            let _query = &query;
-            match state.storage_failure() {
-                Some(reason) => Err(Status::unavailable(reason)),
-                None => Ok(entry),
-            }
-        });
-
-        let mut response = Response::new(Box::pin(stream) as Self::StreamLogsStream);
+        let entries = self.retain_encoding_state(entries, Arc::clone(&query));
+        let mut response = Response::new(Box::pin(entries.into_stream()) as Self::StreamLogsStream);
         response.extensions_mut().insert(lease);
         Ok(response)
     }
@@ -395,36 +408,6 @@ fn parse_topic_constraint(
     })
 }
 
-fn log_row_to_proto(row: LogRow) -> LogEntry {
-    let mut topics = Vec::with_capacity(4);
-    if let Some(topic) = row.topic0 {
-        topics.push(topic.as_slice().to_vec());
-    }
-    if let Some(topic) = row.topic1 {
-        topics.push(topic.as_slice().to_vec());
-    }
-    if let Some(topic) = row.topic2 {
-        topics.push(topic.as_slice().to_vec());
-    }
-    if let Some(topic) = row.topic3 {
-        topics.push(topic.as_slice().to_vec());
-    }
-
-    LogEntry {
-        block_number: row.block_number,
-        block_hash: row.block_hash.as_slice().to_vec(),
-        timestamp: row.timestamp,
-        tx_hash: row.tx_hash.as_slice().to_vec(),
-        tx_index: row.tx_index,
-        log_index: row.log_index,
-        address: row.address.as_slice().to_vec(),
-        topics,
-        data: row.data.to_vec(),
-        data_len: row.data_len,
-        source: row.source as u32,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -534,7 +517,7 @@ mod tests {
         assert!(state.query_control.start_concurrent().is_ok());
     }
 
-    fn make_test_rows() -> Vec<LogRow> {
+    pub(super) fn make_test_rows() -> Vec<LogRow> {
         vec![
             LogRow {
                 block_number: 100,
@@ -571,7 +554,7 @@ mod tests {
         ]
     }
 
-    fn setup_storage() -> (TempDir, PartitionManager) {
+    pub(super) fn setup_storage() -> (TempDir, PartitionManager) {
         let tmp = TempDir::new().unwrap();
         let config = PartitionManagerConfig {
             data_dir: tmp.path().to_path_buf(),
