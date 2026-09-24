@@ -338,7 +338,8 @@ Security:
         #[arg(long, default_value = "8")]
         query_max_concurrent: usize,
 
-        /// Shared DataFusion operator memory budget in bytes, not a process memory limit.
+        /// Shared budget in bytes for SQL operators and retained scan output.
+        /// This is not a process memory limit.
         #[arg(long, default_value = "1073741824")]
         query_memory_bytes: u64,
 
