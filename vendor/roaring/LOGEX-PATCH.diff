@@ -13,7 +13,7 @@
  
 --- /dev/null
 +++ b/src/bitmap/query_decode.rs
-@@ -0,0 +1,445 @@
+@@ -0,0 +1,450 @@
 +//! Query-only portable decoding with an allocation-free validated preparation.
 +use super::container::{Container, ARRAY_LIMIT};
 +use super::store::{ArrayStore, BitmapStore, Store, BITMAP_LENGTH};
@@ -365,7 +365,12 @@
 +                    .map(|i| 0xffff0000 + i * 2)
 +                    .collect::<Vec<_>>()
 +            );
-+            assert_eq!(result, RoaringBitmap::deserialize_from(&bytes[..]).unwrap());
++            // The generic run decoder can retain an oversized ArrayStore.
++            // Upstream equality compares Store variants, so verify set semantics
++            // independently of the normalized representation required here.
++            let legacy = RoaringBitmap::deserialize_from(&bytes[..]).unwrap();
++            assert_eq!(result.len(), legacy.len());
++            assert!(result.iter().eq(legacy.iter()));
 +            assert!(
 +                matches!(&result.containers[0].store, Store::Array(_)) == (cardinality <= 4096)
 +            );

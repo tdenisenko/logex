@@ -41,9 +41,9 @@ PACKAGES = (
         modified={
             PurePosixPath("src/bitmap/mod.rs"): "4d2694f2773645d8a476cff93b2310ca9e42c33ee5e120553d4eb6e27590a288",
         },
-        patch_checksum="73f4605eadf3621636524494864087f10b26e469c9d674264977f8715da43095",
+        patch_checksum="b07a40bf521ce2a67980d5a2a56850d6897e6cfa861ea11f3c706693f8e02c7f",
         added={
-            PurePosixPath("src/bitmap/query_decode.rs"): "bab697cb900bdbf350c11dfa64f26344264b8eff6334f0eba7e7eb094defb870",
+            PurePosixPath("src/bitmap/query_decode.rs"): "3328f41937acc7b4fe5d9ecc1244c6cb7e01e3906b4bf4c60556f377dbaf53e4",
             PurePosixPath("LICENSE-APACHE"): "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
             PurePosixPath("LICENSE-MIT"): "42d3bf7e7d4d49d72c0555d14ed99c3ee7ce9ce3cbffbc38bbafe8c103f50969",
         },

@@ -45,6 +45,10 @@ clones and MultiOps allocation hooks are outside this patch.
 Five new lib tests exercise empty/sparse/dense boundaries, key65535, normalized
 singleton/full runs, mixed and unaligned payloads, malformed/truncated geometry,
 array/run/dense content validation, checked arithmetic, and spare heap capacity.
+Run parity checks compare rows and cardinality, not structural Store equality:
+the generic decoder may retain an oversized array whereas the query decoder
+normalizes the same set into a bitmap. Explicit Store shape and independently
+generated expected rows are tested separately.
 Existing upstream tests remain present. Standard validation command:
 CARGO_TARGET_DIR=target/roaring-regressions cargo test --manifest-path vendor/roaring/Cargo.toml --lib --locked
 
