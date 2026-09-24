@@ -23,4 +23,4 @@ pub use partition::{Partition, PartitionManager, PartitionManagerConfig};
 pub use reader::ColumnReader;
 pub use segment_reader::SegmentReader;
 pub use state::SyncHead;
-pub use wal::WriteAheadLog;
+pub use wal::{WalReadLimits, WriteAheadLog};

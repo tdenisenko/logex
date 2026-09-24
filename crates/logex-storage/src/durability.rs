@@ -373,6 +373,15 @@ pub(crate) fn publish_tree(tree: &Path, manifest: &Path, bytes: &[u8]) -> io::Re
     prepare_tree_publication(tree, manifest, bytes)?.finish()
 }
 
+/// Repeat persistence barriers for an already-written maintenance tree without
+/// publishing another marker or creating temporary files.
+pub(crate) fn sync_tree(tree: &Path) -> io::Result<()> {
+    let mut group = SyncGroup::default();
+    flush_tree(tree, &mut group)?;
+    group.flush_directory(parent(tree))?;
+    group.finish()
+}
+
 /// WAL-backed publication can defer the full device flush until checkpoint, but
 /// every artifact and name must remain ordered before subsequent publications.
 pub(crate) fn publish_tree_ordered(

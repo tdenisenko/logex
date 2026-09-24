@@ -40,6 +40,7 @@ pub struct PendingRepair {
 pub enum RepairInspection {
     Primary(Box<PrimaryDataInspection>),
     Pending(Box<PendingRepair>),
+    PendingIndexes(Box<super::PendingIndexRepair>),
 }
 
 /// Inspect existing repair evidence without opening storage or performing recovery.
@@ -47,6 +48,15 @@ pub enum RepairInspection {
 pub fn inspect_repair(root: &Path, limits: InspectionLimits) -> io::Result<RepairInspection> {
     let owner = DataDirectoryLock::acquire_existing(root)?;
     let paths = StorageCatalogPaths::new(std::path::absolute(root)?);
+    if exists(&paths.root().join(super::indexes::JOURNAL_FILE))? {
+        if exists(&paths.root().join(JOURNAL_FILE))? {
+            return Err(invalid(
+                "conflicting primary and index repair journals; preserve all evidence",
+            ));
+        }
+        return super::indexes::inspect_owned(owner, paths)
+            .map(|pending| RepairInspection::PendingIndexes(Box::new(pending)));
+    }
     match RepairJournal::load(&paths)? {
         Some(journal) => Ok(RepairInspection::Pending(Box::new(pending_owned(
             owner, paths, journal,
@@ -58,7 +68,7 @@ pub fn inspect_repair(root: &Path, limits: InspectionLimits) -> io::Result<Repai
 }
 
 pub(in crate::native) fn require_no_pending_repair(root: &Path) -> io::Result<()> {
-    if exists(&root.join(JOURNAL_FILE))? {
+    if exists(&root.join(JOURNAL_FILE))? || exists(&root.join(super::indexes::JOURNAL_FILE))? {
         return Err(io::Error::new(
             io::ErrorKind::WouldBlock,
             "offline repair journal is present; resume repair before opening storage",
@@ -72,6 +82,12 @@ pub(in crate::native) fn require_no_pending_repair(root: &Path) -> io::Result<()
 pub fn inspect_pending_repair(root: &Path) -> io::Result<Option<PendingRepair>> {
     let owner = DataDirectoryLock::acquire_existing(root)?;
     let paths = StorageCatalogPaths::new(std::path::absolute(root)?);
+    if exists(&paths.root().join(super::indexes::JOURNAL_FILE))? {
+        return Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "index repair is pending; use the shared repair inspection",
+        ));
+    }
     let Some(journal) = RepairJournal::load(&paths)? else {
         return Ok(None);
     };
@@ -93,6 +109,23 @@ fn pending_owned(
 }
 
 impl PendingRepair {
+    pub fn replacement_row_counts(&self) -> impl Iterator<Item = u64> + '_ {
+        self.journal.entries.iter().filter_map(|entry| {
+            entry
+                .staged_manifest
+                .as_ref()
+                .map(|manifest| manifest.row_count)
+        })
+    }
+
+    /// Additional journal archive bytes after an already committed replacement.
+    pub fn estimate_completion_metadata_bytes(&self) -> io::Result<u64> {
+        Ok(self.journal.encode()?.len() as u64)
+    }
+
+    pub fn check_completion_headroom(&self, required_free_bytes: u64) -> io::Result<()> {
+        check_headroom(self.paths.root(), required_free_bytes)
+    }
     pub fn state(&self) -> RepairCatalogState {
         self.state
     }
@@ -134,6 +167,22 @@ impl PendingRepair {
         }
         finish_publication(&self.paths, &self.journal, limits, verify_indexes)
     }
+
+    /// Finish committed publication and re-inspect without releasing ownership.
+    pub fn finish_inspected(
+        self,
+        limits: InspectionLimits,
+        verify_indexes: impl FnMut(&Path) -> io::Result<()>,
+    ) -> io::Result<(PrimaryDataInspection, PathBuf)> {
+        if self.state != RepairCatalogState::AfterPublication {
+            return Err(invalid(
+                "uncommitted repair requires reconstruction and admission",
+            ));
+        }
+        let quarantine = finish_publication(&self.paths, &self.journal, limits, verify_indexes)?;
+        let inspection = inspection::inspect_owned(self.owner, self.paths, limits)?;
+        Ok((inspection, quarantine))
+    }
 }
 
 /// A durable intent and reserved new IDs, borrowing the inspection's owner.
@@ -155,6 +204,24 @@ impl Drop for PublicationOwner<'_> {
 }
 
 impl RepairOwnershipPlan {
+    /// Consume a completed plan and inspect the published dataset under the
+    /// original owner. A pending transaction prevents this transition.
+    pub fn into_inspection(self, limits: InspectionLimits) -> io::Result<PrimaryDataInspection> {
+        require_no_pending_repair(self.inspection.paths.root())?;
+        self.inspection.reinspect(limits)
+    }
+    /// Conservative additional logical file bytes for intent rewrites, the
+    /// completed journal archive and replacement catalog publication. Existing
+    /// originals, journals and retained attempts already consume available space.
+    /// Filesystem allocation, metadata, quotas and concurrent writers are excluded.
+    pub fn estimate_publication_metadata_bytes(&self) -> io::Result<u64> {
+        let journals = if self.pending.is_some() { 1u64 } else { 2 };
+        journals
+            .checked_mul(super::journal::MAX_BYTES as u64)
+            .and_then(|value| value.checked_add(super::journal::MAX_CATALOG as u64))
+            .ok_or_else(|| invalid("repair metadata estimate overflows"))
+    }
+
     /// Record durable intent before creating staging artifacts. `required_free_bytes`
     /// is caller-estimated headroom, not a reservation or a guarantee against a
     /// later full device. All write failures retain the journal and original data.
@@ -630,26 +697,26 @@ fn ensure_operation_dirs(paths: &StorageCatalogPaths, journal: &RepairJournal) -
     ensure_directory(&operation)?;
     ensure_directory(&operation.join("staging"))
 }
-fn exists(path: &Path) -> io::Result<bool> {
+pub(super) fn exists(path: &Path) -> io::Result<bool> {
     match fs::symlink_metadata(path) {
         Ok(_) => Ok(true),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
         Err(e) => Err(e),
     }
 }
-fn ordinary_directory(path: &Path) -> io::Result<()> {
+pub(super) fn ordinary_directory(path: &Path) -> io::Result<()> {
     if !fs::symlink_metadata(path)?.file_type().is_dir() {
         return Err(invalid("repair requires an ordinary directory"));
     }
     Ok(())
 }
-fn ordinary_file(path: &Path) -> io::Result<()> {
+pub(super) fn ordinary_file(path: &Path) -> io::Result<()> {
     if !fs::symlink_metadata(path)?.file_type().is_file() {
         return Err(invalid("repair requires an ordinary file"));
     }
     Ok(())
 }
-fn ensure_directory(path: &Path) -> io::Result<()> {
+pub(super) fn ensure_directory(path: &Path) -> io::Result<()> {
     match fs::create_dir(path) {
         Ok(()) => {}
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => ordinary_directory(path)?,
@@ -663,7 +730,7 @@ fn ensure_directory(path: &Path) -> io::Result<()> {
             .ok_or_else(|| invalid("repair directory has no parent"))?,
     )
 }
-fn rename_owned(source: &Path, destination: &Path) -> io::Result<()> {
+pub(super) fn rename_owned(source: &Path, destination: &Path) -> io::Result<()> {
     ordinary_directory(source)?;
     if exists(destination)? {
         return Err(io::Error::new(
@@ -686,7 +753,7 @@ fn rename_owned(source: &Path, destination: &Path) -> io::Result<()> {
 }
 
 #[cfg(unix)]
-fn check_headroom(path: &Path, required: u64) -> io::Result<()> {
+pub(in crate::native) fn check_headroom(path: &Path, required: u64) -> io::Result<()> {
     use std::os::fd::AsRawFd;
     let directory = fs::File::open(path)?;
     let mut status = std::mem::MaybeUninit::<libc::statvfs>::uninit();
@@ -706,7 +773,7 @@ fn check_headroom(path: &Path, required: u64) -> io::Result<()> {
     Ok(())
 }
 #[cfg(not(unix))]
-fn check_headroom(_: &Path, _: u64) -> io::Result<()> {
+pub(in crate::native) fn check_headroom(_: &Path, _: u64) -> io::Result<()> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "repair headroom checks require macOS or Linux",

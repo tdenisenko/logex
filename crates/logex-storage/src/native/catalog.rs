@@ -17,7 +17,7 @@ const CATALOG_MAGIC: &[u8; 8] = b"LXCAT013";
 const CATALOG_PREFIX_BYTES: usize = 20;
 const MAX_CACHED_HEADERS: usize = 8192;
 const MAX_CACHED_HEADER_BYTES: usize = 16 * 1024;
-const MAX_CATALOG_BYTES: u64 = 64 * 1024 * 1024;
+pub(super) const MAX_CATALOG_BYTES: u64 = 64 * 1024 * 1024;
 // Retain the legacy name so older binaries encounter invalid JSON and fail
 // instead of treating the directory as empty and allocating replacement segments.
 const CATALOG_FILE: &str = "catalog.json";

@@ -31,6 +31,20 @@ pub struct StagedRepairCandidate<'a> {
 }
 
 impl<'a> VerifiedRepairCandidate<'a> {
+    /// Bound the logical file bytes of one fresh replacement bundle and manifest.
+    /// Revalidate the detached rows against this candidate, then run the same page
+    /// encoders in a count-only mode. This offline CPU work creates no files and
+    /// does not reserve space. Indexes, journals, catalogs, retained attempts,
+    /// filesystem allocation overhead and other disk users are excluded.
+    pub fn estimate_staging_bytes(&self, rows: &[LogRow]) -> io::Result<u64> {
+        let mut verifier = self.verifier()?;
+        verifier.append(rows)?;
+        let source = verifier.finish()?;
+        segment::estimate_repair_bundle_bytes(rows, source.canonical())?
+            .checked_add(SegmentManifest::MAX_BYTES as u64)
+            .ok_or_else(|| invalid("repair staging size bound overflow"))
+    }
+
     /// Create a new staging root under an existing parent. An existing root is
     /// always refused; no source artifact or caller-owned ancestor is replaced.
     /// Verify the supplied rows again because this proof does not retain them.

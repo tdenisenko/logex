@@ -22,7 +22,7 @@ fn invalid(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
 
-fn physical_len(logical_len: u64) -> io::Result<u64> {
+pub(crate) fn physical_len(logical_len: u64) -> io::Result<u64> {
     logical_len
         .div_ceil(PAGE_BYTES as u64)
         .checked_mul(CHECKSUM_BYTES)

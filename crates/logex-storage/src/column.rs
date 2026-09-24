@@ -1248,6 +1248,68 @@ impl NullBitmap {
 /// must synchronize the complete segment before publishing its manifest.
 pub struct ColumnFile;
 
+// The uncompressed fixed-width streams emitted by write_batch_contents and
+// append_batch_owned: address, block number/hash, timestamp, transaction hash,
+// transaction/log index, declared data length, source, and four nullable topics.
+const RAW_FIXED_WIDTHS: [u64; 13] = [20, 8, 32, 8, 32, 4, 4, 4, 1, 32, 32, 32, 32];
+
+struct RawColumnSizes {
+    fixed: u64,
+    variable: u64,
+    nulls: u64,
+    canonical: u64,
+}
+
+impl RawColumnSizes {
+    fn new(rows: u64, payload: u64) -> io::Result<Self> {
+        if rows > u64::from(u32::MAX) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "raw column rows exceed segment addressing",
+            ));
+        }
+        let bitmap = checked_raw_sum(&[8, rows.div_ceil(8)])?;
+        Ok(Self {
+            fixed: checked_raw_sum(&[
+                raw_fixed_payload_bytes(rows)?,
+                (RAW_FIXED_WIDTHS.len() * ColumnFileHeader::SIZE) as u64,
+            ])?,
+            variable: checked_raw_sum(&[
+                ColumnFileHeader::SIZE as u64,
+                (rows + 1).checked_mul(8).ok_or_else(raw_size_overflow)?,
+                payload,
+            ])?,
+            nulls: bitmap.checked_mul(4).ok_or_else(raw_size_overflow)?,
+            canonical: checked_raw_sum(&[
+                CANONICAL_ENVELOPE_HEADER as u64,
+                bitmap,
+                PrefixState::MAX_ENCODED_BYTES as u64,
+            ])?,
+        })
+    }
+}
+
+fn raw_fixed_payload_bytes(rows: u64) -> io::Result<u64> {
+    RAW_FIXED_WIDTHS.iter().try_fold(0u64, |total, width| {
+        total
+            .checked_add(rows.checked_mul(*width).ok_or_else(raw_size_overflow)?)
+            .ok_or_else(raw_size_overflow)
+    })
+}
+
+fn checked_raw_sum(bytes: &[u64]) -> io::Result<u64> {
+    bytes.iter().try_fold(0u64, |total, bytes| {
+        total.checked_add(*bytes).ok_or_else(raw_size_overflow)
+    })
+}
+
+fn raw_size_overflow() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "raw column byte estimate overflows",
+    )
+}
+
 fn join_write_worker(handle: thread::ScopedJoinHandle<'_, io::Result<()>>) -> io::Result<()> {
     handle
         .join()
@@ -1255,6 +1317,66 @@ fn join_write_worker(handle: thread::ScopedJoinHandle<'_, io::Result<()>>) -> io
 }
 
 impl ColumnFile {
+    /// Conservative logical bytes for publishing four raw null bitmaps and an
+    /// identified canonical bitmap, including maximum restart state and two
+    /// source-marker publications. Covers replacement temporaries without
+    /// crediting old-file reclamation; excludes column payloads and caller-owned
+    /// manifests, catalogs, journals, indexes, filesystem allocation and other users.
+    pub(crate) fn estimate_raw_bitmap_publication_bytes(row_count: u64) -> io::Result<u64> {
+        let sizes = RawColumnSizes::new(row_count, 0)?;
+        checked_raw_sum(&[sizes.nulls, sizes.canonical, 2 * SOURCE_MARKER_BYTES as u64])
+    }
+
+    /// Conservative incremental logical file bytes for a committed-prefix rewrite.
+    /// Existing columns and retained attempts already occupy the baseline disk space.
+    /// Counts every replacement file concurrently, a pending canonical replacement
+    /// (including bounded restart evidence), and two source-marker publications.
+    /// Does not credit old files released by rename. Excludes filesystem allocation,
+    /// other disk users, manifests, catalogs, journals, indexes and bundle files.
+    pub(crate) fn estimate_prefix_rewrite_bytes(
+        row_count: u64,
+        payload_bytes: u64,
+    ) -> io::Result<u64> {
+        let sizes = RawColumnSizes::new(row_count, payload_bytes)?;
+        checked_raw_sum(&[
+            sizes.fixed,
+            sizes.variable,
+            sizes.nulls,
+            sizes.canonical,
+            sizes.canonical, // pending canonical may coexist with the final temporary
+            2 * SOURCE_MARKER_BYTES as u64,
+        ])
+    }
+
+    /// Conservative incremental logical bytes for one raw append. `total_payload_bytes`
+    /// includes the old committed payload: data.col is replaced in full, not extended.
+    /// Fixed columns grow in place; complete resulting null/canonical bitmap and data
+    /// temporaries coexist with their originals. Always allows identified restart
+    /// evidence and source-marker publications. A zero-row prefix also covers initial
+    /// file creation. Existing retained attempts are baseline, not reclaimed credit.
+    /// Excludes filesystem allocation/other disk users and caller-owned manifest,
+    /// catalog, journal, index and bundle bytes.
+    pub(crate) fn estimate_append_growth_bytes(
+        existing_rows: u64,
+        appended_rows: u64,
+        total_payload_bytes: u64,
+    ) -> io::Result<u64> {
+        let rows = existing_rows
+            .checked_add(appended_rows)
+            .ok_or_else(raw_size_overflow)?;
+        if existing_rows == 0 {
+            return Self::estimate_prefix_rewrite_bytes(rows, total_payload_bytes);
+        }
+        let sizes = RawColumnSizes::new(rows, total_payload_bytes)?;
+        checked_raw_sum(&[
+            raw_fixed_payload_bytes(appended_rows)?,
+            sizes.variable,
+            sizes.nulls,
+            sizes.canonical,
+            2 * SOURCE_MARKER_BYTES as u64,
+        ])
+    }
+
     /// Write all fixed-size and variable-length column files for a batch of rows.
     pub fn write_batch(dir: &Path, rows: &[LogRow]) -> io::Result<()> {
         Self::write_batch_with_canonical(dir, rows, None)
@@ -2354,6 +2476,151 @@ mod tests {
             data_len: 0,
             source: Source::Receipt,
         }
+    }
+
+    fn sizing_rows(count: usize) -> Vec<LogRow> {
+        (0..count)
+            .map(|index| {
+                let mut value = row();
+                value.log_index = index as u32;
+                value.topic0 = (index % 2 == 0).then_some(B256::repeat_byte(7));
+                value.topic2 = (index % 3 == 0).then_some(B256::repeat_byte(9));
+                value.data = Bytes::from(vec![
+                    index as u8;
+                    if index == 1 { 8193 } else { index % 19 }
+                ]);
+                value.data_len = value.data.len() as u32;
+                value
+            })
+            .collect()
+    }
+
+    fn regular_column_bytes(dir: &Path) -> u64 {
+        fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| {
+                let metadata = entry.unwrap().metadata().unwrap();
+                assert!(metadata.is_file());
+                metadata.len()
+            })
+            .sum()
+    }
+
+    #[test]
+    fn raw_prefix_estimate_covers_real_rewrite_and_pending_evidence() {
+        for count in [0, 1, 17, 8193] {
+            let dir = tempfile::tempdir().unwrap();
+            let rows = sizing_rows(count);
+            let payload = rows.iter().map(|row| row.data.len() as u64).sum();
+            let mut canonical = NullBitmap::new();
+            for index in 0..count {
+                canonical.push(index % 3 != 0);
+            }
+            ColumnFile::write_batch_with_canonical(dir.path(), &rows, Some(&canonical)).unwrap();
+            let marker = read_source_marker(dir.path()).unwrap().unwrap();
+            let prefix = PrefixState::from_rows(marker.namespace, &rows).unwrap();
+            let owner = begin_prefix_recovery(
+                dir.path(),
+                marker.namespace,
+                count as u64,
+                marker.generation,
+                marker.segment_id,
+                marker.kind,
+                Some(prefix.commitment()),
+            )
+            .unwrap();
+            ColumnFile::rewrite_verified_prefix(
+                dir.path(),
+                &rows,
+                &canonical,
+                marker.namespace,
+                marker.generation,
+                &owner,
+            )
+            .unwrap();
+            ColumnFile::finish_verified_prefix(dir.path(), &owner).unwrap();
+            let bitmap_bytes: u64 = [
+                "topic0.null",
+                "topic1.null",
+                "topic2.null",
+                "topic3.null",
+                "canonical.bitmap",
+                SOURCE_MARKER_FILE,
+            ]
+            .iter()
+            .map(|name| fs::metadata(dir.path().join(name)).unwrap().len())
+            .sum();
+            assert!(
+                bitmap_bytes
+                    <= ColumnFile::estimate_raw_bitmap_publication_bytes(count as u64).unwrap()
+            );
+            let actual = regular_column_bytes(dir.path());
+            // Charge the real final set plus another canonical and marker as if
+            // pending evidence and final replacement files all coexist.
+            let pending = fs::metadata(dir.path().join("canonical.bitmap"))
+                .unwrap()
+                .len()
+                + SOURCE_MARKER_BYTES as u64;
+            assert!(
+                actual + pending
+                    <= ColumnFile::estimate_prefix_rewrite_bytes(count as u64, payload).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn raw_append_estimate_covers_in_place_growth_and_full_temporaries() {
+        for (existing, appended) in [(0, 0), (0, 17), (1, 0), (1, 17), (8193, 17)] {
+            let dir = tempfile::tempdir().unwrap();
+            let rows = sizing_rows(existing + appended);
+            ColumnFile::write_batch(dir.path(), &rows[..existing]).unwrap();
+            let before = regular_column_bytes(dir.path());
+            let replaced = [
+                "data.col",
+                "topic0.null",
+                "topic1.null",
+                "topic2.null",
+                "topic3.null",
+                "canonical.bitmap",
+            ];
+            let old_replaced: u64 = replaced
+                .iter()
+                .map(|name| fs::metadata(dir.path().join(name)).unwrap().len())
+                .sum();
+            ColumnFile::append_batch(dir.path(), &rows[existing..], existing as u64).unwrap();
+            let after = regular_column_bytes(dir.path());
+            // Adding old replacement lengths back avoids crediting rename reclamation.
+            let peak_growth = (after + old_replaced).saturating_sub(before);
+            let payload = rows.iter().map(|row| row.data.len() as u64).sum();
+            assert!(
+                peak_growth
+                    <= ColumnFile::estimate_append_growth_bytes(
+                        existing as u64,
+                        appended as u64,
+                        payload
+                    )
+                    .unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn raw_estimates_check_addressing_and_arithmetic() {
+        assert!(ColumnFile::estimate_prefix_rewrite_bytes(u64::from(u32::MAX), 0).is_ok());
+        for (rows, payload) in [(u64::from(u32::MAX) + 1, 0), (1, u64::MAX)] {
+            assert_eq!(
+                ColumnFile::estimate_prefix_rewrite_bytes(rows, payload)
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::InvalidInput
+            );
+        }
+        assert!(
+            ColumnFile::estimate_raw_bitmap_publication_bytes(u64::from(u32::MAX) + 1).is_err()
+        );
+        assert!(ColumnFile::estimate_append_growth_bytes(u64::MAX, 1, 0).is_err());
+        assert!(ColumnFile::estimate_append_growth_bytes(u64::from(u32::MAX), 1, 0).is_err());
+        assert!(ColumnFile::estimate_append_growth_bytes(1, 1, u64::MAX).is_err());
     }
 
     #[test]

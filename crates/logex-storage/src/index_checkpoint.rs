@@ -15,8 +15,8 @@ const NAMESPACE_ONLY_MAGIC: &[u8; 8] = b"LXICP005";
 const UNBOUND_SOURCE_MAGIC: &[u8; 8] = b"LXICP004";
 const UNBOUND_MAGIC: &[u8; 8] = b"LXICP003";
 const LEGACY_MAGIC: &[u8; 8] = b"LXICP002";
-const MAX_CHECKPOINT_BYTES: usize = 4_096;
-const MAX_ARTIFACTS: usize = 12;
+pub(crate) const MAX_CHECKPOINT_BYTES: usize = 4_096;
+pub(crate) const MAX_ARTIFACTS: usize = 12;
 const MAX_ARTIFACT_NAME_BYTES: usize = 64;
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -45,7 +45,7 @@ struct Checkpoint {
     artifacts: Vec<ArtifactBinding>,
 }
 
-fn validate_artifact_name(name: &str) -> io::Result<()> {
+pub(crate) fn validate_artifact_name(name: &str) -> io::Result<()> {
     if name.is_empty()
         || name.len() > MAX_ARTIFACT_NAME_BYTES
         || name == "."
@@ -105,11 +105,15 @@ pub struct IndexReadCheckpoint {
 
 impl IndexReadCheckpoint {
     pub fn open(dir: &Path, reader: &SegmentReader) -> io::Result<Option<Self>> {
+        Self::open_at(&dir.join("indexes"), reader)
+    }
+
+    /// Read a publication at an explicit output directory, bound to this source.
+    pub fn open_at(index_dir: &Path, reader: &SegmentReader) -> io::Result<Option<Self>> {
         if reader.source_namespace().is_none() || reader.source_commitment()?.is_none() {
             return Ok(None);
         }
-        let index_dir = dir.join("indexes");
-        let file = match File::open(&index_dir) {
+        let file = match File::open(index_dir) {
             Ok(file) => file,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error),
@@ -120,7 +124,7 @@ impl IndexReadCheckpoint {
             Err(TryLockError::Error(error)) => return Err(error),
         }
         let lock = DirectoryLock(file);
-        let Some(checkpoint) = read_checkpoint(&index_dir)? else {
+        let Some(checkpoint) = read_checkpoint(index_dir)? else {
             return Ok(None);
         };
         if checkpoint.identity != Identity::read(reader)? {
@@ -148,6 +152,7 @@ impl IndexReadCheckpoint {
 pub struct IndexBuildCheckpoint {
     _lock: DirectoryLock,
     dir: PathBuf,
+    index_dir: PathBuf,
     identity: Identity,
     reuse_existing: bool,
     previous_artifacts: BTreeMap<String, [u8; 16]>,
@@ -161,6 +166,19 @@ impl IndexBuildCheckpoint {
         let identity = Identity::read(&SegmentReader::open_projected(dir, &[])?)?;
         let index_dir = dir.join("indexes");
         fs::create_dir_all(&index_dir)?;
+        Self::begin_owned(dir, index_dir, identity)
+    }
+
+    /// Create a fresh output directory only after establishing source eligibility.
+    /// Existing destinations and missing parents are refused; failures retain any
+    /// created staging directory for caller-owned recovery or quarantine.
+    pub fn begin_fresh_at(source_dir: &Path, index_dir: &Path) -> io::Result<Self> {
+        let identity = Identity::read(&SegmentReader::open_projected(source_dir, &[])?)?;
+        fs::create_dir(index_dir)?;
+        Self::begin_owned(source_dir, index_dir.to_owned(), identity)
+    }
+
+    fn begin_owned(dir: &Path, index_dir: PathBuf, identity: Identity) -> io::Result<Self> {
         let file = File::open(&index_dir)?;
         file.try_lock().map_err(|error| match error {
             TryLockError::WouldBlock => io::Error::new(
@@ -182,6 +200,7 @@ impl IndexBuildCheckpoint {
         Ok(Self {
             _lock: lock,
             dir: dir.to_owned(),
+            index_dir,
             reuse_existing: previous
                 .as_ref()
                 .is_some_and(|checkpoint| checkpoint.identity == identity),
@@ -261,7 +280,7 @@ impl IndexBuildCheckpoint {
         let mut bytes = MAGIC.to_vec();
         bytes.extend_from_slice(checkpoint_digest(MAGIC, &payload).as_slice());
         bytes.extend_from_slice(&payload);
-        let index_dir = self.dir.join("indexes");
+        let index_dir = self.index_dir;
         durability::publish_tree(&index_dir, &index_dir.join(INDEX_CHECKPOINT_FILE), &bytes)?;
         Ok(())
     }
@@ -360,6 +379,56 @@ mod tests {
             data_len: 0,
             source: Source::Receipt,
         }
+    }
+
+    #[test]
+    fn fresh_checkpoint_uses_separate_destination_and_rechecks_source() {
+        let source = tempfile::tempdir().unwrap();
+        let outputs = tempfile::tempdir().unwrap();
+        ColumnFile::write_batch(source.path(), &[row()]).unwrap();
+        let missing = outputs.path().join("missing/stage");
+        assert_eq!(
+            IndexBuildCheckpoint::begin_fresh_at(source.path(), &missing)
+                .err()
+                .unwrap()
+                .kind(),
+            io::ErrorKind::NotFound
+        );
+        assert!(!outputs.path().join("missing").exists());
+        let stage = outputs.path().join("stage");
+        let build = IndexBuildCheckpoint::begin_fresh_at(source.path(), &stage).unwrap();
+        assert!(!build.can_reuse_existing());
+        assert_eq!(
+            IndexBuildCheckpoint::begin_fresh_at(source.path(), &stage)
+                .err()
+                .unwrap()
+                .kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        ColumnFile::write_batch(source.path(), &[row(), row()]).unwrap();
+        assert_eq!(
+            build.publish().unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        assert!(stage.is_dir());
+        assert!(!stage.join(INDEX_CHECKPOINT_FILE).exists());
+        assert!(!source.path().join("indexes").exists());
+        let fresh = outputs.path().join("fresh");
+        IndexBuildCheckpoint::begin_fresh_at(source.path(), &fresh)
+            .unwrap()
+            .publish()
+            .unwrap();
+        let reader = SegmentReader::open(source.path()).unwrap();
+        assert!(
+            IndexReadCheckpoint::open_at(&fresh, &reader)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            IndexReadCheckpoint::open(source.path(), &reader)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

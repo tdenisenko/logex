@@ -15,6 +15,21 @@ const INDEX_HEADER_LEN: usize = 20;
 const INDEX_V2_ENTRY_TRAILER_LEN: usize = 8 + 4;
 const SINGLE_ENTRY_BULK_MAX_LOGICAL_BYTES: u64 = 1024 * 1024;
 
+/// Bound a builder index in which each source row enters at most one key.
+/// The pinned Roaring encoding uses 8 bytes per bitmap plus 8 per container,
+/// with at most 2 bytes per stored row. There are at most `rows` nonempty
+/// bitmaps and containers, so all bitmap payloads together use at most 18*rows.
+/// Empty indexes have only the index header. This does not apply to arbitrary
+/// BTreeIndex callers that insert the same row under several keys.
+pub(crate) fn row_partitioned_logical_size_bound(rows: u64, key_size: u64) -> io::Result<u64> {
+    key_size
+        .checked_add(INDEX_V2_ENTRY_TRAILER_LEN as u64)
+        .and_then(|width| width.checked_add(18))
+        .and_then(|width| width.checked_mul(rows))
+        .and_then(|payload| payload.checked_add(INDEX_HEADER_LEN as u64))
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "index size bound overflow"))
+}
+
 /// An in-memory B+ tree index mapping fixed-size byte keys to roaring bitmaps
 /// of row IDs. Used during index construction and for the hot partition.
 ///
