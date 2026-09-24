@@ -135,18 +135,39 @@ pub(crate) fn allocate_json_prefixed_hex_with_cancel(
 }
 
 fn write_hex(output: &mut impl std::fmt::Write, bytes: &[u8]) -> std::fmt::Result {
-    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    if bytes.is_empty() {
+        return Ok(());
+    }
+    if bytes.len() <= 32 {
+        return write_hex_chunk::<64>(output, bytes);
+    }
+    write_hex_large(output, bytes)
+}
+
+// Keep the 8 KiB scratch frame out of the common address/hash/topic call path.
+#[inline(never)]
+fn write_hex_large(output: &mut impl std::fmt::Write, bytes: &[u8]) -> std::fmt::Result {
     for chunk in bytes.chunks(4_096) {
-        let mut encoded = [0_u8; 8_192];
-        for (index, byte) in chunk.iter().copied().enumerate() {
-            encoded[index * 2] = DIGITS[(byte >> 4) as usize];
-            encoded[index * 2 + 1] = DIGITS[(byte & 0x0f) as usize];
-        }
-        output.write_str(
-            std::str::from_utf8(&encoded[..chunk.len() * 2]).expect("hexadecimal digits are UTF-8"),
-        )?;
+        write_hex_chunk::<8_192>(output, chunk)?;
     }
     Ok(())
+}
+
+#[inline(always)]
+fn write_hex_chunk<const N: usize>(
+    output: &mut impl std::fmt::Write,
+    bytes: &[u8],
+) -> std::fmt::Result {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    debug_assert!(bytes.len() <= N / 2);
+    let mut encoded = [0_u8; N];
+    for (index, byte) in bytes.iter().copied().enumerate() {
+        encoded[index * 2] = DIGITS[(byte >> 4) as usize];
+        encoded[index * 2 + 1] = DIGITS[(byte & 0x0f) as usize];
+    }
+    output.write_str(
+        std::str::from_utf8(&encoded[..bytes.len() * 2]).expect("hexadecimal digits are UTF-8"),
+    )
 }
 
 pub(crate) fn allocate_json_display(
@@ -1159,6 +1180,18 @@ mod tests {
             .iter()
             .map(|row| row["value"].clone())
             .collect())
+    }
+
+    #[test]
+    fn hex_writer_matches_reference_across_scratch_boundaries() {
+        for length in [0, 20, 32, 33, 4_096, 4_097] {
+            let bytes = (0..length)
+                .map(|index| (index as u8).wrapping_mul(37).wrapping_add(11))
+                .collect::<Vec<_>>();
+            let mut actual = String::new();
+            write_hex(&mut actual, &bytes).unwrap();
+            assert_eq!(actual, hex::encode(bytes));
+        }
     }
 
     #[test]
