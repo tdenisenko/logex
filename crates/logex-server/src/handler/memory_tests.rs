@@ -2,12 +2,15 @@ use super::*;
 use crate::grpc::pb::log_ex_service_server::LogExService;
 use crate::grpc::{LogExGrpcService, pb};
 use crate::rest::{self, QueryRequest};
+use alloy_primitives::{Address, B256, bytes};
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::Response;
 use logex_storage::PartitionManagerConfig;
+use logex_types::{LogRow, Source};
 
 const SORT_QUERY: &str = "SELECT x FROM (VALUES (2), (1)) AS values_table(x) ORDER BY x + 0";
+const SCAN_QUERY: &str = "SELECT block_hash || '' AS hash FROM logs ORDER BY hash";
 
 fn state(memory_bytes: usize) -> (tempfile::TempDir, Arc<AppState>) {
     let temp = tempfile::tempdir().unwrap();
@@ -17,6 +20,43 @@ fn state(memory_bytes: usize) -> (tempfile::TempDir, Arc<AppState>) {
         compaction_safety_margin_blocks: 2_048,
     })
     .unwrap();
+    let state = Arc::new(AppState::with_query_limits(
+        storage,
+        None,
+        SyncStatus::default(),
+        QueryConcurrencyLimit::new(2).unwrap(),
+        QueryMemoryLimit::new(memory_bytes).unwrap(),
+    ));
+    (temp, state)
+}
+
+fn state_with_log(memory_bytes: usize) -> (tempfile::TempDir, Arc<AppState>) {
+    let temp = tempfile::tempdir().unwrap();
+    let mut storage = PartitionManager::open(PartitionManagerConfig {
+        data_dir: temp.path().to_owned(),
+        partition_target_rows: 1_000_000,
+        compaction_safety_margin_blocks: 2_048,
+    })
+    .unwrap();
+    storage
+        .write_batch(&[LogRow {
+            block_number: 1,
+            block_hash: B256::repeat_byte(1),
+            timestamp: 2,
+            tx_hash: B256::repeat_byte(3),
+            tx_index: 0,
+            log_index: 0,
+            address: Address::repeat_byte(4),
+            topic0: Some(B256::repeat_byte(5)),
+            topic1: None,
+            topic2: None,
+            topic3: None,
+            data: bytes!("cafe"),
+            data_len: 2,
+            source: Source::Receipt,
+        }])
+        .unwrap();
+    storage.checkpoint().unwrap();
     let state = Arc::new(AppState::with_query_limits(
         storage,
         None,
@@ -116,4 +156,50 @@ async fn shared_memory_capacity_applies_to_rest_and_grpc_without_latching_storag
     drop(response);
     assert_eq!(state.query_memory.used(), 0);
     assert!(state.storage_failure().is_none());
+}
+
+#[tokio::test]
+async fn scan_output_capacity_is_typed_across_protocols_and_recovers() {
+    let limit = 1024 * 1024;
+    let (_temp, state) = state_with_log(limit);
+    let service = LogExGrpcService::new(Arc::clone(&state));
+    let held = state
+        .query_memory
+        .reserve(limit - 32, "test fixture")
+        .unwrap();
+
+    let response = rest::handle_query(
+        State(Arc::clone(&state)),
+        axum::Json(rest_request(SCAN_QUERY)),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = json(response).await;
+    assert_eq!(body["status"], "query_capacity");
+    assert_eq!(body["resource"], "memory");
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap()
+            .contains("sql arrow scan output")
+    );
+    assert!(state.storage_failure().is_none());
+
+    let status = service
+        .query(tonic::Request::new(grpc_request(SCAN_QUERY)))
+        .await
+        .unwrap_err();
+    assert_eq!(status.code(), tonic::Code::ResourceExhausted);
+    assert!(status.message().contains("sql arrow scan output"));
+    assert!(state.storage_failure().is_none());
+
+    drop(held);
+    assert_eq!(state.query_memory.used(), 0);
+    let response = service
+        .query(tonic::Request::new(grpc_request(SCAN_QUERY)))
+        .await
+        .unwrap();
+    assert_eq!(response.get_ref().row_count, 1);
+    drop(response);
+    assert_eq!(state.query_memory.used(), 0);
 }

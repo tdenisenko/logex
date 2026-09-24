@@ -1,6 +1,7 @@
 use std::any::Any;
 use std::cmp::Ordering as CmpOrdering;
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::ops::ControlFlow;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -10,9 +11,10 @@ use std::task::{Context, Poll};
 use alloy_primitives::{Address, B256, keccak256};
 use async_trait::async_trait;
 use datafusion::arrow::array::{
-    Array, ArrayRef, BooleanArray, Int64Array, ListBuilder, StringArray, StringBuilder,
-    UInt64Array, new_empty_array,
+    Array, ArrayData, ArrayRef, BooleanArray, Int64Array, ListBuilder, StringBuilder, UInt64Array,
+    UInt64Builder, make_array,
 };
+use datafusion::arrow::buffer::{BooleanBuffer, Buffer, NullBuffer};
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use datafusion::arrow::record_batch::{RecordBatch, RecordBatchOptions};
 use datafusion::catalog::Session;
@@ -127,6 +129,12 @@ impl From<DataFusionError> for SqlQueryError {
                         );
                         continue;
                     }
+                }
+                if let Some(error) = error.downcast_ref::<std::io::Error>() {
+                    if let Some(inner) = error.get_ref() {
+                        pending.push(inner);
+                    }
+                    continue;
                 }
                 if let Some(source) = error.source() {
                     pending.push(source);
@@ -417,6 +425,7 @@ struct LogexTableProvider {
     snapshot: StorageSnapshot,
     total_scanned: Arc<AtomicU64>,
     cancel_check: Option<QueryCancelCheck>,
+    memory: QueryMemoryBudget,
 }
 
 impl std::fmt::Debug for LogexTableProvider {
@@ -434,12 +443,14 @@ impl LogexTableProvider {
         snapshot: StorageSnapshot,
         total_scanned: Arc<AtomicU64>,
         cancel_check: Option<QueryCancelCheck>,
+        memory: QueryMemoryBudget,
     ) -> Self {
         Self {
             schema: Arc::new(log_rows_schema()),
             snapshot,
             total_scanned,
             cancel_check,
+            memory,
         }
     }
 }
@@ -528,6 +539,7 @@ impl TableProvider for LogexTableProvider {
                 projected_columns.clone(),
                 row_ids,
                 self.cancel_check.clone(),
+                self.memory.clone(),
             )));
 
             if remaining_limit == Some(0) {
@@ -618,10 +630,9 @@ impl PartitionStream for EmptyLogPartition {
     }
 
     fn execute(&self, _context: Arc<TaskContext>) -> SendableRecordBatchStream {
-        let schema = self.schema.clone();
         Box::pin(RecordBatchStreamAdapter::new(
-            schema.clone(),
-            stream::once(async move { empty_projected_batch(schema) }),
+            self.schema.clone(),
+            stream::empty::<DataFusionResult<RecordBatch>>(),
         ))
     }
 }
@@ -635,6 +646,7 @@ struct LogSegmentPartition {
     // the complete selection and never recalculate it against newer storage.
     row_ids: Arc<Vec<u32>>,
     cancel_check: Option<QueryCancelCheck>,
+    memory: QueryMemoryBudget,
 }
 
 impl std::fmt::Debug for LogSegmentPartition {
@@ -654,6 +666,7 @@ impl LogSegmentPartition {
         projected_columns: Vec<String>,
         row_ids: Vec<u32>,
         cancel_check: Option<QueryCancelCheck>,
+        memory: QueryMemoryBudget,
     ) -> Self {
         Self {
             dir,
@@ -661,6 +674,7 @@ impl LogSegmentPartition {
             projected_columns: Arc::new(projected_columns),
             row_ids: Arc::new(row_ids),
             cancel_check,
+            memory,
         }
     }
 }
@@ -685,6 +699,7 @@ impl PartitionStream for LogSegmentPartition {
                     &partition.dir,
                     &partition.row_ids[offset..end],
                     &partition.projected_columns,
+                    Some(&partition.memory),
                 )
                 .map_err(DataFusionError::from)?;
                 Ok(Some((batch, (partition, end))))
@@ -743,9 +758,10 @@ pub async fn execute_sql_page_on_snapshot(
 /// Execute one SQL page against a captured storage view using a shared memory budget.
 ///
 /// The view remains subject to optimistic invalidation checks. DataFusion operator
-/// reservations participate in `memory` across concurrent queries. Query planning,
-/// custom storage scans, native fast paths, and result conversion are outside this
-/// accounting milestone. Infallible DataFusion allocations are recorded even when
+/// reservations and retained Arrow output from custom scans participate in `memory`
+/// across concurrent queries. Query planning, scan source/decoder allocations, native
+/// fast paths, and result conversion are outside this accounting milestone. Infallible
+/// DataFusion allocations are recorded even when
 /// they temporarily exceed the configured limit. Disk spilling is disabled, so a
 /// fallible operator reservation that exceeds available capacity returns
 /// [`SqlQueryError::Capacity`] without truncating rows.
@@ -809,7 +825,12 @@ async fn execute_sql_page_on_snapshot_inner(
         return Ok(result);
     }
     let total_scanned = Arc::new(AtomicU64::new(0));
-    let table = LogexTableProvider::new(snapshot, Arc::clone(&total_scanned), cancel_check.clone());
+    let table = LogexTableProvider::new(
+        snapshot,
+        Arc::clone(&total_scanned),
+        cancel_check.clone(),
+        memory.clone(),
+    );
 
     let query_lifetime = Arc::new(DataFusionQueryLifetime {
         _cancel_check: cancel_check
@@ -2831,7 +2852,7 @@ impl PreparedSqlExpressions {
         let arrays = self
             .columns
             .iter()
-            .map(|column| read_column_as_array(reader, row_ids, column))
+            .map(|column| read_column_as_array(reader, row_ids, column, None))
             .collect::<std::io::Result<Vec<_>>>()?;
         let options = RecordBatchOptions::new().with_row_count(Some(row_ids.len()));
         let batch = RecordBatch::try_new_with_options(self.schema.clone(), arrays, &options)
@@ -4690,6 +4711,7 @@ fn build_projected_batch(
     dir: &std::path::Path,
     row_ids: &[u32],
     projected_columns: &[String],
+    memory: Option<&QueryMemoryBudget>,
 ) -> std::io::Result<RecordBatch> {
     if projected_columns.is_empty() {
         let options = RecordBatchOptions::new().with_row_count(Some(row_ids.len()));
@@ -4714,119 +4736,57 @@ fn build_projected_batch(
     let mut arrays = Vec::with_capacity(projected_columns.len());
 
     for column in projected_columns {
-        arrays.push(read_column_as_array(&reader, row_ids, column)?);
+        arrays.push(read_column_as_array(&reader, row_ids, column, memory)?);
     }
 
     RecordBatch::try_new(schema, arrays).map_err(std::io::Error::other)
-}
-
-fn empty_projected_batch(schema: SchemaRef) -> DataFusionResult<RecordBatch> {
-    if schema.fields().is_empty() {
-        let options = RecordBatchOptions::new().with_row_count(Some(0));
-        return Ok(RecordBatch::try_new_with_options(
-            schema,
-            Vec::new(),
-            &options,
-        )?);
-    }
-
-    let arrays = schema
-        .fields()
-        .iter()
-        .map(|field| new_empty_array(field.data_type()))
-        .collect();
-    Ok(RecordBatch::try_new(schema, arrays)?)
 }
 
 fn read_column_as_array(
     reader: &SegmentReader,
     row_ids: &[u32],
     column: &str,
+    memory: Option<&QueryMemoryBudget>,
 ) -> std::io::Result<ArrayRef> {
     let array: ArrayRef = match column {
-        "block_number" => Arc::new(UInt64Array::from(
-            reader.read_u64("block_number", Some(row_ids))?,
-        )),
-        "block_hash" => Arc::new(StringArray::from_iter_values(
-            reader
-                .read_b256("block_hash", Some(row_ids))?
-                .into_iter()
-                .map(to_hex_hash),
-        )),
-        "timestamp" => Arc::new(UInt64Array::from(
-            reader.read_u64("timestamp", Some(row_ids))?,
-        )),
-        "tx_hash" => Arc::new(StringArray::from_iter_values(
-            reader
-                .read_b256("tx_hash", Some(row_ids))?
-                .into_iter()
-                .map(to_hex_hash),
-        )),
-        "tx_index" => Arc::new(UInt64Array::from_iter_values(
-            reader
-                .read_u32("tx_index", Some(row_ids))?
-                .into_iter()
-                .map(|value| value as u64),
-        )),
-        "log_index" => Arc::new(UInt64Array::from_iter_values(
-            reader
-                .read_u32("log_index", Some(row_ids))?
-                .into_iter()
-                .map(|value| value as u64),
-        )),
-        "address" => Arc::new(StringArray::from_iter_values(
-            reader
-                .read_address(Some(row_ids))?
-                .into_iter()
-                .map(|address| to_hex_address(address.as_slice())),
-        )),
-        "topic0" => Arc::new(StringArray::from(
-            reader
-                .read_nullable_b256("topic0", Some(row_ids))?
-                .into_iter()
-                .map(|topic| topic.map(to_hex_hash))
-                .collect::<Vec<_>>(),
-        )),
-        "topic1" => Arc::new(StringArray::from(
-            reader
-                .read_nullable_b256("topic1", Some(row_ids))?
-                .into_iter()
-                .map(|topic| topic.map(to_hex_hash))
-                .collect::<Vec<_>>(),
-        )),
-        "topic2" => Arc::new(StringArray::from(
-            reader
-                .read_nullable_b256("topic2", Some(row_ids))?
-                .into_iter()
-                .map(|topic| topic.map(to_hex_hash))
-                .collect::<Vec<_>>(),
-        )),
-        "topic3" => Arc::new(StringArray::from(
-            reader
-                .read_nullable_b256("topic3", Some(row_ids))?
-                .into_iter()
-                .map(|topic| topic.map(to_hex_hash))
-                .collect::<Vec<_>>(),
-        )),
-        "topics" => build_topics_array(reader, row_ids)?,
-        "data" => Arc::new(StringArray::from_iter_values(
-            reader
-                .read_var_bytes("data", Some(row_ids))?
-                .into_iter()
-                .map(|bytes| to_hex_bytes(&bytes)),
-        )),
-        "data_len" => Arc::new(UInt64Array::from_iter_values(
-            reader
-                .read_u32("data_len", Some(row_ids))?
-                .into_iter()
-                .map(|value| value as u64),
-        )),
-        "source" => Arc::new(UInt64Array::from_iter_values(
-            reader
-                .read_u8("source", Some(row_ids))?
-                .into_iter()
-                .map(|value| value as u64),
-        )),
+        "block_number" => {
+            build_direct_u64_array(reader.read_u64("block_number", Some(row_ids))?, memory)?
+        }
+        "block_hash" => {
+            build_fixed_hex_array(reader.read_b256("block_hash", Some(row_ids))?, 32, memory)?
+        }
+        "timestamp" => {
+            build_direct_u64_array(reader.read_u64("timestamp", Some(row_ids))?, memory)?
+        }
+        "tx_hash" => {
+            build_fixed_hex_array(reader.read_b256("tx_hash", Some(row_ids))?, 32, memory)?
+        }
+        "tx_index" => build_converted_u64_array(
+            reader.read_u32("tx_index", Some(row_ids))?,
+            memory,
+            |value| value as u64,
+        )?,
+        "log_index" => build_converted_u64_array(
+            reader.read_u32("log_index", Some(row_ids))?,
+            memory,
+            |value| value as u64,
+        )?,
+        "address" => build_fixed_hex_array(reader.read_address(Some(row_ids))?, 20, memory)?,
+        "topic0" | "topic1" | "topic2" | "topic3" => {
+            build_nullable_hex_array(reader.read_nullable_b256(column, Some(row_ids))?, memory)?
+        }
+        "topics" => build_topics_array(reader, row_ids, memory)?,
+        "data" => build_variable_hex_array(reader.read_var_bytes("data", Some(row_ids))?, memory)?,
+        "data_len" => build_converted_u64_array(
+            reader.read_u32("data_len", Some(row_ids))?,
+            memory,
+            |value| value as u64,
+        )?,
+        "source" => {
+            build_converted_u64_array(reader.read_u8("source", Some(row_ids))?, memory, |value| {
+                value as u64
+            })?
+        }
         other => {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -4838,24 +4798,305 @@ fn read_column_as_array(
     Ok(array)
 }
 
-fn build_topics_array(reader: &SegmentReader, row_ids: &[u32]) -> std::io::Result<ArrayRef> {
+const SCAN_OUTPUT_STAGE: &str = "sql arrow scan output";
+
+#[derive(Debug)]
+struct ColumnBufferLease {
+    _reservation: QueryMemoryReservation,
+}
+
+#[derive(Debug)]
+struct BudgetedBufferOwner {
+    buffer: Buffer,
+    _lease: Arc<ColumnBufferLease>,
+}
+
+impl AsRef<[u8]> for BudgetedBufferOwner {
+    fn as_ref(&self) -> &[u8] {
+        self.buffer.as_slice()
+    }
+}
+
+fn size_overflow() -> std::io::Error {
+    std::io::Error::other(QueryMemoryError::SizeOverflow {
+        stage: SCAN_OUTPUT_STAGE,
+    })
+}
+
+fn checked_add(left: usize, right: usize) -> std::io::Result<usize> {
+    left.checked_add(right).ok_or_else(size_overflow)
+}
+
+fn checked_mul(left: usize, right: usize) -> std::io::Result<usize> {
+    left.checked_mul(right).ok_or_else(size_overflow)
+}
+
+fn round_capacity(bytes: usize) -> std::io::Result<usize> {
+    bytes.checked_next_multiple_of(64).ok_or_else(size_overflow)
+}
+
+fn offset_capacity(items: usize) -> std::io::Result<usize> {
+    checked_mul(checked_add(items, 1)?, std::mem::size_of::<i32>())
+}
+
+fn validity_capacity(items: usize) -> std::io::Result<usize> {
+    round_capacity(checked_add(items, 7)? / 8)
+}
+
+fn string_capacity(items: usize, values: usize, nullable: bool) -> std::io::Result<usize> {
+    let capacity = checked_add(offset_capacity(items)?, values)?;
+    if nullable {
+        checked_add(capacity, validity_capacity(items)?)
+    } else {
+        Ok(capacity)
+    }
+}
+
+fn check_i32_offset(value: usize) -> std::io::Result<()> {
+    if value > i32::MAX as usize {
+        return Err(size_overflow());
+    }
+    Ok(())
+}
+
+fn reserve_scan_output(
+    memory: Option<&QueryMemoryBudget>,
+    bytes: usize,
+) -> std::io::Result<Option<QueryMemoryReservation>> {
+    memory
+        .map(|memory| {
+            memory
+                .reserve(bytes, SCAN_OUTPUT_STAGE)
+                .map_err(std::io::Error::other)
+        })
+        .transpose()
+}
+
+fn checked_buffer_capacity(data: &ArrayData) -> std::io::Result<usize> {
+    let mut bytes = 0usize;
+    for buffer in data.buffers() {
+        bytes = checked_add(bytes, buffer.capacity())?;
+    }
+    if let Some(nulls) = data.nulls() {
+        bytes = checked_add(bytes, nulls.buffer().capacity())?;
+    }
+    for child in data.child_data() {
+        bytes = checked_add(bytes, checked_buffer_capacity(child)?)?;
+    }
+    Ok(bytes)
+}
+
+fn wrap_buffer(buffer: Buffer, lease: &Arc<ColumnBufferLease>) -> Buffer {
+    Buffer::from(bytes::Bytes::from_owner(BudgetedBufferOwner {
+        buffer,
+        _lease: Arc::clone(lease),
+    }))
+}
+
+fn wrap_array_data(data: ArrayData, lease: &Arc<ColumnBufferLease>) -> DataFusionResult<ArrayData> {
+    let buffers = data
+        .buffers()
+        .iter()
+        .cloned()
+        .map(|buffer| wrap_buffer(buffer, lease))
+        .collect();
+    let nulls = data.nulls().map(|nulls| {
+        NullBuffer::new(BooleanBuffer::new(
+            wrap_buffer(nulls.buffer().clone(), lease),
+            nulls.offset(),
+            nulls.len(),
+        ))
+    });
+    let children = data
+        .child_data()
+        .iter()
+        .cloned()
+        .map(|child| wrap_array_data(child, lease))
+        .collect::<DataFusionResult<Vec<_>>>()?;
+    Ok(data
+        .into_builder()
+        .buffers(buffers)
+        .nulls(nulls)
+        .child_data(children)
+        .build()?)
+}
+
+fn finish_scan_array(
+    array: ArrayRef,
+    memory: Option<&QueryMemoryBudget>,
+    mut reservation: Option<QueryMemoryReservation>,
+) -> std::io::Result<ArrayRef> {
+    let Some(memory) = memory else {
+        return Ok(array);
+    };
+    let mut reservation = reservation
+        .take()
+        .expect("accounted scan arrays reserve before construction or ownership transfer");
+    let data = array.to_data();
+    drop(array);
+    let actual = checked_buffer_capacity(&data)?;
+    let reserved = usize::try_from(reservation.bytes()).map_err(|_| size_overflow())?;
+    if actual > reserved {
+        let additional = actual - reserved;
+        let used_before = memory.used();
+        reservation.record_existing(additional);
+        if memory.used() > memory.limit() as u128 {
+            return Err(std::io::Error::other(QueryMemoryError::CapacityExceeded {
+                requested: additional,
+                used: used_before,
+                limit: memory.limit(),
+                stage: SCAN_OUTPUT_STAGE,
+            }));
+        }
+    } else if reserved > actual {
+        reservation
+            .shrink(reserved - actual)
+            .map_err(std::io::Error::other)?;
+    }
+    if actual == 0 {
+        return Ok(make_array(data));
+    }
+    let lease = Arc::new(ColumnBufferLease {
+        _reservation: reservation,
+    });
+    wrap_array_data(data, &lease)
+        .map(make_array)
+        .map_err(std::io::Error::other)
+}
+
+fn build_direct_u64_array(
+    values: Vec<u64>,
+    memory: Option<&QueryMemoryBudget>,
+) -> std::io::Result<ArrayRef> {
+    let bytes = checked_mul(values.capacity(), std::mem::size_of::<u64>())?;
+    let reservation = reserve_scan_output(memory, bytes)?;
+    finish_scan_array(Arc::new(UInt64Array::from(values)), memory, reservation)
+}
+
+fn build_converted_u64_array<T>(
+    values: Vec<T>,
+    memory: Option<&QueryMemoryBudget>,
+    convert: impl Fn(T) -> u64,
+) -> std::io::Result<ArrayRef> {
+    let estimate = checked_mul(values.len(), std::mem::size_of::<u64>())?;
+    let reservation = reserve_scan_output(memory, estimate)?;
+    let mut builder = UInt64Builder::with_capacity(values.len());
+    for value in values {
+        builder.append_value(convert(value));
+    }
+    finish_scan_array(Arc::new(builder.finish()), memory, reservation)
+}
+
+fn append_hex(builder: &mut StringBuilder, value: &[u8]) -> std::io::Result<()> {
+    builder.write_str("0x").map_err(std::io::Error::other)?;
+    let mut encoded = [0u8; 512];
+    for chunk in value.chunks(encoded.len() / 2) {
+        let output = &mut encoded[..chunk.len() * 2];
+        hex::encode_to_slice(chunk, output).map_err(std::io::Error::other)?;
+        builder
+            .write_str(std::str::from_utf8(output).map_err(std::io::Error::other)?)
+            .map_err(std::io::Error::other)?;
+    }
+    builder.append_value("");
+    Ok(())
+}
+
+fn build_fixed_hex_array<T: AsRef<[u8]>>(
+    values: Vec<T>,
+    width: usize,
+    memory: Option<&QueryMemoryBudget>,
+) -> std::io::Result<ArrayRef> {
+    if values.iter().any(|value| value.as_ref().len() != width) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "fixed-width value length differs from its Arrow encoding",
+        ));
+    }
+    let value_bytes = checked_mul(values.len(), checked_add(2, checked_mul(width, 2)?)?)?;
+    check_i32_offset(value_bytes)?;
+    let estimate = string_capacity(values.len(), value_bytes, false)?;
+    let reservation = reserve_scan_output(memory, estimate)?;
+    let mut builder = StringBuilder::with_capacity(values.len(), value_bytes);
+    for value in values {
+        append_hex(&mut builder, value.as_ref())?;
+    }
+    finish_scan_array(Arc::new(builder.finish()), memory, reservation)
+}
+
+fn build_nullable_hex_array(
+    values: Vec<Option<B256>>,
+    memory: Option<&QueryMemoryBudget>,
+) -> std::io::Result<ArrayRef> {
+    let present = values.iter().filter(|value| value.is_some()).count();
+    let value_bytes = checked_mul(present, 66)?;
+    check_i32_offset(value_bytes)?;
+    let nullable = present != values.len();
+    let estimate = string_capacity(values.len(), value_bytes, nullable)?;
+    let reservation = reserve_scan_output(memory, estimate)?;
+    let mut builder = StringBuilder::with_capacity(values.len(), value_bytes);
+    for value in values {
+        match value {
+            Some(value) => append_hex(&mut builder, value.as_slice())?,
+            None => builder.append_null(),
+        }
+    }
+    finish_scan_array(Arc::new(builder.finish()), memory, reservation)
+}
+
+fn build_variable_hex_array<T: AsRef<[u8]>>(
+    values: Vec<T>,
+    memory: Option<&QueryMemoryBudget>,
+) -> std::io::Result<ArrayRef> {
+    let value_bytes = values.iter().try_fold(0usize, |total, value| {
+        checked_add(
+            total,
+            checked_add(2, checked_mul(value.as_ref().len(), 2)?)?,
+        )
+    })?;
+    check_i32_offset(value_bytes)?;
+    let estimate = string_capacity(values.len(), value_bytes, false)?;
+    let reservation = reserve_scan_output(memory, estimate)?;
+    let mut builder = StringBuilder::with_capacity(values.len(), value_bytes);
+    for value in values {
+        append_hex(&mut builder, value.as_ref())?;
+    }
+    finish_scan_array(Arc::new(builder.finish()), memory, reservation)
+}
+
+fn build_topics_array(
+    reader: &SegmentReader,
+    row_ids: &[u32],
+    memory: Option<&QueryMemoryBudget>,
+) -> std::io::Result<ArrayRef> {
     let topic0 = reader.read_nullable_b256("topic0", Some(row_ids))?;
     let topic1 = reader.read_nullable_b256("topic1", Some(row_ids))?;
     let topic2 = reader.read_nullable_b256("topic2", Some(row_ids))?;
     let topic3 = reader.read_nullable_b256("topic3", Some(row_ids))?;
 
-    let mut builder = ListBuilder::new(StringBuilder::new());
+    let topic_count = [&topic0, &topic1, &topic2, &topic3]
+        .into_iter()
+        .map(|topics| topics.iter().filter(|topic| topic.is_some()).count())
+        .try_fold(0usize, checked_add)?;
+    check_i32_offset(topic_count)?;
+    let value_bytes = checked_mul(topic_count, 66)?;
+    check_i32_offset(value_bytes)?;
+    let estimate = string_capacity(topic_count, value_bytes, false)?
+        .checked_add(offset_capacity(row_ids.len())?)
+        .ok_or_else(size_overflow)?;
+    let reservation = reserve_scan_output(memory, estimate)?;
+    let values = StringBuilder::with_capacity(topic_count, value_bytes);
+    let mut builder = ListBuilder::with_capacity(values, row_ids.len());
     for index in 0..row_ids.len() {
         for topic in [topic0[index], topic1[index], topic2[index], topic3[index]]
             .into_iter()
             .flatten()
         {
-            builder.values().append_value(to_hex_hash(topic));
+            append_hex(builder.values(), topic.as_slice())?;
         }
         builder.append(true);
     }
 
-    Ok(Arc::new(builder.finish()))
+    finish_scan_array(Arc::new(builder.finish()), memory, reservation)
 }
 
 fn supports_exact_pushdown(expr: &DataFusionExpr) -> bool {
@@ -5644,6 +5885,7 @@ fn to_hex_bytes(data: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use alloy_primitives::{Address, B256, bytes, keccak256};
+    use datafusion::arrow::array::{ListArray, StringArray};
     use datafusion::execution::memory_pool::MemoryConsumer;
     use logex_index::IndexBuilder;
     use logex_storage::PartitionManagerConfig;
@@ -5781,6 +6023,263 @@ mod tests {
             SqlQueryError::from(error),
             SqlQueryError::DataFusion(_)
         ));
+    }
+
+    #[test]
+    fn io_wrapped_memory_errors_keep_typed_capacity_classification() {
+        let capacity = QueryMemoryError::CapacityExceeded {
+            requested: 2,
+            used: 7,
+            limit: 8,
+            stage: SCAN_OUTPUT_STAGE,
+        };
+        let error = DataFusionError::IoError(std::io::Error::other(capacity));
+        assert!(matches!(
+            SqlQueryError::from(error),
+            SqlQueryError::Capacity(message) if message.contains(SCAN_OUTPUT_STAGE)
+        ));
+
+        let overflow =
+            DataFusionError::IoError(std::io::Error::other(QueryMemoryError::SizeOverflow {
+                stage: SCAN_OUTPUT_STAGE,
+            }));
+        assert!(matches!(
+            SqlQueryError::from(overflow),
+            SqlQueryError::Capacity(message) if message.contains("overflow")
+        ));
+
+        let invalid =
+            DataFusionError::IoError(std::io::Error::other(QueryMemoryError::InvalidRelease {
+                requested: 2,
+                reserved: 1,
+            }));
+        assert!(matches!(
+            SqlQueryError::from(invalid),
+            SqlQueryError::DataFusion(_)
+        ));
+    }
+
+    #[test]
+    fn scan_output_owner_preserves_null_slice_until_last_clone_drops() {
+        let budget = QueryMemoryBudget::new(QueryMemoryLimit::new(1024 * 1024).unwrap());
+        let array = build_nullable_hex_array(vec![Some(B256::repeat_byte(1)), None], Some(&budget))
+            .unwrap();
+        let charged = budget.used();
+        assert!(charged > 0);
+        let strings = array.as_any().downcast_ref::<StringArray>().unwrap();
+        assert_eq!(strings.value(0), format!("0x{}", "01".repeat(32)));
+        assert!(strings.is_null(1));
+        let slice = array.slice(1, 1);
+
+        drop(array);
+        assert_eq!(budget.used(), charged);
+        assert!(
+            slice
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap()
+                .is_null(0)
+        );
+        drop(slice);
+        assert_eq!(budget.used(), 0);
+    }
+
+    #[test]
+    fn scan_output_wrap_preserves_existing_array_and_validity_offsets() {
+        let budget = QueryMemoryBudget::new(QueryMemoryLimit::new(1024 * 1024).unwrap());
+        let original: ArrayRef = Arc::new(StringArray::from(vec![Some("zero"), None, Some("two")]));
+        let source = original.slice(1, 2);
+        drop(original);
+        let source_data = source.to_data();
+        let expected_offset = source_data.offset();
+        let expected_null_offset = source_data.nulls().unwrap().offset();
+        let bytes = checked_buffer_capacity(&source_data).unwrap();
+        drop(source_data);
+        let reservation = reserve_scan_output(Some(&budget), bytes).unwrap();
+
+        let wrapped = finish_scan_array(source, Some(&budget), reservation).unwrap();
+        let wrapped_data = wrapped.to_data();
+        assert_eq!(wrapped_data.offset(), expected_offset);
+        assert_eq!(wrapped_data.nulls().unwrap().offset(), expected_null_offset);
+        let strings = wrapped.as_any().downcast_ref::<StringArray>().unwrap();
+        assert!(strings.is_null(0));
+        assert_eq!(strings.value(1), "two");
+        drop(wrapped_data);
+        drop(wrapped);
+        assert_eq!(budget.used(), 0);
+    }
+
+    #[test]
+    fn nested_topics_child_buffer_retains_full_column_charge() {
+        let budget = QueryMemoryBudget::new(QueryMemoryLimit::new(1024 * 1024).unwrap());
+        let mut builder = ListBuilder::with_capacity(StringBuilder::with_capacity(1, 66), 1);
+        append_hex(builder.values(), B256::repeat_byte(7).as_slice()).unwrap();
+        builder.append(true);
+        let array: ArrayRef = Arc::new(builder.finish());
+        let bytes = checked_buffer_capacity(&array.to_data()).unwrap();
+        let reservation = reserve_scan_output(Some(&budget), bytes).unwrap();
+        let array = finish_scan_array(array, Some(&budget), reservation).unwrap();
+        let charge = budget.used();
+        let list = array.as_any().downcast_ref::<ListArray>().unwrap();
+        let child = list.values().clone();
+        let child_data = child.to_data();
+        let values_buffer = child_data.buffers()[1].clone();
+
+        drop(child_data);
+        drop(child);
+        drop(array);
+        assert_eq!(budget.used(), charge);
+        drop(values_buffer);
+        assert_eq!(budget.used(), 0);
+    }
+
+    #[test]
+    fn scan_output_sizes_reject_checked_and_i32_offset_overflow() {
+        assert!(check_i32_offset(i32::MAX as usize).is_ok());
+        assert!(check_i32_offset(i32::MAX as usize + 1).is_err());
+        assert!(checked_mul(usize::MAX, 2).is_err());
+        assert!(offset_capacity(usize::MAX).is_err());
+    }
+
+    #[test]
+    fn zero_length_scan_buffer_with_capacity_retains_its_charge() {
+        let budget = QueryMemoryBudget::new(QueryMemoryLimit::new(1024).unwrap());
+        let values = Vec::<u64>::with_capacity(4);
+        let array = build_direct_u64_array(values, Some(&budget)).unwrap();
+        assert_eq!(array.len(), 0);
+        assert_eq!(budget.used(), 32);
+        drop(array);
+        assert_eq!(budget.used(), 0);
+    }
+
+    #[test]
+    fn chunked_hex_encoding_matches_existing_formatter_across_boundaries() {
+        let bytes = (0u8..=255).collect::<Vec<_>>();
+        let values = vec![bytes[..255].to_vec(), bytes.clone(), {
+            let mut extended = bytes.clone();
+            extended.push(0);
+            extended
+        }];
+        let expected = values
+            .iter()
+            .map(|value| to_hex_bytes(value))
+            .collect::<Vec<_>>();
+        let array = build_variable_hex_array(values, None).unwrap();
+        let strings = array.as_any().downcast_ref::<StringArray>().unwrap();
+        assert_eq!(
+            strings.iter().map(Option::unwrap).collect::<Vec<_>>(),
+            expected
+        );
+    }
+
+    #[test]
+    fn projected_columns_release_independent_scan_output_leases() {
+        let budget = QueryMemoryBudget::new(QueryMemoryLimit::new(1024 * 1024).unwrap());
+        let large = build_variable_hex_array(vec![vec![7u8; 512]], Some(&budget)).unwrap();
+        let large_charge = budget.used();
+        let small = build_direct_u64_array(vec![1], Some(&budget)).unwrap();
+        let total = budget.used();
+        assert!(total > large_charge);
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("large", DataType::Utf8, false),
+            Field::new("small", DataType::UInt64, false),
+        ]));
+        let batch = RecordBatch::try_new(schema, vec![large.clone(), small.clone()]).unwrap();
+        let projected = batch.project(&[0]).unwrap();
+        drop(large);
+        drop(small);
+        drop(batch);
+        assert_eq!(budget.used(), large_charge);
+        drop(projected);
+        assert_eq!(budget.used(), 0);
+    }
+
+    #[test]
+    fn converted_numeric_scan_output_accepts_exact_requested_capacity() {
+        let budget = QueryMemoryBudget::new(QueryMemoryLimit::new(24).unwrap());
+        let array = build_converted_u64_array(vec![1u32, 2, 3], Some(&budget), u64::from).unwrap();
+        assert_eq!(budget.used(), 24);
+        assert_eq!(
+            array
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .unwrap()
+                .values(),
+            &[1, 2, 3]
+        );
+        drop(array);
+        assert_eq!(budget.used(), 0);
+    }
+
+    #[test]
+    fn separate_scan_outputs_contend_and_recover() {
+        let probe_budget = QueryMemoryBudget::new(QueryMemoryLimit::new(1024 * 1024).unwrap());
+        let probe = build_fixed_hex_array(
+            vec![B256::repeat_byte(2), B256::repeat_byte(3)],
+            32,
+            Some(&probe_budget),
+        )
+        .unwrap();
+        let charge = usize::try_from(probe_budget.used()).unwrap();
+        drop(probe);
+
+        let budget = QueryMemoryBudget::new(QueryMemoryLimit::new(charge).unwrap());
+        let first = build_fixed_hex_array(
+            vec![B256::repeat_byte(2), B256::repeat_byte(3)],
+            32,
+            Some(&budget),
+        )
+        .unwrap();
+        assert!(matches!(
+            build_fixed_hex_array(vec![B256::repeat_byte(4)], 32, Some(&budget)),
+            Err(error) if error.get_ref().is_some_and(|source| source.is::<QueryMemoryError>())
+        ));
+        drop(first);
+        let recovered =
+            build_fixed_hex_array(vec![B256::repeat_byte(4)], 32, Some(&budget)).unwrap();
+        drop(recovered);
+        assert_eq!(budget.used(), 0);
+    }
+
+    #[test]
+    fn every_scan_column_shape_is_charged_and_released() {
+        let (_tmp, storage) = setup_storage();
+        let path = storage.hot_partition().meta.path.clone();
+        let row_ids = [0, 1];
+        let schema = Arc::new(log_rows_schema());
+        for column in schema.fields() {
+            let name = column.name().clone();
+            let projected = Arc::new(Schema::new(vec![column.as_ref().clone()]));
+            let tiny = QueryMemoryBudget::new(QueryMemoryLimit::new(1).unwrap());
+            let error = build_projected_batch(
+                projected.clone(),
+                &path,
+                &row_ids,
+                std::slice::from_ref(&name),
+                Some(&tiny),
+            )
+            .unwrap_err();
+            assert!(
+                error
+                    .get_ref()
+                    .is_some_and(|source| source.is::<QueryMemoryError>())
+            );
+            assert_eq!(tiny.used(), 0, "{name}");
+
+            let budget = QueryMemoryBudget::new(QueryMemoryLimit::new(1024 * 1024).unwrap());
+            let batch = build_projected_batch(
+                projected,
+                &path,
+                &row_ids,
+                std::slice::from_ref(&name),
+                Some(&budget),
+            )
+            .unwrap();
+            assert!(budget.used() > 0, "{name}");
+            drop(batch);
+            assert_eq!(budget.used(), 0, "{name}");
+        }
     }
 
     #[test]
@@ -6104,6 +6603,7 @@ mod tests {
             vec!["log_index".to_owned()],
             (0..count as u32).collect(),
             Some(Arc::new(move || cancellation.load(Ordering::Relaxed))),
+            QueryMemoryBudget::new(QueryMemoryLimit::default()),
         );
         let plan: Arc<dyn ExecutionPlan> = Arc::new(
             StreamingTableExec::try_new(schema, vec![Arc::new(partition)], None, [], false, None)

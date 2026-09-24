@@ -10,6 +10,7 @@ logex-storage = { workspace = true }
 logex-index = { workspace = true }
 alloy-primitives = { workspace = true }
 async-trait = { workspace = true }
+bytes = "1"
 datafusion = { workspace = true }
 futures-util = { workspace = true }
 hex = "0.4"

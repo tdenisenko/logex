@@ -87,8 +87,9 @@ impl AppState {
     }
 
     /// Configure shared admission and accounted memory for this server.
-    /// DataFusion operators participate in memory accounting; native scans and
-    /// response allocations do not yet participate. This is not an RSS cap.
+    /// DataFusion operators and retained fallback scan output participate;
+    /// native working sets, source decoding and responses remain outside this
+    /// accounting. This is not an RSS cap.
     pub fn with_query_limits(
         storage: PartitionManager,
         subscriptions: Option<SubscriptionManager>,
