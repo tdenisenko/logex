@@ -7,7 +7,7 @@ use logex_types::{LogRow, QueryBuffer, QueryMemoryBudget, Source};
 use crate::column_artifact::ColumnArtifacts;
 use crate::native::{ColumnDescriptor, CompressionCodec, SegmentManifest};
 use crate::page::{
-    PageIndexEntry, decode_fixed_width_page_accounted, decode_u8_page_accounted, decode_u32_page,
+    PageIndexEntry, decode_fixed_width_page_accounted, decode_u8_page_accounted,
     decode_u32_page_accounted, decode_u64_page_accounted, decode_var_bytes_page_bounded,
     decode_var_bytes_page_selected_accounted, read_page_index, read_page_index_accounted,
 };
@@ -100,7 +100,7 @@ enum BatchPayload<'a> {
     Raw(RawBytesColumn),
     Paged {
         descriptor: &'a ColumnDescriptor,
-        entries: Vec<PageIndexEntry>,
+        entries: QueryBuffer<PageIndexEntry>,
     },
 }
 
@@ -108,13 +108,29 @@ enum BatchLengths<'a> {
     Raw(RawFixedColumn<4>),
     Paged {
         descriptor: &'a ColumnDescriptor,
-        entries: Vec<PageIndexEntry>,
-        cached: Option<(PageIndexEntry, Vec<u32>)>,
+        entries: QueryBuffer<PageIndexEntry>,
+        cached: Option<(PageIndexEntry, QueryBuffer<u32>)>,
     },
 }
 
-impl BatchLengths<'_> {
-    fn row(&mut self, reader: &SegmentReader, row: u64) -> io::Result<u32> {
+impl<'a> BatchLengths<'a> {
+    fn new(reader: &'a SegmentReader, memory: Option<&QueryMemoryBudget>) -> io::Result<Self> {
+        Ok(match reader.compacted_column("data_len") {
+            Some(descriptor) => Self::Paged {
+                descriptor,
+                entries: reader.read_compacted_page_index_accounted(descriptor, None, memory)?,
+                cached: None,
+            },
+            None => Self::Raw(reader.raw_fixed_accounted::<4>("data_len.col", None, memory)?),
+        })
+    }
+
+    fn row(
+        &mut self,
+        reader: &SegmentReader,
+        row: u64,
+        memory: Option<&QueryMemoryBudget>,
+    ) -> io::Result<u32> {
         let missing = || io::Error::new(io::ErrorKind::InvalidData, "data length row is missing");
         match self {
             Self::Raw(column) => column
@@ -137,10 +153,14 @@ impl BatchLengths<'_> {
                     if row < entry.first_row {
                         return Err(missing());
                     }
-                    let values = decode_u32_page(
-                        &reader.read_page_payload(descriptor, &entry)?,
+                    // No references into the old page survive this lookup.
+                    // Release it before admitting the next page's buffers.
+                    *cached = None;
+                    let values = decode_u32_page_accounted(
+                        &reader.read_page_payload_accounted(descriptor, &entry, memory)?,
                         entry.row_count as usize,
                         descriptor.codec,
+                        memory,
                     )?;
                     *cached = Some((entry, values));
                 }
@@ -160,17 +180,19 @@ struct PreparedVarBytes<'a> {
 }
 
 impl<'a> PreparedVarBytes<'a> {
-    fn new(reader: &'a SegmentReader) -> io::Result<Self> {
+    fn new(reader: &'a SegmentReader, memory: Option<&QueryMemoryBudget>) -> io::Result<Self> {
         let payload = match reader.compacted_column("data") {
             Some(descriptor) => BatchPayload::Paged {
                 descriptor,
-                entries: reader.read_compacted_page_index(descriptor, None)?,
+                entries: reader.read_compacted_page_index_accounted(descriptor, None, memory)?,
             },
             None => {
-                let column = RawBytesColumn::from_bytes(
-                    &reader.dir.join("data.col"),
-                    reader.artifacts.read("data.col")?,
-                )?;
+                let data = if memory.is_some() {
+                    reader.artifacts.read_accounted("data.col")?
+                } else {
+                    QueryBuffer::unaccounted(reader.artifacts.read("data.col")?)
+                };
+                let column = RawBytesColumn::from_accounted(&reader.dir.join("data.col"), data)?;
                 if (column.row_count() as u64) < reader.read_row_count()? {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
@@ -180,14 +202,7 @@ impl<'a> PreparedVarBytes<'a> {
                 BatchPayload::Raw(column)
             }
         };
-        let lengths = match reader.compacted_column("data_len") {
-            Some(descriptor) => BatchLengths::Paged {
-                descriptor,
-                entries: reader.read_compacted_page_index(descriptor, None)?,
-                cached: None,
-            },
-            None => BatchLengths::Raw(reader.raw_fixed::<4>("data_len.col", None)?),
-        };
+        let lengths = BatchLengths::new(reader, memory)?;
         Ok(Self { payload, lengths })
     }
 
@@ -195,22 +210,36 @@ impl<'a> PreparedVarBytes<'a> {
         &mut self,
         reader: &SegmentReader,
         remaining: &mut &[u32],
-    ) -> io::Result<Vec<Bytes>> {
+        memory: Option<&QueryMemoryBudget>,
+    ) -> io::Result<QueryBuffer<Bytes>> {
         let count;
-        let mut output = Vec::new();
-        match &self.payload {
+        let output = match &self.payload {
             BatchPayload::Raw(column) => {
                 count = remaining.len().min(crate::page::MAX_PAGE_ROWS as usize);
-                output.try_reserve_exact(count).map_err(io::Error::other)?;
-                for &row in &remaining[..count] {
+                let mut validated_row = |row: u32| {
                     let bytes = column.row(row as usize)?;
-                    if bytes.len() != self.lengths.row(reader, u64::from(row))? as usize {
+                    if bytes.len() != self.lengths.row(reader, u64::from(row), memory)? as usize {
                         return Err(io::Error::new(
                             io::ErrorKind::InvalidData,
                             "data bytes differ from their row-length metadata",
                         ));
                     }
-                    output.push(Bytes::copy_from_slice(bytes));
+                    Ok(bytes)
+                };
+                if memory.is_some() {
+                    for &row in &remaining[..count] {
+                        validated_row(row)?;
+                    }
+                    column.materialize_accounted(Some(&remaining[..count]), None, memory)?
+                } else {
+                    // Maintenance callers retain independent per-row backing;
+                    // only accounted query batches share a selected payload.
+                    let mut output =
+                        QueryBuffer::try_with_capacity(count, None, "variable result headers")?;
+                    for &row in &remaining[..count] {
+                        output.try_push(Bytes::copy_from_slice(validated_row(row)?))?;
+                    }
+                    output
                 }
             }
             BatchPayload::Paged {
@@ -228,20 +257,41 @@ impl<'a> PreparedVarBytes<'a> {
                     })?;
                 let end = entry.first_row + u64::from(entry.row_count);
                 count = remaining.partition_point(|&row| u64::from(row) < end);
-                let expected: Vec<u32> = (entry.first_row..end)
-                    .map(|row| self.lengths.row(reader, row))
-                    .collect::<io::Result<_>>()?;
-                let page = decode_var_bytes_page_bounded(
-                    &reader.read_page_payload(descriptor, entry)?,
-                    descriptor.codec,
-                    &expected,
+                let mut expected = QueryBuffer::try_with_capacity(
+                    entry.row_count as usize,
+                    memory,
+                    "variable batch companion lengths",
                 )?;
-                output.try_reserve_exact(count).map_err(io::Error::other)?;
-                for &row in &remaining[..count] {
-                    output.push(page[(u64::from(row) - entry.first_row) as usize].clone());
+                for row in entry.first_row..end {
+                    expected.try_push(self.lengths.row(reader, row, memory)?)?;
+                }
+                let encoded = reader.read_page_payload_accounted(descriptor, entry, memory)?;
+                if memory.is_some() {
+                    let mut local_rows =
+                        QueryBuffer::try_with_capacity(count, memory, "variable batch selection")?;
+                    for &row in &remaining[..count] {
+                        local_rows.try_push((u64::from(row) - entry.first_row) as usize)?;
+                    }
+                    decode_var_bytes_page_selected_accounted(
+                        &encoded,
+                        descriptor.codec,
+                        &expected,
+                        Some(&local_rows),
+                        memory,
+                    )?
+                } else {
+                    let page =
+                        decode_var_bytes_page_bounded(&encoded, descriptor.codec, &expected)?;
+                    let mut output =
+                        QueryBuffer::try_with_capacity(count, None, "variable result headers")?;
+                    for &row in &remaining[..count] {
+                        output
+                            .try_push(page[(u64::from(row) - entry.first_row) as usize].clone())?;
+                    }
+                    output
                 }
             }
-        }
+        };
         *remaining = &remaining[count..];
         Ok(output)
     }
@@ -617,14 +667,6 @@ impl SegmentReader {
             io::ErrorKind::WouldBlock,
             "segment changed repeatedly during capture; retry the read",
         ))
-    }
-
-    fn raw_fixed<const WIDTH: usize>(
-        &self,
-        path: &str,
-        row_ids: Option<&[u32]>,
-    ) -> io::Result<RawFixedColumn<WIDTH>> {
-        self.raw_fixed_accounted(path, row_ids, None)
     }
 
     fn raw_fixed_accounted<const WIDTH: usize>(
@@ -1048,6 +1090,30 @@ impl SegmentReader {
         column: &str,
         row_ids: &'a [u32],
     ) -> io::Result<impl Iterator<Item = io::Result<Vec<Bytes>>> + 'a> {
+        Ok(self
+            .var_bytes_batches_core(column, row_ids, None)?
+            .map(|batch| batch.map(|values| values.into_parts().0)))
+    }
+
+    /// As `var_bytes_batches`, with the reader's query budget retained by raw
+    /// buffers, page indexes and the current companion-length page. Each batch
+    /// owns its result headers; payload aliases retain their shared backing even
+    /// after the batch, iterator and reader are dropped. Preparation remains lazy.
+    /// Readers opened without a budget return unaccounted buffers.
+    pub fn var_bytes_batches_with_memory<'a>(
+        &'a self,
+        column: &str,
+        row_ids: &'a [u32],
+    ) -> io::Result<impl Iterator<Item = io::Result<QueryBuffer<Bytes>>> + 'a> {
+        self.var_bytes_batches_core(column, row_ids, self.memory.as_ref())
+    }
+
+    fn var_bytes_batches_core<'a>(
+        &'a self,
+        column: &str,
+        row_ids: &'a [u32],
+        memory: Option<&'a QueryMemoryBudget>,
+    ) -> io::Result<impl Iterator<Item = io::Result<QueryBuffer<Bytes>>> + 'a> {
         let visible = self.read_row_count()?;
         if column != "data"
             || row_ids.windows(2).any(|pair| pair[0] >= pair[1])
@@ -1066,12 +1132,13 @@ impl SegmentReader {
             }
             let result = (|| {
                 if prepared.is_none() {
-                    prepared = Some(PreparedVarBytes::new(self)?);
+                    prepared = Some(PreparedVarBytes::new(self, memory)?);
                 }
-                prepared
-                    .as_mut()
-                    .expect("initialized above")
-                    .next_batch(self, &mut remaining)
+                prepared.as_mut().expect("initialized above").next_batch(
+                    self,
+                    &mut remaining,
+                    memory,
+                )
             })();
             if result.is_err() {
                 remaining = &[];
@@ -1386,21 +1453,14 @@ impl SegmentReader {
             }
             return Ok(());
         }
-        let mut lengths = match self.compacted_column("data_len") {
-            Some(descriptor) => BatchLengths::Paged {
-                descriptor,
-                entries: self.read_compacted_page_index(descriptor, None)?,
-                cached: None,
-            },
-            None => BatchLengths::Raw(self.raw_fixed::<4>("data_len.col", None)?),
-        };
+        let mut lengths = BatchLengths::new(self, None)?;
         let mut decoded = 0;
         // Every companion length is checked before even looking at a data
         // payload's codec tag. Length pages have fixed, format-bound decoding.
         for row in 0..rows {
             inspection_charge(
                 &mut decoded,
-                u64::from(lengths.row(self, row)?),
+                u64::from(lengths.row(self, row, None)?),
                 max_decoded_payload_bytes,
                 "decoded_payload_bytes",
             )?;
@@ -2197,6 +2257,12 @@ impl SegmentReader {
                 .read_page_payload(descriptor, entry)
                 .map(QueryBuffer::unaccounted);
         }
+        #[cfg(test)]
+        BATCH_PAGE_READS.with_borrow_mut(|reads| {
+            if let Some(reads) = reads {
+                reads.push((descriptor.name.clone(), entry.first_row));
+            }
+        });
         let end = entry
             .offset
             .checked_add(u64::from(entry.encoded_len))
@@ -3162,9 +3228,62 @@ mod tests {
         drop(reader);
         // Only the selected payload backing survives, not source bytes or result headers.
         assert!(memory.used() >= expected[19].len() as u128);
-        assert!(memory.used() <= (expected[19].len() * 2) as u128);
+        assert!(memory.used() <= (expected[19].len() * 2 + expected[7].len()) as u128);
         assert_eq!(slice.as_ref(), &expected[19][1..]);
         drop(slice);
+        assert_eq!(memory.used(), 0);
+
+        let reader =
+            SegmentReader::open_projected_with_memory(dir, &["data"], memory.clone()).unwrap();
+        let baseline = memory.used();
+        let ids = [0, 7, 19];
+        let mut batches = reader.var_bytes_batches_with_memory("data", &ids).unwrap();
+        assert_eq!(
+            memory.used(),
+            baseline,
+            "batch preparation must remain lazy"
+        );
+        let pressure = memory
+            .reserve(
+                memory.limit() - usize::try_from(baseline).unwrap() - 1,
+                "variable batch test pressure",
+            )
+            .unwrap();
+        let error = batches.next().unwrap().unwrap_err();
+        assert!(
+            error
+                .get_ref()
+                .is_some_and(|error| error.is::<logex_types::QueryMemoryError>())
+        );
+        assert!(batches.next().is_none());
+        drop(batches);
+        drop(pressure);
+        assert_eq!(memory.used(), baseline);
+
+        let batches = reader
+            .var_bytes_batches_with_memory("data", &ids)
+            .unwrap()
+            .collect::<io::Result<Vec<_>>>()
+            .unwrap();
+        assert!(
+            batches
+                .iter()
+                .flat_map(|batch| batch.iter())
+                .eq(ids.iter().map(|&row| &expected[row as usize]))
+        );
+        let alias = batches.last().unwrap().last().unwrap().slice(1..);
+        drop(batches);
+        drop(reader);
+        assert!(memory.used() >= expected[19].len() as u128);
+        assert!(
+            memory.used()
+                <= ids
+                    .iter()
+                    .map(|&row| expected[row as usize].len() as u128)
+                    .sum()
+        );
+        assert_eq!(alias.as_ref(), &expected[19][1..]);
+        drop(alias);
         assert_eq!(memory.used(), 0);
     }
 
@@ -3311,6 +3430,14 @@ mod tests {
             );
             assert_eq!(memory.used(), 0);
         }
+        let mut batches = reader.var_bytes_batches_with_memory("data", &[19]).unwrap();
+        assert_eq!(
+            batches.next().unwrap().unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert!(batches.next().is_none());
+        drop(batches);
+        assert_eq!(memory.used(), 0);
         for codec in [
             CompressionCodec::None,
             CompressionCodec::Lz4,
@@ -3362,6 +3489,15 @@ mod tests {
                 io::ErrorKind::InvalidData
             );
             assert_eq!(memory.used(), 0);
+            let mut batches = reader.var_bytes_batches_with_memory("data", &[19]).unwrap();
+            assert_eq!(
+                batches.next().unwrap().unwrap_err().kind(),
+                io::ErrorKind::InvalidData,
+                "every companion length must be checked, including unselected rows"
+            );
+            assert!(batches.next().is_none());
+            drop(batches);
+            assert_eq!(memory.used(), 0);
         }
     }
 
@@ -3375,10 +3511,21 @@ mod tests {
         let reader =
             SegmentReader::open_projected_with_memory(raw.path(), &["data"], memory.clone())
                 .unwrap();
+        let ids = [0, 19];
+        let baseline = memory.used();
+        let mut batches = reader.var_bytes_batches_with_memory("data", &ids).unwrap();
+        assert_eq!(memory.used(), baseline);
         let mut appended = rows[0].clone();
         appended.data = bytes!("010203");
         appended.data_len = 3;
         ColumnFile::append_batch(raw.path(), &[appended], rows.len() as u64).unwrap();
+        let batch = batches.next().unwrap().unwrap();
+        assert_eq!(&*batch, &ids.map(|id| rows[id as usize].data.clone()));
+        assert!(batches.next().is_none());
+        let batch_alias = batch[0].clone();
+        drop(batch);
+        drop(batches);
+        assert!(reader.var_bytes_batches_with_memory("data", &[20]).is_err());
         let result = reader.read_var_bytes_with_memory("data", None).unwrap();
         assert_eq!(
             &*result,
@@ -3393,6 +3540,9 @@ mod tests {
         assert!(memory.used() > 0);
         assert_eq!(alias, rows[0].data);
         drop(alias);
+        assert_eq!(batch_alias, rows[0].data);
+        assert!(memory.used() > 0);
+        drop(batch_alias);
         assert_eq!(memory.used(), 0);
     }
 
@@ -4450,16 +4600,40 @@ mod tests {
             batches.concat(),
             sorted.map(|row| values[row as usize].clone())
         );
+        let expected_reads = [
+            ("data_len".to_owned(), 0),
+            ("data_len".to_owned(), 7),
+            ("data".to_owned(), 0),
+            ("data_len".to_owned(), 13),
+            ("data".to_owned(), 11),
+        ];
+        assert_eq!(reads, expected_reads);
+
+        let memory =
+            QueryMemoryBudget::new(logex_types::QueryMemoryLimit::new(1024 * 1024).unwrap());
+        let reader =
+            SegmentReader::open_projected_with_memory(&dir, &["data"], memory.clone()).unwrap();
+        BATCH_PAGE_READS.with_borrow_mut(|reads| *reads = Some(Vec::new()));
+        let batches = reader
+            .var_bytes_batches_with_memory("data", &sorted)
+            .unwrap()
+            .collect::<io::Result<Vec<_>>>()
+            .unwrap();
+        let reads = BATCH_PAGE_READS.with_borrow_mut(Option::take).unwrap();
         assert_eq!(
-            reads,
-            [
-                ("data_len".to_owned(), 0),
-                ("data_len".to_owned(), 7),
-                ("data".to_owned(), 0),
-                ("data_len".to_owned(), 13),
-                ("data".to_owned(), 11),
-            ]
+            batches.iter().map(|batch| batch.len()).collect::<Vec<_>>(),
+            [2, 2]
         );
+        assert!(
+            batches
+                .iter()
+                .flat_map(|batch| batch.iter())
+                .eq(sorted.iter().map(|&row| &values[row as usize]))
+        );
+        assert_eq!(reads, expected_reads, "accounting must not reread pages");
+        drop(batches);
+        drop(reader);
+        assert_eq!(memory.used(), 0);
     }
 
     #[test]
@@ -4468,6 +4642,11 @@ mod tests {
         let rows = vec![make_rows()[0].clone(); crate::page::MAX_PAGE_ROWS as usize + 1];
         ColumnFile::write_batch(tmp.path(), &rows).unwrap();
         let reader = SegmentReader::open_projected(tmp.path(), &["data"]).unwrap();
+        let memory =
+            QueryMemoryBudget::new(logex_types::QueryMemoryLimit::new(4 * 1024 * 1024).unwrap());
+        let accounted =
+            SegmentReader::open_projected_with_memory(tmp.path(), &["data"], memory.clone())
+                .unwrap();
         assert!(
             reader
                 .var_bytes_batches("data", &[])
@@ -4480,15 +4659,45 @@ mod tests {
                 reader.var_bytes_batches("data", ids).err().unwrap().kind(),
                 io::ErrorKind::InvalidInput
             );
+            assert_eq!(
+                accounted
+                    .var_bytes_batches_with_memory("data", ids)
+                    .err()
+                    .unwrap()
+                    .kind(),
+                io::ErrorKind::InvalidInput
+            );
         }
         assert!(reader.var_bytes_batches("source", &[0]).is_err());
+        assert!(
+            accounted
+                .var_bytes_batches_with_memory("source", &[0])
+                .is_err()
+        );
+        assert!(
+            accounted
+                .var_bytes_batches_with_memory("data", &[])
+                .unwrap()
+                .next()
+                .is_none()
+        );
         let ids: Vec<_> = (0..rows.len() as u32).collect();
         let mut batches = reader.var_bytes_batches("data", &ids).unwrap();
+        let baseline = memory.used();
+        let mut owned_batches = accounted
+            .var_bytes_batches_with_memory("data", &ids)
+            .unwrap();
+        assert_eq!(memory.used(), baseline);
         let first = batches.next().unwrap().unwrap();
         assert_eq!(
             first,
             vec![rows[0].data.clone(); crate::page::MAX_PAGE_ROWS as usize]
         );
+        let owned_first = owned_batches.next().unwrap().unwrap();
+        assert_eq!(&*owned_first, first.as_slice());
+        let alias = owned_first[0].clone();
+        drop(owned_first);
+        assert!(memory.used() > baseline);
         // Once prepared, later batches must use the validated retained buffers,
         // even if the captured files are subsequently damaged in place.
         fs::write(tmp.path().join("data.col"), []).unwrap();
@@ -4496,6 +4705,20 @@ mod tests {
         assert_eq!(batches.next().unwrap().unwrap(), [rows[0].data.clone()]);
         assert!(batches.next().is_none());
         assert!(batches.next().is_none());
+        assert_eq!(
+            &*owned_batches.next().unwrap().unwrap(),
+            &[rows[0].data.clone()]
+        );
+        assert!(owned_batches.next().is_none());
+        drop(owned_batches);
+        drop(accounted);
+        assert_eq!(alias, rows[0].data);
+        assert_eq!(
+            memory.used(),
+            (crate::page::MAX_PAGE_ROWS as usize * rows[0].data.len()) as u128
+        );
+        drop(alias);
+        assert_eq!(memory.used(), 0);
     }
 
     #[test]
@@ -4503,10 +4726,25 @@ mod tests {
         let (_tmp, dir) = compacted_fixture();
         let reader = SegmentReader::open_projected(&dir, &["data"]).unwrap();
         let mut batches = reader.var_bytes_batches("data", &[0, 19]).unwrap();
+        let memory =
+            QueryMemoryBudget::new(logex_types::QueryMemoryLimit::new(1024 * 1024).unwrap());
+        let accounted =
+            SegmentReader::open_projected_with_memory(&dir, &["data"], memory.clone()).unwrap();
+        let baseline = memory.used();
+        let mut owned_batches = accounted
+            .var_bytes_batches_with_memory("data", &[0, 19])
+            .unwrap();
+        assert_eq!(memory.used(), baseline);
         let descriptor = reader.compacted_column("data").unwrap();
         fs::write(dir.join(&descriptor.data_path), []).unwrap();
         assert!(batches.next().unwrap().is_err());
         assert!(batches.next().is_none());
+        assert!(owned_batches.next().unwrap().is_err());
+        assert!(owned_batches.next().is_none());
+        assert_eq!(memory.used(), baseline);
+        drop(owned_batches);
+        drop(accounted);
+        assert_eq!(memory.used(), 0);
         assert!(
             reader
                 .var_bytes_batches("data", &[])
@@ -4553,6 +4791,8 @@ mod tests {
                 batches.concat(),
                 ids.map(|row| rows[row as usize].data.clone())
             );
+            let expected: Vec<_> = rows.iter().map(|row| row.data.clone()).collect();
+            assert_accounted_variable_fixture(&dir, &expected);
         }
     }
 

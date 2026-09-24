@@ -14,7 +14,7 @@ bytes = "1"
 datafusion = { workspace = true }
 futures-util = { workspace = true }
 hex = "0.4"
-num-bigint = "0.4"
+num-bigint = "=0.4.6"
 roaring = "0.10"
 serde = { workspace = true }
 serde_json = { workspace = true }
