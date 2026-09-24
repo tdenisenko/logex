@@ -271,45 +271,59 @@ fn memory_error(error: QueryMemoryError) -> DataFusionError {
     DataFusionError::External(Box::new(error))
 }
 
-/// Conservative allocation bytes for an insertion-only serde_json object with `entries`
-/// unique keys on the pinned nightly-2026-08-24 standard library.
+/// Conservative allocation bytes for an insertion-only serde_json object. The
+/// pinned serde_json 1.0.149 uses BTreeMap when `preserve_order` is disabled.
+pub(crate) fn json_object_node_bytes(entries: usize) -> Result<usize> {
+    btree_node_bytes::<String, Value>(entries, SQL_RESULT_STAGE).map_err(memory_error)
+}
+
+/// Conservative node allocation bytes for an insertion-only BTreeMap with `entries`
+/// unique keys on the pinned nightly-2026-08-24 standard library. Heap allocations
+/// owned by individual keys/values require separate admission.
 ///
-/// serde_json 1.0.149 uses BTreeMap when `preserve_order` is disabled. Rust commit
-/// fb6531d550e0075b9eb9a51464f404805eec87d9 uses B=6: nodes hold 11 key/value pairs,
+/// Rust commit fb6531d550e0075b9eb9a51464f404805eec87d9 uses B=6: nodes hold 11
+/// key/value pairs,
 /// internal nodes add 12 child pointers, and every completed non-root node has at least
 /// five keys. Up to 11 entries remain in one leaf; inserting the twelfth splits it into
 /// two leaves under a new root. Insertions do not free nodes, so the completed tree also
 /// bounds transient allocations: above that first split, one root plus at most
 /// `(entries - 1) / 5` non-root nodes. Treating every node as the larger internal layout
-/// is conservative.
-pub(crate) fn json_object_node_bytes(entries: usize) -> Result<usize> {
+/// is conservative. Keep the full allowance until destruction when consuming or
+/// draining a map: this occupancy bound does not describe partially emptied nodes.
+pub(crate) fn btree_node_bytes<K, V>(
+    entries: usize,
+    stage: &'static str,
+) -> std::result::Result<usize, QueryMemoryError> {
+    let overflow = || QueryMemoryError::SizeOverflow { stage };
     if entries == 0 {
         return Ok(0);
     }
     let nodes = if entries <= 11 {
         1
     } else {
-        1usize
-            .checked_add((entries - 1) / 5)
-            .ok_or_else(size_overflow)?
+        1usize.checked_add((entries - 1) / 5).ok_or_else(overflow)?
     };
-    internal_node_upper_bytes()?
+    internal_node_upper_bytes::<K, V>(stage)?
         .checked_mul(nodes)
-        .ok_or_else(size_overflow)
+        .ok_or_else(overflow)
 }
 
-fn internal_node_upper_bytes() -> Result<usize> {
+fn internal_node_upper_bytes<K, V>(
+    stage: &'static str,
+) -> std::result::Result<usize, QueryMemoryError> {
     use std::mem::{align_of, size_of};
 
-    let max_align = align_of::<String>()
-        .max(align_of::<Value>())
+    let overflow = || QueryMemoryError::SizeOverflow { stage };
+    let max_align = align_of::<K>()
+        .max(align_of::<V>())
+        .max(align_of::<u16>())
         .max(align_of::<usize>());
     let fields = [
         size_of::<usize>(),
         size_of::<u16>(),
         size_of::<u16>(),
-        size_of::<[String; 11]>(),
-        size_of::<[Value; 11]>(),
+        size_of::<[K; 11]>(),
+        size_of::<[V; 11]>(),
         size_of::<[usize; 12]>(),
     ];
     // LeafNode has Rust layout, so do not rely on source field order. Allow maximum
@@ -318,11 +332,11 @@ fn internal_node_upper_bytes() -> Result<usize> {
     let padding = fields
         .len()
         .checked_mul(max_align - 1)
-        .ok_or_else(size_overflow)?;
+        .ok_or_else(overflow)?;
     fields
         .into_iter()
         .try_fold(padding, |total, bytes| total.checked_add(bytes))
-        .ok_or_else(size_overflow)
+        .ok_or_else(overflow)
 }
 
 fn size_overflow() -> DataFusionError {
@@ -338,12 +352,61 @@ mod tests {
 
     #[test]
     fn object_node_allowance_tracks_pinned_split_boundaries() {
-        let node = internal_node_upper_bytes().unwrap();
+        let node = internal_node_upper_bytes::<String, Value>(SQL_RESULT_STAGE).unwrap();
         assert_eq!(json_object_node_bytes(0).unwrap(), 0);
         for entries in 1..=11 {
             assert_eq!(json_object_node_bytes(entries).unwrap(), node);
         }
         assert_eq!(json_object_node_bytes(12).unwrap(), node * 3);
+    }
+
+    #[test]
+    fn typed_node_allowance_covers_pinned_layout_and_alignment() {
+        use std::mem::{MaybeUninit, size_of};
+        use std::ptr::NonNull;
+
+        // Pinned alloc/src/collections/btree/node.rs field layout. This checks
+        // the allowance against Rust's actual padding for representative types,
+        // including alignment greater than a pointer; it allocates no tree.
+        #[allow(dead_code)]
+        struct Leaf<K, V> {
+            parent: Option<NonNull<()>>,
+            parent_idx: MaybeUninit<u16>,
+            len: u16,
+            keys: [MaybeUninit<K>; 11],
+            values: [MaybeUninit<V>; 11],
+        }
+        #[repr(C)]
+        struct Internal<K, V> {
+            data: Leaf<K, V>,
+            edges: [MaybeUninit<NonNull<()>>; 12],
+        }
+        #[repr(align(64))]
+        struct AlignedKey;
+
+        fn check<K, V>() {
+            const STAGE: &str = "typed BTree nodes";
+            assert_eq!(btree_node_bytes::<K, V>(0, STAGE).unwrap(), 0);
+            assert!(btree_node_bytes::<K, V>(1, STAGE).unwrap() >= size_of::<Leaf<K, V>>());
+            assert!(
+                btree_node_bytes::<K, V>(12, STAGE).unwrap()
+                    >= 2 * size_of::<Leaf<K, V>>() + size_of::<Internal<K, V>>()
+            );
+        }
+        check::<(), ()>();
+        check::<[u8; 20], (usize, Vec<u128>)>();
+        check::<AlignedKey, u8>();
+        check::<String, Value>();
+    }
+
+    #[test]
+    fn typed_node_size_overflow_preserves_its_stage_without_allocating() {
+        assert_eq!(
+            btree_node_bytes::<[u8; 20], Vec<u128>>(usize::MAX, "group nodes"),
+            Err(QueryMemoryError::SizeOverflow {
+                stage: "group nodes"
+            })
+        );
     }
 
     #[test]

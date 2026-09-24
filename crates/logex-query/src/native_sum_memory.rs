@@ -8,6 +8,192 @@ use logex_types::{QueryBuffer, QueryMemoryBudget, QueryMemoryError, QueryMemoryR
 pub(crate) const NATIVE_SUM_STAGE: &str = "native data SUM working memory";
 const LIMB_BYTES: usize = std::mem::size_of::<usize>();
 
+/// Numeric state used inside the grouped SUM workspace. It deliberately owns
+/// no reservation: the workspace admits a whole sparse batch before any state
+/// mutates and retains one aggregate charge for every state backing.
+pub(crate) struct RestrictedSumState {
+    value: BigInt,
+    capacity_limbs: usize,
+    count: u64,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct RestrictedSumBatchPlan {
+    count: u64,
+    max_bits: usize,
+    max_bytes: usize,
+    has_data: bool,
+}
+
+pub(crate) struct RestrictedSumAdmission {
+    next_count: u64,
+    retained_limbs: usize,
+    scratch_bytes: usize,
+}
+
+impl RestrictedSumState {
+    pub(crate) fn zero() -> Self {
+        Self {
+            value: BigInt::default(),
+            capacity_limbs: 0,
+            count: 0,
+        }
+    }
+
+    pub(crate) fn value(&self) -> Option<&BigInt> {
+        (self.count > 0).then_some(&self.value)
+    }
+
+    pub(crate) fn retained_bytes(&self) -> io::Result<usize> {
+        limb_bytes(self.capacity_limbs)
+    }
+
+    pub(crate) fn plan_batch(
+        &self,
+        plan: &RestrictedSumBatchPlan,
+    ) -> io::Result<RestrictedSumAdmission> {
+        if plan.count == 0 {
+            return Ok(RestrictedSumAdmission {
+                next_count: self.count,
+                retained_limbs: self.capacity_limbs,
+                scratch_bytes: 0,
+            });
+        }
+        let next_count = self
+            .count
+            .checked_add(plan.count)
+            .ok_or_else(size_overflow)?;
+        let batch_count = usize::try_from(plan.count).map_err(|_| size_overflow())?;
+        let result_bits = usize::try_from(self.value.bits())
+            .map_err(|_| size_overflow())?
+            .max(
+                plan.max_bits
+                    .checked_add(ceil_log2(batch_count))
+                    .ok_or_else(size_overflow)?,
+            )
+            .checked_add(1)
+            .ok_or_else(size_overflow)?;
+        let input_limbs = limbs_for_bits(plan.max_bits)?;
+        let result_limbs = limbs_for_bits(result_bits)?;
+        let retained_limbs = growth_bound(
+            self.capacity_limbs.max(input_limbs),
+            result_limbs
+                .max(input_limbs)
+                .checked_add(1)
+                .ok_or_else(size_overflow)?,
+        )?;
+        let retained_bytes = limb_bytes(retained_limbs)?;
+        let input_bytes = limb_bytes(input_limbs)?;
+        let addition_peak = input_bytes
+            .checked_add(retained_bytes.checked_mul(2).ok_or_else(size_overflow)?)
+            .ok_or_else(size_overflow)?;
+        let data_constructor = if plan.has_data {
+            plan.max_bytes
+                .checked_add(input_bytes.checked_mul(2).ok_or_else(size_overflow)?)
+                .ok_or_else(size_overflow)?
+        } else {
+            0
+        };
+        Ok(RestrictedSumAdmission {
+            next_count,
+            retained_limbs,
+            scratch_bytes: addition_peak.max(data_constructor),
+        })
+    }
+
+    /// Install conservative history before mutation. Any later error is
+    /// terminal for the containing workspace, so this metadata may overstate a
+    /// partially completed batch but can never undercharge its live backing.
+    pub(crate) fn begin_batch(&mut self, admission: &RestrictedSumAdmission) {
+        self.count = admission.next_count;
+        self.capacity_limbs = admission.retained_limbs;
+    }
+
+    pub(crate) fn add_data(&mut self, bytes: &[u8]) {
+        self.value += BigInt::from(BigUint::from_bytes_be(bytes));
+    }
+
+    pub(crate) fn add_literal(&mut self, value: &BigInt) {
+        // Pinned num-bigint AddAssign<&BigInt> borrows the prepared literal;
+        // no per-row BigInt clone or transferable RHS backing is involved.
+        self.value += value;
+    }
+
+    pub(crate) fn plan_merge(&self, other: &Self) -> io::Result<RestrictedSumAdmission> {
+        let next_count = self
+            .count
+            .checked_add(other.count)
+            .ok_or_else(size_overflow)?;
+        if other.count == 0 {
+            return Ok(RestrictedSumAdmission {
+                next_count,
+                retained_limbs: self.capacity_limbs,
+                scratch_bytes: 0,
+            });
+        }
+        let rhs_limbs =
+            limbs_for_bits(usize::try_from(other.value.bits()).map_err(|_| size_overflow())?)?;
+        let result_limbs = limbs_for_bits(
+            usize::try_from(self.value.bits().max(other.value.bits()))
+                .map_err(|_| size_overflow())?
+                .checked_add(1)
+                .ok_or_else(size_overflow)?,
+        )?;
+        let retained_limbs = growth_bound(
+            self.capacity_limbs.max(rhs_limbs),
+            result_limbs
+                .max(rhs_limbs)
+                .checked_add(1)
+                .ok_or_else(size_overflow)?,
+        )?;
+        Ok(RestrictedSumAdmission {
+            next_count,
+            retained_limbs,
+            // Both existing operands remain charged. Pinned owned AddAssign
+            // forwards to borrowed AddAssign, leaving only lhs replacement /
+            // normalization scratch to admit here.
+            scratch_bytes: limb_bytes(retained_limbs)?
+                .checked_mul(2)
+                .ok_or_else(size_overflow)?,
+        })
+    }
+
+    pub(crate) fn merge_from(&mut self, mut other: Self, admission: &RestrictedSumAdmission) {
+        self.begin_batch(admission);
+        self.value += std::mem::take(&mut other.value);
+    }
+}
+
+impl RestrictedSumBatchPlan {
+    pub(crate) fn include_data(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.count = self.count.checked_add(1).ok_or_else(size_overflow)?;
+        self.max_bytes = self.max_bytes.max(bytes.len());
+        self.max_bits = self
+            .max_bits
+            .max(bytes.len().checked_mul(8).ok_or_else(size_overflow)?);
+        self.has_data = true;
+        Ok(())
+    }
+
+    pub(crate) fn include_literal(&mut self, value: &BigInt) -> io::Result<()> {
+        self.count = self.count.checked_add(1).ok_or_else(size_overflow)?;
+        self.max_bits = self
+            .max_bits
+            .max(usize::try_from(value.bits()).map_err(|_| size_overflow())?);
+        Ok(())
+    }
+}
+
+impl RestrictedSumAdmission {
+    pub(crate) fn retained_bytes(&self) -> io::Result<usize> {
+        limb_bytes(self.retained_limbs)
+    }
+
+    pub(crate) fn scratch_bytes(&self) -> usize {
+        self.scratch_bytes
+    }
+}
+
 /// Restricted owner for the one accumulator used by the ungrouped data-only
 /// native SUM path. `capacity_limbs` follows the pinned num-bigint 0.4.6 Vec
 /// growth proof and the nightly-2026-08-24 RawVec behavior audited with it; both
@@ -412,6 +598,52 @@ mod tests {
         assert_eq!(multiplication_scratch(32).unwrap(), 0);
         assert!(multiplication_scratch(33).unwrap() > 0);
         assert!(multiplication_scratch(257).unwrap() > multiplication_scratch(256).unwrap());
+    }
+
+    #[test]
+    fn restricted_state_covers_leading_zero_signed_carry_and_merge() {
+        let leading = [0, 0, 0, 0, 1];
+        let negative = BigInt::from(-2);
+        let mut plan = RestrictedSumBatchPlan::default();
+        plan.include_data(&leading).unwrap();
+        plan.include_literal(&negative).unwrap();
+        let mut state = RestrictedSumState::zero();
+        let admission = state.plan_batch(&plan).unwrap();
+        assert!(admission.retained_bytes().unwrap() >= LIMB_BYTES * 4);
+        state.begin_batch(&admission);
+        state.add_data(&leading);
+        state.add_literal(&negative);
+        assert_eq!(state.value(), Some(&BigInt::from(-1)));
+
+        let carry = vec![0xff; LIMB_BYTES];
+        let mut source_plan = RestrictedSumBatchPlan::default();
+        source_plan.include_data(&carry).unwrap();
+        source_plan.include_data(&[1]).unwrap();
+        let mut source = RestrictedSumState::zero();
+        let source_admission = source.plan_batch(&source_plan).unwrap();
+        source.begin_batch(&source_admission);
+        source.add_data(&carry);
+        source.add_data(&[1]);
+        let expected = BigInt::from(BigUint::from_bytes_be(&carry)) + 1;
+        assert_eq!(source.value(), Some(&expected));
+
+        let merge = state.plan_merge(&source).unwrap();
+        state.merge_from(source, &merge);
+        assert_eq!(state.value(), Some(&(expected - 1)));
+        assert_eq!(state.count, 4);
+    }
+
+    #[test]
+    fn merge_uses_normalized_rhs_length_not_historical_capacity() {
+        let destination = RestrictedSumState::zero();
+        let source = RestrictedSumState {
+            value: BigInt::from(1),
+            capacity_limbs: 1_024,
+            count: 1,
+        };
+        let admission = destination.plan_merge(&source).unwrap();
+        assert!(admission.retained_limbs < source.capacity_limbs);
+        assert!(admission.retained_limbs <= 4);
     }
 
     #[test]
