@@ -60,7 +60,9 @@ use serde_json::{Map, Value};
 
 use logex_storage::native::{NativeLogFilter, TopicConstraint};
 use logex_storage::{PartitionManager, SegmentReader};
-use logex_types::{QueryMemoryBudget, QueryMemoryError, QueryMemoryLimit, QueryMemoryReservation};
+use logex_types::{
+    QueryBuffer, QueryMemoryBudget, QueryMemoryError, QueryMemoryLimit, QueryMemoryReservation,
+};
 
 use crate::json::{record_batches_to_json, unique_names};
 use crate::lexer::{Token, tokenize};
@@ -758,9 +760,10 @@ pub async fn execute_sql_page_on_snapshot(
 /// Execute one SQL page against a captured storage view using a shared memory budget.
 ///
 /// The view remains subject to optimistic invalidation checks. DataFusion operator
-/// reservations and retained Arrow output from custom scans participate in `memory`
-/// across concurrent queries. Query planning, scan source/decoder allocations, native
-/// fast paths, and result conversion are outside this accounting milestone. Infallible
+/// reservations, retained fixed-column scan sources, and retained Arrow output from
+/// custom scans participate in `memory` across concurrent queries. Query planning,
+/// variable-column scan sources, remaining decoder scratch, native fast paths, and
+/// result conversion are outside this accounting milestone. Infallible
 /// DataFusion allocations are recorded even when
 /// they temporarily exceed the configured limit. Disk spilling is disabled, so a
 /// fallible operator reservation that exceeds available capacity returns
@@ -4732,7 +4735,12 @@ fn build_projected_batch(
             projection.push(column.as_str());
         }
     }
-    let reader = SegmentReader::open_projected(dir, &projection)?;
+    let reader = match memory {
+        Some(memory) => {
+            SegmentReader::open_projected_with_memory(dir, &projection, memory.clone())?
+        }
+        None => SegmentReader::open_projected(dir, &projection)?,
+    };
     let mut arrays = Vec::with_capacity(projected_columns.len());
 
     for column in projected_columns {
@@ -4749,44 +4757,53 @@ fn read_column_as_array(
     memory: Option<&QueryMemoryBudget>,
 ) -> std::io::Result<ArrayRef> {
     let array: ArrayRef = match column {
-        "block_number" => {
-            build_direct_u64_array(reader.read_u64("block_number", Some(row_ids))?, memory)?
-        }
-        "block_hash" => {
-            build_fixed_hex_array(reader.read_b256("block_hash", Some(row_ids))?, 32, memory)?
-        }
-        "timestamp" => {
-            build_direct_u64_array(reader.read_u64("timestamp", Some(row_ids))?, memory)?
-        }
-        "tx_hash" => {
-            build_fixed_hex_array(reader.read_b256("tx_hash", Some(row_ids))?, 32, memory)?
-        }
+        "block_number" => build_direct_u64_array(
+            read_u64_source(reader, "block_number", row_ids, memory)?,
+            memory,
+        )?,
+        "block_hash" => build_fixed_hex_array(
+            read_b256_source(reader, "block_hash", row_ids, memory)?,
+            32,
+            memory,
+        )?,
+        "timestamp" => build_direct_u64_array(
+            read_u64_source(reader, "timestamp", row_ids, memory)?,
+            memory,
+        )?,
+        "tx_hash" => build_fixed_hex_array(
+            read_b256_source(reader, "tx_hash", row_ids, memory)?,
+            32,
+            memory,
+        )?,
         "tx_index" => build_converted_u64_array(
-            reader.read_u32("tx_index", Some(row_ids))?,
+            read_u32_source(reader, "tx_index", row_ids, memory)?,
             memory,
             |value| value as u64,
         )?,
         "log_index" => build_converted_u64_array(
-            reader.read_u32("log_index", Some(row_ids))?,
+            read_u32_source(reader, "log_index", row_ids, memory)?,
             memory,
             |value| value as u64,
         )?,
-        "address" => build_fixed_hex_array(reader.read_address(Some(row_ids))?, 20, memory)?,
-        "topic0" | "topic1" | "topic2" | "topic3" => {
-            build_nullable_hex_array(reader.read_nullable_b256(column, Some(row_ids))?, memory)?
+        "address" => {
+            build_fixed_hex_array(read_address_source(reader, row_ids, memory)?, 20, memory)?
         }
+        "topic0" | "topic1" | "topic2" | "topic3" => build_nullable_hex_array(
+            read_nullable_b256_source(reader, column, row_ids, memory)?,
+            memory,
+        )?,
         "topics" => build_topics_array(reader, row_ids, memory)?,
         "data" => build_variable_hex_array(reader.read_var_bytes("data", Some(row_ids))?, memory)?,
         "data_len" => build_converted_u64_array(
-            reader.read_u32("data_len", Some(row_ids))?,
+            read_u32_source(reader, "data_len", row_ids, memory)?,
             memory,
             |value| value as u64,
         )?,
-        "source" => {
-            build_converted_u64_array(reader.read_u8("source", Some(row_ids))?, memory, |value| {
-                value as u64
-            })?
-        }
+        "source" => build_converted_u64_array(
+            read_u8_source(reader, "source", row_ids, memory)?,
+            memory,
+            |value| value as u64,
+        )?,
         other => {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -4796,6 +4813,89 @@ fn read_column_as_array(
     };
 
     Ok(array)
+}
+
+fn read_u64_source(
+    reader: &SegmentReader,
+    column: &str,
+    row_ids: &[u32],
+    memory: Option<&QueryMemoryBudget>,
+) -> std::io::Result<QueryBuffer<u64>> {
+    match memory {
+        Some(_) => reader.read_u64_with_memory(column, Some(row_ids)),
+        None => reader
+            .read_u64(column, Some(row_ids))
+            .map(QueryBuffer::unaccounted),
+    }
+}
+
+fn read_u32_source(
+    reader: &SegmentReader,
+    column: &str,
+    row_ids: &[u32],
+    memory: Option<&QueryMemoryBudget>,
+) -> std::io::Result<QueryBuffer<u32>> {
+    match memory {
+        Some(_) => reader.read_u32_with_memory(column, Some(row_ids)),
+        None => reader
+            .read_u32(column, Some(row_ids))
+            .map(QueryBuffer::unaccounted),
+    }
+}
+
+fn read_u8_source(
+    reader: &SegmentReader,
+    column: &str,
+    row_ids: &[u32],
+    memory: Option<&QueryMemoryBudget>,
+) -> std::io::Result<QueryBuffer<u8>> {
+    match memory {
+        Some(_) => reader.read_u8_with_memory(column, Some(row_ids)),
+        None => reader
+            .read_u8(column, Some(row_ids))
+            .map(QueryBuffer::unaccounted),
+    }
+}
+
+fn read_b256_source(
+    reader: &SegmentReader,
+    column: &str,
+    row_ids: &[u32],
+    memory: Option<&QueryMemoryBudget>,
+) -> std::io::Result<QueryBuffer<B256>> {
+    match memory {
+        Some(_) => reader.read_b256_with_memory(column, Some(row_ids)),
+        None => reader
+            .read_b256(column, Some(row_ids))
+            .map(QueryBuffer::unaccounted),
+    }
+}
+
+fn read_nullable_b256_source(
+    reader: &SegmentReader,
+    column: &str,
+    row_ids: &[u32],
+    memory: Option<&QueryMemoryBudget>,
+) -> std::io::Result<QueryBuffer<Option<B256>>> {
+    match memory {
+        Some(_) => reader.read_nullable_b256_with_memory(column, Some(row_ids)),
+        None => reader
+            .read_nullable_b256(column, Some(row_ids))
+            .map(QueryBuffer::unaccounted),
+    }
+}
+
+fn read_address_source(
+    reader: &SegmentReader,
+    row_ids: &[u32],
+    memory: Option<&QueryMemoryBudget>,
+) -> std::io::Result<QueryBuffer<Address>> {
+    match memory {
+        Some(_) => reader.read_address_with_memory(Some(row_ids)),
+        None => reader
+            .read_address(Some(row_ids))
+            .map(QueryBuffer::unaccounted),
+    }
 }
 
 const SCAN_OUTPUT_STAGE: &str = "sql arrow scan output";
@@ -4965,23 +5065,29 @@ fn finish_scan_array(
 }
 
 fn build_direct_u64_array(
-    values: Vec<u64>,
+    values: QueryBuffer<u64>,
     memory: Option<&QueryMemoryBudget>,
 ) -> std::io::Result<ArrayRef> {
-    let bytes = checked_mul(values.capacity(), std::mem::size_of::<u64>())?;
-    let reservation = reserve_scan_output(memory, bytes)?;
+    let (values, reservation) = values.into_parts();
+    let reservation = match reservation {
+        Some(reservation) => Some(reservation),
+        None => reserve_scan_output(
+            memory,
+            checked_mul(values.capacity(), std::mem::size_of::<u64>())?,
+        )?,
+    };
     finish_scan_array(Arc::new(UInt64Array::from(values)), memory, reservation)
 }
 
-fn build_converted_u64_array<T>(
-    values: Vec<T>,
+fn build_converted_u64_array<T: Copy>(
+    values: QueryBuffer<T>,
     memory: Option<&QueryMemoryBudget>,
     convert: impl Fn(T) -> u64,
 ) -> std::io::Result<ArrayRef> {
     let estimate = checked_mul(values.len(), std::mem::size_of::<u64>())?;
     let reservation = reserve_scan_output(memory, estimate)?;
     let mut builder = UInt64Builder::with_capacity(values.len());
-    for value in values {
+    for &value in values.iter() {
         builder.append_value(convert(value));
     }
     finish_scan_array(Arc::new(builder.finish()), memory, reservation)
@@ -5002,7 +5108,7 @@ fn append_hex(builder: &mut StringBuilder, value: &[u8]) -> std::io::Result<()> 
 }
 
 fn build_fixed_hex_array<T: AsRef<[u8]>>(
-    values: Vec<T>,
+    values: QueryBuffer<T>,
     width: usize,
     memory: Option<&QueryMemoryBudget>,
 ) -> std::io::Result<ArrayRef> {
@@ -5017,14 +5123,14 @@ fn build_fixed_hex_array<T: AsRef<[u8]>>(
     let estimate = string_capacity(values.len(), value_bytes, false)?;
     let reservation = reserve_scan_output(memory, estimate)?;
     let mut builder = StringBuilder::with_capacity(values.len(), value_bytes);
-    for value in values {
+    for value in values.iter() {
         append_hex(&mut builder, value.as_ref())?;
     }
     finish_scan_array(Arc::new(builder.finish()), memory, reservation)
 }
 
 fn build_nullable_hex_array(
-    values: Vec<Option<B256>>,
+    values: QueryBuffer<Option<B256>>,
     memory: Option<&QueryMemoryBudget>,
 ) -> std::io::Result<ArrayRef> {
     let present = values.iter().filter(|value| value.is_some()).count();
@@ -5034,7 +5140,7 @@ fn build_nullable_hex_array(
     let estimate = string_capacity(values.len(), value_bytes, nullable)?;
     let reservation = reserve_scan_output(memory, estimate)?;
     let mut builder = StringBuilder::with_capacity(values.len(), value_bytes);
-    for value in values {
+    for value in values.iter() {
         match value {
             Some(value) => append_hex(&mut builder, value.as_slice())?,
             None => builder.append_null(),
@@ -5068,10 +5174,10 @@ fn build_topics_array(
     row_ids: &[u32],
     memory: Option<&QueryMemoryBudget>,
 ) -> std::io::Result<ArrayRef> {
-    let topic0 = reader.read_nullable_b256("topic0", Some(row_ids))?;
-    let topic1 = reader.read_nullable_b256("topic1", Some(row_ids))?;
-    let topic2 = reader.read_nullable_b256("topic2", Some(row_ids))?;
-    let topic3 = reader.read_nullable_b256("topic3", Some(row_ids))?;
+    let topic0 = read_nullable_b256_source(reader, "topic0", row_ids, memory)?;
+    let topic1 = read_nullable_b256_source(reader, "topic1", row_ids, memory)?;
+    let topic2 = read_nullable_b256_source(reader, "topic2", row_ids, memory)?;
+    let topic3 = read_nullable_b256_source(reader, "topic3", row_ids, memory)?;
 
     let topic_count = [&topic0, &topic1, &topic2, &topic3]
         .into_iter()
@@ -6062,8 +6168,11 @@ mod tests {
     #[test]
     fn scan_output_owner_preserves_null_slice_until_last_clone_drops() {
         let budget = QueryMemoryBudget::new(QueryMemoryLimit::new(1024 * 1024).unwrap());
-        let array = build_nullable_hex_array(vec![Some(B256::repeat_byte(1)), None], Some(&budget))
-            .unwrap();
+        let array = build_nullable_hex_array(
+            QueryBuffer::unaccounted(vec![Some(B256::repeat_byte(1)), None]),
+            Some(&budget),
+        )
+        .unwrap();
         let charged = budget.used();
         assert!(charged > 0);
         let strings = array.as_any().downcast_ref::<StringArray>().unwrap();
@@ -6145,11 +6254,55 @@ mod tests {
     fn zero_length_scan_buffer_with_capacity_retains_its_charge() {
         let budget = QueryMemoryBudget::new(QueryMemoryLimit::new(1024).unwrap());
         let values = Vec::<u64>::with_capacity(4);
-        let array = build_direct_u64_array(values, Some(&budget)).unwrap();
+        let array =
+            build_direct_u64_array(QueryBuffer::unaccounted(values), Some(&budget)).unwrap();
         assert_eq!(array.len(), 0);
         assert_eq!(budget.used(), 32);
         drop(array);
         assert_eq!(budget.used(), 0);
+    }
+
+    #[test]
+    fn accounted_direct_u64_transfers_storage_charge_without_copy_or_double_charge() {
+        let budget = QueryMemoryBudget::new(QueryMemoryLimit::new(16).unwrap());
+        let mut values =
+            QueryBuffer::<u64>::try_with_capacity(2, Some(&budget), "fixed column output").unwrap();
+        values.try_extend([7, 9]).unwrap();
+        let source_pointer = values.as_ptr();
+        assert_eq!(budget.used(), 16);
+
+        let array = build_direct_u64_array(values, Some(&budget)).unwrap();
+        let integers = array.as_any().downcast_ref::<UInt64Array>().unwrap();
+        assert_eq!(integers.values().as_ptr(), source_pointer);
+        assert_eq!(integers.values(), &[7, 9]);
+        assert_eq!(budget.used(), 16);
+
+        drop(array);
+        assert_eq!(budget.used(), 0);
+    }
+
+    #[test]
+    fn converted_scan_output_reserves_while_source_charge_is_live() {
+        let constrained = QueryMemoryBudget::new(QueryMemoryLimit::new(23).unwrap());
+        let mut source =
+            QueryBuffer::<u32>::try_with_capacity(2, Some(&constrained), "fixed column output")
+                .unwrap();
+        source.try_extend([1, 2]).unwrap();
+        assert_eq!(constrained.used(), 8);
+        assert!(matches!(
+            build_converted_u64_array(source, Some(&constrained), u64::from),
+            Err(error) if error.get_ref().is_some_and(|inner| inner.is::<QueryMemoryError>())
+        ));
+        assert_eq!(constrained.used(), 0);
+
+        let exact = QueryMemoryBudget::new(QueryMemoryLimit::new(24).unwrap());
+        let mut source =
+            QueryBuffer::<u32>::try_with_capacity(2, Some(&exact), "fixed column output").unwrap();
+        source.try_extend([1, 2]).unwrap();
+        let array = build_converted_u64_array(source, Some(&exact), u64::from).unwrap();
+        assert_eq!(exact.used(), 16);
+        drop(array);
+        assert_eq!(exact.used(), 0);
     }
 
     #[test]
@@ -6177,7 +6330,8 @@ mod tests {
         let budget = QueryMemoryBudget::new(QueryMemoryLimit::new(1024 * 1024).unwrap());
         let large = build_variable_hex_array(vec![vec![7u8; 512]], Some(&budget)).unwrap();
         let large_charge = budget.used();
-        let small = build_direct_u64_array(vec![1], Some(&budget)).unwrap();
+        let small =
+            build_direct_u64_array(QueryBuffer::unaccounted(vec![1]), Some(&budget)).unwrap();
         let total = budget.used();
         assert!(total > large_charge);
 
@@ -6198,7 +6352,12 @@ mod tests {
     #[test]
     fn converted_numeric_scan_output_accepts_exact_requested_capacity() {
         let budget = QueryMemoryBudget::new(QueryMemoryLimit::new(24).unwrap());
-        let array = build_converted_u64_array(vec![1u32, 2, 3], Some(&budget), u64::from).unwrap();
+        let array = build_converted_u64_array(
+            QueryBuffer::unaccounted(vec![1u32, 2, 3]),
+            Some(&budget),
+            u64::from,
+        )
+        .unwrap();
         assert_eq!(budget.used(), 24);
         assert_eq!(
             array
@@ -6216,7 +6375,7 @@ mod tests {
     fn separate_scan_outputs_contend_and_recover() {
         let probe_budget = QueryMemoryBudget::new(QueryMemoryLimit::new(1024 * 1024).unwrap());
         let probe = build_fixed_hex_array(
-            vec![B256::repeat_byte(2), B256::repeat_byte(3)],
+            QueryBuffer::unaccounted(vec![B256::repeat_byte(2), B256::repeat_byte(3)]),
             32,
             Some(&probe_budget),
         )
@@ -6226,18 +6385,26 @@ mod tests {
 
         let budget = QueryMemoryBudget::new(QueryMemoryLimit::new(charge).unwrap());
         let first = build_fixed_hex_array(
-            vec![B256::repeat_byte(2), B256::repeat_byte(3)],
+            QueryBuffer::unaccounted(vec![B256::repeat_byte(2), B256::repeat_byte(3)]),
             32,
             Some(&budget),
         )
         .unwrap();
         assert!(matches!(
-            build_fixed_hex_array(vec![B256::repeat_byte(4)], 32, Some(&budget)),
+            build_fixed_hex_array(
+                QueryBuffer::unaccounted(vec![B256::repeat_byte(4)]),
+                32,
+                Some(&budget),
+            ),
             Err(error) if error.get_ref().is_some_and(|source| source.is::<QueryMemoryError>())
         ));
         drop(first);
-        let recovered =
-            build_fixed_hex_array(vec![B256::repeat_byte(4)], 32, Some(&budget)).unwrap();
+        let recovered = build_fixed_hex_array(
+            QueryBuffer::unaccounted(vec![B256::repeat_byte(4)]),
+            32,
+            Some(&budget),
+        )
+        .unwrap();
         drop(recovered);
         assert_eq!(budget.used(), 0);
     }
@@ -6312,21 +6479,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fallback_engine_reports_capacity_and_releases_budget() {
-        let (_tmp, storage) = setup_storage();
-        let budget = QueryMemoryBudget::new(QueryMemoryLimit::new(1).unwrap());
-        let result = execute_sql_page_on_snapshot_with_memory(
-            "SELECT block_number FROM logs ORDER BY block_number + 0",
-            StorageSnapshot::from_storage(&storage),
-            storage.head_block().unwrap_or(0),
-            SqlQueryPage::default(),
-            None,
-            budget.clone(),
-        )
-        .await;
+    async fn raw_and_bundled_fallback_scans_report_source_capacity_and_release_budget() {
+        let raw = setup_storage();
+        let bundled = setup_bundled_storage();
+        for (kind, (_tmp, storage)) in [("raw", raw), ("bundled", bundled)] {
+            let budget = QueryMemoryBudget::new(QueryMemoryLimit::new(1).unwrap());
+            let result = execute_sql_page_on_snapshot_with_memory(
+                "SELECT block_number FROM logs ORDER BY block_number + 0",
+                StorageSnapshot::from_storage(&storage),
+                storage.head_block().unwrap_or(0),
+                SqlQueryPage::default(),
+                None,
+                budget.clone(),
+            )
+            .await;
 
-        assert!(matches!(result, Err(SqlQueryError::Capacity(_))));
-        assert_eq!(budget.used(), 0);
+            assert!(
+                matches!(
+                    result,
+                    Err(SqlQueryError::Capacity(message))
+                        if !message.contains(SCAN_OUTPUT_STAGE)
+                            && (message.contains("fixed")
+                                || message.contains("bundle")
+                                || message.contains("captured column"))
+                ),
+                "{kind} fixed source should reject before Arrow output"
+            );
+            assert_eq!(budget.used(), 0, "{kind}");
+        }
     }
 
     #[tokio::test]
@@ -6734,6 +6914,19 @@ mod tests {
         .unwrap();
         storage.write_batch(&make_test_rows()).unwrap();
         IndexBuilder::build_all_indexes(&storage.hot_partition().meta.path).unwrap();
+        storage.checkpoint().unwrap();
+        (tmp, storage)
+    }
+
+    fn setup_bundled_storage() -> (TempDir, PartitionManager) {
+        let tmp = TempDir::new().unwrap();
+        let mut storage = PartitionManager::open(PartitionManagerConfig {
+            data_dir: tmp.path().to_path_buf(),
+            partition_target_rows: 1_000_000,
+            compaction_safety_margin_blocks: 2_048,
+        })
+        .unwrap();
+        storage.write_historical_batch(&make_test_rows()).unwrap();
         storage.checkpoint().unwrap();
         (tmp, storage)
     }

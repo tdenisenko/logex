@@ -165,7 +165,7 @@ async fn scan_output_capacity_is_typed_across_protocols_and_recovers() {
     let service = LogExGrpcService::new(Arc::clone(&state));
     let held = state
         .query_memory
-        .reserve(limit - 32, "test fixture")
+        .reserve(limit - 96, "test fixture")
         .unwrap();
 
     let response = rest::handle_query(
@@ -202,4 +202,51 @@ async fn scan_output_capacity_is_typed_across_protocols_and_recovers() {
     assert_eq!(response.get_ref().row_count, 1);
     drop(response);
     assert_eq!(state.query_memory.used(), 0);
+}
+
+#[tokio::test]
+async fn fixed_scan_source_capacity_is_typed_and_does_not_latch_storage() {
+    let limit = 1024 * 1024;
+    let (_temp, state) = state_with_log(limit);
+    let service = LogExGrpcService::new(Arc::clone(&state));
+    let held = state
+        .query_memory
+        .reserve(limit - 1, "test fixture")
+        .unwrap();
+
+    let response = rest::handle_query(
+        State(Arc::clone(&state)),
+        axum::Json(rest_request(SCAN_QUERY)),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = json(response).await;
+    assert_eq!(body["status"], "query_capacity");
+    assert_eq!(body["resource"], "memory");
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap()
+            .contains("captured column bytes")
+    );
+    assert!(state.storage_failure().is_none());
+
+    let status = service
+        .query(tonic::Request::new(grpc_request(SCAN_QUERY)))
+        .await
+        .unwrap_err();
+    assert_eq!(status.code(), tonic::Code::ResourceExhausted);
+    assert!(status.message().contains("captured column bytes"));
+    assert!(state.storage_failure().is_none());
+
+    drop(held);
+    assert_eq!(state.query_memory.used(), 0);
+    let response = service
+        .query(tonic::Request::new(grpc_request(SCAN_QUERY)))
+        .await
+        .unwrap();
+    assert_eq!(response.get_ref().row_count, 1);
+    drop(response);
+    assert_eq!(state.query_memory.used(), 0);
+    assert!(state.storage_failure().is_none());
 }
