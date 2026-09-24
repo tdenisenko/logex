@@ -199,3 +199,219 @@
  }
  
  #[cfg(test)]
+--- a/src/string/repeat.rs
++++ b/src/string/repeat.rs
+@@ -114,27 +114,15 @@
+     match args[0].data_type() {
+         Utf8View => {
+             let string_view_array = args[0].as_string_view();
+-            repeat_impl::<i32, &StringViewArray>(
+-                string_view_array,
+-                number_array,
+-                i32::MAX as usize,
+-            )
++            repeat_impl::<i32, &StringViewArray>(string_view_array, number_array)
+         }
+         Utf8 => {
+             let string_array = args[0].as_string::<i32>();
+-            repeat_impl::<i32, &GenericStringArray<i32>>(
+-                string_array,
+-                number_array,
+-                i32::MAX as usize,
+-            )
++            repeat_impl::<i32, &GenericStringArray<i32>>(string_array, number_array)
+         }
+         LargeUtf8 => {
+             let string_array = args[0].as_string::<i64>();
+-            repeat_impl::<i64, &GenericStringArray<i64>>(
+-                string_array,
+-                number_array,
+-                i64::MAX as usize,
+-            )
++            repeat_impl::<i64, &GenericStringArray<i64>>(string_array, number_array)
+         }
+         other => exec_err!(
+             "Unsupported data type {other:?} for function repeat. \
+@@ -143,29 +131,24 @@
+     }
+ }
+ 
+-fn repeat_impl<'a, T, S>(
+-    string_array: S,
+-    number_array: &Int64Array,
+-    max_str_len: usize,
+-) -> Result<ArrayRef>
++fn repeat_impl<'a, T, S>(string_array: S, number_array: &Int64Array) -> Result<ArrayRef>
+ where
+     T: OffsetSizeTrait,
+     S: StringArrayType<'a>,
+ {
++    // Arrow offsets and Vec's allocation limit both constrain the output.
++    let max_output_size = T::MAX_OFFSET.min(isize::MAX as usize);
+     let mut total_capacity = 0;
+     string_array.iter().zip(number_array.iter()).try_for_each(
+         |(string, number)| -> Result<(), DataFusionError> {
+             match (string, number) {
+                 (Some(string), Some(number)) if number >= 0 => {
+-                    let item_capacity = string.len() * number as usize;
+-                    if item_capacity > max_str_len {
+-                        return exec_err!(
+-                            "string size overflow on repeat, max size is {}, but got {}",
+-                            max_str_len,
+-                            number as usize * string.len()
+-                        );
+-                    }
+-                    total_capacity += item_capacity;
++                    total_capacity = checked_repeat_capacity(
++                        total_capacity,
++                        string.len(),
++                        number,
++                        max_output_size,
++                    )?;
+                 }
+                 _ => (),
+             }
+@@ -180,7 +163,16 @@
+         |(string, number)| -> Result<(), DataFusionError> {
+             match (string, number) {
+                 (Some(string), Some(number)) if number >= 0 => {
+-                    builder.append_value(string.repeat(number as usize));
++                    if string.is_empty() {
++                        // Do not reject an empty result merely because the
++                        // repetition count is wider than usize on this target.
++                        builder.append_value("");
++                    } else {
++                        let repetitions = usize::try_from(number).map_err(|_| {
++                            repeat_capacity_error(max_output_size, string.len(), number)
++                        })?;
++                        builder.append_value(string.repeat(repetitions));
++                    }
+                 }
+                 (Some(_), Some(_)) => builder.append_value(""),
+                 _ => builder.append_null(),
+@@ -193,16 +185,63 @@
+     Ok(Arc::new(array) as ArrayRef)
+ }
+ 
++fn checked_repeat_capacity(
++    total: usize,
++    string_len: usize,
++    number: i64,
++    max_offset: usize,
++) -> Result<usize> {
++    if string_len == 0 {
++        return Ok(total);
++    }
++    let repetitions = usize::try_from(number)
++        .map_err(|_| repeat_capacity_error(max_offset, string_len, number))?;
++    let item = string_len
++        .checked_mul(repetitions)
++        .ok_or_else(|| repeat_capacity_error(max_offset, string_len, number))?;
++    if item > max_offset {
++        return Err(DataFusionError::Execution(format!(
++            "string size overflow on repeat, max size is {max_offset}, but got {item}"
++        )));
++    }
++    let combined = total.checked_add(item).ok_or_else(|| {
++        DataFusionError::Execution(format!(
++            "string size overflow on repeat, max size is {max_offset}, but cumulative size overflowed"
++        ))
++    })?;
++    if combined > max_offset {
++        return Err(DataFusionError::Execution(format!(
++            "string size overflow on repeat, max size is {max_offset}, but got cumulative size {combined}"
++        )));
++    }
++    Ok(combined)
++}
++
++fn repeat_capacity_error(
++    max_offset: usize,
++    string_len: usize,
++    number: i64,
++) -> DataFusionError {
++    DataFusionError::Execution(format!(
++        "string size overflow on repeat, max size is {max_offset}, but requested {string_len} bytes repeated {number} times"
++    ))
++}
++
+ #[cfg(test)]
+ mod tests {
+-    use arrow::array::{Array, StringArray};
+-    use arrow::datatypes::DataType::Utf8;
++    use std::sync::Arc;
++
++    use arrow::array::{
++        Array, ArrayRef, AsArray, Int64Array, LargeStringArray, StringArray,
++        StringViewArray,
++    };
++    use arrow::datatypes::DataType::{LargeUtf8, Utf8};
+ 
+     use datafusion_common::ScalarValue;
+     use datafusion_common::{exec_err, Result};
+     use datafusion_expr::{ColumnarValue, ScalarUDFImpl};
+ 
+-    use crate::string::repeat::RepeatFunc;
++    use crate::string::repeat::{checked_repeat_capacity, repeat, RepeatFunc};
+     use crate::utils::test::test_function;
+ 
+     #[test]
+@@ -292,4 +331,57 @@
+ 
+         Ok(())
+     }
+-}
++
++    #[test]
++    fn checked_capacity_rejects_item_and_cumulative_offset_overflow() {
++        let max_utf8 = i32::MAX as usize;
++        assert_eq!(
++            checked_repeat_capacity(0, max_utf8, 1, max_utf8).unwrap(),
++            max_utf8
++        );
++        assert!(checked_repeat_capacity(max_utf8, 1, 1, max_utf8).is_err());
++
++        let max_large =
++            <i64 as arrow::array::OffsetSizeTrait>::MAX_OFFSET.min(isize::MAX as usize);
++        assert_eq!(
++            checked_repeat_capacity(0, max_large, 1, max_large).unwrap(),
++            max_large
++        );
++        assert!(checked_repeat_capacity(max_large, 1, 1, max_large).is_err());
++        assert!(checked_repeat_capacity(0, 4, 1_i64 << 62, max_utf8).is_err());
++    }
++
++    #[test]
++    fn repeat_preserves_supported_array_and_null_semantics() {
++        let counts: ArrayRef = Arc::new(Int64Array::from(vec![Some(2), None, Some(2)]));
++        for strings in [
++            Arc::new(StringArray::from(vec![Some("é"), Some("cd"), None])) as ArrayRef,
++            Arc::new(StringViewArray::from(vec![Some("é"), Some("cd"), None]))
++                as ArrayRef,
++            Arc::new(LargeStringArray::from(vec![Some("é"), Some("cd"), None]))
++                as ArrayRef,
++        ] {
++            let output = repeat(&[strings, Arc::clone(&counts)]).unwrap();
++            match output.data_type() {
++                Utf8 => {
++                    let values = output.as_string::<i32>();
++                    assert_eq!(values.value(0), "éé");
++                    assert!(values.is_null(1));
++                    assert!(values.is_null(2));
++                }
++                LargeUtf8 => {
++                    let values = output.as_string::<i64>();
++                    assert_eq!(values.value(0), "éé");
++                    assert!(values.is_null(1));
++                    assert!(values.is_null(2));
++                }
++                other => panic!("unexpected repeat output: {other}"),
++            }
++        }
++
++        let strings: ArrayRef = Arc::new(StringArray::from(vec![Some("")]));
++        let counts: ArrayRef = Arc::new(Int64Array::from(vec![i64::MAX]));
++        let output = repeat(&[strings, counts]).unwrap();
++        assert_eq!(output.as_string::<i32>().value(0), "");
++    }
++}

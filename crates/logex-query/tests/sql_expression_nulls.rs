@@ -217,6 +217,39 @@ async fn exact_sum_residual_and_case_preserve_scalar_nulls() {
             assert_eq!(actual.rows, vec![json!({"total": "10"})], "{sql}");
         }
     }
+
+    for (sql, expected) in [
+        (
+            "SELECT SUM(data) AS total FROM logs \
+             WHERE repeat('', 9223372036854775807) = '' AND log_index = 0",
+            "10",
+        ),
+        (
+            "SELECT SUM(CASE WHEN repeat('', 9223372036854775807) = '' \
+             THEN data ELSE 0 END) AS total FROM logs",
+            "60",
+        ),
+    ] {
+        let actual = execute_sql(sql, &storage, storage.head_block())
+            .await
+            .unwrap();
+        assert_eq!(actual.rows, vec![json!({"total": expected})], "{sql}");
+    }
+
+    for sql in [
+        "SELECT SUM(data) AS total FROM logs \
+         WHERE repeat('abcd', 4611686018427387904) = ''",
+        "SELECT SUM(CASE WHEN repeat('abcd', 4611686018427387904) = '' \
+         THEN data ELSE 0 END) AS total FROM logs",
+    ] {
+        let error = execute_sql(sql, &storage, storage.head_block())
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("string size overflow"),
+            "{sql}: {error}"
+        );
+    }
 }
 
 #[test]

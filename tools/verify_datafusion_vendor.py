@@ -140,8 +140,9 @@ PACKAGES = (
         modified={
             PurePosixPath("src/math/log.rs"): "b3d76a25320c6dc314aedf61384da5d16b6b353b9bfa582263eeac81b329216b",
             PurePosixPath("src/math/power.rs"): "4fc54d4122bc364dd18bfa69e3e004f2b5835201dba1893c59adc4cdb8f56180",
+            PurePosixPath("src/string/repeat.rs"): "1e2ce71337a991328c36600d01011d95ddf489543d74445ab38ac679bbe4012a",
         },
-        patch_checksum="ade213cbee5eb6d236b0f66e702d6b09040d11c253e9c96fc21b28500fd18241",
+        patch_checksum="21aca9096c228ceea82b6358362bde9a4959cae40ae53bf7ea7ba406f9d7ef64",
     ),
 
 

@@ -90,6 +90,12 @@ jobs:
           --config max_width=90,skip_children=true
           vendor/datafusion-physical-plan/src/sorts/sort.rs
 
+      - name: Check patched string function formatting
+        run: >-
+          rustfmt --check --edition 2021
+          --config max_width=90,skip_children=true
+          vendor/datafusion-functions/src/string/repeat.rs
+
       - name: Check query bitmap formatting
         run: >-
           rustfmt --check --edition 2021 --config skip_children=true
@@ -154,6 +160,11 @@ jobs:
         env:
           CARGO_TARGET_DIR: target/physical-plan-regressions
         run: cargo test --manifest-path vendor/datafusion-physical-plan/Cargo.toml --lib logex_internal --locked
+      - name: Check pinned string capacity regressions
+        env:
+          # Reuse compiled DataFusion dependencies from the execution checks.
+          CARGO_TARGET_DIR: target/physical-plan-regressions
+        run: cargo test --manifest-path vendor/datafusion-functions/Cargo.toml --lib string::repeat::tests --locked
       - name: Check pinned gossipsub regressions
         env:
           CARGO_TARGET_DIR: target/gossipsub-regressions
@@ -213,6 +224,11 @@ jobs:
         env:
           CARGO_TARGET_DIR: target/physical-plan-regressions
         run: cargo test --manifest-path vendor/datafusion-physical-plan/Cargo.toml --lib logex_internal --locked
+      - name: Check pinned string capacity regressions
+        env:
+          # Reuse compiled DataFusion dependencies from the execution checks.
+          CARGO_TARGET_DIR: target/physical-plan-regressions
+        run: cargo test --manifest-path vendor/datafusion-functions/Cargo.toml --lib string::repeat::tests --locked
       - name: Check pinned gossipsub regressions
         env:
           CARGO_TARGET_DIR: target/gossipsub-regressions
