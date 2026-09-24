@@ -538,9 +538,57 @@ pub(crate) fn candidate_row_ids_with_memory(
     memory: &QueryMemoryBudget,
     cancel: Option<&crate::QueryCancelCheck>,
 ) -> std::io::Result<QueryBuffer<u32>> {
+    candidate_row_ids_for_filters_with_memory(
+        dir,
+        std::slice::from_ref(filter),
+        use_indexes,
+        visible_rows,
+        memory,
+        cancel,
+    )
+}
+
+/// Open one accounted source capture and build the sorted, unique union for
+/// every filter. The returned row IDs retain their own charge; the projected
+/// source owner is released before this function returns.
+pub(crate) fn candidate_row_ids_for_filters_with_memory(
+    dir: &Path,
+    filters: &[NativeLogFilter],
+    use_indexes: bool,
+    visible_rows: u64,
+    memory: &QueryMemoryBudget,
+    cancel: Option<&crate::QueryCancelCheck>,
+) -> std::io::Result<QueryBuffer<u32>> {
     check_candidate_canceled(cancel)?;
-    let columns = candidate_refinement_columns(filter);
+    if filters.is_empty() {
+        return QueryBuffer::try_with_capacity(0, Some(memory), "query candidate row ids");
+    }
+    let columns = candidate_refinement_columns_for_filters(filters);
     let reader = SegmentReader::open_projected_with_memory(dir, &columns, memory.clone())?;
+    candidate_row_ids_for_filters_on_reader_with_memory(
+        dir,
+        &reader,
+        filters,
+        use_indexes,
+        visible_rows,
+        memory,
+        cancel,
+    )
+}
+
+/// Build a sorted, unique candidate union while borrowing a caller-owned,
+/// accounted source capture. This lets grouped queries retain the same source
+/// owner for later projection without reopening or recapturing the segment.
+pub(crate) fn candidate_row_ids_for_filters_on_reader_with_memory(
+    dir: &Path,
+    reader: &SegmentReader,
+    filters: &[NativeLogFilter],
+    use_indexes: bool,
+    visible_rows: u64,
+    memory: &QueryMemoryBudget,
+    cancel: Option<&crate::QueryCancelCheck>,
+) -> std::io::Result<QueryBuffer<u32>> {
+    check_candidate_canceled(cancel)?;
     let physical_rows = reader.read_row_count()?;
     if visible_rows > physical_rows {
         return Err(io::Error::new(
@@ -554,23 +602,87 @@ pub(crate) fn candidate_row_ids_with_memory(
             "segment row count exceeds candidate address space",
         ));
     }
-    if filter.min_topic_count > filter.topics.len() || visible_rows == 0 {
+    if filters.is_empty() || visible_rows == 0 {
+        return QueryBuffer::try_with_capacity(0, Some(memory), "query candidate row ids");
+    }
+    if filters
+        .iter()
+        .all(|filter| filter.min_topic_count > filter.topics.len())
+    {
         return QueryBuffer::try_with_capacity(0, Some(memory), "query candidate row ids");
     }
 
     let checkpoint = if use_indexes {
-        IndexReadCheckpoint::open(dir, &reader)?
+        IndexReadCheckpoint::open(dir, reader)?
     } else {
         None
     };
-    if let Some(checkpoint) = checkpoint.as_ref()
-        && erc20_event_bloom_excludes_with_memory(&dir.join("indexes"), checkpoint, filter, memory)?
-    {
-        return QueryBuffer::try_with_capacity(0, Some(memory), "query candidate row ids");
-    }
+    let bloom_exclusions = match checkpoint.as_ref() {
+        Some(checkpoint) => erc20_event_bloom_exclusions_with_memory(
+            &dir.join("indexes"),
+            checkpoint,
+            filters,
+            memory,
+            cancel,
+        )?,
+        None => AccountedBloomExclusions::None,
+    };
     check_candidate_canceled(cancel)?;
 
-    let mut row_ids = if let Some(checkpoint) = checkpoint.as_ref() {
+    let common_canonical =
+        filters
+            .first()
+            .map(|filter| filter.canonical_only)
+            .filter(|canonical| {
+                filters
+                    .iter()
+                    .all(|filter| filter.canonical_only == *canonical)
+            });
+    let hoist_canonical = filters.len() > 1 && common_canonical == Some(true);
+    let mut union = QueryBuffer::try_with_capacity(0, Some(memory), "query candidate row ids")?;
+    for (index, filter) in filters.iter().enumerate() {
+        check_candidate_canceled(cancel)?;
+        let bloom_excluded = bloom_exclusions.excludes(index);
+        let row_ids = candidate_row_ids_for_filter_on_accounted_reader(
+            dir,
+            reader,
+            checkpoint.as_ref(),
+            filter,
+            bloom_excluded,
+            !hoist_canonical,
+            physical_rows,
+            visible_rows,
+            memory,
+            cancel,
+        )?;
+        union = merge_sorted_candidate_ids(union, row_ids, memory, cancel)?;
+    }
+    drop(bloom_exclusions);
+    if hoist_canonical && !union.is_empty() {
+        union = retain_canonical_candidate_ids(reader, visible_rows, Some(union), memory, cancel)?;
+    }
+    check_candidate_canceled(cancel)?;
+    Ok(union)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn candidate_row_ids_for_filter_on_accounted_reader(
+    dir: &Path,
+    reader: &SegmentReader,
+    checkpoint: Option<&IndexReadCheckpoint>,
+    filter: &NativeLogFilter,
+    bloom_excluded: bool,
+    apply_canonical: bool,
+    physical_rows: u64,
+    visible_rows: u64,
+    memory: &QueryMemoryBudget,
+    cancel: Option<&crate::QueryCancelCheck>,
+) -> io::Result<QueryBuffer<u32>> {
+    if filter.min_topic_count > filter.topics.len() || bloom_excluded {
+        return QueryBuffer::try_with_capacity(0, Some(memory), "query candidate row ids");
+    }
+
+    let mut row_ids = if let Some(checkpoint) = checkpoint {
         build_index_candidate_set(dir, checkpoint, filter, Some(memory), cancel)?
             .map(|candidate| candidate.into_row_ids(memory))
             .transpose()?
@@ -587,77 +699,232 @@ pub(crate) fn candidate_row_ids_with_memory(
                 "index row exceeds its source segment",
             ));
         }
-        ids.retain(|row| u64::from(*row) < visible_rows);
+        ids.truncate(ids.partition_point(|row| u64::from(*row) < visible_rows));
         if ids.is_empty() {
             return Ok(row_ids.expect("candidate selection exists"));
         }
     }
 
-    refine_candidate_ids_from_columns(&reader, filter, visible_rows, memory, cancel, &mut row_ids)?;
+    refine_candidate_ids_from_columns(reader, filter, visible_rows, memory, cancel, &mut row_ids)?;
     check_candidate_canceled(cancel)?;
-    if filter.canonical_only {
-        let canonical = reader.read_canonical_accounted()?;
-        if canonical.len() < visible_rows {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "canonical bitmap is shorter than the captured query snapshot",
-            ));
-        }
-        if let Some(ids) = &mut row_ids {
-            ids.retain(|row| canonical.is_present(u64::from(*row)));
-        } else {
-            let matches = (0..visible_rows)
-                .filter(|row| canonical.is_present(*row))
-                .count();
-            let mut ids =
-                QueryBuffer::try_with_capacity(matches, Some(memory), "query candidate row ids")?;
-            ids.try_extend(
-                (0..visible_rows)
-                    .filter(|row| canonical.is_present(*row))
-                    .map(|row| row as u32),
-            )?;
-            row_ids = Some(ids);
-        }
+    if apply_canonical && filter.canonical_only {
+        row_ids = Some(retain_canonical_candidate_ids(
+            reader,
+            visible_rows,
+            row_ids,
+            memory,
+            cancel,
+        )?);
     }
     check_candidate_canceled(cancel)?;
     row_ids.map_or_else(|| query_row_id_range(visible_rows, memory), Ok)
 }
 
+fn retain_canonical_candidate_ids(
+    reader: &SegmentReader,
+    visible_rows: u64,
+    mut row_ids: Option<QueryBuffer<u32>>,
+    memory: &QueryMemoryBudget,
+    cancel: Option<&crate::QueryCancelCheck>,
+) -> io::Result<QueryBuffer<u32>> {
+    check_candidate_canceled(cancel)?;
+    let canonical = reader.read_canonical_accounted()?;
+    if canonical.len() < visible_rows {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "canonical bitmap is shorter than the captured query snapshot",
+        ));
+    }
+    if let Some(mut ids) = row_ids.take() {
+        let mut retained = 0usize;
+        for position in 0..ids.len() {
+            if position.is_multiple_of(256) {
+                check_candidate_canceled(cancel)?;
+            }
+            let row = ids[position];
+            if canonical.is_present(u64::from(row)) {
+                ids[retained] = row;
+                retained += 1;
+            }
+        }
+        ids.truncate(retained);
+        return Ok(ids);
+    }
+
+    let mut matches = 0usize;
+    for row in 0..visible_rows {
+        if row.is_multiple_of(256) {
+            check_candidate_canceled(cancel)?;
+        }
+        if canonical.is_present(row) {
+            matches = matches.checked_add(1).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "canonical candidate count exceeds address space",
+                )
+            })?;
+        }
+    }
+    let mut ids = QueryBuffer::try_with_capacity(matches, Some(memory), "query candidate row ids")?;
+    for row in 0..visible_rows {
+        if row.is_multiple_of(256) {
+            check_candidate_canceled(cancel)?;
+        }
+        if canonical.is_present(row) {
+            ids.try_push(row as u32)?;
+        }
+    }
+    Ok(ids)
+}
+
 fn candidate_refinement_columns(filter: &NativeLogFilter) -> Vec<&'static str> {
+    candidate_refinement_columns_for_filters(std::slice::from_ref(filter))
+}
+
+/// Return the deterministic physical-column union needed to refine every
+/// filter from one projected segment capture.
+pub(crate) fn candidate_refinement_columns_for_filters(
+    filters: &[NativeLogFilter],
+) -> Vec<&'static str> {
     let mut columns = Vec::new();
     for (name, needed) in [
-        ("address", !filter.addresses.is_empty()),
-        ("block_hash", filter.block_hash.is_some()),
+        (
+            "address",
+            filters.iter().any(|filter| !filter.addresses.is_empty()),
+        ),
+        (
+            "block_hash",
+            filters.iter().any(|filter| filter.block_hash.is_some()),
+        ),
         (
             "block_number",
-            filter.from_block.is_some() || filter.to_block.is_some(),
+            filters
+                .iter()
+                .any(|filter| filter.from_block.is_some() || filter.to_block.is_some()),
         ),
         (
             "timestamp",
-            filter.from_timestamp.is_some() || filter.to_timestamp.is_some(),
+            filters
+                .iter()
+                .any(|filter| filter.from_timestamp.is_some() || filter.to_timestamp.is_some()),
         ),
-        ("data_len", filter.data_len.is_some()),
+        (
+            "data_len",
+            filters.iter().any(|filter| filter.data_len.is_some()),
+        ),
         (
             "data",
-            filter.data_min.is_some()
-                || filter.data_max.is_some()
-                || !filter.data_not_equals.is_empty(),
+            filters.iter().any(|filter| {
+                filter.data_min.is_some()
+                    || filter.data_max.is_some()
+                    || !filter.data_not_equals.is_empty()
+            }),
         ),
     ] {
         if needed {
             columns.push(name);
         }
     }
-    for (index, (name, constraint)) in ["topic0", "topic1", "topic2", "topic3"]
+    for (index, name) in ["topic0", "topic1", "topic2", "topic3"]
         .into_iter()
-        .zip(&filter.topics)
         .enumerate()
     {
-        if index < filter.min_topic_count || !matches!(constraint, TopicConstraint::Any) {
+        if filters.iter().any(|filter| {
+            index < filter.min_topic_count || !matches!(&filter.topics[index], TopicConstraint::Any)
+        }) {
             columns.push(name);
         }
     }
     columns
+}
+
+fn merge_sorted_candidate_ids(
+    left: QueryBuffer<u32>,
+    right: QueryBuffer<u32>,
+    memory: &QueryMemoryBudget,
+    cancel: Option<&crate::QueryCancelCheck>,
+) -> io::Result<QueryBuffer<u32>> {
+    if left.is_empty() {
+        return Ok(right);
+    }
+    if right.is_empty() {
+        return Ok(left);
+    }
+
+    let mut left_index = 0usize;
+    let mut right_index = 0usize;
+    let mut union_len = 0usize;
+    let mut steps = 0usize;
+    while left_index < left.len() || right_index < right.len() {
+        if steps.is_multiple_of(256) {
+            check_candidate_canceled(cancel)?;
+        }
+        match (left.get(left_index), right.get(right_index)) {
+            (Some(left_value), Some(right_value)) if left_value == right_value => {
+                left_index += 1;
+                right_index += 1;
+            }
+            (Some(left_value), Some(right_value)) if left_value < right_value => left_index += 1,
+            (Some(_), Some(_)) => right_index += 1,
+            (Some(_), None) => left_index += 1,
+            (None, Some(_)) => right_index += 1,
+            (None, None) => break,
+        }
+        union_len = union_len.checked_add(1).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "candidate union exceeds address space",
+            )
+        })?;
+        steps += 1;
+    }
+    check_candidate_canceled(cancel)?;
+    if union_len == left.len() {
+        return Ok(left);
+    }
+    if union_len == right.len() {
+        return Ok(right);
+    }
+
+    let mut union =
+        QueryBuffer::try_with_capacity(union_len, Some(memory), "query candidate row ids")?;
+    left_index = 0;
+    right_index = 0;
+    steps = 0;
+    while left_index < left.len() || right_index < right.len() {
+        if steps.is_multiple_of(256) {
+            check_candidate_canceled(cancel)?;
+        }
+        let value = match (left.get(left_index), right.get(right_index)) {
+            (Some(left_value), Some(right_value)) if left_value == right_value => {
+                left_index += 1;
+                right_index += 1;
+                *left_value
+            }
+            (Some(left_value), Some(right_value)) if left_value < right_value => {
+                left_index += 1;
+                *left_value
+            }
+            (Some(_), Some(right_value)) => {
+                right_index += 1;
+                *right_value
+            }
+            (Some(left_value), None) => {
+                left_index += 1;
+                *left_value
+            }
+            (None, Some(right_value)) => {
+                right_index += 1;
+                *right_value
+            }
+            (None, None) => break,
+        };
+        union.try_push(value)?;
+        steps += 1;
+    }
+    debug_assert_eq!(union.len(), union_len);
+    check_candidate_canceled(cancel)?;
+    Ok(union)
 }
 
 fn check_candidate_canceled(cancel: Option<&crate::QueryCancelCheck>) -> io::Result<()> {
@@ -685,6 +952,7 @@ fn refine_candidate_ids_with_values<T>(
     row_ids: &mut Option<QueryBuffer<u32>>,
     row_count: u64,
     memory: &QueryMemoryBudget,
+    cancel: Option<&crate::QueryCancelCheck>,
     values: &QueryBuffer<T>,
     matches: impl Fn(&T) -> bool,
 ) -> io::Result<()> {
@@ -695,12 +963,18 @@ fn refine_candidate_ids_with_values<T>(
                 "selected candidate column returned the wrong row count",
             ));
         }
-        let mut position = 0usize;
-        ids.retain(|_| {
-            let keep = matches(&values[position]);
-            position += 1;
-            keep
-        });
+        let mut retained = 0usize;
+        for position in 0..ids.len() {
+            if position.is_multiple_of(256) {
+                check_candidate_canceled(cancel)?;
+            }
+            if matches(&values[position]) {
+                let row = ids[position];
+                ids[retained] = row;
+                retained += 1;
+            }
+        }
+        ids.truncate(retained);
         return Ok(());
     }
 
@@ -719,9 +993,25 @@ fn refine_candidate_ids_with_values<T>(
     // Appends after snapshot capture may make the pinned physical column longer
     // than this query's visible prefix. Never admit those later rows.
     let visible = &values[..expected];
-    let count = visible.iter().filter(|value| matches(value)).count();
+    let mut count = 0usize;
+    for (position, value) in visible.iter().enumerate() {
+        if position.is_multiple_of(256) {
+            check_candidate_canceled(cancel)?;
+        }
+        if matches(value) {
+            count = count.checked_add(1).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "candidate row count exceeds address space",
+                )
+            })?;
+        }
+    }
     let mut ids = QueryBuffer::try_with_capacity(count, Some(memory), "query candidate row ids")?;
     for (row, value) in visible.iter().enumerate() {
+        if row.is_multiple_of(256) {
+            check_candidate_canceled(cancel)?;
+        }
         if matches(value) {
             ids.try_push(row as u32)?;
         }
@@ -742,7 +1032,9 @@ fn refine_candidate_ids_from_columns(
         ($read:expr, $matches:expr) => {{
             check_candidate_canceled(cancel)?;
             let values = $read?;
-            refine_candidate_ids_with_values(row_ids, row_count, memory, &values, $matches)?;
+            refine_candidate_ids_with_values(
+                row_ids, row_count, memory, cancel, &values, $matches,
+            )?;
             if row_ids.as_ref().is_some_and(|ids| ids.is_empty()) {
                 return Ok(());
             }
@@ -1419,17 +1711,52 @@ fn erc20_event_bloom_excludes(
     Ok(false)
 }
 
-fn erc20_event_bloom_excludes_with_memory(
+#[derive(Debug)]
+enum AccountedBloomExclusions {
+    None,
+    Single(bool),
+    Multiple(QueryBuffer<u8>),
+}
+
+impl AccountedBloomExclusions {
+    fn excludes(&self, index: usize) -> bool {
+        match self {
+            Self::None => false,
+            Self::Single(excluded) => {
+                debug_assert_eq!(index, 0);
+                *excluded
+            }
+            Self::Multiple(exclusions) => exclusions[index] != 0,
+        }
+    }
+}
+
+fn erc20_event_bloom_exclusions_with_memory(
     index_dir: &Path,
     checkpoint: &IndexReadCheckpoint,
-    filter: &NativeLogFilter,
+    filters: &[NativeLogFilter],
     memory: &QueryMemoryBudget,
-) -> io::Result<bool> {
+    cancel: Option<&crate::QueryCancelCheck>,
+) -> io::Result<AccountedBloomExclusions> {
     let common_bloom_path = index_dir.join(ERC20_EVENTS_BLOOM_FILE);
     if let Some(file_id) = checkpoint.artifact_id(ERC20_EVENTS_BLOOM_FILE) {
         let mut reader =
             Erc20EventBloomReader::open_bound_with_memory(&common_bloom_path, file_id, memory)?;
-        return erc20_event_bloom_reader_excludes(&mut reader, filter);
+        if let [filter] = filters {
+            check_candidate_canceled(cancel)?;
+            return erc20_event_bloom_reader_excludes(&mut reader, filter)
+                .map(AccountedBloomExclusions::Single);
+        }
+        let mut exclusions =
+            QueryBuffer::try_with_capacity(filters.len(), Some(memory), "event bloom exclusions")?;
+        for filter in filters {
+            check_candidate_canceled(cancel)?;
+            exclusions.try_push(u8::from(erc20_event_bloom_reader_excludes(
+                &mut reader,
+                filter,
+            )?))?;
+        }
+        return Ok(AccountedBloomExclusions::Multiple(exclusions));
     }
 
     let legacy_transfer_bloom_path = index_dir.join(TRANSFER_BLOOM_FILE);
@@ -1439,38 +1766,24 @@ fn erc20_event_bloom_excludes_with_memory(
             file_id,
             memory,
         )?;
-        return legacy_transfer_bloom_reader_excludes(&mut reader, filter);
+        if let [filter] = filters {
+            check_candidate_canceled(cancel)?;
+            return legacy_transfer_bloom_reader_excludes(&mut reader, filter)
+                .map(AccountedBloomExclusions::Single);
+        }
+        let mut exclusions =
+            QueryBuffer::try_with_capacity(filters.len(), Some(memory), "event bloom exclusions")?;
+        for filter in filters {
+            check_candidate_canceled(cancel)?;
+            exclusions.try_push(u8::from(legacy_transfer_bloom_reader_excludes(
+                &mut reader,
+                filter,
+            )?))?;
+        }
+        return Ok(AccountedBloomExclusions::Multiple(exclusions));
     }
 
-    Ok(false)
-}
-
-pub(crate) fn erc20_event_bloom_exclusions(
-    index_dir: &Path,
-    checkpoint: &IndexReadCheckpoint,
-    filters: &[NativeLogFilter],
-) -> io::Result<Option<Vec<bool>>> {
-    let common_bloom_path = index_dir.join(ERC20_EVENTS_BLOOM_FILE);
-    if let Some(file_id) = checkpoint.artifact_id(ERC20_EVENTS_BLOOM_FILE) {
-        let mut reader = Erc20EventBloomReader::open_bound(&common_bloom_path, file_id)?;
-        return filters
-            .iter()
-            .map(|filter| erc20_event_bloom_reader_excludes(&mut reader, filter))
-            .collect::<io::Result<Vec<_>>>()
-            .map(Some);
-    }
-
-    let legacy_transfer_bloom_path = index_dir.join(TRANSFER_BLOOM_FILE);
-    if let Some(file_id) = checkpoint.artifact_id(TRANSFER_BLOOM_FILE) {
-        let mut reader = TransferBloomReader::open_bound(&legacy_transfer_bloom_path, file_id)?;
-        return filters
-            .iter()
-            .map(|filter| legacy_transfer_bloom_reader_excludes(&mut reader, filter))
-            .collect::<io::Result<Vec<_>>>()
-            .map(Some);
-    }
-
-    Ok(None)
+    Ok(AccountedBloomExclusions::None)
 }
 
 fn erc20_event_bloom_reader_excludes(
@@ -2124,6 +2437,320 @@ mod tests {
     }
 
     #[test]
+    fn accounted_multi_filter_candidates_share_capture_and_match_oracle() {
+        #[derive(Clone, Copy)]
+        enum Indexes {
+            None,
+            Partial,
+            Full,
+        }
+
+        let prototype = make_test_rows()[0].clone();
+        let rows: Vec<_> = (0..4)
+            .map(|index| LogRow {
+                block_number: 100 + index,
+                block_hash: B256::repeat_byte(index as u8 + 1),
+                timestamp: prototype.timestamp + index,
+                log_index: index as u32,
+                address: [
+                    Address::repeat_byte(0xaa),
+                    Address::repeat_byte(0xbb),
+                    Address::repeat_byte(0xaa),
+                    Address::repeat_byte(0xcc),
+                ][index as usize],
+                ..prototype.clone()
+            })
+            .collect();
+        let canonical = [true, false, true, true];
+        let filters = vec![
+            NativeLogFilter {
+                canonical_only: true,
+                addresses: vec![Address::repeat_byte(0xaa)],
+                ..NativeLogFilter::default()
+            },
+            NativeLogFilter {
+                canonical_only: true,
+                from_block: Some(102),
+                to_block: Some(103),
+                ..NativeLogFilter::default()
+            },
+        ];
+        assert_eq!(
+            candidate_refinement_columns_for_filters(&filters),
+            vec!["address", "block_number"]
+        );
+
+        for indexes in [Indexes::None, Indexes::Partial, Indexes::Full] {
+            let tmp = tempfile::tempdir().unwrap();
+            let mut storage = PartitionManager::open(PartitionManagerConfig {
+                data_dir: tmp.path().to_path_buf(),
+                partition_target_rows: 1_000_000,
+                compaction_safety_margin_blocks: 2_048,
+            })
+            .unwrap();
+            storage.write_batch(&rows).unwrap();
+            assert_eq!(storage.mark_non_canonical(rows[1].block_hash).unwrap(), 1);
+            let path = storage.hot_partition().meta.path.clone();
+            match indexes {
+                Indexes::None => {}
+                Indexes::Partial => {
+                    IndexBuilder::build_indexes(&path, IndexBuildProfile::Erc20Transfer).unwrap();
+                }
+                Indexes::Full => IndexBuilder::build_all_indexes(&path).unwrap(),
+            }
+            storage.checkpoint().unwrap();
+
+            let expected: Vec<u32> = rows
+                .iter()
+                .enumerate()
+                .filter_map(|(row, value)| {
+                    (filters.iter().any(|filter| {
+                        matches_native_filter(value, filter)
+                            && (!filter.canonical_only || canonical[row])
+                    }))
+                    .then_some(row as u32)
+                })
+                .collect();
+            let memory = QueryMemoryBudget::new(QueryMemoryLimit::new(16 * 1024 * 1024).unwrap());
+            let columns = candidate_refinement_columns_for_filters(&filters);
+            let reader =
+                SegmentReader::open_projected_with_memory(&path, &columns, memory.clone()).unwrap();
+            let ids = candidate_row_ids_for_filters_on_reader_with_memory(
+                &path,
+                &reader,
+                &filters,
+                !matches!(indexes, Indexes::None),
+                rows.len() as u64,
+                &memory,
+                None,
+            )
+            .unwrap();
+            assert_eq!(&*ids, expected);
+            assert_eq!(
+                memory.used(),
+                (ids.capacity() * size_of::<u32>()) as u128,
+                "the returned candidate allocation must retain its own charge"
+            );
+            drop(ids);
+            assert_eq!(
+                memory.used(),
+                0,
+                "a raw captured reader has no scalable buffer until a read"
+            );
+
+            let mixed_filters = vec![
+                NativeLogFilter {
+                    canonical_only: false,
+                    addresses: vec![Address::repeat_byte(0xbb)],
+                    ..NativeLogFilter::default()
+                },
+                filters[0].clone(),
+            ];
+            let ids = candidate_row_ids_for_filters_on_reader_with_memory(
+                &path,
+                &reader,
+                &mixed_filters,
+                !matches!(indexes, Indexes::None),
+                rows.len() as u64,
+                &memory,
+                None,
+            )
+            .unwrap();
+            assert_eq!(&*ids, &[0, 1, 2]);
+            drop(ids);
+            assert_eq!(memory.used(), 0);
+            drop(reader);
+            assert_eq!(memory.used(), 0);
+        }
+    }
+
+    #[test]
+    fn accounted_candidate_union_charges_overlap_and_releases_on_failure() {
+        fn ids(values: &[u32], memory: &QueryMemoryBudget) -> QueryBuffer<u32> {
+            let mut ids = QueryBuffer::try_with_capacity(
+                values.len(),
+                Some(memory),
+                "query candidate row ids",
+            )
+            .unwrap();
+            ids.try_extend(values.iter().copied()).unwrap();
+            ids
+        }
+
+        let constrained =
+            QueryMemoryBudget::new(QueryMemoryLimit::new(size_of::<[u32; 8]>() - 1).unwrap());
+        let error = merge_sorted_candidate_ids(
+            ids(&[0, 2], &constrained),
+            ids(&[1, 3], &constrained),
+            &constrained,
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .get_ref()
+                .unwrap()
+                .is::<logex_types::QueryMemoryError>()
+        );
+        assert_eq!(constrained.used(), 0);
+
+        let memory = QueryMemoryBudget::new(QueryMemoryLimit::new(16 * 1024).unwrap());
+        let union = merge_sorted_candidate_ids(
+            ids(&[0, 2], &memory),
+            ids(&[1, 2, 3], &memory),
+            &memory,
+            None,
+        )
+        .unwrap();
+        assert_eq!(&*union, &[0, 1, 2, 3]);
+        assert!(memory.used() > 0);
+        drop(union);
+        assert_eq!(memory.used(), 0);
+
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let cancel: crate::QueryCancelCheck = {
+            let calls = std::sync::Arc::clone(&calls);
+            std::sync::Arc::new(move || {
+                calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed) >= 1
+            })
+        };
+        let left: Vec<_> = (0..600).step_by(2).collect();
+        let right: Vec<_> = (1..600).step_by(2).collect();
+        let error = merge_sorted_candidate_ids(
+            ids(&left, &memory),
+            ids(&right, &memory),
+            &memory,
+            Some(&cancel),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+        assert_eq!(memory.used(), 0);
+    }
+
+    #[test]
+    fn singleton_canonical_filter_does_not_materialize_full_row_range() {
+        let dir = tempfile::tempdir().unwrap();
+        let prototype = make_test_rows()[0].clone();
+        let rows: Vec<_> = (0..512)
+            .map(|index| LogRow {
+                block_number: prototype.block_number + index,
+                block_hash: B256::repeat_byte((index % 255 + 1) as u8),
+                log_index: index as u32,
+                ..prototype.clone()
+            })
+            .collect();
+        write_legacy_source(dir.path(), &rows);
+        let mut canonical = logex_storage::NullBitmap::new();
+        for _ in &rows {
+            canonical.push(false);
+        }
+        let mut canonical_bytes = Vec::new();
+        canonical.write_to(&mut canonical_bytes).unwrap();
+        fs::write(dir.path().join("canonical.bitmap"), canonical_bytes).unwrap();
+
+        let probe = QueryMemoryBudget::new(QueryMemoryLimit::new(1024 * 1024).unwrap());
+        let reader =
+            SegmentReader::open_projected_with_memory(dir.path(), &[], probe.clone()).unwrap();
+        let capture_bytes = probe.used();
+        let canonical = reader.read_canonical_accounted().unwrap();
+        let exact_limit = usize::try_from(probe.used()).unwrap();
+        assert!(exact_limit < probe.limit());
+        assert!(
+            (rows.len() * size_of::<u32>()) as u128 > exact_limit as u128 - capture_bytes,
+            "the fixture budget must reject a full candidate range"
+        );
+        drop(canonical);
+        drop(reader);
+        assert_eq!(probe.used(), 0);
+
+        let memory = QueryMemoryBudget::new(QueryMemoryLimit::new(exact_limit).unwrap());
+        let reader =
+            SegmentReader::open_projected_with_memory(dir.path(), &[], memory.clone()).unwrap();
+        let ids = candidate_row_ids_for_filters_on_reader_with_memory(
+            dir.path(),
+            &reader,
+            std::slice::from_ref(&NativeLogFilter::new()),
+            false,
+            rows.len() as u64,
+            &memory,
+            None,
+        )
+        .unwrap();
+        assert!(ids.is_empty());
+        drop(ids);
+        drop(reader);
+        assert_eq!(memory.used(), 0);
+    }
+
+    #[test]
+    fn impossible_multi_filter_union_skips_index_checkpoint() {
+        let dir = tempfile::tempdir().unwrap();
+        let rows = make_test_rows();
+        write_legacy_source(dir.path(), &rows);
+        IndexBuilder::build_all_indexes(dir.path()).unwrap();
+        fs::write(dir.path().join("indexes/index-checkpoint"), b"corrupt").unwrap();
+        let memory = QueryMemoryBudget::new(QueryMemoryLimit::new(1024 * 1024).unwrap());
+        let reader =
+            SegmentReader::open_projected_with_memory(dir.path(), &[], memory.clone()).unwrap();
+        let impossible = NativeLogFilter {
+            min_topic_count: 5,
+            ..NativeLogFilter::new()
+        };
+        let ids = candidate_row_ids_for_filters_on_reader_with_memory(
+            dir.path(),
+            &reader,
+            &[impossible.clone(), impossible],
+            true,
+            rows.len() as u64,
+            &memory,
+            None,
+        )
+        .unwrap();
+        assert!(ids.is_empty());
+        drop(ids);
+        drop(reader);
+        assert_eq!(memory.used(), 0);
+    }
+
+    #[test]
+    fn singleton_bloom_exclusion_keeps_scalar_working_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut rows = make_test_rows();
+        rows[0].topic0 = Some(transfer_topic0());
+        write_legacy_source(dir.path(), &rows);
+        IndexBuilder::build_all_indexes(dir.path()).unwrap();
+        let reader = SegmentReader::open(dir.path()).unwrap();
+        let checkpoint = IndexReadCheckpoint::open(dir.path(), &reader)
+            .unwrap()
+            .unwrap();
+        let file_id = checkpoint.artifact_id(ERC20_EVENTS_BLOOM_FILE).unwrap();
+        let bloom_path = dir.path().join("indexes").join(ERC20_EVENTS_BLOOM_FILE);
+
+        let probe = QueryMemoryBudget::new(QueryMemoryLimit::new(1024 * 1024).unwrap());
+        let bloom =
+            Erc20EventBloomReader::open_bound_with_memory(&bloom_path, file_id, &probe).unwrap();
+        let exact_limit = usize::try_from(probe.used()).unwrap();
+        drop(bloom);
+        assert_eq!(probe.used(), 0);
+
+        let memory = QueryMemoryBudget::new(QueryMemoryLimit::new(exact_limit).unwrap());
+        let filter =
+            NativeLogFilter::new().with_topic(0, TopicConstraint::One(B256::repeat_byte(0xee)));
+        assert!(matches!(
+            erc20_event_bloom_exclusions_with_memory(
+                &dir.path().join("indexes"),
+                &checkpoint,
+                std::slice::from_ref(&filter),
+                &memory,
+                None,
+            )
+            .unwrap(),
+            AccountedBloomExclusions::Single(false)
+        ));
+        assert_eq!(memory.used(), 0);
+    }
+
+    #[test]
     fn accounted_candidate_cancellation_releases_every_owner() {
         let dir = tempfile::tempdir().unwrap();
         let rows = make_test_rows();
@@ -2157,11 +2784,20 @@ mod tests {
             .unwrap();
         assert!(storage.hot_partition().meta.row_count > visible_rows);
 
-        let filter = NativeLogFilter::new().with_addresses(vec![appended.address]);
+        let filters = [
+            NativeLogFilter::new().with_addresses(vec![appended.address]),
+            NativeLogFilter::new().with_block_range(Some(appended.block_number), None),
+        ];
         let memory = QueryMemoryBudget::new(QueryMemoryLimit::new(16 * 1024 * 1024).unwrap());
-        let actual =
-            candidate_row_ids_with_memory(&path, &filter, true, visible_rows, &memory, None)
-                .unwrap();
+        let actual = candidate_row_ids_for_filters_with_memory(
+            &path,
+            &filters,
+            true,
+            visible_rows,
+            &memory,
+            None,
+        )
+        .unwrap();
         assert_eq!(&*actual, &[0]);
         drop(actual);
         assert_eq!(memory.used(), 0);
@@ -2424,16 +3060,20 @@ mod tests {
         let checkpoint = IndexReadCheckpoint::open(&target, &segment)
             .unwrap()
             .unwrap();
+        let memory = QueryMemoryBudget::new(QueryMemoryLimit::new(1024 * 1024).unwrap());
         assert_eq!(
-            erc20_event_bloom_exclusions(
+            erc20_event_bloom_exclusions_with_memory(
                 &target.join("indexes"),
                 &checkpoint,
                 std::slice::from_ref(&filter),
+                &memory,
+                None,
             )
             .unwrap_err()
             .kind(),
             io::ErrorKind::InvalidData
         );
+        assert_eq!(memory.used(), 0);
 
         assert_indexed_result_matches_scan_or_errors(
             &target,
