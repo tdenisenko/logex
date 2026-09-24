@@ -1,4 +1,4 @@
-# LogEx DataFusion math simplification correction
+# LogEx DataFusion function corrections
 
 This is the complete published `datafusion-functions` 51.0.0 package.
 The workspace patches its source without upgrading any dependency version.
@@ -11,7 +11,7 @@ The workspace patches its source without upgrading any dependency version.
 - Original file inventory: `LOGEX-UPSTREAM-SHA256`
 - Complete reversible source diff: `LOGEX-PATCH.diff`
 
-## Changes and limits
+## Math simplification changes and limits
 
 Apache DataFusion #24247, merged as
 `c08832d481cea2dcea98e43393e3dd640d421064`, establishes NULL guards for
@@ -37,9 +37,28 @@ tests are retained; excluded vendor crates are not automatically tested by the
 workspace gates. Run `python3 tools/verify_datafusion_vendor.py` to verify all
 published files and the exact patch offline.
 
+## String repetition length validation
+
+The pinned repetition kernel multiplies each byte length and accumulates the
+output length before constructing its Arrow builder. The local correction checks
+both operations and validates the cumulative length against the output offset
+type and platform buffer-capacity limit, so unrepresentable output returns an
+execution error before allocation.
+Its diagnostic does not repeat unchecked arithmetic. Empty strings bypass count
+conversion, preserving their result even when a positive count is wider than
+`usize`; zero, negative and NULL behavior is preserved.
+
+`crates/logex-query/tests/repeat_lengths.rs` exercises the public query path.
+The focused upstream tests use tiny inputs and pure length calculations for
+offset boundaries, without constructing oversized arrays. They run explicitly on
+macOS and Linux in CI because excluded vendor tests are outside workspace gates.
+This corrects arithmetic and offset validation; it is not a bound on every
+otherwise valid allocation or DataFusion's internal expression scratch memory.
+
 ## Removal condition
 
 Remove this override only when a maintained DataFusion release preserves these
-NULL, domain and required-evaluation cases and passes LogEx compatibility gates.
+NULL, domain, required-evaluation and repetition-length cases and passes LogEx
+compatibility gates.
 No performance improvement or uniform timing bound is claimed for the retained
 kernel evaluation.
