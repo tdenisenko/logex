@@ -3,6 +3,7 @@ use std::{
     fs,
     io::{self, Read},
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use alloy_primitives::FixedBytes;
@@ -10,8 +11,8 @@ use logex_types::LogRow;
 
 use super::super::{
     InspectionLimits, NativeStorageCatalog, PrimaryDataDisposition, PrimaryDataInspection,
-    SegmentDescriptor, SegmentManifest, StorageCatalogPaths, directory_lock::DataDirectoryLock,
-    inspection,
+    RepairDirectoryGuard, SegmentDescriptor, SegmentManifest, StorageCatalogPaths,
+    directory_lock::DataDirectoryLock, inspection,
 };
 use super::{
     RepairOwnershipPlan, RepairPlanLimits, StagedRepairCandidate, VerifiedRepairCandidate, invalid,
@@ -28,7 +29,7 @@ pub enum RepairCatalogState {
 /// Read-only recovery classification retaining the original directory lock.
 #[derive(Debug)]
 pub struct PendingRepair {
-    owner: DataDirectoryLock,
+    owner: Arc<DataDirectoryLock>,
     paths: StorageCatalogPaths,
     journal: RepairJournal,
     state: RepairCatalogState,
@@ -43,11 +44,27 @@ pub enum RepairInspection {
     PendingIndexes(Box<super::PendingIndexRepair>),
 }
 
+impl RepairInspection {
+    /// Retain exclusive directory ownership independently of this consumed
+    /// operation, including its error paths. Drop only after related workers
+    /// and transports have finished cleanup. The guard authorizes no writes.
+    pub fn retain_directory(&self) -> RepairDirectoryGuard {
+        match self {
+            Self::Primary(primary) => primary.retain_directory(),
+            Self::Pending(pending) => RepairDirectoryGuard::retain(&pending.owner),
+            Self::PendingIndexes(pending) => pending.retain_directory(),
+        }
+    }
+}
+
 /// Inspect existing repair evidence without opening storage or performing recovery.
 /// Both outcomes retain the same owner acquired here for subsequent planning.
+/// An explicit `.` root remains relative to the retained process working directory.
+/// The caller must not change cwd until all returned and derived owners, plans,
+/// stages and publications are dropped; other relative roots normalize once.
 pub fn inspect_repair(root: &Path, limits: InspectionLimits) -> io::Result<RepairInspection> {
-    let owner = DataDirectoryLock::acquire_existing(root)?;
-    let paths = StorageCatalogPaths::new(std::path::absolute(root)?);
+    let owner = Arc::new(DataDirectoryLock::acquire_existing(root)?);
+    let paths = StorageCatalogPaths::new(inspection::maintenance_root(root)?);
     if exists(&paths.root().join(super::indexes::JOURNAL_FILE))? {
         if exists(&paths.root().join(JOURNAL_FILE))? {
             return Err(invalid(
@@ -79,9 +96,10 @@ pub(in crate::native) fn require_no_pending_repair(root: &Path) -> io::Result<()
 
 /// Inspect the complete journal/catalog relation without replay, cleanup or writes.
 /// Any unreadable evidence or third catalog state is an explicit blocker.
+/// An explicit `.` root retains the same cwd contract as [`inspect_repair`].
 pub fn inspect_pending_repair(root: &Path) -> io::Result<Option<PendingRepair>> {
-    let owner = DataDirectoryLock::acquire_existing(root)?;
-    let paths = StorageCatalogPaths::new(std::path::absolute(root)?);
+    let owner = Arc::new(DataDirectoryLock::acquire_existing(root)?);
+    let paths = StorageCatalogPaths::new(inspection::maintenance_root(root)?);
     if exists(&paths.root().join(super::indexes::JOURNAL_FILE))? {
         return Err(io::Error::new(
             io::ErrorKind::WouldBlock,
@@ -95,7 +113,7 @@ pub fn inspect_pending_repair(root: &Path) -> io::Result<Option<PendingRepair>> 
 }
 
 fn pending_owned(
-    owner: DataDirectoryLock,
+    owner: Arc<DataDirectoryLock>,
     paths: StorageCatalogPaths,
     journal: RepairJournal,
 ) -> io::Result<PendingRepair> {
@@ -786,3 +804,7 @@ mod tests;
 #[cfg(test)]
 #[path = "inspection_tests.rs"]
 mod inspection_tests;
+
+#[cfg(all(test, unix))]
+#[path = "pinned_cwd_tests.rs"]
+mod pinned_cwd_tests;

@@ -62,6 +62,44 @@ impl ExpectedVolume {
         }
     }
 
+    /// Pin and enter an existing readable data directory without creating paths,
+    /// probing writes, or requiring free space. Like `prepare`, main must call
+    /// this before creating workers and retain the guard until command completion.
+    /// Do not attach the writable storage monitor to this read-only preflight.
+    pub(crate) fn prepare_read_only(mount: &Path, uuid: &str, data: &Path) -> io::Result<Self> {
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        {
+            let deadline = deadline::Deadline::start(Duration::from_secs(180))?;
+            let result = unix::prepare_read_only(mount, uuid, data);
+            deadline.complete()?;
+            result
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        {
+            let _ = (mount, uuid, data);
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "expected-volume protection requires macOS or Linux",
+            ))
+        }
+    }
+
+    /// Revalidate pinned mount/data identity after a read-only assessment.
+    /// Does not check write capability, free space, or create probe artifacts.
+    pub(crate) fn check_read_only(&self) -> io::Result<()> {
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        {
+            unix::check_read_only(self)
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        {
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "expected-volume protection requires macOS or Linux",
+            ))
+        }
+    }
+
     pub(crate) fn check(&self) -> io::Result<()> {
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         {
@@ -104,6 +142,18 @@ pub(crate) struct MonitorHandle {
 }
 
 impl MonitorHandle {
+    /// End a maintenance callback before normal startup installs its handler.
+    /// A latched failure cannot be cleared or hidden during this handoff. If a
+    /// new failure arrives while no handler is installed, `report` terminates.
+    pub(crate) fn clear_failure_handler(&self) -> io::Result<()> {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        if let Some(reason) = &state.failure {
+            return Err(io::Error::other(reason.clone()));
+        }
+        state.callback = None;
+        Ok(())
+    }
+
     pub(crate) fn set_failure_handler(
         &self,
         callback: impl Fn(&str) + Send + Sync + 'static,

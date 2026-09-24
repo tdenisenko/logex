@@ -4,6 +4,7 @@ pub mod eth_filter;
 pub mod grpc;
 pub mod handler;
 pub mod jsonrpc;
+mod maintenance;
 pub mod rest;
 mod storage_metrics;
 pub mod ws;
@@ -23,6 +24,10 @@ use axum::{
 use base64::Engine;
 
 pub use handler::AppState;
+pub use maintenance::{
+    MaintenanceState, MaintenanceStatus, MaintenanceStatusKind, RepairPhase,
+    build_maintenance_router, serve_maintenance,
+};
 pub use ws::SubscriptionManager;
 
 #[derive(Clone, PartialEq, Eq)]

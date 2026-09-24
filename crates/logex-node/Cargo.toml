@@ -11,6 +11,8 @@ path = "src/main.rs"
 [dependencies]
 logex-fs = { workspace = true }
 alloy-primitives = { workspace = true }
+alloy-consensus = { workspace = true }
+eyre = { workspace = true }
 logex-cl = { workspace = true }
 logex-types = { workspace = true }
 logex-storage = { workspace = true }
@@ -20,6 +22,7 @@ logex-sync = { workspace = true }
 reth-chainspec = { workspace = true }
 reth-discv4 = { workspace = true }
 reth-ethereum-forks = { workspace = true }
+reth-network-peers = { workspace = true }
 secp256k1 = { version = "0.30", features = ["global-context", "rand"] }
 clap = { workspace = true }
 serde = { workspace = true }
@@ -28,6 +31,7 @@ toml = { workspace = true }
 reqwest = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { version = "0.7", features = ["rt"] }
 futures-util = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

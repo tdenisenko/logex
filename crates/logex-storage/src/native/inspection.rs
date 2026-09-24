@@ -88,7 +88,26 @@ pub struct PrimaryDataInspection {
     pub derived_indexes_inspected: bool,
 }
 
+/// Keeps exclusive directory ownership through caller cleanup after a consumed
+/// repair operation fails or unwinds. This grants no read or write capability.
+/// For a `.` inspection, retain its process cwd until this guard is also dropped.
+#[derive(Debug)]
+pub struct RepairDirectoryGuard {
+    _owner: Arc<DataDirectoryLock>,
+}
+
+impl RepairDirectoryGuard {
+    pub(in crate::native) fn retain(owner: &Arc<DataDirectoryLock>) -> Self {
+        Self {
+            _owner: Arc::clone(owner),
+        }
+    }
+}
+
 impl PrimaryDataInspection {
+    pub(in crate::native) fn retain_directory(&self) -> RepairDirectoryGuard {
+        RepairDirectoryGuard::retain(&self._owner)
+    }
     /// Authoritative root retained with this inspection's exclusive owner.
     pub fn root(&self) -> &Path {
         self.paths.root()
@@ -124,6 +143,12 @@ fn contextual(stage: &str, path: &Path, error: io::Error) -> io::Error {
 /// Limits are checked before row-ID allocation and whole-buffer source reads.
 /// They bound specified inputs, not total process RSS. Segments are scanned
 /// serially; captured metadata and one payload batch can coexist.
+///
+/// An explicit `.` root stays relative to the process's retained working
+/// directory, preserving a caller's pinned-volume identity across ancestor
+/// renames. The caller must not change the working directory until this handle
+/// and every derived repair owner, plan and stage have been dropped. Other
+/// relative roots are made absolute once when the inspection starts.
 pub fn inspect_primary_data(
     path: &Path,
     limits: InspectionLimits,
@@ -132,9 +157,17 @@ pub fn inspect_primary_data(
         .map_err(|error| contextual("acquire inspection ownership", path, error))?;
     inspect_owned(
         owner,
-        StorageCatalogPaths::new(std::path::absolute(path)?),
+        StorageCatalogPaths::new(maintenance_root(path)?),
         limits,
     )
+}
+
+pub(in crate::native) fn maintenance_root(path: &Path) -> io::Result<std::path::PathBuf> {
+    if path == Path::new(".") {
+        Ok(std::path::PathBuf::from("."))
+    } else {
+        std::path::absolute(path)
+    }
 }
 
 pub(super) fn inspect_owned(

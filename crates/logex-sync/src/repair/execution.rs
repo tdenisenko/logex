@@ -41,6 +41,29 @@ pub struct RepairExecutionOutcome {
     pub recovered_pending_storage: bool,
 }
 
+/// Resolve retained consensus trust only when primary reconstruction needs it.
+/// Providers must not bootstrap or replace trust as a side effect of repair.
+pub trait RepairConsensusProvider {
+    fn consensus(&mut self) -> Result<&ConsensusStore>;
+}
+
+/// Observational progress only; callbacks receive no repair ownership or verdict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RepairExecutionPhase {
+    Recovering,
+    RebuildingIndexes,
+    Reconstructing,
+    Verifying,
+}
+
+struct BorrowedConsensus<'a>(&'a ConsensusStore);
+
+impl RepairConsensusProvider for BorrowedConsensus<'_> {
+    fn consensus(&mut self) -> Result<&ConsensusStore> {
+        Ok(self.0)
+    }
+}
+
 /// Execute local recovery, index rebuild or authenticated reconstruction as
 /// classified by the retained assessment. No ordinary ingestion handle is exposed.
 ///
@@ -50,12 +73,36 @@ pub struct RepairExecutionOutcome {
 /// is observed between bounded operations; started publication/quarantine finishes
 /// or leaves its durable journal. No new network requests occur for index-only work.
 pub async fn execute_repair(
-    mut assessment: RepairAssessment,
+    assessment: RepairAssessment,
     limits: RepairExecutionLimits,
     profile: IndexBuildProfile,
     source: &mut impl RepairSource,
     consensus: &ConsensusStore,
     cancellation: CancellationToken,
+) -> Result<RepairExecutionOutcome> {
+    execute_repair_with_provider(
+        assessment,
+        limits,
+        profile,
+        source,
+        &mut BorrowedConsensus(consensus),
+        cancellation,
+        |_| {},
+    )
+    .await
+}
+
+/// Execute with lazy retained trust and observational phase notifications.
+/// Local recovery, index work and completion after publication never resolve
+/// consensus. The same worker and shutdown requirements as `execute_repair` apply.
+pub async fn execute_repair_with_provider(
+    mut assessment: RepairAssessment,
+    limits: RepairExecutionLimits,
+    profile: IndexBuildProfile,
+    source: &mut impl RepairSource,
+    consensus: &mut impl RepairConsensusProvider,
+    cancellation: CancellationToken,
+    mut on_phase: impl FnMut(RepairExecutionPhase),
 ) -> Result<RepairExecutionOutcome> {
     ensure!(
         assessment.uses_limits(limits.assessment),
@@ -65,6 +112,7 @@ pub async fn execute_repair(
     let mut recovered = false;
     let mut reconstructed = false;
     let mut rebuilt = false;
+    on_phase(RepairExecutionPhase::Verifying);
     loop {
         active(&limits, &cancellation)?;
         // Reports are privately held, but each underlying operation independently
@@ -72,6 +120,8 @@ pub async fn execute_repair(
         let report = assessment.report().clone();
         let inspection = match report {
             RepairAssessmentReport::PendingIndexes { .. } => {
+                on_phase(RepairExecutionPhase::RebuildingIndexes);
+                active(&limits, &cancellation)?;
                 ensure!(
                     !rebuilt,
                     "index repair did not converge; retain its evidence"
@@ -110,6 +160,8 @@ pub async fn execute_repair(
                 RepairInspection::Primary(Box::new(repair.into_inspection()?))
             }
             RepairAssessmentReport::RecoveryRequired { .. } => {
+                on_phase(RepairExecutionPhase::Recovering);
+                active(&limits, &cancellation)?;
                 ensure!(
                     !recovered,
                     "verified startup recovery left pending evidence; preserve artifacts for inspection"
@@ -127,13 +179,30 @@ pub async fn execute_repair(
                     !reconstructed,
                     "primary repair did not converge; retain the publication journal"
                 );
+                // Resolve prerequisites before consuming the pending owner or
+                // beginning any publication work. Committed completion is local.
+                let retained = if state == RepairCatalogState::BeforePublication {
+                    on_phase(RepairExecutionPhase::Reconstructing);
+                    active(&limits, &cancellation)?;
+                    Some(consensus.consensus()?)
+                } else {
+                    None
+                };
                 let RepairInspection::Pending(pending) = assessment.into_inspection() else {
                     unreachable!("assessment owns matching inspection")
                 };
                 let (primary, quarantine) = match state {
                     RepairCatalogState::BeforePublication => {
                         let plan = pending.into_plan(limits.assessment.primary, limits.plan)?;
-                        reconstruct(plan, limits, profile, source, consensus, &cancellation).await?
+                        reconstruct(
+                            plan,
+                            limits,
+                            profile,
+                            source,
+                            retained.expect("resolved before-publication trust"),
+                            &cancellation,
+                        )
+                        .await?
                     }
                     RepairCatalogState::AfterPublication => {
                         // The committed catalog is authoritative. Completing
@@ -153,6 +222,7 @@ pub async fn execute_repair(
                             ) {
                                 Ok(()) => Ok(()),
                                 Err(error) if repairable_index(&error) => {
+                                    on_phase(RepairExecutionPhase::RebuildingIndexes);
                                     IndexBuilder::build_indexes(path, profile)?;
                                     verify_indexes(
                                         path,
@@ -195,18 +265,33 @@ pub async fn execute_repair(
                         recovered_pending_storage: recovered,
                     });
                 }
-                let RepairInspection::Primary(primary) = assessment.into_inspection() else {
-                    unreachable!("assessment owns matching inspection")
-                };
-                if !primary_ids.is_empty() {
+                let retained = if !primary_ids.is_empty() {
                     ensure!(
                         !reconstructed,
                         "primary verification still fails after repair; retain all artifacts"
                     );
+                    on_phase(RepairExecutionPhase::Reconstructing);
+                    active(&limits, &cancellation)?;
+                    Some(consensus.consensus()?)
+                } else {
+                    on_phase(RepairExecutionPhase::RebuildingIndexes);
+                    active(&limits, &cancellation)?;
+                    None
+                };
+                let RepairInspection::Primary(primary) = assessment.into_inspection() else {
+                    unreachable!("assessment owns matching inspection")
+                };
+                if !primary_ids.is_empty() {
                     let plan = primary.into_repair_plan(&primary_ids, limits.plan)?;
-                    let (primary, quarantine) =
-                        reconstruct(plan, limits, profile, source, consensus, &cancellation)
-                            .await?;
+                    let (primary, quarantine) = reconstruct(
+                        plan,
+                        limits,
+                        profile,
+                        source,
+                        retained.expect("resolved reconstruction trust"),
+                        &cancellation,
+                    )
+                    .await?;
                     quarantine_dirs.push(quarantine);
                     reconstructed = true;
                     RepairInspection::Primary(Box::new(primary))
@@ -253,6 +338,8 @@ pub async fn execute_repair(
                 }
             }
         };
+        on_phase(RepairExecutionPhase::Verifying);
+        active(&limits, &cancellation)?;
         assessment = assess_owned(inspection, limits.assessment, profile)?;
     }
 }

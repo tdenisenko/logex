@@ -8,6 +8,7 @@ use std::{
     fs,
     io::{self, Read},
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use super::{
@@ -19,7 +20,7 @@ use super::{
 };
 use crate::native::{
     InspectionLimits, NativeStorageCatalog, PrimaryDataDisposition, PrimaryDataInspection,
-    StorageCatalogPaths, directory_lock::DataDirectoryLock, inspection,
+    RepairDirectoryGuard, StorageCatalogPaths, directory_lock::DataDirectoryLock, inspection,
 };
 use crate::{
     durability,
@@ -33,13 +34,13 @@ pub(in crate::native) const JOURNAL_FILE: &str = "index-repair.journal";
 
 #[derive(Debug)]
 pub struct PendingIndexRepair {
-    owner: DataDirectoryLock,
+    owner: Arc<DataDirectoryLock>,
     paths: StorageCatalogPaths,
     journal: Journal,
 }
 
 pub(super) fn inspect_owned(
-    owner: DataDirectoryLock,
+    owner: Arc<DataDirectoryLock>,
     paths: StorageCatalogPaths,
 ) -> io::Result<PendingIndexRepair> {
     let journal =
@@ -53,6 +54,9 @@ pub(super) fn inspect_owned(
 }
 
 impl PendingIndexRepair {
+    pub(super) fn retain_directory(&self) -> RepairDirectoryGuard {
+        RepairDirectoryGuard::retain(&self.owner)
+    }
     pub fn operation_id(&self) -> FixedBytes<16> {
         self.journal.metadata.operation
     }

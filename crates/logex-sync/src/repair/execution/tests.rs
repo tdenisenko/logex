@@ -514,17 +514,20 @@ async fn committed_publication_finishes_without_anchors_or_new_requests() {
             ..
         }
     ));
-    let outcome = execute_repair(
+    let mut provider = RefusingConsensus::default();
+    let outcome = execute_repair_with_provider(
         assessment,
         limits(),
         IndexBuildProfile::All,
         &mut source,
-        &store,
+        &mut provider,
         CancellationToken::new(),
+        |_| {},
     )
     .await
     .unwrap();
     verified(&outcome.assessment, IndexBuildProfile::All);
+    assert_eq!(provider.calls, 0);
     no_requests(&source);
     assert_eq!(fs::read(tmp.path().join("catalog.json")).unwrap(), catalog);
     assert_eq!(
@@ -575,4 +578,156 @@ async fn unsupported_index_path_is_blocked_without_mutation() {
     no_requests(&source);
     assert_eq!(tree(tmp.path()), before);
     assert_eq!(fs::read_dir(outside.path()).unwrap().count(), 0);
+}
+
+#[derive(Default)]
+struct RefusingConsensus {
+    calls: usize,
+}
+
+impl RepairConsensusProvider for RefusingConsensus {
+    fn consensus(&mut self) -> Result<&ConsensusStore> {
+        self.calls += 1;
+        Err(eyre::eyre!("retained consensus unavailable"))
+    }
+}
+
+#[tokio::test]
+async fn local_repair_never_resolves_consensus_and_reports_its_phases() {
+    for recover_wal in [false, true] {
+        let tmp = write(&rows().await);
+        if recover_wal {
+            // A bounded incomplete final header is safe to retire locally.
+            fs::write(tmp.path().join("wal/pending.wal"), [0; 3]).unwrap();
+        }
+        let (mut source, _) = fixture();
+        let mut provider = RefusingConsensus::default();
+        let mut phases = Vec::new();
+        let outcome = execute_repair_with_provider(
+            assess(tmp.path(), IndexBuildProfile::All),
+            limits(),
+            IndexBuildProfile::All,
+            &mut source,
+            &mut provider,
+            CancellationToken::new(),
+            |phase| phases.push(phase),
+        )
+        .await
+        .unwrap();
+        verified(&outcome.assessment, IndexBuildProfile::All);
+        assert_eq!(provider.calls, 0);
+        no_requests(&source);
+        assert_eq!(outcome.recovered_pending_storage, recover_wal);
+        assert_eq!(
+            phases.contains(&RepairExecutionPhase::Recovering),
+            recover_wal
+        );
+        assert!(phases.contains(&RepairExecutionPhase::RebuildingIndexes));
+        assert!(!phases.contains(&RepairExecutionPhase::Reconstructing));
+        assert_eq!(phases.last(), Some(&RepairExecutionPhase::Verifying));
+    }
+}
+
+#[tokio::test]
+async fn unavailable_trust_preserves_damaged_primary_and_pending_publication() {
+    for pending in [false, true] {
+        let tmp = write(&rows().await);
+        let id = primary(assess(tmp.path(), IndexBuildProfile::All))
+            .catalog
+            .active_hot_segment
+            .unwrap();
+        let path = StorageCatalogPaths::new(tmp.path().to_owned()).segment_dir(id);
+        fs::remove_file(path.join("data.col")).unwrap();
+        if pending {
+            let plan = primary(assess(tmp.path(), IndexBuildProfile::All))
+                .into_repair_plan(&[id], limits().plan)
+                .unwrap();
+            drop(plan.begin_publication(0).unwrap());
+            drop(plan);
+        }
+        let before = tree(tmp.path());
+        let (mut source, _) = fixture();
+        let mut provider = RefusingConsensus::default();
+        let mut phases = Vec::new();
+        let assessment = assess(tmp.path(), IndexBuildProfile::All);
+        let directory = assessment.retain_directory();
+        let error = execute_repair_with_provider(
+            assessment,
+            limits(),
+            IndexBuildProfile::All,
+            &mut source,
+            &mut provider,
+            CancellationToken::new(),
+            |phase| phases.push(phase),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("retained consensus unavailable"));
+        assert_eq!(provider.calls, 1);
+        assert_eq!(
+            phases,
+            [
+                RepairExecutionPhase::Verifying,
+                RepairExecutionPhase::Reconstructing
+            ]
+        );
+        no_requests(&source);
+        assert_eq!(tree(tmp.path()), before);
+        assert_eq!(
+            assess_repair(tmp.path(), limits().assessment, IndexBuildProfile::All)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::WouldBlock
+        );
+        drop(directory);
+        drop(assess(tmp.path(), IndexBuildProfile::All));
+    }
+}
+
+#[tokio::test]
+async fn pending_index_owner_survives_consumed_execution_error_until_cleanup_guard_drops() {
+    let tmp = write(&rows().await);
+    let inspection = primary(assess(tmp.path(), IndexBuildProfile::All));
+    let id = inspection.catalog.active_hot_segment.unwrap();
+    drop(
+        inspection
+            .begin_index_repair(
+                &[id],
+                IndexBuilder::required_index_files(IndexBuildProfile::All),
+                limits().assessment.primary,
+                0,
+            )
+            .unwrap(),
+    );
+    let assessment = assess(tmp.path(), IndexBuildProfile::All);
+    let directory = assessment.retain_directory();
+    let before = tree(tmp.path());
+    let cancellation = CancellationToken::new();
+    cancellation.cancel();
+    let (mut source, _) = fixture();
+    let mut provider = RefusingConsensus::default();
+    assert!(
+        execute_repair_with_provider(
+            assessment,
+            limits(),
+            IndexBuildProfile::All,
+            &mut source,
+            &mut provider,
+            cancellation,
+            |_| {}
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(provider.calls, 0);
+    no_requests(&source);
+    assert_eq!(tree(tmp.path()), before);
+    assert_eq!(
+        assess_repair(tmp.path(), limits().assessment, IndexBuildProfile::All)
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::WouldBlock
+    );
+    drop(directory);
+    drop(assess(tmp.path(), IndexBuildProfile::All));
 }

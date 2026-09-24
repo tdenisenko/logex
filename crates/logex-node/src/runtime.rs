@@ -33,6 +33,7 @@ use crate::background::{join_task, run_background_indexer};
 use crate::checkpoint::{RECENT_CHECKPOINT_MAX_FINALIZED_EPOCH_LAG, resolve_checkpoint};
 
 mod cleanup;
+pub(crate) mod repair;
 mod services;
 mod storage_health;
 mod supervision;
@@ -162,9 +163,16 @@ pub struct RunSyncOptions<'a> {
     pub dashboard_enabled: bool,
     pub dashboard_password: Option<String>,
     pub disable_historical_sync: bool,
+    pub repair_corrupt_segments: bool,
+    pub repair_limits: crate::cli::RepairLimitsArgs,
 }
 
 pub async fn run_sync(options: RunSyncOptions<'_>) -> cleanup::RuntimeShutdown {
+    // Tokio keeps process signal handlers installed after individual listeners
+    // drop. Retain one listener across maintenance and ordinary startup so a
+    // stop arriving between the stages remains queued for the sync supervisor.
+    let shutdown_signal = wait_for_shutdown_signal();
+    tokio::pin!(shutdown_signal);
     let RunSyncOptions {
         pm_config,
         storage_monitor,
@@ -187,7 +195,58 @@ pub async fn run_sync(options: RunSyncOptions<'_>) -> cleanup::RuntimeShutdown {
         dashboard_enabled,
         dashboard_password,
         disable_historical_sync,
+        repair_corrupt_segments,
+        repair_limits,
     } = options;
+    if repair_corrupt_segments {
+        let inspect =
+            repair::needs_startup_assessment(&pm_config.data_dir).unwrap_or_else(|error| {
+                tracing::error!(%error, "cannot assess automatic repair startup");
+                std::process::exit(1);
+            });
+        if inspect {
+            let result = repair::run_maintenance(
+                repair::RunRepairOptions {
+                    root: pm_config.data_dir.clone(),
+                    limits: repair_limits,
+                    http_address: SocketAddr::new(http_host, http_port),
+                    http: logex_server::HttpServerConfig {
+                        dashboard_enabled,
+                        dashboard_password: dashboard_password.clone(),
+                    },
+                    network: repair::RepairNetworkOptions {
+                        discovery_port,
+                        p2p_port,
+                        max_peers,
+                        nat: nat.clone(),
+                        p2p_bind_ip,
+                        execution_bootnodes: execution_bootnodes.clone(),
+                        execution_discv5_port,
+                    },
+                },
+                storage_monitor,
+                shutdown_signal.as_mut(),
+            )
+            .await;
+            match result {
+                Ok(outcome) => {
+                    tracing::info!(
+                        quarantine_dirs = ?outcome.quarantine_dirs,
+                        recovered_pending_storage = outcome.recovered_pending_storage,
+                        "offline repair completed; starting normal sync"
+                    );
+                    // Publication and all maintenance/network workers are done.
+                    // Normal startup reacquires the directory lock; another owner
+                    // acquiring it first causes an explicit startup failure.
+                    drop(outcome);
+                }
+                Err(error) => {
+                    tracing::error!(error = %format!("{error:#}"), "automatic offline repair failed; preserve journals and inspect with logex repair --dry-run");
+                    std::process::exit(1);
+                }
+            }
+        }
+    }
     let local_p2p_candidates = detect_local_p2p_addresses().await;
     let mut p2p_address =
         match select_p2p_address(&nat, p2p_bind_ip, p2p_port, local_p2p_candidates).await {
@@ -654,7 +713,7 @@ pub async fn run_sync(options: RunSyncOptions<'_>) -> cleanup::RuntimeShutdown {
     }
     .run(
         engine.run(),
-        wait_for_shutdown_signal(),
+        shutdown_signal.as_mut(),
         storage_health::wait_for_failure(data_dir.clone(), storage_failure),
         |reason| state.mark_storage_unavailable(reason),
     )
@@ -733,6 +792,20 @@ pub async fn run_sync(options: RunSyncOptions<'_>) -> cleanup::RuntimeShutdown {
         std::process::exit(1);
     }
     shutdown_guard.expect("the supervisor arms shutdown before completing")
+}
+
+pub(crate) async fn run_repair_command(
+    options: repair::RunRepairOptions,
+    storage_monitor: &mut Option<crate::volume::StorageMonitor>,
+) -> (cleanup::RuntimeShutdown, eyre::Result<()>) {
+    let signal = wait_for_shutdown_signal();
+    tokio::pin!(signal);
+    let outcome = repair::run_maintenance(options, storage_monitor, signal.as_mut()).await;
+    let guard =
+        cleanup::start_shutdown_watchdog(RUNTIME_FAILURE_CLEANUP_GRACE, || std::process::exit(1))
+            .unwrap_or_else(|_| std::process::exit(1));
+    let result = outcome.and_then(|outcome| repair::print_outcome(&outcome));
+    (guard, result)
 }
 
 async fn wait_for_runtime_failure(

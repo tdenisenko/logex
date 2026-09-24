@@ -64,5 +64,16 @@ process repeats the same executable preflight.
 After a storage failure, restore the correct volume and permissions, ensure free
 space, and restart. LogEx reopens its existing recovery state; it does not create
 a substitute database elsewhere. A wrong or missing volume keeps failing
-preflight until corrected. The automatic corrupt-segment repair command is a
-separate audit item and is not provided by these templates.
+preflight until corrected. Offline inspection is available with `logex repair
+--dry-run`; it verifies the expected existing volume without a write probe and
+does not create a data directory. `logex repair` performs exclusive repair and
+retains quarantine artifacts. Both commands use the configured data directory.
+
+Automatic repair before sync is optional: set `repair_corrupt_segments = true`
+in the service config. Each restart then uses the same verified repair coordinator
+before starting ingestion and queries. Maintenance health/status report HTTP 503;
+authentication remains in effect for detailed status and the dashboard. Repair
+requires determinable ranges and retained trustworthy anchors when re-fetching
+data; it never resets the database or replaces consensus trust to get past a
+blocker. Omit checkpoint settings from a manual repair config. See the root
+README and `logex repair --help` for exit codes and work allowances.

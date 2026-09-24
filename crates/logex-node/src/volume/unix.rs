@@ -20,11 +20,30 @@ pub(super) fn prepare(
     prepare_with(mount, uuid, data, minimum, platform::verify)
 }
 
+pub(super) fn prepare_read_only(
+    mount: &Path,
+    uuid: &str,
+    data: &Path,
+) -> io::Result<ExpectedVolume> {
+    prepare_mode_with(mount, uuid, data, None, platform::verify)
+}
+
 fn prepare_with(
     mount: &Path,
     uuid: &str,
     data: &Path,
     minimum: u64,
+    verify: fn(&File, &Path, &str) -> io::Result<()>,
+) -> io::Result<ExpectedVolume> {
+    prepare_mode_with(mount, uuid, data, Some(minimum), verify)
+}
+
+// None is a read-only existing-path inspection; Some retains writable startup.
+fn prepare_mode_with(
+    mount: &Path,
+    uuid: &str,
+    data: &Path,
+    minimum: Option<u64>,
     verify: fn(&File, &Path, &str) -> io::Result<()>,
 ) -> io::Result<ExpectedVolume> {
     let mount_path = absolute_normalized(mount)?;
@@ -43,7 +62,9 @@ fn prepare_with(
     }
     let mount = open_directory(&mount_path)?;
     verify(&mount, &mount_path, &uuid)?;
-    check_space(&mount, minimum)?;
+    if let Some(minimum) = minimum {
+        check_space(&mount, minimum)?;
+    }
     let device = mount.metadata()?.dev();
     let mut directory = mount.try_clone()?;
     for component in relative.components() {
@@ -55,7 +76,7 @@ fn prepare_with(
         let name = CString::new(name.as_bytes()).map_err(|_| invalid("data path contains NUL"))?;
         let next = match open_child(&directory, &name) {
             Ok(next) => next,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            Err(error) if error.kind() == io::ErrorKind::NotFound && minimum.is_some() => {
                 // Test actual write capability on the verified ancestor before
                 // creating any data-directory component. All later paths stay
                 // relative to the pinned directory, never the mount pathname.
@@ -86,7 +107,9 @@ fn prepare_with(
     // Check all existing entries before any database reader can follow aliases.
     // LogEx never creates symlinks or nested mounts in its data directory.
     verify_tree(device)?;
-    write_probe()?;
+    if minimum.is_some() {
+        write_probe()?;
+    }
     let guard = ExpectedVolume {
         mount,
         data: directory,
@@ -94,8 +117,15 @@ fn prepare_with(
         data_path,
         uuid,
     };
-    check_with(&guard, minimum, verify)?;
+    match minimum {
+        Some(minimum) => check_with(&guard, minimum, verify)?,
+        None => check_identity(&guard, verify)?,
+    }
     Ok(guard)
+}
+
+pub(super) fn check_read_only(volume: &ExpectedVolume) -> io::Result<()> {
+    check_identity(volume, platform::verify)
 }
 
 pub(super) fn check(volume: &ExpectedVolume, minimum: u64) -> io::Result<()> {
@@ -107,6 +137,15 @@ fn check_with(
     minimum: u64,
     verify: fn(&File, &Path, &str) -> io::Result<()>,
 ) -> io::Result<()> {
+    check_identity(volume, verify)?;
+    check_space(&volume.data, minimum)?;
+    write_probe()
+}
+
+fn check_identity(
+    volume: &ExpectedVolume,
+    verify: fn(&File, &Path, &str) -> io::Result<()>,
+) -> io::Result<()> {
     verify(&volume.mount, &volume.mount_path, &volume.uuid)?;
     // The pathname must still name the same mounted directory. A different
     // filesystem or replacement directory is failure even if it is writable.
@@ -115,9 +154,7 @@ fn check_with(
     let current_data = open_directory(&volume.data_path)?;
     same_entry(&volume.data, &current_data)?;
     let cwd = open_directory(Path::new("."))?;
-    same_entry(&volume.data, &cwd)?;
-    check_space(&volume.data, minimum)?;
-    write_probe()
+    same_entry(&volume.data, &cwd)
 }
 
 fn same_entry(expected: &File, actual: &File) -> io::Result<()> {
@@ -243,6 +280,13 @@ mod tests {
             "occupied",
             "replacement",
             "permission",
+            "read_only",
+            "read_only_missing_mount",
+            "read_only_missing_data",
+            "read_only_wrong_uuid",
+            "read_only_alias",
+            "read_only_tree_alias",
+            "read_only_replacement",
         ] {
             let directory = tempfile::tempdir().unwrap();
             let root = directory.path().canonicalize().unwrap();
@@ -266,6 +310,90 @@ mod tests {
         }
     }
 
+    fn read_only_snapshot(
+        root: &Path,
+    ) -> std::collections::BTreeMap<PathBuf, (std::time::SystemTime, Option<Vec<u8>>)> {
+        fn visit(
+            root: &Path,
+            path: &Path,
+            result: &mut std::collections::BTreeMap<
+                PathBuf,
+                (std::time::SystemTime, Option<Vec<u8>>),
+            >,
+        ) {
+            let metadata = fs::symlink_metadata(path).unwrap();
+            result.insert(
+                path.strip_prefix(root).unwrap().to_owned(),
+                (
+                    metadata.modified().unwrap(),
+                    metadata.is_file().then(|| fs::read(path).unwrap()),
+                ),
+            );
+            if metadata.is_dir() {
+                for entry in fs::read_dir(path).unwrap() {
+                    visit(root, &entry.unwrap().path(), result);
+                }
+            }
+        }
+        let mut result = std::collections::BTreeMap::new();
+        visit(root, root, &mut result);
+        result
+    }
+
+    fn read_only_child(root: &Path, case: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        let mount = root.join("volume");
+        let data = mount.join("node/data");
+        if case != "read_only_missing_mount" {
+            fs::create_dir(&mount).unwrap();
+        }
+        if !matches!(case, "read_only_missing_mount" | "read_only_missing_data") {
+            fs::create_dir_all(&data).unwrap();
+            fs::write(data.join("catalog"), b"retained fixture").unwrap();
+        }
+        if case == "read_only_alias" {
+            fs::rename(mount.join("node"), mount.join("retained")).unwrap();
+            std::os::unix::fs::symlink(mount.join("retained"), mount.join("node")).unwrap();
+        }
+        if case == "read_only_tree_alias" {
+            std::os::unix::fs::symlink(data.join("catalog"), data.join("alias")).unwrap();
+        }
+        if case == "read_only" {
+            // Read/execute permission is enough: no writable probe is permitted.
+            fs::set_permissions(&data, fs::Permissions::from_mode(0o500)).unwrap();
+        }
+        let before = read_only_snapshot(root);
+        let uuid = if case == "read_only_wrong_uuid" {
+            "1234-abcd"
+        } else {
+            "abcd-1234"
+        };
+        let result = prepare_mode_with(&mount, uuid, &data, None, fixture_identity);
+        assert_eq!(
+            read_only_snapshot(root),
+            before,
+            "read-only preflight mutated {case}"
+        );
+        if matches!(case, "read_only" | "read_only_replacement") {
+            let guard = result.unwrap();
+            check_identity(&guard, fixture_identity).unwrap();
+            assert_eq!(std::env::current_dir().unwrap(), data);
+            if case == "read_only_replacement" {
+                fs::rename(&mount, root.join("retained-volume")).unwrap();
+                fs::create_dir_all(&data).unwrap();
+                fs::write(data.join("unrelated"), b"unchanged replacement").unwrap();
+                let before = read_only_snapshot(root);
+                assert!(check_identity(&guard, fixture_identity).is_err());
+                assert_eq!(read_only_snapshot(root), before);
+            }
+        } else {
+            assert!(result.is_err(), "case {case}");
+        }
+        if case == "read_only" {
+            fs::set_permissions(&data, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+    }
+
     #[test]
     fn preflight_child() {
         let Some(root) = std::env::var_os("LOGEX_VOLUME_TEST_ROOT") else {
@@ -273,6 +401,10 @@ mod tests {
         };
         let root = PathBuf::from(root);
         let case = std::env::var("LOGEX_VOLUME_TEST_CASE").unwrap();
+        if case.starts_with("read_only") {
+            read_only_child(&root, &case);
+            return;
+        }
         let mount = root.join("volume");
         let data = mount.join("node/data");
         if case != "missing_mount" {
