@@ -1,4 +1,7 @@
 //! Bounded disposable datasets and scripted transport; retained anchors are not CL proofs.
+#[path = "retry_tests.rs"]
+mod retry_tests;
+
 use super::*;
 use crate::repair::tests::{Scripted, anchor, fixture, limits as fetch_limits};
 use crate::repair::{RepairFetchStep, RepairFetcher, RepairRange, assess_repair};
@@ -12,7 +15,7 @@ use logex_storage::{
 use logex_types::{ExecutionAnchor, LogRow};
 use std::{collections::BTreeMap, fs, time::Duration};
 
-fn limits() -> RepairExecutionLimits {
+pub(super) fn limits() -> RepairExecutionLimits {
     RepairExecutionLimits {
         assessment: RepairAssessmentLimits {
             primary: InspectionLimits {
@@ -50,7 +53,7 @@ fn limits() -> RepairExecutionLimits {
     }
 }
 
-fn consensus(anchors: &[ExecutionAnchor]) -> (tempfile::TempDir, ConsensusStore) {
+pub(super) fn consensus(anchors: &[ExecutionAnchor]) -> (tempfile::TempDir, ConsensusStore) {
     let tmp = tempfile::tempdir().unwrap();
     let store = ConsensusStore::open(
         tmp.path(),
@@ -118,7 +121,7 @@ fn primary(assessment: RepairAssessment) -> PrimaryDataInspection {
 }
 
 type Tree = BTreeMap<PathBuf, Option<Vec<u8>>>;
-fn tree(root: &Path) -> Tree {
+pub(super) fn tree(root: &Path) -> Tree {
     fn visit(root: &Path, path: &Path, out: &mut Tree) {
         let metadata = fs::symlink_metadata(path).unwrap();
         out.insert(
