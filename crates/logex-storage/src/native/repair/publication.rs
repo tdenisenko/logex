@@ -9,8 +9,9 @@ use alloy_primitives::FixedBytes;
 use logex_types::LogRow;
 
 use super::super::{
-    InspectionLimits, NativeStorageCatalog, PrimaryDataDisposition, SegmentDescriptor,
-    SegmentManifest, StorageCatalogPaths, directory_lock::DataDirectoryLock, inspection,
+    InspectionLimits, NativeStorageCatalog, PrimaryDataDisposition, PrimaryDataInspection,
+    SegmentDescriptor, SegmentManifest, StorageCatalogPaths, directory_lock::DataDirectoryLock,
+    inspection,
 };
 use super::{
     RepairOwnershipPlan, RepairPlanLimits, StagedRepairCandidate, VerifiedRepairCandidate, invalid,
@@ -33,6 +34,29 @@ pub struct PendingRepair {
     state: RepairCatalogState,
 }
 
+/// Read-only repair classification retaining one exclusive directory owner.
+/// Pending publication evidence is checked before primary-data inspection.
+#[derive(Debug)]
+pub enum RepairInspection {
+    Primary(Box<PrimaryDataInspection>),
+    Pending(Box<PendingRepair>),
+}
+
+/// Inspect existing repair evidence without opening storage or performing recovery.
+/// Both outcomes retain the same owner acquired here for subsequent planning.
+pub fn inspect_repair(root: &Path, limits: InspectionLimits) -> io::Result<RepairInspection> {
+    let owner = DataDirectoryLock::acquire_existing(root)?;
+    let paths = StorageCatalogPaths::new(std::path::absolute(root)?);
+    match RepairJournal::load(&paths)? {
+        Some(journal) => Ok(RepairInspection::Pending(Box::new(pending_owned(
+            owner, paths, journal,
+        )?))),
+        None => Ok(RepairInspection::Primary(Box::new(
+            inspection::inspect_owned(owner, paths, limits)?,
+        ))),
+    }
+}
+
 pub(in crate::native) fn require_no_pending_repair(root: &Path) -> io::Result<()> {
     if exists(&root.join(JOURNAL_FILE))? {
         return Err(io::Error::new(
@@ -51,13 +75,21 @@ pub fn inspect_pending_repair(root: &Path) -> io::Result<Option<PendingRepair>> 
     let Some(journal) = RepairJournal::load(&paths)? else {
         return Ok(None);
     };
+    pending_owned(owner, paths, journal).map(Some)
+}
+
+fn pending_owned(
+    owner: DataDirectoryLock,
+    paths: StorageCatalogPaths,
+    journal: RepairJournal,
+) -> io::Result<PendingRepair> {
     let state = catalog_state(&paths, &journal)?;
-    Ok(Some(PendingRepair {
+    Ok(PendingRepair {
         owner,
         paths,
         journal,
         state,
-    }))
+    })
 }
 
 impl PendingRepair {
@@ -683,3 +715,7 @@ fn check_headroom(_: &Path, _: u64) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "inspection_tests.rs"]
+mod inspection_tests;
