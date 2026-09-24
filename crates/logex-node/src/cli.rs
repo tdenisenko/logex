@@ -57,7 +57,7 @@ pub struct Cli {
     /// log_level, partition_target_rows, checkpoint,
     /// checkpoint_sync_url, nat, p2p_bind_ip, execution_bootnodes, execution_discv5_port,
     /// http_host, grpc_host, allow_public_grpc, dashboard_enabled, dashboard_password,
-    /// repair_corrupt_segments, query_max_concurrent.
+    /// repair_corrupt_segments, query_max_concurrent, query_memory_bytes.
     #[arg(long, global = true)]
     pub config: Option<PathBuf>,
 
@@ -165,6 +165,7 @@ impl Cli {
             allow_public_grpc,
             repair_corrupt_segments,
             query_max_concurrent,
+            query_memory_bytes,
             ..
         } = &mut self.command
         {
@@ -172,6 +173,12 @@ impl Cli {
                 .subcommand_matches("sync")
                 .expect("sync options come from the same CLI parse");
             apply_file_default(grpc_host, file_config.grpc_host, matches, "grpc_host");
+            apply_file_default(
+                query_memory_bytes,
+                file_config.query_memory_bytes,
+                matches,
+                "query_memory_bytes",
+            );
             apply_file_default(
                 query_max_concurrent,
                 file_config.query_max_concurrent,
@@ -330,6 +337,10 @@ Security:
         /// Excess requests fail immediately; this is not a query memory budget.
         #[arg(long, default_value = "8")]
         query_max_concurrent: usize,
+
+        /// Shared DataFusion operator memory budget in bytes, not a process memory limit.
+        #[arg(long, default_value = "1073741824")]
+        query_memory_bytes: u64,
 
         /// Repair corrupt segments from retained verified trust before normal sync.
         #[arg(long, default_value = "false", num_args = 0..=1, require_equals = true, default_missing_value = "true", action = clap::ArgAction::Set)]
@@ -610,6 +621,7 @@ pub enum IndexProfile {
 pub struct Config {
     #[serde(default)]
     pub query_max_concurrent: Option<usize>,
+    pub query_memory_bytes: Option<u64>,
     #[serde(default)]
     pub repair_corrupt_segments: Option<bool>,
     #[serde(default)]

@@ -120,12 +120,13 @@ async fn execute_query(
     };
     let requested_limit = req.limit;
     let page = SqlQueryPage::new(requested_limit, req.offset);
-    let execution = logex_query::execute_sql_page_on_snapshot(
+    let execution = logex_query::execute_sql_page_on_snapshot_with_memory(
         &req.sql,
         storage_snapshot,
         head_block,
         page,
         Some(cancel_check),
+        state.query_memory.clone(),
     );
     let result = match tokio::select! {
         biased;
@@ -139,6 +140,17 @@ async fn execute_query(
                 Json(ErrorResponse {
                     error: error.to_string(),
                 }),
+            )
+                .into_response();
+        }
+        Err(SqlQueryError::Capacity(error)) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "status": "query_capacity",
+                    "resource": "memory",
+                    "error": error,
+                })),
             )
                 .into_response();
         }

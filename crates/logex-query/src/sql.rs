@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::ops::ControlFlow;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, LazyLock};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::task::{Context, Poll};
 
 use alloy_primitives::{Address, B256, keccak256};
@@ -22,9 +22,7 @@ use datafusion::datasource::TableProvider;
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::execution::context::{SQLOptions, SessionState, TaskContext};
 use datafusion::execution::disk_manager::{DiskManagerBuilder, DiskManagerMode};
-use datafusion::execution::memory_pool::{
-    MemoryConsumer, MemoryLimit, MemoryPool, MemoryReservation, UnboundedMemoryPool,
-};
+use datafusion::execution::memory_pool::{MemoryLimit, MemoryPool, MemoryReservation};
 use datafusion::execution::runtime_env::RuntimeEnvBuilder;
 use datafusion::logical_expr::expr::InList;
 use datafusion::logical_expr::simplify::SimplifyContext;
@@ -60,6 +58,7 @@ use serde_json::{Map, Value};
 
 use logex_storage::native::{NativeLogFilter, TopicConstraint};
 use logex_storage::{PartitionManager, SegmentReader};
+use logex_types::{QueryMemoryBudget, QueryMemoryError, QueryMemoryLimit, QueryMemoryReservation};
 
 use crate::json::{record_batches_to_json, unique_names};
 use crate::lexer::{Token, tokenize};
@@ -70,6 +69,8 @@ use crate::native::{
 };
 
 const DATAFUSION_BATCH_SIZE: usize = 4_096;
+static DEFAULT_QUERY_MEMORY_BUDGET: LazyLock<QueryMemoryBudget> =
+    LazyLock::new(|| QueryMemoryBudget::new(QueryMemoryLimit::default()));
 // No query tables or user functions are registered in this built-in planner
 // template. Each aggregate query receives a marked execution snapshot via state().
 static NATIVE_SUM_EXPRESSION_CONTEXT: LazyLock<SessionContext> = LazyLock::new(SessionContext::new);
@@ -87,10 +88,58 @@ pub enum SqlQueryError {
     SnapshotChanged,
     #[error("storage error: {0}")]
     Storage(#[from] std::io::Error),
+    #[error("query capacity exceeded: {0}")]
+    Capacity(String),
     #[error("sql error: {0}")]
-    DataFusion(#[from] DataFusionError),
+    DataFusion(DataFusionError),
     #[error("legacy LogEx syntax error: {0}")]
     LegacySyntax(String),
+}
+
+impl From<DataFusionError> for SqlQueryError {
+    fn from(error: DataFusionError) -> Self {
+        fn capacity_message(root: &(dyn std::error::Error + 'static)) -> Option<String> {
+            let mut pending = vec![root];
+            while let Some(error) = pending.pop() {
+                if let Some(error) = error.downcast_ref::<QueryMemoryError>() {
+                    match error {
+                        QueryMemoryError::CapacityExceeded { .. }
+                        | QueryMemoryError::SizeOverflow { .. } => {
+                            return Some(error.to_string());
+                        }
+                        QueryMemoryError::InvalidRelease { .. } => {}
+                    }
+                }
+                let datafusion = error.downcast_ref::<DataFusionError>().or_else(|| {
+                    error
+                        .downcast_ref::<Arc<DataFusionError>>()
+                        .map(Arc::as_ref)
+                });
+                if let Some(error) = datafusion {
+                    if let DataFusionError::ResourcesExhausted(message) = error {
+                        return Some(message.clone());
+                    }
+                    if let DataFusionError::Collection(errors) = error {
+                        pending.extend(
+                            errors
+                                .iter()
+                                .map(|error| error as &(dyn std::error::Error + 'static)),
+                        );
+                        continue;
+                    }
+                }
+                if let Some(source) = error.source() {
+                    pending.push(source);
+                }
+            }
+            None
+        }
+
+        match capacity_message(&error) {
+            Some(message) => Self::Capacity(message),
+            None => Self::DataFusion(error),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -114,37 +163,48 @@ struct DataFusionQueryLifetime {
 
 #[derive(Debug)]
 struct QueryLifetimeMemoryPool {
-    inner: Arc<dyn MemoryPool>,
+    budget: QueryMemoryBudget,
+    reservation: Mutex<QueryMemoryReservation>,
+    limit: usize,
     _lifetime: Arc<DataFusionQueryLifetime>,
 }
 
 impl MemoryPool for QueryLifetimeMemoryPool {
-    fn register(&self, consumer: &MemoryConsumer) {
-        self.inner.register(consumer);
+    fn grow(&self, _reservation: &MemoryReservation, additional: usize) {
+        self.reservation
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .record_existing(additional);
     }
 
-    fn unregister(&self, consumer: &MemoryConsumer) {
-        self.inner.unregister(consumer);
+    fn shrink(&self, _reservation: &MemoryReservation, shrink: usize) {
+        self.reservation
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .shrink(shrink)
+            .expect("DataFusion released more query memory than it reserved");
     }
 
-    fn grow(&self, reservation: &MemoryReservation, additional: usize) {
-        self.inner.grow(reservation, additional);
-    }
-
-    fn shrink(&self, reservation: &MemoryReservation, shrink: usize) {
-        self.inner.shrink(reservation, shrink);
-    }
-
-    fn try_grow(&self, reservation: &MemoryReservation, additional: usize) -> DataFusionResult<()> {
-        self.inner.try_grow(reservation, additional)
+    fn try_grow(
+        &self,
+        _reservation: &MemoryReservation,
+        additional: usize,
+    ) -> DataFusionResult<()> {
+        self.reservation
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .try_grow(additional)
+            .map_err(|error| DataFusionError::ResourcesExhausted(error.to_string()))
     }
 
     fn reserved(&self) -> usize {
-        self.inner.reserved()
+        // This pool represents one consumer of a server-wide budget. Report the
+        // shared ledger so DataFusion metrics expose total admitted operator memory.
+        usize::try_from(self.budget.used()).unwrap_or(usize::MAX)
     }
 
     fn memory_limit(&self) -> MemoryLimit {
-        self.inner.memory_limit()
+        MemoryLimit::Finite(self.limit)
     }
 }
 
@@ -669,6 +729,34 @@ pub async fn execute_sql_page_on_snapshot(
     page: SqlQueryPage,
     cancel_check: Option<QueryCancelCheck>,
 ) -> Result<SqlQueryResult, SqlQueryError> {
+    execute_sql_page_on_snapshot_with_memory(
+        sql,
+        snapshot,
+        head_block,
+        page,
+        cancel_check,
+        DEFAULT_QUERY_MEMORY_BUDGET.clone(),
+    )
+    .await
+}
+
+/// Execute one SQL page against a captured storage view using a shared memory budget.
+///
+/// The view remains subject to optimistic invalidation checks. DataFusion operator
+/// reservations participate in `memory` across concurrent queries. Query planning,
+/// custom storage scans, native fast paths, and result conversion are outside this
+/// accounting milestone. Infallible DataFusion allocations are recorded even when
+/// they temporarily exceed the configured limit. Disk spilling is disabled, so a
+/// fallible operator reservation that exceeds available capacity returns
+/// [`SqlQueryError::Capacity`] without truncating rows.
+pub async fn execute_sql_page_on_snapshot_with_memory(
+    sql: &str,
+    snapshot: StorageSnapshot,
+    head_block: u64,
+    page: SqlQueryPage,
+    cancel_check: Option<QueryCancelCheck>,
+    memory: QueryMemoryBudget,
+) -> Result<SqlQueryResult, SqlQueryError> {
     let validity = snapshot.validity.clone();
     if validity.as_ref().is_some_and(|token| !token.is_valid()) {
         return Err(SqlQueryError::SnapshotChanged);
@@ -679,7 +767,8 @@ pub async fn execute_sql_page_on_snapshot(
             || view_check.as_ref().is_some_and(|token| !token.is_valid())
     }));
     let result =
-        execute_sql_page_on_snapshot_inner(sql, snapshot, head_block, page, cancel_check).await;
+        execute_sql_page_on_snapshot_inner(sql, snapshot, head_block, page, cancel_check, memory)
+            .await;
     // Validate even after errors: a changed view is retryable, and no partial
     // aggregate/page produced across a reorg may become a successful result.
     if validity.as_ref().is_some_and(|token| !token.is_valid()) {
@@ -694,6 +783,7 @@ async fn execute_sql_page_on_snapshot_inner(
     head_block: u64,
     page: SqlQueryPage,
     cancel_check: Option<QueryCancelCheck>,
+    memory: QueryMemoryBudget,
 ) -> Result<SqlQueryResult, SqlQueryError> {
     let SqlQueryPage { limit, offset } = page;
     validate_sql_text_size(sql)?;
@@ -727,8 +817,14 @@ async fn execute_sql_page_on_snapshot_inner(
             .expect("snapshot execution always installs a cancellation check"),
     });
     let config = SessionConfig::new().with_extension(Arc::clone(&query_lifetime));
+    let memory_limit = memory.limit();
+    let memory_reservation = memory
+        .reserve(0, "datafusion query operators")
+        .map_err(|error| SqlQueryError::Capacity(error.to_string()))?;
     let memory_pool: Arc<dyn MemoryPool> = Arc::new(QueryLifetimeMemoryPool {
-        inner: Arc::new(UnboundedMemoryPool::default()),
+        budget: memory,
+        reservation: Mutex::new(memory_reservation),
+        limit: memory_limit,
         _lifetime: Arc::clone(&query_lifetime),
     });
     let runtime = RuntimeEnvBuilder::new()
@@ -5548,6 +5644,7 @@ fn to_hex_bytes(data: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use alloy_primitives::{Address, B256, bytes, keccak256};
+    use datafusion::execution::memory_pool::MemoryConsumer;
     use logex_index::IndexBuilder;
     use logex_storage::PartitionManagerConfig;
     use logex_types::{LogRow, Source};
@@ -5600,19 +5697,178 @@ mod tests {
                 false
             }),
         });
+        let budget = QueryMemoryBudget::new(QueryMemoryLimit::new(1_024).unwrap());
         let pool: Arc<dyn MemoryPool> = Arc::new(QueryLifetimeMemoryPool {
-            inner: Arc::new(UnboundedMemoryPool::default()),
+            budget: budget.clone(),
+            reservation: Mutex::new(budget.reserve(0, "test operators").unwrap()),
+            limit: budget.limit(),
             _lifetime: Arc::clone(&query_lifetime),
         });
-        let reservation = MemoryConsumer::new("query-lifetime-test").register(&pool);
+        let mut reservation = MemoryConsumer::new("query-lifetime-test").register(&pool);
+        reservation.try_grow(7).unwrap();
 
         drop(request_owner);
         drop(query_lifetime);
         drop(pool);
         assert!(weak_request_owner.upgrade().is_some());
+        assert_eq!(budget.used(), 7);
 
         drop(reservation);
         assert!(weak_request_owner.upgrade().is_none());
+        assert_eq!(budget.used(), 0);
+    }
+
+    #[test]
+    fn datafusion_pool_contends_and_split_reservations_release_exactly() {
+        let budget = QueryMemoryBudget::new(QueryMemoryLimit::new(8).unwrap());
+        let query_lifetime = Arc::new(DataFusionQueryLifetime {
+            _cancel_check: Arc::new(|| false),
+        });
+        let first_pool: Arc<dyn MemoryPool> = Arc::new(QueryLifetimeMemoryPool {
+            budget: budget.clone(),
+            reservation: Mutex::new(budget.reserve(0, "test operators").unwrap()),
+            limit: budget.limit(),
+            _lifetime: Arc::clone(&query_lifetime),
+        });
+        let second_pool: Arc<dyn MemoryPool> = Arc::new(QueryLifetimeMemoryPool {
+            budget: budget.clone(),
+            reservation: Mutex::new(budget.reserve(0, "test operators").unwrap()),
+            limit: budget.limit(),
+            _lifetime: query_lifetime,
+        });
+        let mut first = MemoryConsumer::new("first session").register(&first_pool);
+        let mut second = MemoryConsumer::new("second session").register(&second_pool);
+
+        first.try_grow(8).unwrap();
+        assert!(matches!(
+            second.try_grow(1),
+            Err(DataFusionError::ResourcesExhausted(_))
+        ));
+        assert_eq!(budget.used(), 8);
+
+        let retained = first.split(3);
+        drop(first);
+        assert_eq!(budget.used(), 3);
+        drop(retained);
+        drop(second);
+        drop(first_pool);
+        drop(second_pool);
+        assert_eq!(budget.used(), 0);
+    }
+
+    #[test]
+    fn capacity_classifier_traverses_arc_wrapped_collections() {
+        let nested = Arc::new(DataFusionError::Collection(vec![
+            DataFusionError::Execution("unrelated".to_owned()),
+            DataFusionError::ResourcesExhausted("shared memory exhausted".to_owned()),
+        ]));
+        let error = DataFusionError::External(Box::new(nested));
+
+        assert!(matches!(
+            SqlQueryError::from(error),
+            SqlQueryError::Capacity(message) if message == "shared memory exhausted"
+        ));
+    }
+
+    #[test]
+    fn invalid_memory_release_is_not_classified_as_capacity() {
+        let error = DataFusionError::External(Box::new(QueryMemoryError::InvalidRelease {
+            requested: 2,
+            reserved: 1,
+        }));
+
+        assert!(matches!(
+            SqlQueryError::from(error),
+            SqlQueryError::DataFusion(_)
+        ));
+    }
+
+    #[test]
+    fn datafusion_infallible_growth_is_accounted_before_later_rejection() {
+        let budget = QueryMemoryBudget::new(QueryMemoryLimit::new(8).unwrap());
+        let pool: Arc<dyn MemoryPool> = Arc::new(QueryLifetimeMemoryPool {
+            budget: budget.clone(),
+            reservation: Mutex::new(budget.reserve(0, "test operators").unwrap()),
+            limit: budget.limit(),
+            _lifetime: Arc::new(DataFusionQueryLifetime {
+                _cancel_check: Arc::new(|| false),
+            }),
+        });
+        let mut existing = MemoryConsumer::new("infallible allocation").register(&pool);
+        let mut fallible = MemoryConsumer::new("fallible allocation").register(&pool);
+
+        existing.grow(9);
+        assert_eq!(budget.used(), 9);
+        assert!(matches!(
+            fallible.try_grow(1),
+            Err(DataFusionError::ResourcesExhausted(_))
+        ));
+        existing.shrink(9);
+        assert_eq!(budget.used(), 0);
+        fallible.try_grow(8).unwrap();
+        drop(fallible);
+        drop(existing);
+        drop(pool);
+        assert_eq!(budget.used(), 0);
+    }
+
+    #[tokio::test]
+    async fn fallback_engine_reports_capacity_and_releases_budget() {
+        let (_tmp, storage) = setup_storage();
+        let budget = QueryMemoryBudget::new(QueryMemoryLimit::new(1).unwrap());
+        let result = execute_sql_page_on_snapshot_with_memory(
+            "SELECT block_number FROM logs ORDER BY block_number + 0",
+            StorageSnapshot::from_storage(&storage),
+            storage.head_block().unwrap_or(0),
+            SqlQueryPage::default(),
+            None,
+            budget.clone(),
+        )
+        .await;
+
+        assert!(matches!(result, Err(SqlQueryError::Capacity(_))));
+        assert_eq!(budget.used(), 0);
+    }
+
+    #[tokio::test]
+    async fn fallback_engine_succeeds_and_releases_available_budget() {
+        let (_tmp, storage) = setup_storage();
+        let budget = QueryMemoryBudget::new(QueryMemoryLimit::new(64 * 1024 * 1024).unwrap());
+        let result = execute_sql_page_on_snapshot_with_memory(
+            "SELECT block_number FROM logs ORDER BY block_number + 0",
+            StorageSnapshot::from_storage(&storage),
+            storage.head_block().unwrap_or(0),
+            SqlQueryPage::default(),
+            None,
+            budget.clone(),
+        )
+        .await
+        .unwrap();
+
+        assert!(!result.rows.is_empty());
+        assert_eq!(budget.used(), 0);
+    }
+
+    #[tokio::test]
+    async fn canceled_fallback_query_releases_budget() {
+        let (_tmp, storage) = setup_storage();
+        let budget = QueryMemoryBudget::new(QueryMemoryLimit::new(1_024).unwrap());
+        let result = execute_sql_page_on_snapshot_with_memory(
+            "SELECT block_number FROM logs ORDER BY block_number + 0",
+            StorageSnapshot::from_storage(&storage),
+            storage.head_block().unwrap_or(0),
+            SqlQueryPage::default(),
+            Some(Arc::new(|| true)),
+            budget.clone(),
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(SqlQueryError::DataFusion(DataFusionError::Execution(message)))
+                if message == "query canceled"
+        ));
+        assert_eq!(budget.used(), 0);
     }
 
     #[test]

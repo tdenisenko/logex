@@ -25,6 +25,7 @@ use axum::{
 use base64::Engine;
 
 pub use handler::{AppState, QueryConcurrencyLimit};
+pub use logex_types::QueryMemoryLimit;
 pub use maintenance::{
     MaintenanceState, MaintenanceStatus, MaintenanceStatusKind, RepairPhase,
     build_maintenance_router, serve_maintenance,

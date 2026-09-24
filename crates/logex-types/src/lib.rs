@@ -1,6 +1,7 @@
 mod consensus;
 mod log_row;
 mod partition;
+mod query_memory;
 mod sync;
 
 pub use consensus::{
@@ -11,6 +12,9 @@ pub use consensus::{
 };
 pub use log_row::{BlockContext, LogRow, LogRowConversionError, Source};
 pub use partition::PartitionMeta;
+pub use query_memory::{
+    QueryMemoryBudget, QueryMemoryError, QueryMemoryLimit, QueryMemoryReservation,
+};
 pub use sync::{ConsensusNetworkStatus, ExecutionNetworkStatus, NodeState, SyncStatus};
 
 /// Canonical LogEx client version string used across JSON-RPC and devp2p.

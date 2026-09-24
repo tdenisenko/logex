@@ -143,10 +143,19 @@ response bytes; disconnecting a caller does not free a slot while its worker
 continues. Metadata, status, cancellation and subscription operations are
 exempt. REST's existing exclusive-query behavior still applies.
 
-This is an admission limit, not a shared query memory budget. Memory accounting
-across native readers, SQL operators and response conversion remains unfinished;
-one admitted query can still consume substantial memory. SQL execution has disk
-spill disabled, and admission rejection never silently truncates results.
+DataFusion operators use a shared accounted-memory budget across REST and gRPC
+SQL queries. Configure it with `sync --query-memory-bytes <BYTES>` or TOML
+`query_memory_bytes`; the default is 1 GiB (`1073741824` bytes). The value must be
+positive and fit the platform's signed address space. Explicit CLI values override
+config, including the default value. A participating operator that cannot reserve
+capacity returns HTTP 503 with `query_capacity` and resource `memory`, or gRPC
+`RESOURCE_EXHAUSTED`. A capacity failure does not mark storage unhealthy.
+
+This budget is not a process-RAM ceiling. Some DataFusion operators account after
+allocating; planner/scratch allocations, LogEx native fast paths, custom scans and
+result/response conversion are not yet covered. One query can still consume
+substantial unaccounted memory. SQL execution has disk spill disabled, and neither
+admission nor memory rejection silently truncates successful results.
 
 SQL requests are limited to 256 KiB of text, 128 syntax tokens (identifiers,
 keywords, operators and opening delimiters) and a parser recursion budget of 16.
@@ -335,6 +344,7 @@ Global options:
 | Option | Default | Use |
 | --- | --- | --- |
 | `--query-max-concurrent <N>` | `8` | Shared admission limit for REST SQL, JSON-RPC logs and gRPC SQL/native queries. Excess requests fail immediately; does not bound query memory. |
+| `--query-memory-bytes <BYTES>` | `1073741824` | Shared accounted-memory budget for DataFusion operators in REST/gRPC SQL queries; not a process-RAM ceiling. Native scans and result conversion are not yet covered. |
 | `--http-host <IP>` | `127.0.0.1` | HTTP bind host for dashboard, `/status`, `/query`, JSON-RPC, and WebSocket routes. Use `0.0.0.0` only with `--dashboard-password` and network-level protection. |
 | `--http-port <PORT>` | `8577` | HTTP dashboard, REST, JSON-RPC, and WebSocket port. Keep this stable for browser sessions and automation. |
 | `--grpc-host <IP>` | `127.0.0.1` | gRPC bind host. gRPC is unauthenticated; public gRPC requires `--allow-public-grpc`. |
@@ -461,6 +471,7 @@ data_dir = "/var/lib/logex/mainnet"
 log_level = "info"
 partition_target_rows = 1000000
 query_max_concurrent = 8
+query_memory_bytes = 1073741824
 checkpoint_sync_url = "https://YOUR-CHECKPOINT-ENDPOINT"
 nat = "extip:203.0.113.10"
 p2p_bind_ip = "0.0.0.0"
@@ -481,6 +492,7 @@ Supported config keys:
 | `log_level` | string | Tracing filter. |
 | `partition_target_rows` | integer | Target rows per sealed segment. |
 | `query_max_concurrent` | positive integer | Shared query admission limit during sync; default 8. Explicit CLI values override config. |
+| `query_memory_bytes` | positive integer | Shared DataFusion accounted-memory budget in bytes during sync; default 1073741824. Explicit CLI values override config. Coverage limitations are described above. |
 | `checkpoint` | string | Weak-subjectivity checkpoint root, `slot@root`, or descriptor path. |
 | `checkpoint_sync_url` | string | Checkpoint-sync or Beacon API URL. Comma-separated URLs require quorum agreement. |
 | `nat` | string | EL NAT resolver, such as `any` or `extip:203.0.113.10`. |

@@ -42,6 +42,13 @@ fn main() {
             std::process::exit(1);
         }
     };
+    let query_memory = match resolved_query_memory(&cli.command) {
+        Ok(limit) => limit,
+        Err(error) => {
+            eprintln!("Error: {error}");
+            std::process::exit(1);
+        }
+    };
     drop(matches);
     let log_level = normalize_info_log_filter(cli.log_level);
 
@@ -160,6 +167,7 @@ fn main() {
     match cli.command {
         Command::Sync {
             query_max_concurrent: _,
+            query_memory_bytes: _,
             http_host,
             http_port,
             grpc_host,
@@ -187,6 +195,7 @@ fn main() {
                 .or_else(|| Some(DEFAULT_CHECKPOINT_SYNC_URL.to_owned()));
             let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
             let shutdown = rt.block_on(runtime::run_sync(runtime::RunSyncOptions {
+                query_memory: query_memory.expect("sync memory limit was validated"),
                 query_concurrency: query_concurrency
                     .expect("sync admission was validated before startup"),
                 pm_config,
@@ -308,6 +317,21 @@ fn normalize_info_log_filter(filter: String) -> String {
         DEFAULT_LOG_FILTER.to_owned()
     } else {
         filter
+    }
+}
+
+fn resolved_query_memory(
+    command: &Command,
+) -> Result<Option<logex_types::QueryMemoryLimit>, String> {
+    match command {
+        Command::Sync {
+            query_memory_bytes, ..
+        } => usize::try_from(*query_memory_bytes)
+            .map_err(|_| "query memory bytes do not fit this platform".to_owned())
+            .and_then(logex_types::QueryMemoryLimit::new)
+            .map(Some)
+            .map_err(|error| format!("invalid --query-memory-bytes / query_memory_bytes: {error}")),
+        _ => Ok(None),
     }
 }
 
