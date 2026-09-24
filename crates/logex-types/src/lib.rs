@@ -1,6 +1,7 @@
 mod consensus;
 mod log_row;
 mod partition;
+mod query_buffer;
 mod query_memory;
 mod sync;
 
@@ -12,6 +13,7 @@ pub use consensus::{
 };
 pub use log_row::{BlockContext, LogRow, LogRowConversionError, Source};
 pub use partition::PartitionMeta;
+pub use query_buffer::QueryBuffer;
 pub use query_memory::{
     QueryMemoryBudget, QueryMemoryError, QueryMemoryLimit, QueryMemoryReservation,
 };

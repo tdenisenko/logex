@@ -130,6 +130,12 @@ pub struct QueryMemoryReservation {
 }
 
 impl QueryMemoryReservation {
+    pub(crate) fn budget(&self) -> &QueryMemoryBudget {
+        &self.budget
+    }
+    pub(crate) fn stage(&self) -> &'static str {
+        self.stage
+    }
     pub fn bytes(&self) -> u128 {
         self.bytes
     }

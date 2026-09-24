@@ -1,4 +1,5 @@
 //! Immutable compressed-artifact snapshots, committed by the storage catalog.
+use logex_types::{QueryBuffer, QueryMemoryBudget};
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
@@ -137,14 +138,16 @@ pub(crate) struct BundleReader {
     reference: BundleReference,
     streams: Arc<BTreeMap<u8, Stream>>,
     group_base: Option<Arc<GroupBase>>,
+    memory: Option<QueryMemoryBudget>,
 }
 
 #[derive(Debug)]
 struct ReadWindow {
     file: File,
     offset: u64,
-    bytes: Vec<u8>,
-    logical_ends: BTreeMap<u8, Vec<u64>>,
+    bytes: QueryBuffer<u8>,
+    logical_ends: BTreeMap<u8, QueryBuffer<u64>>,
+    memory: Option<QueryMemoryBudget>,
 }
 
 impl ReadWindow {
@@ -153,11 +156,12 @@ impl ReadWindow {
         extent: &Extent,
         snapshot_end: u64,
         read_ahead: bool,
-    ) -> io::Result<Vec<u8>> {
+        output_memory: Option<&QueryMemoryBudget>,
+    ) -> io::Result<QueryBuffer<u8>> {
         if !read_ahead {
             // Preserve the direct path for large or physically isolated pages.
             // Reading unrelated columns would add copying without saving I/O.
-            let mut bytes = buffer(extent.len as usize)?;
+            let mut bytes = query_buffer(extent.len as usize, output_memory)?;
             self.file.seek(SeekFrom::Start(extent.offset))?;
             self.file.read_exact(&mut bytes)?;
             if crc32fast::hash(&bytes) != extent.checksum {
@@ -180,7 +184,7 @@ impl ReadWindow {
             // overwritten old cache on retry. Never read an unpublished suffix.
             self.bytes.clear();
             self.offset = offset;
-            let mut bytes = buffer(len)?;
+            let mut bytes = query_buffer(len, self.memory.as_ref())?;
             self.file.seek(SeekFrom::Start(offset))?;
             self.file.read_exact(&mut bytes)?;
             self.bytes = bytes;
@@ -190,7 +194,10 @@ impl ReadWindow {
         if crc32fast::hash(bytes) != extent.checksum {
             return Err(invalid("bundle extent checksum mismatch"));
         }
-        Ok(bytes.to_vec())
+        let mut output =
+            QueryBuffer::try_with_capacity(bytes.len(), output_memory, "bundle extent copy")?;
+        output.try_extend_from_slice(bytes)?;
+        Ok(output)
     }
 }
 
@@ -216,6 +223,14 @@ impl BundleReader {
     }
 
     pub(crate) fn open(path: &Path, reference: &BundleReference) -> io::Result<Self> {
+        Self::open_with_memory(path, reference, None)
+    }
+
+    pub(crate) fn open_with_memory(
+        path: &Path,
+        reference: &BundleReference,
+        memory: Option<&QueryMemoryBudget>,
+    ) -> io::Result<Self> {
         let mut file = File::open(path)?;
         let end = reference.end()?;
         if end > file.metadata()?.len() {
@@ -280,12 +295,14 @@ impl BundleReader {
             file: Arc::new(Mutex::new(ReadWindow {
                 file,
                 offset: 0,
-                bytes: Vec::new(),
+                bytes: QueryBuffer::unaccounted(Vec::new()),
                 logical_ends: BTreeMap::new(),
+                memory: memory.cloned(),
             })),
             reference: reference.clone(),
             streams: Arc::new(streams),
             group_base,
+            memory: memory.cloned(),
         })
     }
 
@@ -293,7 +310,28 @@ impl BundleReader {
         self.read_range(id, 0..self.stream(id)?.len)
     }
 
+    pub(crate) fn read_stream_accounted(&self, id: u8) -> io::Result<QueryBuffer<u8>> {
+        self.read_range_accounted(id, 0..self.stream(id)?.len)
+    }
+
     pub(crate) fn read_range(&self, id: u8, range: Range<u64>) -> io::Result<Vec<u8>> {
+        Ok(self.read_range_inner(id, range, None)?.into_parts().0)
+    }
+
+    pub(crate) fn read_range_accounted(
+        &self,
+        id: u8,
+        range: Range<u64>,
+    ) -> io::Result<QueryBuffer<u8>> {
+        self.read_range_inner(id, range, self.memory.as_ref())
+    }
+
+    fn read_range_inner(
+        &self,
+        id: u8,
+        range: Range<u64>,
+        output_memory: Option<&QueryMemoryBudget>,
+    ) -> io::Result<QueryBuffer<u8>> {
         let stream = self.stream(id)?;
         if range.start > range.end || range.end > stream.len {
             return Err(invalid("bundle stream range is out of bounds"));
@@ -301,9 +339,13 @@ impl BundleReader {
         let len = usize::try_from(range.end - range.start)
             .map_err(|_| invalid("bundle range exceeds address space"))?;
         if inline_index(id) {
-            return Ok(stream.inline[range.start as usize..range.end as usize].to_vec());
+            let mut output =
+                QueryBuffer::try_with_capacity(len, output_memory, "bundle inline range")?;
+            output
+                .try_extend_from_slice(&stream.inline[range.start as usize..range.end as usize])?;
+            return Ok(output);
         }
-        let mut output = buffer(len)?;
+        let mut output = query_buffer(len, output_memory)?;
         let (first, mut logical) = if range.start != 0 && stream.extents.len() >= 32 {
             // Page selections must not rescan every preceding extent. Build
             // offsets only for selected streams; full scans and startup retain
@@ -315,14 +357,16 @@ impl BundleReader {
             let ends = match file.logical_ends.entry(id) {
                 std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
                 std::collections::btree_map::Entry::Vacant(entry) => {
-                    let mut ends = Vec::new();
-                    ends.try_reserve_exact(stream.extents.len())
-                        .map_err(|_| invalid("bundle lookup allocation failed"))?;
+                    let mut ends = QueryBuffer::try_with_capacity(
+                        stream.extents.len(),
+                        self.memory.as_ref(),
+                        "bundle extent lookup",
+                    )?;
                     let mut end = 0;
                     for extent in &stream.extents {
                         // The immutable table already bounds the sum and count.
                         end += u64::from(extent.len);
-                        ends.push(end);
+                        ends.try_push(end)?;
                     }
                     entry.insert(ends)
                 }
@@ -338,7 +382,7 @@ impl BundleReader {
             let start = range.start.max(logical);
             let end = range.end.min(next);
             if start < end {
-                let bytes = self.read_extent(&stream.extents, index)?;
+                let bytes = self.read_extent_with_memory(&stream.extents, index, output_memory)?;
                 let destination = (start - range.start) as usize;
                 let local = (start - logical) as usize;
                 let count = (end - start) as usize;
@@ -375,7 +419,16 @@ impl BundleReader {
             .ok_or_else(|| invalid("missing bundle stream"))
     }
 
-    fn read_extent(&self, extents: &[Extent], index: usize) -> io::Result<Vec<u8>> {
+    fn read_extent(&self, extents: &[Extent], index: usize) -> io::Result<QueryBuffer<u8>> {
+        self.read_extent_with_memory(extents, index, self.memory.as_ref())
+    }
+
+    fn read_extent_with_memory(
+        &self,
+        extents: &[Extent],
+        index: usize,
+        output_memory: Option<&QueryMemoryBudget>,
+    ) -> io::Result<QueryBuffer<u8>> {
         // Tables bound each extent before allocation. Verify even a partial
         // selection against the whole extent, at most MAX_EXTENT_BYTES.
         let extent = &extents[index];
@@ -388,7 +441,7 @@ impl BundleReader {
             .file
             .lock()
             .map_err(|_| invalid("bundle reader lock poisoned"))?;
-        file.read_extent(extent, self.reference.end()?, read_ahead)
+        file.read_extent(extent, self.reference.end()?, read_ahead, output_memory)
     }
 }
 
@@ -1132,6 +1185,11 @@ impl Cursor<'_> {
 fn invalid(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
+fn query_buffer(len: usize, memory: Option<&QueryMemoryBudget>) -> io::Result<QueryBuffer<u8>> {
+    let mut bytes = QueryBuffer::try_with_capacity(len, memory, "bundle read bytes")?;
+    bytes.try_resize(len, 0)?;
+    Ok(bytes)
+}
 fn buffer(len: usize) -> io::Result<Vec<u8>> {
     let mut bytes = Vec::new();
     bytes.try_reserve_exact(len).map_err(io::Error::other)?;
@@ -1144,6 +1202,64 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    fn accounted_fixture(path: &Path) -> BundleReference {
+        let writer = BundleWriter::create(path).unwrap();
+        for bytes in vec![7; 2 * READ_AHEAD_BYTES + 31].chunks(97) {
+            writer.append_data(0, bytes).unwrap();
+        }
+        writer.finish(1).unwrap()
+    }
+
+    #[test]
+    fn accounted_cache_and_outputs_follow_their_owners() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("bundle");
+        let reference = accounted_fixture(&path);
+        let memory =
+            QueryMemoryBudget::new(logex_types::QueryMemoryLimit::new(1024 * 1024).unwrap());
+        let reader = BundleReader::open_with_memory(&path, &reference, Some(&memory)).unwrap();
+        let output = reader.read_range_accounted(0, 1..30).unwrap();
+        assert_eq!(&*output, &[7; 29]);
+        let retained = memory.used();
+        assert!(retained > output.capacity() as u128);
+        let clone = reader.clone();
+        drop(reader);
+        assert_eq!(memory.used(), retained);
+        // Legacy reads do not strip the shared cache's ownership.
+        assert_eq!(clone.read_range(0, 1..30).unwrap(), vec![7; 29]);
+        assert_eq!(memory.used(), retained);
+        drop(clone);
+        assert_eq!(memory.used(), output.capacity() as u128);
+        drop(output);
+        assert_eq!(memory.used(), 0);
+    }
+
+    #[test]
+    fn accounted_cache_replacement_failure_retains_old_capacity() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("bundle");
+        let reference = accounted_fixture(&path);
+        let memory =
+            QueryMemoryBudget::new(logex_types::QueryMemoryLimit::new(100 * 1024).unwrap());
+        let reader = BundleReader::open_with_memory(&path, &reference, Some(&memory)).unwrap();
+        drop(reader.read_range_accounted(0, 0..1).unwrap());
+        let before = memory.used();
+        let error = reader.read_range_accounted(0, 70_000..70_001).unwrap_err();
+        assert!(
+            error
+                .get_ref()
+                .unwrap()
+                .is::<logex_types::QueryMemoryError>()
+        );
+        let window = reader.file.lock().unwrap();
+        assert!(window.bytes.is_empty());
+        assert_eq!(window.bytes.capacity(), READ_AHEAD_BYTES);
+        assert!(memory.used() >= before);
+        drop(window);
+        drop(reader);
+        assert_eq!(memory.used(), 0);
+    }
 
     #[test]
     fn append_sizer_covers_delta_and_group_table_growth_without_writes() {

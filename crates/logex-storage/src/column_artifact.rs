@@ -1,4 +1,5 @@
 //! Resolve the fixed logical column schema through one captured bundle table.
+use logex_types::{QueryBuffer, QueryMemoryBudget};
 use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::{self, Read, Seek, SeekFrom};
@@ -72,6 +73,7 @@ pub(crate) struct ColumnArtifacts {
     bundle: Option<BundleReader>,
     pinned: Option<Arc<BTreeMap<String, Mutex<File>>>>,
     inspection_lengths: Option<Arc<BTreeMap<String, u64>>>,
+    memory: Option<QueryMemoryBudget>,
 }
 
 #[cfg(test)]
@@ -91,7 +93,16 @@ impl ColumnArtifacts {
         manifest: Option<&SegmentManifest>,
         projection: Option<&[&str]>,
     ) -> io::Result<Self> {
-        Self::open_projected_checked(dir, manifest, projection, false)
+        Self::open_projected_checked(dir, manifest, projection, false, None)
+    }
+
+    pub(crate) fn open_projected_with_memory(
+        dir: &Path,
+        manifest: Option<&SegmentManifest>,
+        projection: Option<&[&str]>,
+        memory: Option<&QueryMemoryBudget>,
+    ) -> io::Result<Self> {
+        Self::open_projected_checked(dir, manifest, projection, false, memory)
     }
 
     pub(crate) fn open_for_inspection(
@@ -99,7 +110,7 @@ impl ColumnArtifacts {
         manifest: Option<&SegmentManifest>,
         projection: Option<&[&str]>,
     ) -> io::Result<Self> {
-        Self::open_projected_checked(dir, manifest, projection, true)
+        Self::open_projected_checked(dir, manifest, projection, true, None)
     }
 
     fn open_projected_checked(
@@ -107,6 +118,7 @@ impl ColumnArtifacts {
         manifest: Option<&SegmentManifest>,
         projection: Option<&[&str]>,
         inspection: bool,
+        memory: Option<&QueryMemoryBudget>,
     ) -> io::Result<Self> {
         if projection.is_some_and(|names| names.iter().any(|name| !COLUMN_NAMES.contains(name))) {
             return Err(io::Error::new(
@@ -119,7 +131,7 @@ impl ColumnArtifacts {
                 names.contains(&name) || (name == "data_len" && names.contains(&"data"))
             })
         };
-        let mut artifacts = Self::open_inspected_checked(dir, manifest, None, inspection)?;
+        let mut artifacts = Self::open_inspected_checked(dir, manifest, None, inspection, memory)?;
         if artifacts.bundle.is_none() {
             if let Some(manifest) = manifest {
                 if manifest.source_namespace.is_some()
@@ -226,7 +238,7 @@ impl ColumnArtifacts {
         manifest: Option<&SegmentManifest>,
         inspected: Option<BundleReader>,
     ) -> io::Result<Self> {
-        Self::open_inspected_checked(dir, manifest, inspected, false)
+        Self::open_inspected_checked(dir, manifest, inspected, false, None)
     }
 
     fn open_inspected_checked(
@@ -234,6 +246,7 @@ impl ColumnArtifacts {
         manifest: Option<&SegmentManifest>,
         inspected: Option<BundleReader>,
         inspection: bool,
+        memory: Option<&QueryMemoryBudget>,
     ) -> io::Result<Self> {
         if inspected.is_some()
             && manifest
@@ -286,7 +299,7 @@ impl ColumnArtifacts {
                             .map_err(|_| invalid("invalid bundle path"))?;
                         require_regular_artifact(dir, relative)?;
                     }
-                    BundleReader::open(&path, reference)?
+                    BundleReader::open_with_memory(&path, reference, memory)?
                 };
                 if !reader.has_complete_schema() {
                     return Err(invalid("incomplete bundled column streams"));
@@ -299,6 +312,7 @@ impl ColumnArtifacts {
             bundle,
             pinned: None,
             inspection_lengths: None,
+            memory: memory.cloned(),
         })
     }
 
@@ -414,19 +428,78 @@ impl ColumnArtifacts {
         }
     }
 
-    pub(crate) fn len(&self, path: &str) -> io::Result<u64> {
-        match &self.bundle {
-            Some(bundle) => bundle.stream_len(stream_id(path)?),
-            None => match &self.pinned {
-                Some(files) => Ok(pinned_file(files, path)?.metadata()?.len()),
-                None => Ok(fs::metadata(self.dir.join(path))?.len()),
-            },
+    /// Read a captured artifact with ownership of its allocated bytes.
+    /// Raw query reads stop at the observed file length instead of following
+    /// a concurrently appended suffix through read_to_end.
+    pub(crate) fn read_accounted(&self, path: &str) -> io::Result<QueryBuffer<u8>> {
+        if let Some(bundle) = &self.bundle {
+            let id = stream_id(path)?;
+            let len = bundle.stream_len(id)?;
+            return match id {
+                14..28 => {
+                    if len > (MAX_EXTENTS * PAGE_INDEX_ENTRY_BYTES) as u64
+                        || !len.is_multiple_of(PAGE_INDEX_ENTRY_BYTES as u64)
+                    {
+                        return Err(invalid("bundled page index exceeds its bound"));
+                    }
+                    let input = bundle.read_stream_accounted(id)?;
+                    let capacity = input
+                        .len()
+                        .checked_add(crate::page::PAGE_INDEX_HEADER_BYTES)
+                        .ok_or_else(|| invalid("framed index length overflow"))?;
+                    let reservation = self
+                        .memory
+                        .as_ref()
+                        .map(|memory| memory.reserve(capacity, "bundle framed page index"))
+                        .transpose()
+                        .map_err(io::Error::other)?;
+                    QueryBuffer::from_reserved(frame_page_index(&input)?, reservation)
+                }
+                28..=CANONICAL_STREAM => {
+                    let expected = bitmap_bytes(bundle.row_count())?;
+                    if len > expected as u64 + 1 {
+                        return Err(invalid("bundled bitmap exceeds its bound"));
+                    }
+                    let input = bundle.read_stream_accounted(id)?;
+                    let reservation = self
+                        .memory
+                        .as_ref()
+                        .map(|memory| memory.reserve(expected, "bundle bitmap output"))
+                        .transpose()
+                        .map_err(io::Error::other)?;
+                    QueryBuffer::from_reserved(
+                        decode_bitmap(&input, bundle.row_count())?,
+                        reservation,
+                    )
+                }
+                _ => bundle.read_stream_accounted(id),
+            };
         }
+        // read_range rechecks the boundary on the same pinned artifact.
+        self.read_range_accounted(path, 0..self.len(path)?)
     }
 
-    pub(crate) fn read_range(&self, path: &str, range: Range<u64>) -> io::Result<Vec<u8>> {
+    pub(crate) fn read_range_accounted(
+        &self,
+        path: &str,
+        range: Range<u64>,
+    ) -> io::Result<QueryBuffer<u8>> {
+        self.read_range_with_memory(path, range, self.memory.as_ref())
+    }
+
+    fn read_range_with_memory(
+        &self,
+        path: &str,
+        range: Range<u64>,
+        memory: Option<&QueryMemoryBudget>,
+    ) -> io::Result<QueryBuffer<u8>> {
         if let Some(bundle) = &self.bundle {
-            return stream_id(path).and_then(|id| bundle.read_range(id, range));
+            let id = stream_id(path)?;
+            return if memory.is_some() {
+                bundle.read_range_accounted(id, range)
+            } else {
+                bundle.read_range(id, range).map(QueryBuffer::unaccounted)
+            };
         }
         let read = |file: &mut File| {
             if let Some(lengths) = &self.inspection_lengths {
@@ -446,9 +519,8 @@ impl ColumnArtifacts {
             if range.end > file.metadata()?.len() {
                 return Err(invalid("captured column range exceeds its file"));
             }
-            let mut bytes = Vec::new();
-            bytes.try_reserve_exact(len).map_err(io::Error::other)?;
-            bytes.resize(len, 0);
+            let mut bytes = QueryBuffer::try_with_capacity(len, memory, "captured column bytes")?;
+            bytes.try_resize(len, 0)?;
             file.seek(SeekFrom::Start(range.start))?;
             file.read_exact(&mut bytes)?;
             Ok(bytes)
@@ -457,6 +529,23 @@ impl ColumnArtifacts {
             Some(files) => read(&mut *pinned_file(files, path)?),
             None => read(&mut File::open(self.dir.join(path))?),
         }
+    }
+
+    pub(crate) fn len(&self, path: &str) -> io::Result<u64> {
+        match &self.bundle {
+            Some(bundle) => bundle.stream_len(stream_id(path)?),
+            None => match &self.pinned {
+                Some(files) => Ok(pinned_file(files, path)?.metadata()?.len()),
+                None => Ok(fs::metadata(self.dir.join(path))?.len()),
+            },
+        }
+    }
+
+    pub(crate) fn read_range(&self, path: &str, range: Range<u64>) -> io::Result<Vec<u8>> {
+        Ok(self
+            .read_range_with_memory(path, range, None)?
+            .into_parts()
+            .0)
     }
 
     pub(crate) fn verify_bundle(&self) -> io::Result<()> {
@@ -582,6 +671,37 @@ fn invalid(reason: &str) -> io::Error {
 mod tests {
     use super::*;
     use crate::column::NullBitmap;
+
+    #[test]
+    fn accounted_raw_ranges_own_capacity_and_reject_before_read() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("address.col"), [0; 8]).unwrap();
+        fs::write(dir.path().join("block_number.col"), [7; 32]).unwrap();
+        let memory = QueryMemoryBudget::new(logex_types::QueryMemoryLimit::new(32).unwrap());
+        let artifacts = ColumnArtifacts::open_projected_with_memory(
+            dir.path(),
+            None,
+            Some(&["block_number"]),
+            Some(&memory),
+        )
+        .unwrap();
+        let mut output = artifacts.read_accounted("block_number.col").unwrap();
+        assert_eq!(&*output, &[7; 32]);
+        let error = artifacts
+            .read_range_accounted("block_number.col", 0..1)
+            .unwrap_err();
+        assert!(
+            error
+                .get_ref()
+                .unwrap()
+                .is::<logex_types::QueryMemoryError>()
+        );
+        drop(artifacts);
+        output.clear();
+        assert_eq!(memory.used(), 32);
+        drop(output);
+        assert_eq!(memory.used(), 0);
+    }
 
     #[test]
     fn raw_canonical_metadata_remains_correct_after_reading_captured_bitmap() {
