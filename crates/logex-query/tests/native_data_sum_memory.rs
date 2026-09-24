@@ -316,6 +316,181 @@ async fn grouped_native_data_sum_preserves_residual_case_partition_and_cancel_se
 }
 
 #[tokio::test]
+async fn grouped_native_sum_preserves_null_ties_having_and_page_order() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut storage = PartitionManager::open(PartitionManagerConfig {
+        data_dir: tmp.path().to_owned(),
+        partition_target_rows: 2,
+        compaction_safety_margin_blocks: 0,
+    })
+    .unwrap();
+    let fixture = [
+        (0, 1, 5),
+        (1, 4, 9),
+        (2, 2, 5),
+        (3, 4, 9),
+        (4, 3, 2),
+        (5, 1, 9),
+    ]
+    .into_iter()
+    .map(|(index, address, data)| {
+        let mut value = row(index);
+        value.address = Address::repeat_byte(address);
+        value.data = Bytes::from(vec![data]);
+        value
+    })
+    .collect::<Vec<_>>();
+    for rows in fixture.chunks(2) {
+        storage.write_batch(rows).unwrap();
+    }
+    storage.checkpoint().unwrap();
+    let nonempty_partitions = storage
+        .sealed_partitions()
+        .iter()
+        .chain(std::iter::once(storage.hot_partition()))
+        .filter(|partition| partition.meta.row_count > 0)
+        .count();
+    assert!(
+        nonempty_partitions >= 2,
+        "fixture must exercise nonempty partition workers and merge"
+    );
+
+    let projection = "address, \
+        SUM(CASE WHEN log_index % 2 = 0 THEN data END) AS total, \
+        SUM(CASE WHEN log_index % 2 = 0 THEN data END) AS duplicate, \
+        SUM(CASE WHEN log_index % 2 = 0 THEN data END) + \
+            SUM(CASE WHEN log_index % 2 = 0 THEN data END) AS doubled, \
+        SUM(CASE WHEN log_index % 2 = 0 THEN data END) - \
+            SUM(CASE WHEN log_index % 2 = 0 THEN data END) AS zero";
+    let address = |byte| Address::repeat_byte(byte).to_string().to_ascii_lowercase();
+    let expected = |byte, total: Option<&str>| {
+        json!({
+            "address": address(byte),
+            "total": total,
+            "duplicate": total,
+            "doubled": total.map(|value| (value.parse::<u8>().unwrap() * 2).to_string()),
+            "zero": total.map(|_| "0"),
+        })
+    };
+    let memory = QueryMemoryBudget::new(QueryMemoryLimit::new(1024 * 1024).unwrap());
+    let snapshot = NativeStorageSnapshot::from_storage(&storage);
+    let head = storage.head_block().unwrap_or(0);
+
+    let ascending = execute_sql_page_on_snapshot_with_memory(
+        &format!(
+            "SELECT {projection} FROM logs \
+             WHERE data_len = 1 AND source + 0 >= 0 \
+             GROUP BY address ORDER BY total ASC"
+        ),
+        snapshot.clone(),
+        head,
+        SqlQueryPage::default(),
+        None,
+        memory.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        ascending.rows.as_slice(),
+        &[
+            expected(3, Some("2")),
+            expected(1, Some("5")),
+            expected(2, Some("5")),
+            expected(4, None),
+        ]
+    );
+    assert_eq!(ascending.total_scanned, fixture.len() as u64);
+    drop(ascending);
+    assert_eq!(memory.used(), 0);
+
+    let descending = execute_sql_page_on_snapshot_with_memory(
+        &format!(
+            "SELECT {projection} FROM logs \
+             WHERE data_len = 1 AND source + 0 >= 0 \
+             GROUP BY address ORDER BY total DESC"
+        ),
+        snapshot.clone(),
+        head,
+        SqlQueryPage::default(),
+        None,
+        memory.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        descending.rows.as_slice(),
+        &[
+            expected(4, None),
+            expected(1, Some("5")),
+            expected(2, Some("5")),
+            expected(3, Some("2")),
+        ]
+    );
+    drop(descending);
+    assert_eq!(memory.used(), 0);
+
+    let paged = execute_sql_page_on_snapshot_with_memory(
+        &format!(
+            "SELECT {projection} FROM logs \
+             WHERE data_len = 1 AND source + 0 >= 0 \
+             GROUP BY address HAVING total >= 0 ORDER BY total ASC LIMIT 2"
+        ),
+        snapshot,
+        head,
+        SqlQueryPage::new(Some(2), 1),
+        None,
+        memory.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(paged.rows.as_slice(), &[expected(1, Some("5"))]);
+    drop(paged);
+    assert_eq!(memory.used(), 0);
+}
+
+#[tokio::test]
+async fn general_native_sum_preserves_empty_group_and_ungrouped_null() {
+    let memory = QueryMemoryBudget::new(QueryMemoryLimit::new(64 * 1024).unwrap());
+    let grouped = execute_sql_page_on_snapshot_with_memory(
+        "SELECT address, \
+                SUM(CASE WHEN log_index % 2 = 0 THEN data END) AS total \
+         FROM logs WHERE source + 0 >= 0 GROUP BY address",
+        NativeStorageSnapshot::default(),
+        0,
+        SqlQueryPage::default(),
+        None,
+        memory.clone(),
+    )
+    .await
+    .unwrap();
+    assert!(grouped.rows.is_empty());
+    assert_eq!(grouped.total_scanned, 0);
+    drop(grouped);
+    assert_eq!(memory.used(), 0);
+
+    let ungrouped = execute_sql_page_on_snapshot_with_memory(
+        "SELECT SUM(CASE WHEN log_index % 2 = 0 THEN data END) AS total, \
+                SUM(CASE WHEN log_index % 2 = 0 THEN data END) - \
+                    SUM(CASE WHEN log_index % 2 = 0 THEN data END) AS zero \
+         FROM logs WHERE source + 0 >= 0",
+        NativeStorageSnapshot::default(),
+        0,
+        SqlQueryPage::default(),
+        None,
+        memory.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        ungrouped.rows.as_slice(),
+        &[json!({"total": null, "zero": null})]
+    );
+    assert_eq!(ungrouped.total_scanned, 0);
+    drop(ungrouped);
+    assert_eq!(memory.used(), 0);
+}
+
+#[tokio::test]
 async fn empty_native_data_sum_accounts_projection_value_headers() {
     let memory = QueryMemoryBudget::new(QueryMemoryLimit::new(1).unwrap());
     let error = execute_sql_page_on_snapshot_with_memory(

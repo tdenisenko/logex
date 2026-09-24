@@ -31,6 +31,13 @@ pub(crate) struct RestrictedSumAdmission {
     scratch_bytes: usize,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct RestrictedProjectionBound {
+    bits: usize,
+    retained_limbs: usize,
+    peak_bytes: usize,
+}
+
 impl RestrictedSumState {
     pub(crate) fn zero() -> Self {
         Self {
@@ -46,6 +53,20 @@ impl RestrictedSumState {
 
     pub(crate) fn retained_bytes(&self) -> io::Result<usize> {
         limb_bytes(self.capacity_limbs)
+    }
+
+    pub(crate) fn projection_bound(&self) -> io::Result<Option<RestrictedProjectionBound>> {
+        if self.count == 0 {
+            return Ok(None);
+        }
+        let bits = usize::try_from(self.value.bits()).map_err(|_| size_overflow())?;
+        let retained_limbs = limbs_for_bits(bits)?;
+        let retained_bytes = limb_bytes(retained_limbs)?;
+        Ok(Some(RestrictedProjectionBound {
+            bits,
+            retained_limbs,
+            peak_bytes: retained_bytes,
+        }))
     }
 
     pub(crate) fn plan_batch(
@@ -161,6 +182,52 @@ impl RestrictedSumState {
     pub(crate) fn merge_from(&mut self, mut other: Self, admission: &RestrictedSumAdmission) {
         self.begin_batch(admission);
         self.value += std::mem::take(&mut other.value);
+    }
+}
+
+impl RestrictedProjectionBound {
+    pub(crate) fn retained_bytes(self) -> io::Result<usize> {
+        limb_bytes(self.retained_limbs)
+    }
+
+    pub(crate) fn peak_bytes(self) -> usize {
+        self.peak_bytes
+    }
+
+    pub(crate) fn combine(left: Self, right: Self) -> io::Result<Self> {
+        let required = limbs_for_bits(
+            left.bits
+                .max(right.bits)
+                .checked_add(1)
+                .ok_or_else(size_overflow)?,
+        )?;
+        let retained_limbs = growth_bound(
+            left.retained_limbs.max(right.retained_limbs),
+            required.checked_add(1).ok_or_else(size_overflow)?,
+        )?;
+        let retained = limb_bytes(retained_limbs)?;
+        let peak_bytes = left
+            .peak_bytes
+            .max(
+                left.retained_bytes()?
+                    .checked_add(right.peak_bytes)
+                    .ok_or_else(size_overflow)?,
+            )
+            .max(
+                left.retained_bytes()?
+                    .checked_add(right.retained_bytes()?)
+                    .and_then(|v| v.checked_add(retained.checked_mul(2)?))
+                    .ok_or_else(size_overflow)?,
+            );
+        Ok(Self {
+            bits: left
+                .bits
+                .max(right.bits)
+                .checked_add(1)
+                .ok_or_else(size_overflow)?,
+            retained_limbs,
+            peak_bytes,
+        })
     }
 }
 
@@ -504,7 +571,7 @@ fn multiplication_scratch(limbs: usize) -> io::Result<usize> {
         .ok_or_else(size_overflow)
 }
 
-fn decimal_scratch_bytes(value: &BigInt) -> io::Result<usize> {
+pub(crate) fn decimal_scratch_bytes(value: &BigInt) -> io::Result<usize> {
     let bits = usize::try_from(value.bits()).map_err(|_| size_overflow())?;
     let limbs = limbs_for_bits(bits)?;
     let limb_scratch = if limbs < 64 {

@@ -81,8 +81,8 @@ use crate::native::{
 mod native_sum_memory;
 use crate::result::{JsonResultBuilder, QueryJsonRows, SQL_RESULT_STAGE, btree_node_bytes};
 use native_sum_memory::{
-    NATIVE_SUM_STAGE, NativeDataSumAccumulator, RestrictedSumAdmission, RestrictedSumBatchPlan,
-    RestrictedSumState,
+    NATIVE_SUM_STAGE, NativeDataSumAccumulator, RestrictedProjectionBound, RestrictedSumAdmission,
+    RestrictedSumBatchPlan, RestrictedSumState, decimal_scratch_bytes,
 };
 
 const DATAFUSION_BATCH_SIZE: usize = 4_096;
@@ -744,9 +744,10 @@ pub async fn execute_sql_page_on_snapshot(
 /// reservations, index candidates, exact retained row IDs, fixed and variable-column
 /// scan sources, retained Arrow output from custom scans, and structured output from
 /// DataFusion and native SQL shortcuts participate in `memory` across concurrent queries.
-/// Query planning, small segment-scaled control metadata, direct engine-kernel
-/// temporaries, and general native SUM projection, sorting and formatting remain outside
-/// this accounting milestone. This is cooperative allocation accounting rather than a
+/// Native SUM source, group, projection, sorting, pagination and decimal-formatting
+/// allocations are also included. Query planning, small segment-scaled control metadata
+/// and direct engine-kernel temporaries remain outside this accounting milestone. This is
+/// cooperative allocation accounting rather than a
 /// process-RSS ceiling. Infallible DataFusion allocations are recorded even when they
 /// temporarily exceed the configured limit. Disk spilling is disabled, so a
 /// fallible operator reservation that exceeds available capacity returns
@@ -2283,13 +2284,27 @@ fn try_execute_native_data_sum(
         cancel_check.as_ref(),
         &memory,
     )?;
-    let mut values = native_data_sum_values(&native_query, &groups);
+    let mut values = native_data_sum_values(
+        &native_query,
+        &groups,
+        memory.clone(),
+        cancel_check.as_ref(),
+    )?;
+    drop(groups);
+    values.sort(&native_query, cancel_check.as_ref())?;
     if let Some(limit) = native_query.sql_limit {
-        values.truncate(limit);
+        values.truncate(limit)?;
     }
-    apply_json_page(&mut values, page);
-    let rows =
-        materialize_native_data_sum_rows(&native_query, &values, memory, cancel_check.as_ref())?;
+    values.apply_page(page)?;
+    let decimal_scratch = values.reserve_decimal_scratch(cancel_check.as_ref())?;
+    let rows = materialize_native_data_sum_rows(
+        &native_query,
+        &values.rows,
+        memory.clone(),
+        cancel_check.as_ref(),
+    )?;
+    values.release_scratch(decimal_scratch)?;
+    drop(values);
     check_query_canceled(cancel_check.as_ref()).map_err(SqlQueryError::DataFusion)?;
 
     Ok(Some(SqlQueryResult {
@@ -3490,73 +3505,408 @@ fn add_native_sum_batch(
 fn native_data_sum_values(
     query: &NativeDataSumQuery,
     groups: &NativeDataSumGroups,
-) -> Vec<NativeDataSumResultRow> {
-    let mut rows = groups
-        .groups()
-        .iter()
-        .filter_map(|(group_key, &ordinal)| {
-            native_data_sum_result_row(query, *group_key, groups.states(ordinal))
-        })
-        .collect::<Vec<_>>();
-
-    if let Some(order) = query.order {
-        rows.sort_by(|left, right| {
-            let ordering = compare_optional_bigint(
-                left.values
-                    .get(order.projection_index)
-                    .and_then(|value| value.as_ref()),
-                right
-                    .values
-                    .get(order.projection_index)
-                    .and_then(|value| value.as_ref()),
+    memory: QueryMemoryBudget,
+    cancel_check: Option<&QueryCancelCheck>,
+) -> Result<NativeDataSumResultRows, SqlQueryError> {
+    let accepted = if let Some(having) = &query.having {
+        let mut accepted = QueryBuffer::try_with_capacity(
+            groups.groups().len(),
+            Some(&memory),
+            "native SUM HAVING decisions",
+        )
+        .map_err(map_native_query_io_error)?;
+        let projection = match &query.projections[having.projection_index] {
+            NativeDataSumProjection::Aggregate(projection) => projection,
+            _ => unreachable!("validated HAVING projection"),
+        };
+        let mut having_scratch = 0usize;
+        for &ordinal in groups.groups().values() {
+            check_query_canceled(cancel_check)?;
+            having_scratch = having_scratch.max(
+                native_projection_bound(&projection.expr, groups.states(ordinal))
+                    .map_err(map_native_query_io_error)?
+                    .peak,
             );
-            if order.descending {
-                ordering.reverse()
-            } else {
-                ordering
-            }
-        });
+        }
+        let having_reservation = memory
+            .reserve(having_scratch, NATIVE_SUM_STAGE)
+            .map_err(std::io::Error::other)
+            .map_err(map_native_query_io_error)?;
+        for &ordinal in groups.groups().values() {
+            accepted
+                .try_push(native_group_passes_having(
+                    query,
+                    groups.states(ordinal),
+                    cancel_check,
+                )?)
+                .map_err(map_native_query_io_error)?;
+        }
+        drop(having_reservation);
+        Some(accepted)
+    } else {
+        None
+    };
+    let row_count = accepted.as_ref().map_or(groups.groups().len(), |accepted| {
+        accepted.iter().filter(|accepted| **accepted).count()
+    });
+    let outer_bytes =
+        QueryMemoryBudget::array_bytes::<NativeDataSumResultRow>(row_count, NATIVE_SUM_STAGE)
+            .map_err(std::io::Error::other)
+            .map_err(map_native_query_io_error)?;
+    let values_bytes = QueryMemoryBudget::array_bytes::<Option<BigInt>>(
+        row_count
+            .checked_mul(query.projections.len())
+            .ok_or_else(native_sum_size_overflow)?,
+        NATIVE_SUM_STAGE,
+    )
+    .map_err(std::io::Error::other)
+    .map_err(map_native_query_io_error)?;
+    let mut numeric_bytes = 0usize;
+    let mut scratch = 0usize;
+    for (index, &ordinal) in groups.groups().values().enumerate() {
+        if accepted.as_ref().is_some_and(|accepted| !accepted[index]) {
+            continue;
+        }
+        check_query_canceled(cancel_check)?;
+        for projection in &query.projections {
+            let NativeDataSumProjection::Aggregate(projection) = projection else {
+                continue;
+            };
+            let bound = native_projection_bound(&projection.expr, groups.states(ordinal))
+                .map_err(map_native_query_io_error)?;
+            let retained = bound
+                .value
+                .map_or(Ok(0), RestrictedProjectionBound::retained_bytes)
+                .map_err(map_native_query_io_error)?;
+            let peak = bound.peak;
+            numeric_bytes = numeric_bytes
+                .checked_add(retained)
+                .ok_or_else(|| map_native_query_io_error(native_sum_size_overflow()))?;
+            scratch = scratch.max(peak);
+        }
     }
+    let reserved = outer_bytes
+        .checked_add(values_bytes)
+        .and_then(|bytes| bytes.checked_add(numeric_bytes))
+        .and_then(|bytes| bytes.checked_add(scratch))
+        .ok_or_else(|| map_native_query_io_error(native_sum_size_overflow()))?;
+    let mut reservation = memory
+        .reserve(reserved, NATIVE_SUM_STAGE)
+        .map_err(std::io::Error::other)
+        .map_err(map_native_query_io_error)?;
+    let mut rows = Vec::new();
+    rows.try_reserve_exact(row_count)
+        .map_err(std::io::Error::other)?;
+    reconcile_native_sum_allocation(
+        &memory,
+        &mut reservation,
+        outer_bytes,
+        QueryMemoryBudget::array_bytes::<NativeDataSumResultRow>(rows.capacity(), NATIVE_SUM_STAGE)
+            .map_err(std::io::Error::other)
+            .map_err(map_native_query_io_error)?,
+    )?;
+    for (original_position, (group_key, &ordinal)) in groups.groups().iter().enumerate() {
+        if accepted
+            .as_ref()
+            .is_some_and(|accepted| !accepted[original_position])
+        {
+            continue;
+        }
+        check_query_canceled(cancel_check)?;
+        let group_numeric = native_group_projection_bound(query, groups.states(ordinal))
+            .map_err(map_native_query_io_error)?;
+        let mut row = native_data_sum_result_row(
+            query,
+            *group_key,
+            groups.states(ordinal),
+            original_position,
+            cancel_check,
+            &memory,
+            &mut reservation,
+        )?;
+        let actual_headers = QueryMemoryBudget::array_bytes::<Option<BigInt>>(
+            row.values.capacity(),
+            NATIVE_SUM_STAGE,
+        )
+        .map_err(std::io::Error::other)
+        .map_err(map_native_query_io_error)?;
+        row.retained_bytes = group_numeric
+            .checked_add(actual_headers)
+            .ok_or_else(|| map_native_query_io_error(native_sum_size_overflow()))?;
+        rows.push(row);
+    }
+    reservation
+        .shrink(scratch)
+        .map_err(std::io::Error::other)
+        .map_err(map_native_query_io_error)?;
 
-    rows
+    Ok(NativeDataSumResultRows {
+        rows,
+        _reservation: reservation,
+    })
+}
+
+fn reconcile_native_sum_allocation(
+    memory: &QueryMemoryBudget,
+    reservation: &mut QueryMemoryReservation,
+    requested: usize,
+    actual: usize,
+) -> Result<(), SqlQueryError> {
+    if actual > requested {
+        let used = memory.used();
+        reservation.record_existing(actual - requested);
+        if memory.used() > memory.limit() as u128 {
+            return Err(map_native_query_io_error(std::io::Error::other(
+                QueryMemoryError::CapacityExceeded {
+                    requested: actual - requested,
+                    used,
+                    limit: memory.limit(),
+                    stage: NATIVE_SUM_STAGE,
+                },
+            )));
+        }
+    } else if requested > actual {
+        reservation
+            .shrink(requested - actual)
+            .map_err(std::io::Error::other)
+            .map_err(map_native_query_io_error)?;
+    }
+    Ok(())
 }
 
 struct NativeDataSumResultRow {
     group_key: Option<NativeGroupKey>,
     values: Vec<Option<BigInt>>,
+    original_position: usize,
+    retained_bytes: usize,
+}
+
+struct NativeDataSumResultRows {
+    rows: Vec<NativeDataSumResultRow>,
+    _reservation: QueryMemoryReservation,
+}
+
+impl NativeDataSumResultRows {
+    fn sort(
+        &mut self,
+        query: &NativeDataSumQuery,
+        cancel_check: Option<&QueryCancelCheck>,
+    ) -> Result<(), SqlQueryError> {
+        let Some(order) = query.order else {
+            return Ok(());
+        };
+        check_query_canceled(cancel_check)?;
+        self.rows.sort_unstable_by(|left, right| {
+            let ordering = compare_optional_bigint(
+                left.values
+                    .get(order.projection_index)
+                    .and_then(|v| v.as_ref()),
+                right
+                    .values
+                    .get(order.projection_index)
+                    .and_then(|v| v.as_ref()),
+            );
+            let ordering = if order.descending {
+                ordering.reverse()
+            } else {
+                ordering
+            };
+            ordering.then_with(|| left.original_position.cmp(&right.original_position))
+        });
+        check_query_canceled(cancel_check)?;
+        Ok(())
+    }
+
+    fn truncate(&mut self, len: usize) -> Result<(), SqlQueryError> {
+        let released = self.rows[len.min(self.rows.len())..]
+            .iter()
+            .try_fold(0usize, |bytes, row| {
+                bytes
+                    .checked_add(row.retained_bytes)
+                    .ok_or_else(native_sum_size_overflow)
+            })
+            .map_err(map_native_query_io_error)?;
+        self.rows.truncate(len);
+        self.release_scratch(released)
+    }
+
+    fn apply_page(&mut self, page: SqlQueryPage) -> Result<(), SqlQueryError> {
+        let before = self
+            .rows
+            .iter()
+            .try_fold(0usize, |bytes, row| {
+                bytes
+                    .checked_add(row.retained_bytes)
+                    .ok_or_else(native_sum_size_overflow)
+            })
+            .map_err(map_native_query_io_error)?;
+        apply_json_page(&mut self.rows, page);
+        let after = self
+            .rows
+            .iter()
+            .try_fold(0usize, |bytes, row| {
+                bytes
+                    .checked_add(row.retained_bytes)
+                    .ok_or_else(native_sum_size_overflow)
+            })
+            .map_err(map_native_query_io_error)?;
+        self.release_scratch(before - after)
+    }
+
+    fn reserve_decimal_scratch(
+        &mut self,
+        cancel_check: Option<&QueryCancelCheck>,
+    ) -> Result<usize, SqlQueryError> {
+        let mut scratch = 0usize;
+        for value in self.rows.iter().flat_map(|row| row.values.iter().flatten()) {
+            check_query_canceled(cancel_check)?;
+            scratch = scratch.max(decimal_scratch_bytes(value).map_err(map_native_query_io_error)?);
+        }
+        self._reservation
+            .try_grow(scratch)
+            .map_err(std::io::Error::other)
+            .map_err(map_native_query_io_error)?;
+        Ok(scratch)
+    }
+
+    fn release_scratch(&mut self, bytes: usize) -> Result<(), SqlQueryError> {
+        self._reservation
+            .shrink(bytes)
+            .map_err(std::io::Error::other)
+            .map_err(map_native_query_io_error)
+    }
+}
+
+fn native_group_projection_bound(
+    query: &NativeDataSumQuery,
+    states: &[RestrictedSumState],
+) -> std::io::Result<usize> {
+    query
+        .projections
+        .iter()
+        .try_fold(0usize, |bytes, projection| {
+            let NativeDataSumProjection::Aggregate(projection) = projection else {
+                return Ok(bytes);
+            };
+            let retained = native_projection_bound(&projection.expr, states)?
+                .value
+                .map_or(Ok(0), RestrictedProjectionBound::retained_bytes)?;
+            bytes
+                .checked_add(retained)
+                .ok_or_else(native_sum_size_overflow)
+        })
+}
+
+fn native_projection_bound(
+    expr: &NativeAggregateExpr,
+    states: &[RestrictedSumState],
+) -> std::io::Result<NativeProjectionPlan> {
+    match expr {
+        NativeAggregateExpr::Sum(index) => {
+            let value = states
+                .get(*index)
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "native SUM index is out of range",
+                    )
+                })?
+                .projection_bound()?;
+            Ok(NativeProjectionPlan {
+                peak: value.map_or(0, RestrictedProjectionBound::peak_bytes),
+                value,
+            })
+        }
+        NativeAggregateExpr::Add(left, right) | NativeAggregateExpr::Sub(left, right) => {
+            let left = native_projection_bound(left, states)?;
+            let Some(left_value) = left.value else {
+                return Ok(left);
+            };
+            let right = native_projection_bound(right, states)?;
+            let Some(right_value) = right.value else {
+                return Ok(NativeProjectionPlan {
+                    value: None,
+                    peak: left.peak.max(
+                        left_value
+                            .retained_bytes()?
+                            .checked_add(right.peak)
+                            .ok_or_else(native_sum_size_overflow)?,
+                    ),
+                });
+            };
+            let value = RestrictedProjectionBound::combine(left_value, right_value)?;
+            Ok(NativeProjectionPlan {
+                peak: value.peak_bytes(),
+                value: Some(value),
+            })
+        }
+    }
+}
+
+struct NativeProjectionPlan {
+    value: Option<RestrictedProjectionBound>,
+    peak: usize,
 }
 
 fn native_data_sum_result_row(
     query: &NativeDataSumQuery,
     group_key: Option<NativeGroupKey>,
     states: &[RestrictedSumState],
-) -> Option<NativeDataSumResultRow> {
-    let values = query
-        .projections
-        .iter()
-        .map(|projection| match projection {
+    original_position: usize,
+    cancel_check: Option<&QueryCancelCheck>,
+    memory: &QueryMemoryBudget,
+    reservation: &mut QueryMemoryReservation,
+) -> Result<NativeDataSumResultRow, SqlQueryError> {
+    let mut values = Vec::with_capacity(query.projections.len());
+    reconcile_native_sum_allocation(
+        memory,
+        reservation,
+        QueryMemoryBudget::array_bytes::<Option<BigInt>>(query.projections.len(), NATIVE_SUM_STAGE)
+            .map_err(std::io::Error::other)
+            .map_err(map_native_query_io_error)?,
+        QueryMemoryBudget::array_bytes::<Option<BigInt>>(values.capacity(), NATIVE_SUM_STAGE)
+            .map_err(std::io::Error::other)
+            .map_err(map_native_query_io_error)?,
+    )?;
+    for projection in &query.projections {
+        values.push(match projection {
             NativeDataSumProjection::GroupColumn { .. } => None,
             NativeDataSumProjection::Aggregate(projection) => {
-                eval_native_aggregate_expr(&projection.expr, states)
+                eval_native_aggregate_expr(&projection.expr, states, cancel_check)?
             }
-        })
-        .collect::<Vec<_>>();
-
-    if let Some(having) = &query.having {
-        let value = values
-            .get(having.projection_index)
-            .and_then(|value| value.as_ref())?;
-        if !compare_bigint(
-            value,
-            having.operator.clone(),
-            &having.value,
-            having.reversed,
-        ) {
-            return None;
-        }
+        });
     }
 
-    Some(NativeDataSumResultRow { group_key, values })
+    Ok(NativeDataSumResultRow {
+        group_key,
+        values,
+        original_position,
+        retained_bytes: 0,
+    })
+}
+
+fn native_group_passes_having(
+    query: &NativeDataSumQuery,
+    states: &[RestrictedSumState],
+    cancel_check: Option<&QueryCancelCheck>,
+) -> Result<bool, SqlQueryError> {
+    let Some(having) = &query.having else {
+        return Ok(true);
+    };
+    let NativeDataSumProjection::Aggregate(projection) =
+        &query.projections[having.projection_index]
+    else {
+        return Ok(false);
+    };
+    let Some(value) = eval_native_aggregate_expr(&projection.expr, states, cancel_check)? else {
+        return Ok(false);
+    };
+    Ok(compare_bigint(
+        &value,
+        having.operator.clone(),
+        &having.value,
+        having.reversed,
+    ))
 }
 
 fn materialize_native_data_sum_rows(
@@ -3572,6 +3922,7 @@ fn materialize_native_data_sum_rows(
         }
         plan.add_object(query.projections.len())?;
         for (index, projection) in query.projections.iter().enumerate() {
+            check_query_canceled(cancel_check).map_err(SqlQueryError::DataFusion)?;
             match projection {
                 NativeDataSumProjection::GroupColumn {
                     output_column,
@@ -3592,6 +3943,7 @@ fn materialize_native_data_sum_rows(
                     }
                 }
             }
+            check_query_canceled(cancel_check).map_err(SqlQueryError::DataFusion)?;
         }
     }
     let mut output = JsonResultBuilder::new(memory)?;
@@ -3602,6 +3954,7 @@ fn materialize_native_data_sum_rows(
         }
         let mut object = Map::new();
         for (index, projection) in query.projections.iter().enumerate() {
+            check_query_canceled(cancel_check).map_err(SqlQueryError::DataFusion)?;
             let (name, value) = match projection {
                 NativeDataSumProjection::GroupColumn {
                     column,
@@ -3633,6 +3986,7 @@ fn materialize_native_data_sum_rows(
                 }
             };
             object.insert(allocate_json_string(name, &mut batch)?, value);
+            check_query_canceled(cancel_check).map_err(SqlQueryError::DataFusion)?;
         }
         batch.push_row(Value::Object(object));
     }
@@ -3692,18 +4046,29 @@ fn compare_bigint(
 fn eval_native_aggregate_expr(
     expr: &NativeAggregateExpr,
     states: &[RestrictedSumState],
-) -> Option<BigInt> {
+    cancel_check: Option<&QueryCancelCheck>,
+) -> Result<Option<BigInt>, SqlQueryError> {
     match expr {
         NativeAggregateExpr::Sum(index) => {
-            let state = states.get(*index)?;
-            state.value().cloned()
+            let Some(state) = states.get(*index) else {
+                return Ok(None);
+            };
+            Ok(state.value().cloned())
         }
-        NativeAggregateExpr::Add(left, right) => Some(
-            eval_native_aggregate_expr(left, states)? + eval_native_aggregate_expr(right, states)?,
-        ),
-        NativeAggregateExpr::Sub(left, right) => Some(
-            eval_native_aggregate_expr(left, states)? - eval_native_aggregate_expr(right, states)?,
-        ),
+        NativeAggregateExpr::Add(left, right) | NativeAggregateExpr::Sub(left, right) => {
+            let Some(left_value) = eval_native_aggregate_expr(left, states, cancel_check)? else {
+                return Ok(None);
+            };
+            let Some(right_value) = eval_native_aggregate_expr(right, states, cancel_check)? else {
+                return Ok(None);
+            };
+            check_query_canceled(cancel_check)?;
+            Ok(Some(if matches!(expr, NativeAggregateExpr::Add(_, _)) {
+                left_value + right_value
+            } else {
+                left_value - right_value
+            }))
+        }
     }
 }
 
@@ -8423,6 +8788,236 @@ mod tests {
         }
         groups.finish_numeric_batch(scratch).unwrap();
         groups
+    }
+
+    #[test]
+    fn grouped_sum_projection_rows_retain_accounted_values() {
+        let query = parse_native_data_sum_query(
+            "SELECT address, SUM(data) AS total \
+             FROM logs GROUP BY address ORDER BY total DESC",
+        )
+        .unwrap()
+        .expect("native grouped SUM");
+        let memory = QueryMemoryBudget::new(QueryMemoryLimit::new(4 * 1024 * 1024).unwrap());
+        let fixture = (0u8..64)
+            .map(|value| (value, value.saturating_add(1)))
+            .collect::<Vec<_>>();
+        let groups = native_sum_groups_with_values(memory.clone(), &fixture);
+        let group_charge = memory.used();
+        let mut rows = native_data_sum_values(&query, &groups, memory.clone(), None).unwrap();
+        rows.sort(&query, None).unwrap();
+        assert_eq!(rows.rows.len(), fixture.len());
+        assert_eq!(
+            rows.rows.first().unwrap().group_key,
+            Some(NativeGroupKey::Address([63; 20]))
+        );
+        assert_eq!(rows.rows.first().unwrap().values[1], Some(BigInt::from(64)));
+        assert_eq!(
+            rows.rows.last().unwrap().group_key,
+            Some(NativeGroupKey::Address([0; 20]))
+        );
+        assert_eq!(rows.rows.last().unwrap().values[1], Some(BigInt::from(1)));
+        assert!(
+            memory.used() > group_charge,
+            "projected row headers and BigInt values must retain their own charge"
+        );
+        let result_charge = memory.used() - group_charge;
+        drop(rows);
+        assert_eq!(memory.used(), group_charge);
+
+        let available = memory.limit() as u128 - group_charge;
+        let held = memory
+            .reserve(
+                usize::try_from(available - (result_charge - 1)).unwrap(),
+                "projection denial fixture",
+            )
+            .unwrap();
+        let error = match native_data_sum_values(&query, &groups, memory.clone(), None) {
+            Ok(_) => panic!("one-byte-short projection budget should reject"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(error, SqlQueryError::Capacity(ref message) if message.contains(NATIVE_SUM_STAGE)),
+            "{error}"
+        );
+        drop(held);
+        assert_eq!(memory.used(), group_charge);
+
+        let mut paged = native_data_sum_values(&query, &groups, memory.clone(), None).unwrap();
+        paged.sort(&query, None).unwrap();
+        let before_page = paged._reservation.bytes();
+        let dropped = paged.rows[..63]
+            .iter()
+            .map(|row| row.retained_bytes as u128)
+            .sum::<u128>();
+        paged
+            .apply_page(SqlQueryPage {
+                offset: 63,
+                limit: Some(1),
+            })
+            .unwrap();
+        assert_eq!(paged.rows.len(), 1);
+        assert_eq!(paged._reservation.bytes(), before_page - dropped);
+        drop(paged);
+        assert_eq!(memory.used(), group_charge);
+
+        let cancel: QueryCancelCheck = Arc::new(|| true);
+        let error = match native_data_sum_values(&query, &groups, memory.clone(), Some(&cancel)) {
+            Ok(_) => panic!("projection planning should honor cancellation"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(error, SqlQueryError::DataFusion(DataFusionError::Execution(ref message)) if message == "query canceled")
+        );
+        assert_eq!(memory.used(), group_charge);
+        let callback_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed = Arc::clone(&callback_count);
+        let count: QueryCancelCheck = Arc::new(move || {
+            observed.fetch_add(1, Ordering::Relaxed);
+            false
+        });
+        drop(native_data_sum_values(&query, &groups, memory.clone(), Some(&count)).unwrap());
+        let callback_count = callback_count.load(Ordering::Relaxed);
+        for cancel_at in 1..callback_count {
+            let calls = std::sync::atomic::AtomicUsize::new(0);
+            let cancel: QueryCancelCheck =
+                Arc::new(move || calls.fetch_add(1, Ordering::Relaxed) >= cancel_at);
+            assert!(
+                native_data_sum_values(&query, &groups, memory.clone(), Some(&cancel)).is_err()
+            );
+            assert_eq!(memory.used(), group_charge, "callback {cancel_at}");
+        }
+
+        let rejected_query = parse_native_data_sum_query(
+            "SELECT address, SUM(data) AS total FROM logs \
+             GROUP BY address HAVING total > 100",
+        )
+        .unwrap()
+        .unwrap();
+        let rejected =
+            native_data_sum_values(&rejected_query, &groups, memory.clone(), None).unwrap();
+        assert!(rejected.rows.is_empty());
+        assert_eq!(
+            memory.used(),
+            group_charge,
+            "all-rejected HAVING must not retain result-sized headers or numerics"
+        );
+        drop(rejected);
+        drop(groups);
+        assert_eq!(memory.used(), 0);
+    }
+
+    #[test]
+    fn grouped_sum_null_projection_bounds_retain_evaluated_child_peak() {
+        let populated = |value: u8| {
+            let mut state = RestrictedSumState::zero();
+            let mut plan = RestrictedSumBatchPlan::default();
+            plan.include_data(&[value]).unwrap();
+            let admission = state.plan_batch(&plan).unwrap();
+            state.begin_batch(&admission);
+            state.add_data(&[value]);
+            state
+        };
+        let states = vec![populated(7), RestrictedSumState::zero(), populated(9)];
+        let left_then_null = NativeAggregateExpr::Add(
+            Box::new(NativeAggregateExpr::Sum(0)),
+            Box::new(NativeAggregateExpr::Sum(1)),
+        );
+        let null_then_right = NativeAggregateExpr::Add(
+            Box::new(NativeAggregateExpr::Sum(1)),
+            Box::new(NativeAggregateExpr::Sum(0)),
+        );
+        let nested = NativeAggregateExpr::Add(
+            Box::new(left_then_null.clone()),
+            Box::new(NativeAggregateExpr::Sum(2)),
+        );
+        for expression in [&left_then_null, &nested] {
+            let bound = native_projection_bound(expression, &states).unwrap();
+            assert!(bound.value.is_none());
+            assert!(
+                bound.peak > 0,
+                "NULL output must retain evaluated-child peak"
+            );
+        }
+        let short_circuit = native_projection_bound(&null_then_right, &states).unwrap();
+        assert!(short_circuit.value.is_none());
+        assert_eq!(short_circuit.peak, 0, "NULL left skips the right subtree");
+    }
+
+    #[test]
+    fn grouped_sum_result_decimal_scratch_is_maximum_and_overlaps_json() {
+        let query = parse_native_data_sum_query(
+            "SELECT address, SUM(data) AS total FROM logs GROUP BY address",
+        )
+        .unwrap()
+        .unwrap();
+        let value63 = BigInt::from(1u8) << (usize::BITS as usize * 63 - 1);
+        let value64 = BigInt::from(1u8) << (usize::BITS as usize * 64 - 1);
+        let expected = decimal_scratch_bytes(&value63)
+            .unwrap()
+            .max(decimal_scratch_bytes(&value64).unwrap());
+        let memory = QueryMemoryBudget::new(QueryMemoryLimit::new(16 * 1024 * 1024).unwrap());
+        let mut groups = NativeDataSumGroups::new(1, memory.clone()).unwrap();
+        let keys = [
+            Some(NativeGroupKey::Address([1; 20])),
+            Some(NativeGroupKey::Address([2; 20])),
+        ];
+        groups.ensure_groups(&keys).unwrap();
+        let mut plans = vec![RestrictedSumBatchPlan::default(); 2];
+        plans[0].include_literal(&value63).unwrap();
+        plans[1].include_literal(&value64).unwrap();
+        let (admissions, scratch) = groups.admit_numeric_batch(&keys, &plans, None).unwrap();
+        groups
+            .begin_numeric_batch(&keys, &admissions, None)
+            .unwrap();
+        for ((key, value), admission) in
+            keys.iter().zip([&value63, &value64]).zip(admissions.iter())
+        {
+            let ordinal = groups.allocations.groups[key];
+            groups.allocations.states[ordinal].add_literal(value);
+            assert!(admission.retained_bytes().unwrap() > 0);
+        }
+        groups.finish_numeric_batch(scratch).unwrap();
+        drop(admissions);
+        let mut result = native_data_sum_values(&query, &groups, memory.clone(), None).unwrap();
+        drop(groups);
+        let retained = usize::try_from(memory.used()).unwrap();
+        let available = memory.limit() - retained;
+        let held = memory
+            .reserve(available - (expected - 1), "scratch denial fixture")
+            .unwrap();
+        assert!(matches!(
+            result.reserve_decimal_scratch(None),
+            Err(SqlQueryError::Capacity(_))
+        ));
+        drop(held);
+        let scratch = result.reserve_decimal_scratch(None).unwrap();
+        assert_eq!(
+            scratch, expected,
+            "sequential formatting reserves the maximum"
+        );
+        assert_eq!(memory.used(), (retained + expected) as u128);
+        let held = memory
+            .reserve(
+                usize::try_from(memory.limit() as u128 - memory.used()).unwrap(),
+                "JSON denial fixture",
+            )
+            .unwrap();
+        assert!(matches!(
+            materialize_native_data_sum_rows(&query, &result.rows, memory.clone(), None),
+            Err(SqlQueryError::Capacity(_))
+        ));
+        drop(held);
+        let json =
+            materialize_native_data_sum_rows(&query, &result.rows, memory.clone(), None).unwrap();
+        result.release_scratch(scratch).unwrap();
+        drop(result);
+        assert!(
+            memory.used() > 0,
+            "returned JSON retains its independent charge"
+        );
+        drop(json);
+        assert_eq!(memory.used(), 0);
     }
 
     #[test]

@@ -220,6 +220,18 @@ cancellation or error. Group-node allowances depend on the pinned Rust BTree
 implementation, and numeric bounds depend on the same pinned arithmetic sources
 as the ungrouped path.
 
+HAVING qualification uses an accounted decision buffer and sequential numeric
+scratch; only matching groups receive projected result buffers. Queries without
+HAVING do not allocate the decision buffer.
+Projected sum rows and numeric values retain their own charges. Source groups
+are released after projection, before sorting and JSON conversion. Result sorting
+works in place without a heap scratch buffer; original group positions break ties
+to preserve stable order. SQL LIMIT applies before external pagination.
+Omitted values are destroyed before their charges are released. Decimal conversion
+reserves the maximum sequential formatting allowance while the projected values
+and structured JSON output overlap. An admitted index sort, numeric operation or
+decimal conversion remains synchronous, with cancellation checks between them.
+
 SQL output is converted one Arrow batch at a time. Completed JSON rows remain
 charged while the next batch is processed; the previous batch can be released.
 Structured results reserve row, key, string and nested-container allocations
@@ -251,8 +263,7 @@ encoder does not support compression; LogEx does not enable response compression
 
 This budget is not a process-RAM ceiling. Some DataFusion operators account after
 allocating. Direct residual/conditional expression evaluation owns its final arrays,
-but internal kernel temporaries remain cooperative engine overhead. Projection,
-sorting and numeric formatting for general native sums are not yet covered.
+but internal kernel temporaries remain cooperative engine overhead.
 Captured JSON manifests,
 paths, codec contexts, fixed builder-control, other control-map nodes and ownership metadata
 are also outside the accounted buffer capacity. Snapshot paths and plan/control
@@ -448,7 +459,7 @@ Global options:
 | Option | Default | Use |
 | --- | --- | --- |
 | `--query-max-concurrent <N>` | `8` | Shared admission limit for REST SQL, JSON-RPC logs and gRPC SQL/native queries. Excess requests fail immediately; does not bound query memory. |
-| `--query-memory-bytes <BYTES>` | `1073741824` | Shared accounted-memory budget for DataFusion operators, index candidates, fallback reads, native row selection, COUNT and native sum state, scan output, structured SQL results and REST/JSON-RPC/gRPC query responses; not a process-RAM ceiling. General native sum projection/sorting/formatting and manifest/control metadata are not yet covered. |
+| `--query-memory-bytes <BYTES>` | `1073741824` | Shared accounted-memory budget for DataFusion operators, index candidates, fallback reads, native row selection, COUNT and native sums, scan output, structured SQL results and REST/JSON-RPC/gRPC query responses; not a process-RAM ceiling. Manifest/control metadata and internal expression-kernel temporaries remain outside the accounted capacity. |
 | `--http-host <IP>` | `127.0.0.1` | HTTP bind host for dashboard, `/status`, `/query`, JSON-RPC, and WebSocket routes. Use `0.0.0.0` only with `--dashboard-password` and network-level protection. |
 | `--http-port <PORT>` | `8577` | HTTP dashboard, REST, JSON-RPC, and WebSocket port. Keep this stable for browser sessions and automation. |
 | `--grpc-host <IP>` | `127.0.0.1` | gRPC bind host. gRPC is unauthenticated; public gRPC requires `--allow-public-grpc`. |
