@@ -1,3 +1,7 @@
+#[path = "segment_reader/prepared.rs"]
+mod prepared;
+pub use prepared::PreparedSegmentSelection;
+
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -377,6 +381,11 @@ impl PreparedLogColumns {
 }
 
 impl SegmentReader {
+    /// Prepare lazy reusable query sources. Results own their backing independently.
+    pub fn prepare_selection(&self) -> PreparedSegmentSelection<'_> {
+        PreparedSegmentSelection::new(self)
+    }
+
     pub(crate) fn generation(&self) -> u64 {
         self.manifest
             .as_ref()
@@ -2293,6 +2302,11 @@ impl SegmentReader {
 
 fn raw_column_path(column: &str) -> &'static str {
     match column {
+        "address" => "address.col",
+        "topic0" => "topic0.col",
+        "topic1" => "topic1.col",
+        "topic2" => "topic2.col",
+        "topic3" => "topic3.col",
         "block_number" => "block_number.col",
         "block_hash" => "block_hash.col",
         "timestamp" => "timestamp.col",
@@ -4631,6 +4645,22 @@ mod tests {
                 .eq(sorted.iter().map(|&row| &values[row as usize]))
         );
         assert_eq!(reads, expected_reads, "accounting must not reread pages");
+        let mut prepared = reader.prepare_selection();
+        BATCH_PAGE_READS.with_borrow_mut(|reads| *reads = Some(Vec::new()));
+        assert_eq!(
+            &*prepared.read_var_bytes("data", &sorted).unwrap(),
+            &sorted.map(|row| values[row as usize].clone())
+        );
+        assert_eq!(
+            BATCH_PAGE_READS.with_borrow_mut(Option::take).unwrap(),
+            expected_reads
+        );
+        // Backtracking after another payload page must remain valid.
+        assert_eq!(
+            &*prepared.read_var_bytes("data", &[0, 8]).unwrap(),
+            &[values[0].clone(), values[8].clone()]
+        );
+        drop(prepared);
         drop(batches);
         drop(reader);
         assert_eq!(memory.used(), 0);
@@ -5048,5 +5078,321 @@ mod tests {
             .read_canonical_len()
             .expect_err("truncated canonical bitmap should fail");
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+    fn assert_prepared_selection(dir: &Path, rows: &[LogRow]) {
+        let budget =
+            QueryMemoryBudget::new(logex_types::QueryMemoryLimit::new(8 * 1024 * 1024).unwrap());
+        let reader =
+            SegmentReader::open_projected_with_memory(dir, QUERY_LOG_COLUMNS, budget.clone())
+                .unwrap();
+        let mut source = reader.prepare_selection();
+        for ids in [&[0, 7, 19][..], &[7], &[0, 19], &[]] {
+            assert_eq!(
+                &*source.read_u64("block_number", ids).unwrap(),
+                ids.iter()
+                    .map(|&i| rows[i as usize].block_number)
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(
+                &*source.read_u32("tx_index", ids).unwrap(),
+                ids.iter()
+                    .map(|&i| rows[i as usize].tx_index)
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(
+                &*source.read_u8("source", ids).unwrap(),
+                ids.iter()
+                    .map(|&i| rows[i as usize].source as u8)
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(
+                &*source.read_address(ids).unwrap(),
+                ids.iter()
+                    .map(|&i| rows[i as usize].address)
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(
+                &*source.read_b256("tx_hash", ids).unwrap(),
+                ids.iter()
+                    .map(|&i| rows[i as usize].tx_hash)
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(
+                &*source.read_nullable_b256("topic1", ids).unwrap(),
+                ids.iter()
+                    .map(|&i| rows[i as usize].topic1)
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(
+                &*source.read_var_bytes("data", ids).unwrap(),
+                ids.iter()
+                    .map(|&i| rows[i as usize].data.clone())
+                    .collect::<Vec<_>>()
+            );
+        }
+        for ids in [&[1, 0][..], &[0, 0], &[20]] {
+            assert!(source.read_u64("block_number", ids).is_err());
+        }
+        let values = source.read_var_bytes("data", &[19]).unwrap();
+        let alias = values[0].clone();
+        drop(values);
+        drop(source);
+        drop(reader);
+        assert_eq!(alias, rows[19].data);
+        if !alias.is_empty() {
+            assert!(budget.used() > 0);
+        }
+        drop(alias);
+        assert_eq!(budget.used(), 0);
+    }
+
+    #[test]
+    fn prepared_selection_typed_layouts_and_aliases() {
+        let rows = make_rows();
+        let raw = TempDir::new().unwrap();
+        ColumnFile::write_batch(raw.path(), &rows).unwrap();
+        assert_prepared_selection(raw.path(), &rows);
+        let (_tmp, dir) = compacted_fixture();
+        assert_prepared_selection(&dir, &rows);
+        let tmp = TempDir::new().unwrap();
+        let mut storage = crate::native::NativeStorage::open(crate::native::NativeStorageConfig {
+            data_dir: tmp.path().to_path_buf(),
+            hot_target_rows: 20,
+            compaction_safety_margin_blocks: 0,
+        })
+        .unwrap();
+        let segments = storage.write_historical_batch(&rows).unwrap();
+        assert_prepared_selection(&segments[0].path, &rows);
+    }
+
+    #[test]
+    fn prepared_selection_raw_windows_repeat_backtrack_and_partial_tail() {
+        let tmp = TempDir::new().unwrap();
+        let mut rows = vec![make_rows()[0].clone(); crate::page::MAX_PAGE_ROWS as usize + 3];
+        for (i, row) in rows.iter_mut().enumerate() {
+            row.block_number = i as u64;
+        }
+        ColumnFile::write_batch(tmp.path(), &rows).unwrap();
+        let budget =
+            QueryMemoryBudget::new(logex_types::QueryMemoryLimit::new(1024 * 1024).unwrap());
+        let reader = SegmentReader::open_projected_with_memory(
+            tmp.path(),
+            &["block_number"],
+            budget.clone(),
+        )
+        .unwrap();
+        let mut source = reader.prepare_selection();
+        let boundary = crate::page::MAX_PAGE_ROWS;
+        prepared::RAW_READS.with_borrow_mut(|v| *v = Some(Vec::new()));
+        source.read_u64("block_number", &[0]).unwrap();
+        source.read_u64("block_number", &[0]).unwrap();
+        source.read_u64("block_number", &[boundary + 2]).unwrap();
+        assert_eq!(
+            &*source
+                .read_u64("block_number", &[boundary, boundary + 2])
+                .unwrap(),
+            &[u64::from(boundary), u64::from(boundary + 2)]
+        );
+        source.read_u64("block_number", &[boundary + 1]).unwrap();
+        source.read_u64("block_number", &[0]).unwrap();
+        source.read_u64("block_number", &[7]).unwrap();
+        source.read_u64("block_number", &[8, 9]).unwrap();
+        source.read_u64("block_number", &[10, 11]).unwrap();
+        let reads = prepared::RAW_READS.with_borrow_mut(Option::take).unwrap();
+        assert_eq!(
+            reads,
+            [
+                ("block_number".to_owned(), 0, 1),
+                ("block_number".to_owned(), u64::from(boundary + 2), 1),
+                ("block_number".to_owned(), u64::from(boundary), 3),
+                ("block_number".to_owned(), 0, 1),
+                ("block_number".to_owned(), 7, 1),
+                ("block_number".to_owned(), 8, 2),
+                ("block_number".to_owned(), 10, 2),
+            ]
+        );
+        drop(source);
+        // A later/incomplete tail must not invalidate a complete selected prefix.
+        fs::OpenOptions::new()
+            .write(true)
+            .open(tmp.path().join("block_number.col"))
+            .unwrap()
+            .set_len((ColumnFileHeader::SIZE + 10 * 8 + 3) as u64)
+            .unwrap();
+        let mut source = reader.prepare_selection();
+        assert_eq!(&*source.read_u64("block_number", &[0, 9]).unwrap(), &[0, 9]);
+        assert!(source.read_u64("block_number", &[10]).is_err());
+        drop(source);
+        drop(reader);
+        assert_eq!(budget.used(), 0);
+    }
+
+    #[test]
+    fn prepared_selection_lazy_capture_pressure_and_companion_validation() {
+        let tmp = TempDir::new().unwrap();
+        let rows = make_rows();
+        ColumnFile::write_batch(tmp.path(), &rows).unwrap();
+        let budget =
+            QueryMemoryBudget::new(logex_types::QueryMemoryLimit::new(1024 * 1024).unwrap());
+        let reader = SegmentReader::open_projected_with_memory(
+            tmp.path(),
+            QUERY_LOG_COLUMNS,
+            budget.clone(),
+        )
+        .unwrap();
+        let baseline = budget.used();
+        let mut source = reader.prepare_selection();
+        assert_eq!(budget.used(), baseline);
+        source.read_var_bytes("data", &[]).unwrap();
+        assert_eq!(budget.used(), baseline);
+        let pressure = budget
+            .reserve(budget.limit() - baseline as usize - 1, "prepared pressure")
+            .unwrap();
+        assert!(source.read_address(&[0]).is_err());
+        drop(pressure);
+        assert_eq!(budget.used(), baseline);
+        let mut changed = rows.clone();
+        changed[0].address = Address::repeat_byte(0xfe);
+        ColumnFile::write_batch(tmp.path(), &changed).unwrap();
+        assert_eq!(&*source.read_address(&[0]).unwrap(), &[rows[0].address]);
+        drop(source);
+        drop(reader);
+        assert_eq!(budget.used(), 0);
+        for codec in [
+            CompressionCodec::None,
+            CompressionCodec::Lz4,
+            CompressionCodec::Zstd,
+            CompressionCodec::AdaptiveBytes,
+        ] {
+            let (_tmp, dir) = compacted_fixture();
+            let values: Vec<_> = rows.iter().map(|r| r.data.clone()).collect();
+            rewrite_variable_fixture_pages(&dir, codec, &values);
+            let reader =
+                SegmentReader::open_projected_with_memory(&dir, &["data"], budget.clone()).unwrap();
+            let mut source = reader.prepare_selection();
+            BATCH_PAGE_READS.with_borrow_mut(|v| *v = Some(Vec::new()));
+            source.read_u32("data_len", &[0]).unwrap();
+            let values = source.read_var_bytes("data", &[19]).unwrap();
+            assert_eq!(&*values, &[rows[19].data.clone()]);
+            let alias = values[0].clone();
+            drop(values);
+            source.read_var_bytes("data", &[0]).unwrap();
+            let reads = BATCH_PAGE_READS.with_borrow_mut(Option::take).unwrap();
+            assert_eq!(
+                reads,
+                [
+                    ("data_len".to_owned(), 0),
+                    ("data_len".to_owned(), 7),
+                    ("data_len".to_owned(), 13),
+                    ("data".to_owned(), 11),
+                    ("data_len".to_owned(), 0),
+                    ("data_len".to_owned(), 7),
+                    ("data".to_owned(), 0)
+                ]
+            );
+            BATCH_PAGE_READS.with_borrow_mut(|v| *v = Some(Vec::new()));
+            // Current companion page is 7..13; repeat hits it, forward/backward
+            // misses each decode exactly once, independent of query batch order.
+            source.read_u32("data_len", &[7, 8]).unwrap();
+            source.read_u32("data_len", &[13]).unwrap();
+            source.read_u32("data_len", &[19]).unwrap();
+            source.read_u32("data_len", &[0]).unwrap();
+            assert_eq!(
+                BATCH_PAGE_READS.with_borrow_mut(Option::take).unwrap(),
+                [("data_len".to_owned(), 13), ("data_len".to_owned(), 0)]
+            );
+            drop(source);
+            drop(reader);
+            assert_eq!(alias, rows[19].data);
+            assert!(
+                budget.used() > 0,
+                "evicted payload alias must retain its backing"
+            );
+            drop(alias);
+            assert_eq!(budget.used(), 0);
+        }
+    }
+    #[test]
+    fn prepared_selection_rejects_null_metadata_and_unselected_companion_damage() {
+        let tmp = TempDir::new().unwrap();
+        ColumnFile::write_batch(tmp.path(), &make_rows()).unwrap();
+        let path = tmp.path().join("topic1.null");
+        let mut bytes = fs::read(&path).unwrap();
+        bytes[..8].copy_from_slice(&19u64.to_le_bytes());
+        fs::write(path, bytes).unwrap();
+        let budget =
+            QueryMemoryBudget::new(logex_types::QueryMemoryLimit::new(1024 * 1024).unwrap());
+        let reader =
+            SegmentReader::open_projected_with_memory(tmp.path(), &["topic1"], budget.clone())
+                .unwrap();
+        let mut prepared = reader.prepare_selection();
+        assert!(prepared.read_nullable_b256("topic1", &[19]).is_err());
+        drop(prepared);
+        drop(reader);
+        assert_eq!(budget.used(), 0);
+        // A paged topic requires bitmap coverage of the complete captured
+        // segment, even when only its first row is requested.
+        let (_short_tmp, short_dir) = compacted_fixture();
+        let manifest = load_manifest(&short_dir).unwrap().unwrap();
+        let topic = manifest
+            .columns
+            .iter()
+            .find(|c| c.name == "topic1")
+            .unwrap();
+        let mut short_bitmap = 1u64.to_le_bytes().to_vec();
+        short_bitmap.push(1);
+        fs::write(
+            short_dir.join(topic.null_bitmap_path.as_ref().unwrap()),
+            short_bitmap,
+        )
+        .unwrap();
+        let reader =
+            SegmentReader::open_projected_with_memory(&short_dir, &["topic1"], budget.clone())
+                .unwrap();
+        assert!(
+            reader
+                .read_nullable_b256_with_memory("topic1", Some(&[0]))
+                .is_err()
+        );
+        let mut prepared = reader.prepare_selection();
+        assert_eq!(
+            prepared
+                .read_nullable_b256("topic1", &[0])
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+        drop(prepared);
+        drop(reader);
+        assert_eq!(budget.used(), 0);
+        let (_tmp, dir) = compacted_fixture();
+        let rows = make_rows();
+        let mut values: Vec<_> = rows.iter().map(|r| r.data.clone()).collect();
+        values[0] = Bytes::from(vec![0; rows[0].data.len() + 1]);
+        // Replace only data pages, leaving existing companion lengths intact.
+        let manifest = load_manifest(&dir).unwrap().unwrap();
+        let descriptor = manifest.columns.iter().find(|c| c.name == "data").unwrap();
+        let encoded = crate::page::encode_var_bytes_page(&values, descriptor.codec).unwrap();
+        fs::write(dir.join(&descriptor.data_path), &encoded).unwrap();
+        fs::write(
+            dir.join(descriptor.page_index_path.as_ref().unwrap()),
+            crate::page::write_page_index(&[PageIndexEntry {
+                first_row: 0,
+                row_count: 20,
+                offset: 0,
+                encoded_len: encoded.len() as u32,
+            }]),
+        )
+        .unwrap();
+        let reader =
+            SegmentReader::open_projected_with_memory(&dir, &["data"], budget.clone()).unwrap();
+        let mut prepared = reader.prepare_selection();
+        assert_eq!(
+            prepared.read_var_bytes("data", &[19]).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        drop(prepared);
+        drop(reader);
+        assert_eq!(budget.used(), 0);
     }
 }

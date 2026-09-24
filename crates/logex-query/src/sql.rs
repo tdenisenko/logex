@@ -55,11 +55,10 @@ use datafusion::sql::sqlparser::keywords::Keyword;
 use datafusion::sql::sqlparser::tokenizer::Token as SqlToken;
 use futures_util::{Stream, TryStreamExt, stream};
 use num_bigint::{BigInt, BigUint};
-use roaring::RoaringBitmap;
 use serde_json::{Map, Value};
 
 use logex_storage::native::{NativeLogFilter, TopicConstraint};
-use logex_storage::{PartitionManager, SegmentReader};
+use logex_storage::{PartitionManager, PreparedSegmentSelection, SegmentReader};
 use logex_types::{
     QueryBuffer, QueryMemoryBudget, QueryMemoryError, QueryMemoryLimit, QueryMemoryReservation,
 };
@@ -73,10 +72,10 @@ use crate::json::{
 };
 use crate::lexer::{Token, tokenize};
 use crate::native::{
-    StorageSnapshot, candidate_row_ids_for_reader, candidate_row_ids_with_memory,
-    erc20_event_bloom_exclusions, ordered_page_is_complete, partition_matches_filter,
-    retain_ordered_prefix_with_memory, scan_native_partition_with_memory,
-    sort_native_rows_with_memory,
+    StorageSnapshot, candidate_refinement_columns_for_filters,
+    candidate_row_ids_for_filters_on_reader_with_memory, candidate_row_ids_with_memory,
+    ordered_page_is_complete, partition_matches_filter, retain_ordered_prefix_with_memory,
+    scan_native_partition_with_memory, sort_native_rows_with_memory,
 };
 #[path = "native_sum_memory.rs"]
 mod native_sum_memory;
@@ -1145,15 +1144,15 @@ enum NativeGroupKey {
     Address([u8; 20]),
 }
 
-#[derive(Clone)]
-struct NativeDataSumPartitionScan {
+struct NativeDataSumPartitionScan<'a> {
     visible_rows: u64,
-    candidate_filters: Vec<NativeLogFilter>,
-    selection: Option<Arc<PreparedSqlExpressions>>,
-    cases: Arc<PreparedSqlExpressions>,
+    candidate_filters: &'a [NativeLogFilter],
+    selection: Option<&'a PreparedSqlExpressions>,
+    cases: &'a PreparedSqlExpressions,
     group_by: NativeDataSumGroupBy,
-    sum_inputs: Vec<PreparedRowValueExpr>,
-    cancel_check: Option<QueryCancelCheck>,
+    sum_inputs: &'a [PreparedRowValueExpr],
+    cancel_check: Option<&'a QueryCancelCheck>,
+    memory: &'a QueryMemoryBudget,
 }
 
 fn parse_native_select_query(sql: &str) -> Result<Option<NativeSqlQuery>, SqlQueryError> {
@@ -1786,6 +1785,7 @@ fn try_execute_native_data_sum(
         &prepared,
         native_query.group_by,
         cancel_check.as_ref(),
+        &memory,
     )?;
     let mut values = native_data_sum_values(&native_query, groups);
     if let Some(limit) = native_query.sql_limit {
@@ -1794,6 +1794,7 @@ fn try_execute_native_data_sum(
     apply_json_page(&mut values, page);
     let rows =
         materialize_native_data_sum_rows(&native_query, &values, memory, cancel_check.as_ref())?;
+    check_query_canceled(cancel_check.as_ref()).map_err(SqlQueryError::DataFusion)?;
 
     Ok(Some(SqlQueryResult {
         rows,
@@ -2638,6 +2639,7 @@ fn execute_native_data_sum(
     prepared: &PreparedSumInputs,
     group_by: NativeDataSumGroupBy,
     cancel_check: Option<&QueryCancelCheck>,
+    memory: &QueryMemoryBudget,
 ) -> Result<(NativeDataSumGroups, u64), SqlQueryError> {
     check_query_canceled(cancel_check).map_err(SqlQueryError::DataFusion)?;
     let mut groups = BTreeMap::new();
@@ -2659,17 +2661,19 @@ fn execute_native_data_sum(
         let chunk_results = std::thread::scope(|scope| {
             let mut handles = Vec::with_capacity(chunk.len());
             for partition in chunk {
-                let path = partition.path.clone();
                 let scan = NativeDataSumPartitionScan {
                     visible_rows: partition.row_count,
-                    candidate_filters: candidate_filters.to_vec(),
-                    selection: prepared.selection.as_ref().map(Arc::clone),
-                    cases: Arc::clone(&prepared.cases),
+                    candidate_filters,
+                    selection: prepared.selection.as_deref(),
+                    cases: prepared.cases.as_ref(),
                     group_by,
-                    sum_inputs: sum_inputs.to_vec(),
-                    cancel_check: cancel_check.cloned(),
+                    sum_inputs,
+                    cancel_check,
+                    memory,
                 };
-                handles.push(scope.spawn(move || scan_native_data_sum_partition(&path, scan)));
+                handles.push(
+                    scope.spawn(move || scan_native_data_sum_partition(&partition.path, scan)),
+                );
             }
             handles
                 .into_iter()
@@ -2685,8 +2689,14 @@ fn execute_native_data_sum(
 
         for result in chunk_results {
             let (partition_groups, partition_scanned) = result?;
-            merge_native_sum_groups(&mut groups, partition_groups);
-            total_scanned += partition_scanned;
+            merge_native_sum_groups(&mut groups, partition_groups)?;
+            total_scanned = total_scanned
+                .checked_add(partition_scanned)
+                .ok_or_else(|| {
+                    SqlQueryError::DataFusion(DataFusionError::Execution(
+                        "native SUM scanned-row count overflow".to_owned(),
+                    ))
+                })?;
         }
     }
 
@@ -2709,71 +2719,91 @@ fn initial_native_sum_states(sum_inputs: &[PreparedRowValueExpr]) -> Vec<NativeS
         .collect()
 }
 
-fn merge_native_sum_states(states: &mut [NativeSumState], partial_states: Vec<NativeSumState>) {
+fn merge_native_sum_states(
+    states: &mut [NativeSumState],
+    partial_states: Vec<NativeSumState>,
+) -> Result<(), SqlQueryError> {
     for (state, partial) in states.iter_mut().zip(partial_states) {
         state.sum += partial.sum;
-        state.count += partial.count;
+        state.count = state.count.checked_add(partial.count).ok_or_else(|| {
+            SqlQueryError::DataFusion(DataFusionError::Execution(
+                "native SUM value count overflow".to_owned(),
+            ))
+        })?;
     }
+    Ok(())
 }
 
-fn merge_native_sum_groups(groups: &mut NativeDataSumGroups, partial_groups: NativeDataSumGroups) {
+fn merge_native_sum_groups(
+    groups: &mut NativeDataSumGroups,
+    partial_groups: NativeDataSumGroups,
+) -> Result<(), SqlQueryError> {
     for (key, partial_states) in partial_groups {
         match groups.get_mut(&key) {
-            Some(states) => merge_native_sum_states(states, partial_states),
+            Some(states) => merge_native_sum_states(states, partial_states)?,
             None => {
                 groups.insert(key, partial_states);
             }
         }
     }
+    Ok(())
 }
 
 fn scan_native_data_sum_partition(
     path: &std::path::Path,
-    scan: NativeDataSumPartitionScan,
+    scan: NativeDataSumPartitionScan<'_>,
 ) -> Result<(NativeDataSumGroups, u64), SqlQueryError> {
-    check_query_canceled(scan.cancel_check.as_ref())?;
+    check_query_canceled(scan.cancel_check)?;
     let mut groups: BTreeMap<Option<NativeGroupKey>, Vec<NativeSumState>> = BTreeMap::new();
-    let mut row_bitmap = RoaringBitmap::new();
-    let reader = SegmentReader::open(path)?;
-    let checkpoint = logex_storage::IndexReadCheckpoint::open(path, &reader)?;
-    let bloom_exclusions = if let Some(checkpoint) = checkpoint.as_ref() {
-        erc20_event_bloom_exclusions(&path.join("indexes"), checkpoint, &scan.candidate_filters)?
-    } else {
-        None
-    };
-    for (index, candidate_filter) in scan.candidate_filters.iter().enumerate() {
-        let row_ids = if bloom_exclusions
-            .as_ref()
-            .is_some_and(|exclusions| exclusions.get(index).copied().unwrap_or(false))
-        {
-            Vec::new()
-        } else {
-            candidate_row_ids_for_reader(
-                path,
-                &reader,
-                candidate_filter,
-                true,
-                bloom_exclusions.is_some(),
-                scan.visible_rows,
-            )?
-        };
-        row_bitmap.extend(row_ids);
+    let mut projection: Vec<&str> =
+        candidate_refinement_columns_for_filters(scan.candidate_filters);
+    for column in scan
+        .selection
+        .into_iter()
+        .flat_map(|selection| selection.columns.iter())
+        .chain(scan.cases.columns.iter())
+        .map(String::as_str)
+        .chain(std::iter::once("data"))
+        .chain((scan.group_by == NativeDataSumGroupBy::Address).then_some("address"))
+    {
+        if column == "topics" {
+            for topic in ["topic0", "topic1", "topic2", "topic3"] {
+                if !projection.contains(&topic) {
+                    projection.push(topic);
+                }
+            }
+        } else if !projection.contains(&column) {
+            projection.push(column);
+        }
     }
-    let row_ids = row_bitmap.iter().collect::<Vec<_>>();
+    let reader = SegmentReader::open_projected_with_memory(path, &projection, scan.memory.clone())
+        .map_err(map_native_query_io_error)?;
+    let row_ids = candidate_row_ids_for_filters_on_reader_with_memory(
+        path,
+        &reader,
+        scan.candidate_filters,
+        true,
+        scan.visible_rows,
+        scan.memory,
+        scan.cancel_check,
+    )
+    .map_err(map_native_query_io_error)?;
     if row_ids.is_empty() {
         return Ok((groups, 0));
     }
 
+    let mut source = reader.prepare_selection();
     let mut total_scanned = 0u64;
     for row_ids in row_ids.chunks(DATAFUSION_BATCH_SIZE) {
-        check_query_canceled(scan.cancel_check.as_ref())?;
+        check_query_canceled(scan.cancel_check)?;
         // Candidate selection refines every native constraint against stored
         // columns, with or without indexes. Each candidate filter contains the
         // common filter, so their union already satisfies it. Residual WHERE
         // evaluation happens before CASE evaluation so excluded rows cannot
         // trigger errors in aggregate inputs.
-        let selected_row_ids = if let Some(selection) = &scan.selection {
-            let selection = selection.evaluate(&reader, row_ids)?;
+        let selected_row_ids = if let Some(selection) = scan.selection {
+            let selection =
+                selection.evaluate(&mut source, row_ids, scan.memory, scan.cancel_check)?;
             let selection = selection[0]
                 .as_any()
                 .downcast_ref::<BooleanArray>()
@@ -2782,39 +2812,75 @@ fn scan_native_data_sum_partition(
                         "prepared SUM selection did not return boolean values".to_owned(),
                     )
                 })?;
-            row_ids
-                .iter()
-                .copied()
-                .enumerate()
-                .filter_map(|(index, row_id)| predicate_matches(selection, index).then_some(row_id))
-                .collect::<Vec<_>>()
+            if selection.len() != row_ids.len() {
+                return Err(SqlQueryError::DataFusion(DataFusionError::Internal(
+                    "prepared SUM selection returned the wrong row count".to_owned(),
+                )));
+            }
+            let mut selected = QueryBuffer::try_with_capacity(
+                row_ids.len(),
+                Some(scan.memory),
+                "native SUM selected row ids",
+            )
+            .map_err(map_native_query_io_error)?;
+            for (index, row_id) in row_ids.iter().copied().enumerate() {
+                if predicate_matches(selection, index) {
+                    selected
+                        .try_push(row_id)
+                        .map_err(map_native_query_io_error)?;
+                }
+            }
+            Some(selected)
         } else {
-            row_ids.to_vec()
+            None
         };
+        let selected_row_ids = selected_row_ids.as_deref().unwrap_or(row_ids);
         if selected_row_ids.is_empty() {
             continue;
         }
-        check_query_canceled(scan.cancel_check.as_ref())?;
-        let cases = scan.cases.evaluate(&reader, &selected_row_ids)?;
-        let cases = cases
-            .iter()
-            .map(|case| {
-                case.as_any()
-                    .downcast_ref::<Int64Array>()
-                    .cloned()
-                    .ok_or_else(|| {
-                        SqlQueryError::DataFusion(DataFusionError::Internal(
-                            "prepared SUM CASE did not return BIGINT values".to_owned(),
-                        ))
-                    })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let values = reader.read_var_bytes("data", Some(&selected_row_ids))?;
+        check_query_canceled(scan.cancel_check)?;
+        let cases = scan.cases.evaluate(
+            &mut source,
+            selected_row_ids,
+            scan.memory,
+            scan.cancel_check,
+        )?;
+        let mut typed_cases = QueryBuffer::try_with_capacity(
+            cases.len(),
+            Some(scan.memory),
+            "native SUM typed expression views",
+        )
+        .map_err(map_native_query_io_error)?;
+        for case in cases.iter() {
+            let case = case.as_any().downcast_ref::<Int64Array>().ok_or_else(|| {
+                SqlQueryError::DataFusion(DataFusionError::Internal(
+                    "prepared SUM CASE did not return BIGINT values".to_owned(),
+                ))
+            })?;
+            if case.len() != selected_row_ids.len() {
+                return Err(SqlQueryError::DataFusion(DataFusionError::Internal(
+                    "prepared SUM CASE returned the wrong row count".to_owned(),
+                )));
+            }
+            typed_cases
+                .try_push(case)
+                .map_err(map_native_query_io_error)?;
+        }
+        let values = source
+            .read_var_bytes("data", selected_row_ids)
+            .map_err(map_native_query_io_error)?;
         let addresses = match scan.group_by {
             NativeDataSumGroupBy::None => None,
-            NativeDataSumGroupBy::Address => Some(reader.read_address(Some(&selected_row_ids))?),
+            NativeDataSumGroupBy::Address => Some(
+                source
+                    .read_address(selected_row_ids)
+                    .map_err(map_native_query_io_error)?,
+            ),
         };
-        for (row_index, data) in values.into_iter().enumerate() {
+        for (row_index, data) in values.iter().enumerate() {
+            if row_index % 1_024 == 0 {
+                check_query_canceled(scan.cancel_check)?;
+            }
             let key = addresses.as_ref().map(|addresses| {
                 let mut bytes = [0u8; 20];
                 bytes.copy_from_slice(addresses[row_index].as_slice());
@@ -2822,19 +2888,28 @@ fn scan_native_data_sum_partition(
             });
             let states = groups
                 .entry(key)
-                .or_insert_with(|| initial_native_sum_states(&scan.sum_inputs));
+                .or_insert_with(|| initial_native_sum_states(scan.sum_inputs));
             for state in states.iter_mut() {
                 if let Some(value) =
-                    eval_native_row_value(data.as_ref(), &state.expr, &cases, row_index)?
+                    eval_native_row_value(data.as_ref(), &state.expr, &typed_cases, row_index)?
                 {
                     state.sum += value;
-                    state.count += 1;
+                    state.count = state.count.checked_add(1).ok_or_else(|| {
+                        SqlQueryError::DataFusion(DataFusionError::Execution(
+                            "native SUM value count overflow".to_owned(),
+                        ))
+                    })?;
                 }
             }
-            total_scanned += 1;
+            total_scanned = total_scanned.checked_add(1).ok_or_else(|| {
+                SqlQueryError::DataFusion(DataFusionError::Execution(
+                    "native SUM scanned-row count overflow".to_owned(),
+                ))
+            })?;
         }
     }
 
+    check_query_canceled(scan.cancel_check)?;
     Ok((groups, total_scanned))
 }
 
@@ -3058,14 +3133,14 @@ fn eval_native_aggregate_expr(
 fn eval_native_row_value(
     data: &[u8],
     expr: &PreparedRowValueExpr,
-    cases: &[Int64Array],
+    cases: &[&Int64Array],
     row_index: usize,
 ) -> Result<Option<BigInt>, SqlQueryError> {
     match expr {
         PreparedRowValueExpr::Data => Ok(Some(BigInt::from(BigUint::from_bytes_be(data)))),
         PreparedRowValueExpr::Literal(value) => Ok(Some(value.clone())),
         PreparedRowValueExpr::Case { expression, leaves } => {
-            let result = cases.get(*expression).ok_or_else(|| {
+            let result = *cases.get(*expression).ok_or_else(|| {
                 DataFusionError::Internal(format!(
                     "prepared SUM CASE expression index {expression} is out of range"
                 ))
@@ -3235,24 +3310,89 @@ impl PreparedSqlExpressions {
 
     fn evaluate(
         &self,
-        reader: &SegmentReader,
+        source: &mut PreparedSegmentSelection<'_>,
         row_ids: &[u32],
-    ) -> Result<Vec<ArrayRef>, SqlQueryError> {
+        memory: &QueryMemoryBudget,
+        cancel_check: Option<&QueryCancelCheck>,
+    ) -> Result<QueryBuffer<ArrayRef>, SqlQueryError> {
         if self.expressions.is_empty() {
-            return Ok(Vec::new());
+            return QueryBuffer::try_with_capacity(
+                0,
+                Some(memory),
+                "native SUM expression array owners",
+            )
+            .map_err(map_native_query_io_error);
         }
+        check_query_canceled(cancel_check)?;
+        let mut source = SelectedColumnSource::Prepared(source);
         let arrays = self
             .columns
             .iter()
-            .map(|column| read_column_as_array(reader, row_ids, column, None))
-            .collect::<std::io::Result<Vec<_>>>()?;
+            .map(|column| read_selected_column_as_array(&mut source, row_ids, column, Some(memory)))
+            .collect::<std::io::Result<Vec<_>>>()
+            .map_err(map_native_query_io_error)?;
         let options = RecordBatchOptions::new().with_row_count(Some(row_ids.len()));
         let batch = RecordBatch::try_new_with_options(self.schema.clone(), arrays, &options)
             .map_err(DataFusionError::from)?;
-        self.expressions
+        // At most the fixed logs schema's 15 projected columns are present.
+        // Their ArrayData headers are bounded control overhead and let final
+        // expression arrays retain input aliases without charging the same
+        // backing allocation a second time.
+        let input_data = batch
+            .columns()
             .iter()
-            .map(|expr| Ok(expr.evaluate(&batch)?.into_array(row_ids.len())?))
-            .collect()
+            .map(|array| array.to_data())
+            .collect::<Vec<_>>();
+        let mut output = QueryBuffer::try_with_capacity(
+            self.expressions.len(),
+            Some(memory),
+            "native SUM expression array owners",
+        )
+        .map_err(map_native_query_io_error)?;
+        for expr in &self.expressions {
+            check_query_canceled(cancel_check)?;
+            let data_type = expr.data_type(&self.schema)?;
+            let estimate = native_sum_expression_output_capacity(&data_type, row_ids.len())
+                .map_err(map_native_query_io_error)?;
+            // DataFusion's kernel intermediates remain engine-managed, but the
+            // predictable final Boolean/Int64 buffers are admitted before the
+            // kernel runs and reconciled to their actual retained capacities.
+            let reservation = memory
+                .reserve(estimate, "native SUM expression output")
+                .map_err(std::io::Error::other)
+                .map_err(map_native_query_io_error)?;
+            let array = expr.evaluate(&batch)?.into_array(row_ids.len())?;
+            if array.len() != row_ids.len() {
+                return Err(SqlQueryError::DataFusion(DataFusionError::Internal(
+                    "prepared SUM expression returned the wrong row count".to_owned(),
+                )));
+            }
+            let array = finish_accounted_array_excluding_aliases(
+                array,
+                Some(memory),
+                Some(reservation),
+                "native SUM expression output",
+                &input_data,
+            )
+            .map_err(map_native_query_io_error)?;
+            output.try_push(array).map_err(map_native_query_io_error)?;
+        }
+        Ok(output)
+    }
+}
+
+fn native_sum_expression_output_capacity(
+    data_type: &DataType,
+    rows: usize,
+) -> std::io::Result<usize> {
+    let validity = validity_capacity(rows)?;
+    match data_type {
+        DataType::Boolean => checked_add(validity_capacity(rows)?, validity),
+        DataType::Int64 => checked_add(round_capacity(checked_mul(rows, 8)?)?, validity),
+        other => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("unsupported prepared SUM expression result type: {other}"),
+        )),
     }
 }
 
@@ -5299,56 +5439,133 @@ fn read_column_as_array(
     column: &str,
     memory: Option<&QueryMemoryBudget>,
 ) -> std::io::Result<ArrayRef> {
+    let mut source = SelectedColumnSource::Direct { reader, memory };
+    read_selected_column_as_array(&mut source, row_ids, column, memory)
+}
+
+enum SelectedColumnSource<'a, 'reader> {
+    Direct {
+        reader: &'a SegmentReader,
+        memory: Option<&'a QueryMemoryBudget>,
+    },
+    Prepared(&'a mut PreparedSegmentSelection<'reader>),
+}
+
+impl SelectedColumnSource<'_, '_> {
+    fn read_u64(&mut self, column: &str, row_ids: &[u32]) -> std::io::Result<QueryBuffer<u64>> {
+        match self {
+            Self::Direct { reader, memory } => read_u64_source(reader, column, row_ids, *memory),
+            Self::Prepared(source) => source.read_u64(column, row_ids),
+        }
+    }
+
+    fn read_u32(&mut self, column: &str, row_ids: &[u32]) -> std::io::Result<QueryBuffer<u32>> {
+        match self {
+            Self::Direct { reader, memory } => read_u32_source(reader, column, row_ids, *memory),
+            Self::Prepared(source) => source.read_u32(column, row_ids),
+        }
+    }
+
+    fn read_u8(&mut self, column: &str, row_ids: &[u32]) -> std::io::Result<QueryBuffer<u8>> {
+        match self {
+            Self::Direct { reader, memory } => read_u8_source(reader, column, row_ids, *memory),
+            Self::Prepared(source) => source.read_u8(column, row_ids),
+        }
+    }
+
+    fn read_b256(&mut self, column: &str, row_ids: &[u32]) -> std::io::Result<QueryBuffer<B256>> {
+        match self {
+            Self::Direct { reader, memory } => read_b256_source(reader, column, row_ids, *memory),
+            Self::Prepared(source) => source.read_b256(column, row_ids),
+        }
+    }
+
+    fn read_nullable_b256(
+        &mut self,
+        column: &str,
+        row_ids: &[u32],
+    ) -> std::io::Result<QueryBuffer<Option<B256>>> {
+        match self {
+            Self::Direct { reader, memory } => {
+                read_nullable_b256_source(reader, column, row_ids, *memory)
+            }
+            Self::Prepared(source) => source.read_nullable_b256(column, row_ids),
+        }
+    }
+
+    fn read_address(&mut self, row_ids: &[u32]) -> std::io::Result<QueryBuffer<Address>> {
+        match self {
+            Self::Direct { reader, memory } => read_address_source(reader, row_ids, *memory),
+            Self::Prepared(source) => source.read_address(row_ids),
+        }
+    }
+
+    fn read_var_bytes(
+        &mut self,
+        column: &str,
+        row_ids: &[u32],
+    ) -> std::io::Result<QueryBuffer<alloy_primitives::Bytes>> {
+        match self {
+            Self::Direct { reader, memory } if column == "data" => {
+                read_var_bytes_source(reader, row_ids, *memory)
+            }
+            Self::Direct { .. } => Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("unsupported variable column: {column}"),
+            )),
+            Self::Prepared(source) => source.read_var_bytes(column, row_ids),
+        }
+    }
+}
+
+fn read_selected_column_as_array(
+    source: &mut SelectedColumnSource<'_, '_>,
+    row_ids: &[u32],
+    column: &str,
+    memory: Option<&QueryMemoryBudget>,
+) -> std::io::Result<ArrayRef> {
     let array: ArrayRef = match column {
-        "block_number" => build_direct_u64_array(
-            read_u64_source(reader, "block_number", row_ids, memory)?,
-            memory,
-        )?,
-        "block_hash" => build_fixed_hex_array(
-            read_b256_source(reader, "block_hash", row_ids, memory)?,
-            32,
-            memory,
-        )?,
-        "timestamp" => build_direct_u64_array(
-            read_u64_source(reader, "timestamp", row_ids, memory)?,
-            memory,
-        )?,
-        "tx_hash" => build_fixed_hex_array(
-            read_b256_source(reader, "tx_hash", row_ids, memory)?,
-            32,
-            memory,
-        )?,
-        "tx_index" => build_converted_u64_array(
-            read_u32_source(reader, "tx_index", row_ids, memory)?,
-            memory,
-            |value| value as u64,
-        )?,
-        "log_index" => build_converted_u64_array(
-            read_u32_source(reader, "log_index", row_ids, memory)?,
-            memory,
-            |value| value as u64,
-        )?,
-        "address" => {
-            build_fixed_hex_array(read_address_source(reader, row_ids, memory)?, 20, memory)?
+        "block_number" => {
+            build_direct_u64_array(source.read_u64("block_number", row_ids)?, memory)?
         }
-        "topic0" | "topic1" | "topic2" | "topic3" => build_nullable_hex_array(
-            read_nullable_b256_source(reader, column, row_ids, memory)?,
-            memory,
-        )?,
-        "topics" => build_topics_array(reader, row_ids, memory)?,
-        "data" => {
-            build_variable_hex_array(read_var_bytes_source(reader, row_ids, memory)?, memory)?
+        "block_hash" => {
+            build_fixed_hex_array(source.read_b256("block_hash", row_ids)?, 32, memory)?
         }
-        "data_len" => build_converted_u64_array(
-            read_u32_source(reader, "data_len", row_ids, memory)?,
+        "timestamp" => build_direct_u64_array(source.read_u64("timestamp", row_ids)?, memory)?,
+        "tx_hash" => build_fixed_hex_array(source.read_b256("tx_hash", row_ids)?, 32, memory)?,
+        "tx_index" => {
+            build_converted_u64_array(source.read_u32("tx_index", row_ids)?, memory, |value| {
+                value as u64
+            })?
+        }
+        "log_index" => {
+            build_converted_u64_array(source.read_u32("log_index", row_ids)?, memory, |value| {
+                value as u64
+            })?
+        }
+        "address" => build_fixed_hex_array(source.read_address(row_ids)?, 20, memory)?,
+        "topic0" | "topic1" | "topic2" | "topic3" => {
+            build_nullable_hex_array(source.read_nullable_b256(column, row_ids)?, memory)?
+        }
+        "topics" => build_topics_array_from_values(
+            source.read_nullable_b256("topic0", row_ids)?,
+            source.read_nullable_b256("topic1", row_ids)?,
+            source.read_nullable_b256("topic2", row_ids)?,
+            source.read_nullable_b256("topic3", row_ids)?,
+            row_ids.len(),
             memory,
-            |value| value as u64,
         )?,
-        "source" => build_converted_u64_array(
-            read_u8_source(reader, "source", row_ids, memory)?,
-            memory,
-            |value| value as u64,
-        )?,
+        "data" => build_variable_hex_array(source.read_var_bytes("data", row_ids)?, memory)?,
+        "data_len" => {
+            build_converted_u64_array(source.read_u32("data_len", row_ids)?, memory, |value| {
+                value as u64
+            })?
+        }
+        "source" => {
+            build_converted_u64_array(source.read_u8("source", row_ids)?, memory, |value| {
+                value as u64
+            })?
+        }
         other => {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -5530,18 +5747,47 @@ fn reserve_scan_output(
         .transpose()
 }
 
-fn checked_buffer_capacity(data: &ArrayData) -> std::io::Result<usize> {
+fn checked_buffer_capacity_excluding(
+    data: &ArrayData,
+    aliases: &[ArrayData],
+) -> std::io::Result<usize> {
     let mut bytes = 0usize;
     for buffer in data.buffers() {
-        bytes = checked_add(bytes, buffer.capacity())?;
+        if !aliases
+            .iter()
+            .any(|alias| array_data_contains_buffer(alias, buffer))
+        {
+            bytes = checked_add(bytes, buffer.capacity())?;
+        }
     }
-    if let Some(nulls) = data.nulls() {
+    if let Some(nulls) = data.nulls()
+        && !aliases
+            .iter()
+            .any(|alias| array_data_contains_buffer(alias, nulls.buffer()))
+    {
         bytes = checked_add(bytes, nulls.buffer().capacity())?;
     }
     for child in data.child_data() {
-        bytes = checked_add(bytes, checked_buffer_capacity(child)?)?;
+        bytes = checked_add(bytes, checked_buffer_capacity_excluding(child, aliases)?)?;
     }
     Ok(bytes)
+}
+
+fn array_data_contains_buffer(data: &ArrayData, candidate: &Buffer) -> bool {
+    data.buffers()
+        .iter()
+        .chain(data.nulls().into_iter().map(|nulls| nulls.buffer()))
+        .any(|buffer| buffer_contains_buffer(buffer, candidate))
+        || data
+            .child_data()
+            .iter()
+            .any(|child| array_data_contains_buffer(child, candidate))
+}
+
+fn buffer_contains_buffer(owner: &Buffer, candidate: &Buffer) -> bool {
+    // Arrow's data pointer identifies the shared allocation and remains stable
+    // across ordinary Buffer slices, unlike the view pointer and length.
+    owner.data_ptr() == candidate.data_ptr()
 }
 
 fn wrap_buffer(buffer: Buffer, lease: &Arc<ColumnBufferLease>) -> Buffer {
@@ -5582,7 +5828,17 @@ fn wrap_array_data(data: ArrayData, lease: &Arc<ColumnBufferLease>) -> DataFusio
 fn finish_scan_array(
     array: ArrayRef,
     memory: Option<&QueryMemoryBudget>,
+    reservation: Option<QueryMemoryReservation>,
+) -> std::io::Result<ArrayRef> {
+    finish_accounted_array_excluding_aliases(array, memory, reservation, SCAN_OUTPUT_STAGE, &[])
+}
+
+fn finish_accounted_array_excluding_aliases(
+    array: ArrayRef,
+    memory: Option<&QueryMemoryBudget>,
     mut reservation: Option<QueryMemoryReservation>,
+    stage: &'static str,
+    aliases: &[ArrayData],
 ) -> std::io::Result<ArrayRef> {
     let Some(memory) = memory else {
         return Ok(array);
@@ -5592,7 +5848,7 @@ fn finish_scan_array(
         .expect("accounted scan arrays reserve before construction or ownership transfer");
     let data = array.to_data();
     drop(array);
-    let actual = checked_buffer_capacity(&data)?;
+    let actual = checked_buffer_capacity_excluding(&data, aliases)?;
     let reserved = usize::try_from(reservation.bytes()).map_err(|_| size_overflow())?;
     if actual > reserved {
         let additional = actual - reserved;
@@ -5603,7 +5859,7 @@ fn finish_scan_array(
                 requested: additional,
                 used: used_before,
                 limit: memory.limit(),
-                stage: SCAN_OUTPUT_STAGE,
+                stage,
             }));
         }
     } else if reserved > actual {
@@ -5727,16 +5983,14 @@ fn build_variable_hex_array<T: AsRef<[u8]>>(
     finish_scan_array(Arc::new(builder.finish()), memory, reservation)
 }
 
-fn build_topics_array(
-    reader: &SegmentReader,
-    row_ids: &[u32],
+fn build_topics_array_from_values(
+    topic0: QueryBuffer<Option<B256>>,
+    topic1: QueryBuffer<Option<B256>>,
+    topic2: QueryBuffer<Option<B256>>,
+    topic3: QueryBuffer<Option<B256>>,
+    row_count: usize,
     memory: Option<&QueryMemoryBudget>,
 ) -> std::io::Result<ArrayRef> {
-    let topic0 = read_nullable_b256_source(reader, "topic0", row_ids, memory)?;
-    let topic1 = read_nullable_b256_source(reader, "topic1", row_ids, memory)?;
-    let topic2 = read_nullable_b256_source(reader, "topic2", row_ids, memory)?;
-    let topic3 = read_nullable_b256_source(reader, "topic3", row_ids, memory)?;
-
     let topic_count = [&topic0, &topic1, &topic2, &topic3]
         .into_iter()
         .map(|topics| topics.iter().filter(|topic| topic.is_some()).count())
@@ -5745,12 +5999,12 @@ fn build_topics_array(
     let value_bytes = checked_mul(topic_count, 66)?;
     check_i32_offset(value_bytes)?;
     let estimate = string_capacity(topic_count, value_bytes, false)?
-        .checked_add(offset_capacity(row_ids.len())?)
+        .checked_add(offset_capacity(row_count)?)
         .ok_or_else(size_overflow)?;
     let reservation = reserve_scan_output(memory, estimate)?;
     let values = StringBuilder::with_capacity(topic_count, value_bytes);
-    let mut builder = ListBuilder::with_capacity(values, row_ids.len());
-    for index in 0..row_ids.len() {
+    let mut builder = ListBuilder::with_capacity(values, row_count);
+    for index in 0..row_count {
         for topic in [topic0[index], topic1[index], topic2[index], topic3[index]]
             .into_iter()
             .flatten()
@@ -6787,7 +7041,7 @@ mod tests {
         let source_data = source.to_data();
         let expected_offset = source_data.offset();
         let expected_null_offset = source_data.nulls().unwrap().offset();
-        let bytes = checked_buffer_capacity(&source_data).unwrap();
+        let bytes = checked_buffer_capacity_excluding(&source_data, &[]).unwrap();
         drop(source_data);
         let reservation = reserve_scan_output(Some(&budget), bytes).unwrap();
 
@@ -6804,13 +7058,91 @@ mod tests {
     }
 
     #[test]
+    fn native_sum_expression_alias_retains_source_owner_until_output_drops() {
+        let budget = QueryMemoryBudget::new(QueryMemoryLimit::new(1024 * 1024).unwrap());
+        let source =
+            build_direct_u64_array(QueryBuffer::unaccounted(vec![1, 2, 3, 4]), Some(&budget))
+                .unwrap();
+        let source_charge = budget.used();
+        assert!(source_charge > 0);
+
+        let output_alias = source.slice(1, 2);
+        let reservation = budget
+            .reserve(
+                native_sum_expression_output_capacity(&DataType::Int64, output_alias.len())
+                    .unwrap(),
+                "native SUM expression output",
+            )
+            .unwrap();
+        let aliases = [source.to_data()];
+        let output = finish_accounted_array_excluding_aliases(
+            output_alias,
+            Some(&budget),
+            Some(reservation),
+            "native SUM expression output",
+            &aliases,
+        )
+        .unwrap();
+        drop(aliases);
+        drop(source);
+        assert_eq!(budget.used(), source_charge);
+        let values = output.as_any().downcast_ref::<UInt64Array>().unwrap();
+        assert_eq!(values.values(), &[2, 3]);
+        drop(output);
+        assert_eq!(budget.used(), 0);
+    }
+
+    #[test]
+    fn native_sum_expression_charges_new_nulls_without_recharging_aliased_values() {
+        let budget = QueryMemoryBudget::new(QueryMemoryLimit::new(1024 * 1024).unwrap());
+        let source =
+            build_direct_u64_array(QueryBuffer::unaccounted(vec![1, 2, 3]), Some(&budget)).unwrap();
+        let source_charge = budget.used();
+        let aliases = [source.to_data()];
+        let data = source
+            .to_data()
+            .into_builder()
+            .nulls(Some(NullBuffer::new(BooleanBuffer::from(vec![
+                true, false, true,
+            ]))))
+            .build()
+            .unwrap();
+        let new_null_capacity = data.nulls().unwrap().buffer().capacity();
+        let array = make_array(data);
+        let reservation = budget
+            .reserve(
+                native_sum_expression_output_capacity(&DataType::Int64, array.len()).unwrap(),
+                "native SUM expression output",
+            )
+            .unwrap();
+        let output = finish_accounted_array_excluding_aliases(
+            array,
+            Some(&budget),
+            Some(reservation),
+            "native SUM expression output",
+            &aliases,
+        )
+        .unwrap();
+        drop(aliases);
+        drop(source);
+        assert_eq!(
+            budget.used(),
+            source_charge + new_null_capacity as u128,
+            "aliased values must remain singly charged while new null bits are charged exactly"
+        );
+        assert!(output.is_null(1));
+        drop(output);
+        assert_eq!(budget.used(), 0);
+    }
+
+    #[test]
     fn nested_topics_child_buffer_retains_full_column_charge() {
         let budget = QueryMemoryBudget::new(QueryMemoryLimit::new(1024 * 1024).unwrap());
         let mut builder = ListBuilder::with_capacity(StringBuilder::with_capacity(1, 66), 1);
         append_hex(builder.values(), B256::repeat_byte(7).as_slice()).unwrap();
         builder.append(true);
         let array: ArrayRef = Arc::new(builder.finish());
-        let bytes = checked_buffer_capacity(&array.to_data()).unwrap();
+        let bytes = checked_buffer_capacity_excluding(&array.to_data(), &[]).unwrap();
         let reservation = reserve_scan_output(Some(&budget), bytes).unwrap();
         let array = finish_scan_array(array, Some(&budget), reservation).unwrap();
         let charge = budget.used();
@@ -7323,6 +7655,32 @@ mod tests {
         drop(held);
         drop(rows);
         assert_eq!(memory.used(), 0);
+    }
+
+    #[test]
+    fn grouped_residual_case_memory_fixture_is_native_eligible() {
+        let query = parse_native_data_sum_query(
+            "SELECT address, \
+                    SUM(CASE WHEN log_index % 2 = 0 THEN data ELSE 0 END) AS total \
+             FROM logs \
+             WHERE data_len = 1 AND source + 0 >= 0 \
+             GROUP BY address ORDER BY total DESC",
+        )
+        .unwrap()
+        .expect("grouped memory fixture must exercise the native SUM path");
+        assert!(query.group_by == NativeDataSumGroupBy::Address);
+        assert!(
+            query.selection.is_some(),
+            "fixture must retain residual WHERE"
+        );
+        assert!(
+            query
+                .sums
+                .iter()
+                .any(|sum| matches!(sum, NativeRowValueExpr::Case { .. })),
+            "fixture must exercise native CASE evaluation"
+        );
+        assert!(query.order.is_some(), "fixture must use native ordering");
     }
 
     #[test]
@@ -8373,12 +8731,12 @@ mod tests {
         };
         let null_case = [Int64Array::from(vec![None])];
         assert_eq!(
-            eval_native_row_value(&[], &expr, &null_case, 0).unwrap(),
+            eval_native_row_value(&[], &expr, &[&null_case[0]], 0).unwrap(),
             None
         );
 
         let invalid_case = [Int64Array::from(vec![Some(1)])];
-        let error = eval_native_row_value(&[], &expr, &invalid_case, 0).unwrap_err();
+        let error = eval_native_row_value(&[], &expr, &[&invalid_case[0]], 0).unwrap_err();
         assert!(matches!(
             error,
             SqlQueryError::DataFusion(DataFusionError::Internal(message))

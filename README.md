@@ -203,6 +203,15 @@ changing either requires reviewing these bounds. Cancellation is checked between
 batches and arithmetic operations; an individual admitted read, numeric operation
 or decimal conversion remains synchronous.
 
+Sums with grouping, conditional inputs or residual expressions also charge their
+candidate unions, selected row IDs, stored-column inputs and final Boolean/integer
+expression arrays. Each partition uses one captured reader and lazy source caches:
+fixed columns retain one bounded raw window or decoded page, and payload pages
+are reused across selections. Raw variable data retains its validated source;
+bundled nullable columns retain a decoded bitmap. Conditional inputs are read and
+evaluated only after the row passes the residual filter. Array and payload aliases
+retain their charges after the source cache or batch is released.
+
 SQL output is converted one Arrow batch at a time. Completed JSON rows remain
 charged while the next batch is processed; the previous batch can be released.
 Structured results reserve row, key, string and nested-container allocations
@@ -233,9 +242,10 @@ synchronously; cancellation does not interrupt an individual copy. The controlle
 encoder does not support compression; LogEx does not enable response compression.
 
 This budget is not a process-RAM ceiling. Some DataFusion operators account after
-allocating; planner/scratch allocations and native sums with grouping, conditional
-inputs or residual expressions (including their numeric formatting buffers) are
-not yet covered. Captured JSON manifests,
+allocating. Direct residual/conditional expression evaluation owns its final arrays,
+but internal kernel temporaries remain cooperative engine overhead. Group maps,
+numeric state, merging, projection, sorting and numeric formatting for general
+native sums are not yet covered. Captured JSON manifests,
 paths, codec contexts, fixed builder-control, non-result map nodes and ownership metadata
 are also outside the accounted buffer capacity. Snapshot paths and plan/control
 objects scale with the number of captured or selected segments. One query can

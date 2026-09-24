@@ -61,6 +61,46 @@ fn checked_range(data: &[u8], start: usize, end: usize) -> io::Result<&[u8]> {
     checked_slice(data, start, end - start)
 }
 
+/// Validate a raw fixed header and available body without reading unused values.
+pub(crate) fn validate_fixed_metadata<const WIDTH: usize>(
+    path: &Path,
+    header_bytes: &[u8],
+    available: u64,
+    prefix: Option<usize>,
+) -> io::Result<usize> {
+    let invalid = |reason: &str| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("invalid fixed column {}: {reason}", path.display()),
+        )
+    };
+    let header =
+        ColumnFileHeader::read_from(header_bytes).ok_or_else(|| invalid("corrupt header"))?;
+    if header.version != COLUMN_VERSION || header.compression != 0 {
+        return Err(invalid("unsupported raw column version or compression"));
+    }
+    let rows = usize::try_from(header.row_count).map_err(|_| invalid("row count overflow"))?;
+    let length = |n: usize| {
+        n.checked_mul(WIDTH)
+            .and_then(|n| n.checked_add(ColumnFileHeader::SIZE))
+    };
+    let declared = length(rows).ok_or_else(|| invalid("column length overflow"))?;
+    if let Some(prefix) = prefix {
+        // Fixed columns append in place. An already-published selected prefix
+        // remains valid while a newer header/tail is incomplete; do not require
+        // unrelated newer rows to be physically complete.
+        let required = length(prefix).ok_or_else(|| invalid("selected prefix overflow"))?;
+        if prefix > rows || required as u64 > available {
+            return Err(invalid("selected rows exceed the column bounds"));
+        }
+        Ok(required)
+    } else if declared as u64 != available {
+        Err(invalid("row count does not match the complete file body"))
+    } else {
+        Ok(declared)
+    }
+}
+
 /// A validated whole fixed-width column, or a bounds-checked selected prefix.
 /// The file buffer owns the bytes; page encoders can borrow them directly.
 pub(crate) struct RawFixedColumn<const WIDTH: usize> {
@@ -105,34 +145,9 @@ impl<const WIDTH: usize> RawFixedColumn<WIDTH> {
         prefix: Option<usize>,
     ) -> io::Result<Self> {
         const { assert!(WIDTH > 0, "raw column widths must be positive") };
-        let invalid = |reason: &str| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("invalid fixed column {}: {reason}", path.display()),
-            )
-        };
-        let header = ColumnFileHeader::read_from(&data).ok_or_else(|| invalid("corrupt header"))?;
-        if header.version != COLUMN_VERSION || header.compression != 0 {
-            return Err(invalid("unsupported raw column version or compression"));
-        }
-        let rows = usize::try_from(header.row_count).map_err(|_| invalid("row count overflow"))?;
-        let byte_len = |rows: usize| {
-            rows.checked_mul(WIDTH)
-                .and_then(|len| len.checked_add(ColumnFileHeader::SIZE))
-        };
-        let declared_len = byte_len(rows).ok_or_else(|| invalid("column length overflow"))?;
-        if let Some(prefix) = prefix {
-            // Fixed columns append in place. A query selecting an already
-            // published prefix can race with a later append's header/tail.
-            // Validate every requested slot without requiring that unrelated
-            // tail to be complete. Whole reads and compaction stay strict.
-            let prefix_len = byte_len(prefix).ok_or_else(|| invalid("selected prefix overflow"))?;
-            if prefix > rows || prefix_len > data.len() {
-                return Err(invalid("selected rows exceed the column bounds"));
-            }
-            data.truncate(prefix_len);
-        } else if declared_len != data.len() {
-            return Err(invalid("row count does not match the complete file body"));
+        let required = validate_fixed_metadata::<WIDTH>(path, &data, data.len() as u64, prefix)?;
+        if prefix.is_some() {
+            data.truncate(required);
         }
         Ok(Self { data })
     }
@@ -498,7 +513,7 @@ impl ColumnReader {
     }
 }
 
-pub(crate) fn validate_null_bytes(
+pub(crate) fn validate_null_metadata(
     data: &[u8],
     complete_len: u64,
     required_rows: u64,
@@ -519,12 +534,28 @@ pub(crate) fn validate_null_bytes(
     if (prefix && rows < required_rows)
         || (!prefix && rows != required_rows)
         || rows.div_ceil(8).checked_add(8) != Some(complete_len)
-        || required_rows
-            .div_ceil(8)
-            .checked_add(8)
-            .is_none_or(|n| n > data.len() as u64)
     {
         return Err(invalid());
+    }
+    Ok(rows)
+}
+
+pub(crate) fn validate_null_bytes(
+    data: &[u8],
+    complete_len: u64,
+    required_rows: u64,
+    prefix: bool,
+) -> io::Result<u64> {
+    let rows = validate_null_metadata(data, complete_len, required_rows, prefix)?;
+    if required_rows
+        .div_ceil(8)
+        .checked_add(8)
+        .is_none_or(|n| n > data.len() as u64)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "null bitmap does not match its column",
+        ));
     }
     Ok(rows)
 }
