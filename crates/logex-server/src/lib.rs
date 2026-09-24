@@ -5,6 +5,7 @@ pub mod grpc;
 pub mod handler;
 pub mod jsonrpc;
 mod maintenance;
+mod query_response;
 pub mod rest;
 mod storage_metrics;
 pub mod ws;
@@ -23,7 +24,7 @@ use axum::{
 };
 use base64::Engine;
 
-pub use handler::AppState;
+pub use handler::{AppState, QueryConcurrencyLimit};
 pub use maintenance::{
     MaintenanceState, MaintenanceStatus, MaintenanceStatusKind, RepairPhase,
     build_maintenance_router, serve_maintenance,

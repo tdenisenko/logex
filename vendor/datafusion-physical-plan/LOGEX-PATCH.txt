@@ -1,0 +1,36 @@
+LogEx query execution ownership correction
+
+Complete published datafusion-physical-plan 51.0.0 package, Apache License 2.0.
+Original license, notice, package files and tests are retained. No version upgrade.
+Archive SHA-256: 0acf0ad6b6924c6b1aa7d213b181e012e2d3ec0a64ff5b10ee6282ab0f8532ac
+Published VCS commit: fd35a09438a2b4841431f5e86ffef378cbbda7c9
+Original inventory: LOGEX-UPSTREAM-SHA256
+Complete source correction and regression: LOGEX-PATCH.diff
+
+The parallel in-memory sort path creates internal streams, then sends their
+results from background tasks. Its one-shot sort future releases its memory
+reservation before yielding. Neither that completed future nor its buffering
+task necessarily retains TaskContext or RuntimeEnv. Aborting an outer stream
+also does not synchronously stop a task that is executing CPU work.
+
+Retain Arc<RuntimeEnv> in an outer map on each internal stream, until the
+buffering task releases that stream. LogEx's per-query forwarding memory pool
+owns the admission lease through this RuntimeEnv; execution-plan child streams
+own it separately. Sort algorithms, buffering, parallelism and reservation sizes
+are unchanged. This corrects ownership, not query-memory limits. LogEx disables
+query disk spill; spill-reader ownership is outside this correction's scope.
+
+The bounded regression forces two tiny batches into the actual internal-sort
+branch on a current-thread runtime, drops external runtime owners, consumes an
+output batch, and checks retention then release. It requires no scheduler race,
+network, production data or wall-clock performance assumption. Workspace tests
+cover plan/cancellation ownership and recursive/result semantics. Excluded vendor
+tests run separately on both CI platforms:
+
+CARGO_TARGET_DIR=target/physical-plan-regressions cargo test --manifest-path vendor/datafusion-physical-plan/Cargo.toml --lib logex_internal --locked
+
+Verify complete source and reviewed differences with:
+python3 tools/verify_datafusion_vendor.py
+
+Remove this override only when a maintained engine provides equivalent internal
+stream/task ownership and passes LogEx query compatibility and lifetime tests.

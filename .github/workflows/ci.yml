@@ -84,6 +84,12 @@ jobs:
           vendor/datafusion-functions-aggregate-common/src/aggregate/avg_distinct/decimal.rs
           vendor/datafusion-functions-aggregate-common/src/utils.rs
 
+      - name: Check patched query execution formatting
+        run: >-
+          rustfmt --check --edition 2021
+          --config max_width=90,skip_children=true
+          vendor/datafusion-physical-plan/src/sorts/sort.rs
+
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
@@ -117,6 +123,10 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo test --workspace --all-targets --locked
       - run: cargo test --workspace --doc --locked
+      - name: Check pinned query execution ownership
+        env:
+          CARGO_TARGET_DIR: target/physical-plan-regressions
+        run: cargo test --manifest-path vendor/datafusion-physical-plan/Cargo.toml --lib logex_internal --locked
       - name: Check pinned gossipsub regressions
         env:
           CARGO_TARGET_DIR: target/gossipsub-regressions
@@ -161,6 +171,10 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo test --workspace --all-targets --locked
       - run: cargo test --workspace --doc --locked
+      - name: Check pinned query execution ownership
+        env:
+          CARGO_TARGET_DIR: target/physical-plan-regressions
+        run: cargo test --manifest-path vendor/datafusion-physical-plan/Cargo.toml --lib logex_internal --locked
       - name: Check pinned gossipsub regressions
         env:
           CARGO_TARGET_DIR: target/gossipsub-regressions

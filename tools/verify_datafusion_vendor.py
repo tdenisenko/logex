@@ -161,6 +161,15 @@ PACKAGES = (
             PurePosixPath("src/session/range_update.rs"): "5518a3cc920616fe298bd4fb2ce859ef57364bbabfd45823515cd665730ba527",
         },
     ),
+    Package(
+        name="datafusion-physical-plan",
+        inventory_checksum="fb35609d85c9b045444a34fb16e3b123f7442edeb72bc4a4d976457a6e98cd8e",
+        modified={
+            PurePosixPath("src/sorts/sort.rs"): "82865b7613af8a61ec7a8807654e7f83d780c9e870a9030dc03548a28f593f46",
+        },
+        patch_checksum="9ef984aedc4481e7c837bef4515b3066c60a5f5f6cf51efb8e94df429b4253c4",
+        provenance_note=PurePosixPath("LOGEX-PATCH.txt"),
+    ),
 )
 
 

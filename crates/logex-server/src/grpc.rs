@@ -10,7 +10,8 @@ use logex_query::{self, DEFAULT_QUERY_PAGE_SIZE, SqlQueryError, SqlQueryPage};
 use logex_storage::native::{LogOrder, NativeLogFilter, TopicConstraint};
 use logex_types::LogRow;
 
-use crate::handler::{ActiveQueryGuard, AppState, MAX_LOG_FILTER_LIMIT};
+use crate::handler::{ActiveQueryGuard, AppState, MAX_LOG_FILTER_LIMIT, QueryAdmissionError};
+pub use crate::query_response::QueryLeaseService;
 
 pub mod pb {
     #![allow(clippy::result_large_err)]
@@ -26,7 +27,8 @@ use pb::{
 
 type BoxStatus = Box<Status>;
 
-/// gRPC service implementation.
+/// gRPC service implementation. Use [`grpc_service`] when serving it so admission
+/// ownership also covers transport encoding and retained response bytes.
 pub struct LogExGrpcService {
     state: Arc<AppState>,
 }
@@ -76,7 +78,7 @@ impl LogExService for LogExGrpcService {
             .state
             .query_control
             .start_concurrent()
-            .map_err(Status::unavailable)?;
+            .map_err(QueryAdmissionError::into_grpc_status)?;
         let sql = &request.get_ref().sql;
         tracing::debug!(sql = %sql, "gRPC query");
 
@@ -143,7 +145,7 @@ impl LogExService for LogExGrpcService {
             rows.push(QueryRow { json });
         }
 
-        Ok(Response::new(QueryResponse {
+        let mut response = Response::new(QueryResponse {
             rows,
             total_scanned: result.total_scanned,
             row_count,
@@ -151,7 +153,9 @@ impl LogExService for LogExGrpcService {
             offset: offset as u64,
             next_offset,
             max_limit: 0,
-        }))
+        });
+        response.extensions_mut().insert(query.lease());
+        Ok(response)
     }
 
     async fn get_head_block(
@@ -175,7 +179,7 @@ impl LogExService for LogExGrpcService {
             .state
             .query_control
             .start_concurrent()
-            .map_err(Status::unavailable)?;
+            .map_err(QueryAdmissionError::into_grpc_status)?;
         let filter = proto_filter_to_native_filter(request.get_ref()).map_err(|status| *status)?;
 
         let logs = self
@@ -187,7 +191,9 @@ impl LogExService for LogExGrpcService {
         }
         let row_count = logs.len() as u64;
 
-        Ok(Response::new(GetLogsResponse { logs, row_count }))
+        let mut response = Response::new(GetLogsResponse { logs, row_count });
+        response.extensions_mut().insert(query.lease());
+        Ok(response)
     }
 
     async fn stream_logs(
@@ -198,7 +204,7 @@ impl LogExService for LogExGrpcService {
             .state
             .query_control
             .start_concurrent()
-            .map_err(Status::unavailable)?;
+            .map_err(QueryAdmissionError::into_grpc_status)?;
         let filter = proto_filter_to_native_filter(request.get_ref()).map_err(|status| *status)?;
 
         let entries = self
@@ -206,6 +212,7 @@ impl LogExService for LogExGrpcService {
             .await
             .map_err(|status| *status)?;
         let state = Arc::clone(&self.state);
+        let lease = query.lease();
         // Tonic requires an unboxed Status as the stream item's error type.
         #[allow(clippy::result_large_err)]
         let stream = tokio_stream::StreamExt::map(tokio_stream::iter(entries), move |entry| {
@@ -217,8 +224,17 @@ impl LogExService for LogExGrpcService {
             }
         });
 
-        Ok(Response::new(Box::pin(stream)))
+        let mut response = Response::new(Box::pin(stream) as Self::StreamLogsStream);
+        response.extensions_mut().insert(lease);
+        Ok(response)
     }
+}
+
+/// Build the gRPC service with admission retained through transport encoding.
+pub fn grpc_service(
+    state: Arc<AppState>,
+) -> QueryLeaseService<LogExServiceServer<LogExGrpcService>> {
+    QueryLeaseService::new(LogExServiceServer::new(LogExGrpcService::new(state)))
 }
 
 /// Start the gRPC server on the given address.
@@ -227,11 +243,11 @@ pub async fn serve_grpc(
     addr: SocketAddr,
     shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> Result<(), tonic::transport::Error> {
-    let service = LogExGrpcService::new(state);
+    let service = grpc_service(state);
     tracing::info!(%addr, "gRPC server starting");
 
     tonic::transport::Server::builder()
-        .add_service(LogExServiceServer::new(service))
+        .add_service(service)
         .serve_with_shutdown(addr, grpc_shutdown_signal(shutdown))
         .await
 }
@@ -413,6 +429,105 @@ mod tests {
     use logex_types::{LogRow, Source, SyncStatus};
     use tempfile::TempDir;
     use tokio_stream::StreamExt;
+
+    /// Exercise the generated Tonic encoder, not only the service trait methods.
+    #[tokio::test]
+    async fn encoded_grpc_query_bodies_and_frames_retain_shared_admission() {
+        use http_body::Body as _;
+        use prost::Message as _;
+        use tower::ServiceExt as _;
+
+        for method in ["Query", "GetLogs", "StreamLogs"] {
+            let (_tmp, storage) = setup_storage();
+            let state = Arc::new(AppState::with_query_concurrency(
+                storage,
+                None,
+                SyncStatus::default(),
+                crate::handler::QueryConcurrencyLimit::new(1).unwrap(),
+            ));
+            let message = if method == "Query" {
+                QueryRequest {
+                    sql: "SELECT * FROM logs".to_owned(),
+                    limit: None,
+                    offset: None,
+                }
+                .encode_to_vec()
+            } else {
+                GetLogsRequest::default().encode_to_vec()
+            };
+            let mut wire = vec![0];
+            wire.extend_from_slice(&(message.len() as u32).to_be_bytes());
+            wire.extend_from_slice(&message);
+            let request = axum::http::Request::builder()
+                .method("POST")
+                .uri(format!("/logex.LogExService/{method}"))
+                .header("content-type", "application/grpc")
+                .body(axum::body::Body::from(wire))
+                .unwrap();
+            let response = grpc_service(Arc::clone(&state))
+                .oneshot(request)
+                .await
+                .unwrap();
+            assert_eq!(response.status(), axum::http::StatusCode::OK);
+            assert!(
+                response
+                    .extensions()
+                    .get::<crate::handler::QueryLease>()
+                    .is_none()
+            );
+            // The adapter already owns the lease before Tonic encodes anything.
+            assert!(matches!(
+                state.query_control.start_concurrent(),
+                Err(QueryAdmissionError::Capacity)
+            ));
+            let mut body = response.into_body();
+            let frame = std::future::poll_fn(|cx| Pin::new(&mut body).poll_frame(cx))
+                .await
+                .unwrap()
+                .unwrap();
+            let bytes = frame.into_data().unwrap();
+            assert!(!bytes.is_empty(), "{method} must encode a data frame");
+            let clone = bytes.clone();
+            let slice = bytes.slice(1..);
+            drop(body);
+            drop(bytes);
+            drop(clone);
+            assert!(matches!(
+                state.query_control.start_concurrent(),
+                Err(QueryAdmissionError::Capacity)
+            ));
+            drop(slice);
+            assert!(state.query_control.start_concurrent().is_ok(), "{method}");
+        }
+    }
+
+    #[tokio::test]
+    async fn grpc_unary_response_extensions_own_admission_before_encoding() {
+        let (_tmp, storage) = setup_storage();
+        let state = Arc::new(AppState::with_query_concurrency(
+            storage,
+            None,
+            SyncStatus::default(),
+            crate::handler::QueryConcurrencyLimit::new(1).unwrap(),
+        ));
+        let service = LogExGrpcService::new(Arc::clone(&state));
+        let response = service
+            .get_logs(Request::new(GetLogsRequest::default()))
+            .await
+            .unwrap();
+        assert!(
+            response
+                .extensions()
+                .get::<crate::handler::QueryLease>()
+                .is_some()
+        );
+        assert!(matches!(
+            state.query_control.start_concurrent(),
+            Err(QueryAdmissionError::Capacity)
+        ));
+        drop(response);
+        assert!(state.query_control.start_concurrent().is_ok());
+    }
 
     fn make_test_rows() -> Vec<LogRow> {
         vec![

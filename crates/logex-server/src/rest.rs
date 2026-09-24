@@ -9,7 +9,8 @@ use logex_query::{self, SqlQueryError, SqlQueryPage};
 use logex_storage::PartitionManager;
 use serde::Serialize;
 
-use crate::handler::AppState;
+use crate::handler::{ActiveQueryGuard, AppState, QueryAdmissionError};
+use crate::query_response::retain_query_lease;
 use crate::storage_metrics;
 
 const HISTORICAL_RATE_STALE_AFTER_MS: u64 = 10_000;
@@ -70,19 +71,42 @@ pub async fn handle_query(
     State(state): State<Arc<AppState>>,
     Json(req): Json<QueryRequest>,
 ) -> Response {
-    let Some(query_guard) = state.query_control.start() else {
-        if let Some(reason) = state.storage_failure() {
-            return storage_unavailable_response(reason);
-        }
-        return (
-            StatusCode::CONFLICT,
-            Json(ErrorResponse {
-                error: "another SQL query is already running; stop it before starting a new one"
-                    .to_owned(),
-            }),
-        )
-            .into_response();
-    };
+    let query_guard =
+        match state.query_control.start() {
+            Ok(query) => query,
+            Err(QueryAdmissionError::StorageUnavailable(reason)) => {
+                return storage_unavailable_response(reason);
+            }
+            Err(QueryAdmissionError::Busy) => {
+                return (
+                StatusCode::CONFLICT,
+                Json(ErrorResponse {
+                    error: "another SQL query is already running; stop it before starting a new one"
+                        .to_owned(),
+                }),
+            ).into_response();
+            }
+            Err(QueryAdmissionError::Capacity) => {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(serde_json::json!({
+                        "status": "query_capacity",
+                        "resource": "concurrency",
+                        "error": QueryAdmissionError::CAPACITY_MESSAGE,
+                    })),
+                )
+                    .into_response();
+            }
+        };
+    let response = execute_query(&state, req, &query_guard).await;
+    retain_query_lease(response, query_guard.lease())
+}
+
+async fn execute_query(
+    state: &AppState,
+    req: QueryRequest,
+    query_guard: &ActiveQueryGuard,
+) -> Response {
     let cancel_check = query_guard.cancel_check();
     let (storage_snapshot, head_block) = {
         let storage = match state.read_storage().await {
