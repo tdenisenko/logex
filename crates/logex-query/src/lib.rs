@@ -10,5 +10,6 @@ pub use native::{
 };
 pub use sql::{
     DEFAULT_QUERY_PAGE_SIZE, QueryCancelCheck, SqlQueryError, SqlQueryPage, SqlQueryResult,
-    execute_sql, execute_sql_page, execute_sql_page_on_snapshot, execute_sql_page_with_cancel,
+    execute_sql, execute_sql_page, execute_sql_page_on_snapshot,
+    execute_sql_page_on_snapshot_with_memory, execute_sql_page_with_cancel,
 };

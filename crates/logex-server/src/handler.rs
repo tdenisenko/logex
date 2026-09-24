@@ -9,7 +9,7 @@ use axum::response::{IntoResponse, Json, Response};
 
 use logex_query::{self, DEFAULT_QUERY_PAGE_SIZE, NativeStorageSnapshot, QueryCancelCheck};
 use logex_storage::PartitionManager;
-use logex_types::{LOGEX_CLIENT_VERSION, SyncStatus};
+use logex_types::{LOGEX_CLIENT_VERSION, QueryMemoryBudget, QueryMemoryLimit, SyncStatus};
 
 use crate::eth_filter::{EthFilter, RpcLog};
 use crate::jsonrpc::{JsonRpcDocument, JsonRpcRequest, JsonRpcResponse};
@@ -58,6 +58,7 @@ pub struct AppState {
     pub sync_status: Arc<std::sync::Mutex<SyncStatus>>,
     pub(crate) storage_metrics: Arc<tokio::sync::Mutex<CachedStorageMetrics>>,
     pub(crate) query_control: Arc<QueryControl>,
+    pub(crate) query_memory: QueryMemoryBudget,
     native_query_workers: OnceLock<Arc<tokio::sync::Semaphore>>,
 }
 
@@ -76,12 +77,32 @@ impl AppState {
         sync_status: SyncStatus,
         limit: QueryConcurrencyLimit,
     ) -> Self {
+        Self::with_query_limits(
+            storage,
+            subscriptions,
+            sync_status,
+            limit,
+            Default::default(),
+        )
+    }
+
+    /// Configure shared admission and accounted memory for this server.
+    /// DataFusion operators participate in memory accounting; native scans and
+    /// response allocations do not yet participate. This is not an RSS cap.
+    pub fn with_query_limits(
+        storage: PartitionManager,
+        subscriptions: Option<SubscriptionManager>,
+        sync_status: SyncStatus,
+        concurrency: QueryConcurrencyLimit,
+        memory: QueryMemoryLimit,
+    ) -> Self {
         Self {
             storage: Arc::new(tokio::sync::RwLock::new(storage)),
             subscriptions,
             sync_status: Arc::new(std::sync::Mutex::new(sync_status)),
             storage_metrics: Arc::new(tokio::sync::Mutex::new(CachedStorageMetrics::default())),
-            query_control: Arc::new(QueryControl::new(limit)),
+            query_control: Arc::new(QueryControl::new(concurrency)),
+            query_memory: QueryMemoryBudget::new(memory),
             native_query_workers: OnceLock::new(),
         }
     }
@@ -1213,3 +1234,5 @@ mod tests {
 
 #[cfg(test)]
 mod admission_tests;
+#[cfg(test)]
+mod memory_tests;

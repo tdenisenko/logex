@@ -107,12 +107,13 @@ impl LogExService for LogExGrpcService {
                 storage.head_block().unwrap_or(0),
             )
         };
-        let execution = logex_query::execute_sql_page_on_snapshot(
+        let execution = logex_query::execute_sql_page_on_snapshot_with_memory(
             sql,
             snapshot,
             head_block,
             SqlQueryPage::new(limit, offset),
             Some(query.cancel_check()),
+            self.state.query_memory.clone(),
         );
         let result = match tokio::select! {
             biased;
@@ -122,6 +123,9 @@ impl LogExService for LogExGrpcService {
             Ok(result) => result,
             Err(error @ SqlQueryError::SnapshotChanged) => {
                 return Err(Status::aborted(error.to_string()));
+            }
+            Err(SqlQueryError::Capacity(error)) => {
+                return Err(Status::resource_exhausted(error));
             }
             Err(SqlQueryError::DataFusion(err)) => {
                 return Err(Status::invalid_argument(format!("query error: {err}")));

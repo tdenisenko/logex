@@ -143,6 +143,7 @@ impl LocalP2pAddressCandidates {
 
 pub struct RunSyncOptions<'a> {
     pub query_concurrency: logex_server::QueryConcurrencyLimit,
+    pub query_memory: logex_types::QueryMemoryLimit,
     pub pm_config: PartitionManagerConfig,
     pub storage_monitor: &'a mut Option<crate::volume::StorageMonitor>,
     pub checkpoint: Option<String>,
@@ -176,6 +177,7 @@ pub async fn run_sync(options: RunSyncOptions<'_>) -> cleanup::RuntimeShutdown {
     tokio::pin!(shutdown_signal);
     let RunSyncOptions {
         query_concurrency,
+        query_memory,
         pm_config,
         storage_monitor,
         checkpoint,
@@ -524,11 +526,12 @@ pub async fn run_sync(options: RunSyncOptions<'_>) -> cleanup::RuntimeShutdown {
         Some(consensus.as_ref()),
     );
     apply_p2p_address_status(&mut sync_status, &p2p_address);
-    let state = Arc::new(AppState::with_query_concurrency(
+    let state = Arc::new(AppState::with_query_limits(
         storage,
         Some(SubscriptionManager::new()),
         sync_status,
         query_concurrency,
+        query_memory,
     ));
     let storage_failure = {
         let (failure, receiver) = tokio::sync::watch::channel(None);

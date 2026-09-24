@@ -493,3 +493,64 @@ fn repair_health_only_mode_does_not_apply_query_admission_configuration() {
             .is_err()
     );
 }
+
+#[test]
+fn query_memory_defaults_precedence_and_validation() {
+    for (args, configured, expected) in [
+        (vec!["logex", "sync"], None, 1 << 30),
+        (vec!["logex", "sync"], Some(17), 17),
+        (
+            vec!["logex", "sync", "--query-memory-bytes", "1073741824"],
+            Some(0),
+            1 << 30,
+        ),
+        (
+            vec!["logex", "sync", "--query-memory-bytes", "23"],
+            Some(17),
+            23,
+        ),
+    ] {
+        let cli = resolve(
+            &args,
+            Config {
+                query_memory_bytes: configured,
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            super::super::resolved_query_memory(&cli.command)
+                .unwrap()
+                .unwrap()
+                .get(),
+            expected
+        );
+    }
+    for invalid in [0, isize::MAX as u64 + 1, u64::MAX] {
+        let cli = resolve(
+            &["logex", "sync"],
+            Config {
+                query_memory_bytes: Some(invalid),
+                ..Default::default()
+            },
+        );
+        assert!(
+            super::super::resolved_query_memory(&cli.command)
+                .unwrap_err()
+                .contains("query-memory-bytes")
+        );
+    }
+    let parsed: Config = toml::from_str("query_memory_bytes = 23").unwrap();
+    assert_eq!(parsed.query_memory_bytes, Some(23));
+    let cli = resolve(
+        &["logex", "repair", "--dry-run"],
+        Config {
+            query_memory_bytes: Some(0),
+            ..Default::default()
+        },
+    );
+    assert!(
+        super::super::resolved_query_memory(&cli.command)
+            .unwrap()
+            .is_none()
+    );
+}

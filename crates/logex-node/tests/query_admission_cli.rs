@@ -7,7 +7,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-fn reject(root: &Path, arguments: &[&str]) -> Output {
+fn reject_setting(root: &Path, arguments: &[&str], setting: &str) -> Output {
     let mut child = Command::new(env!("CARGO_BIN_EXE_logex"))
         .arg("--data-dir")
         .arg(root)
@@ -53,9 +53,48 @@ fn reject(root: &Path, arguments: &[&str]) -> Output {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(output.stdout.is_empty());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("query-max-concurrent"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains(setting));
     assert!(!root.exists(), "invalid admission setting created storage");
     output
+}
+
+fn reject(root: &Path, arguments: &[&str]) -> Output {
+    reject_setting(root, arguments, "query-max-concurrent")
+}
+
+#[test]
+fn invalid_query_memory_rejects_before_storage_without_echoing_config() {
+    // TOML integers are signed, so the platform-size overflow is exercised
+    // through the u64 CLI parser; config zero exercises resolved validation.
+    for (from_config, value) in [(false, 0), (false, isize::MAX as u64 + 1), (true, 0)] {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("absent-data");
+        let config = temp.path().join("settings.toml");
+        let credential = "private-memory-fixture-password";
+        let contents =
+            format!("query_memory_bytes = {value}\ndashboard_password = '{credential}'\n");
+        if from_config {
+            fs::write(&config, &contents).unwrap();
+        }
+        let parent_mtime = fs::metadata(temp.path()).unwrap().modified().unwrap();
+        let config_mtime = from_config.then(|| fs::metadata(&config).unwrap().modified().unwrap());
+        let number = value.to_string();
+        let args = if from_config {
+            vec!["--config", config.to_str().unwrap(), "sync"]
+        } else {
+            vec!["sync", "--query-memory-bytes", &number]
+        };
+        let output = reject_setting(&root, &args, "query-memory-bytes");
+        assert!(!String::from_utf8_lossy(&output.stderr).contains(credential));
+        assert_eq!(
+            fs::metadata(temp.path()).unwrap().modified().unwrap(),
+            parent_mtime
+        );
+        if let Some(mtime) = config_mtime {
+            assert_eq!(fs::read_to_string(&config).unwrap(), contents);
+            assert_eq!(fs::metadata(&config).unwrap().modified().unwrap(), mtime);
+        }
+    }
 }
 
 #[test]
