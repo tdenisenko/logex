@@ -1,6 +1,43 @@
 use super::*;
 
 #[test]
+fn maintenance_callback_handoff_cannot_clear_a_latched_storage_failure() {
+    let handle = MonitorHandle {
+        state: Arc::new(Mutex::new(MonitorState::default())),
+        failure_grace: Duration::from_secs(180),
+    };
+    let (first, old_events) = mpsc::channel();
+    handle
+        .set_failure_handler(move |_| {
+            first.send(()).unwrap();
+        })
+        .unwrap();
+    assert!(handle.set_failure_handler(|_| {}).is_err());
+    handle.clear_failure_handler().unwrap();
+    assert!(matches!(
+        old_events.try_recv(),
+        Err(mpsc::TryRecvError::Disconnected)
+    ));
+
+    let (second, events) = mpsc::channel();
+    handle
+        .set_failure_handler(move |reason| {
+            second.send(reason.to_owned()).unwrap();
+        })
+        .unwrap();
+    let callback = {
+        let mut state = handle.state.lock().unwrap();
+        state.failure = Some("fixture storage failure".to_owned());
+        state.callback.clone().unwrap()
+    };
+    callback("fixture storage failure");
+    assert_eq!(events.recv().unwrap(), "fixture storage failure");
+    assert!(handle.clear_failure_handler().is_err());
+    assert!(handle.set_failure_handler(|_| {}).is_err());
+    assert!(handle.state.lock().unwrap().callback.is_some());
+}
+
+#[test]
 fn configuration_requires_pair_and_absolute_mount() {
     assert!(configured(None, None).unwrap().is_none());
     assert!(configured(Some("/volume".into()), None).is_err());

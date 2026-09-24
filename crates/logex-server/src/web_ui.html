@@ -3498,6 +3498,21 @@ function fetchStatus() {
         throw new Error('status timed out');
       }
       if (!response.ok) {
+        if (response.status === 503 && response.data &&
+            (response.data.status === 'repairing' || response.data.status === 'repair_failed')) {
+          lastStatusReceivedAtMs = performance.now();
+          var failed = response.data.status === 'repair_failed';
+          markStatusOffline(failed ? 'Repair failed' : 'Repair in progress');
+          var phases = {
+            inspecting: 'Inspecting stored data.', recovering: 'Recovering interrupted storage work.',
+            rebuilding_indexes: 'Rebuilding derived indexes.', reconstructing: 'Reconstructing verified data.',
+            verifying: 'Verifying repaired data.', starting: 'Starting normal operation.'
+          };
+          setText('executionSummary', response.data.diagnostic ||
+            (failed ? 'Repair failed. Queries are unavailable.' : (phases[response.data.phase] || 'Repair is in progress.') + ' Queries are paused.'));
+          refreshLastUpdated();
+          return;
+        }
         if (response.status === 503 && response.data && response.data.status === 'storage_unavailable') {
           lastStatusReceivedAtMs = performance.now();
           markStatusOffline('Storage unavailable');

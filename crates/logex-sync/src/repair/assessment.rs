@@ -97,6 +97,12 @@ pub struct RepairAssessment {
 }
 
 impl RepairAssessment {
+    /// Keep the data directory exclusively owned through caller-side transport
+    /// cleanup even when execution consumes this assessment and returns an error.
+    /// This opaque guard grants no storage access or repair authorization.
+    pub fn retain_directory(&self) -> logex_storage::native::RepairDirectoryGuard {
+        self.inspection.retain_directory()
+    }
     pub(super) fn uses_limits(&self, limits: RepairAssessmentLimits) -> bool {
         self.limits.primary.max_segment_rows == limits.primary.max_segment_rows
             && self.limits.primary.max_retained_artifact_bytes

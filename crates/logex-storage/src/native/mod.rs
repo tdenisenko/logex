@@ -25,7 +25,7 @@ pub use storage::{
 
 pub use inspection::{
     InspectedSegmentRole, InspectionLimits, NativeRecoveryLimits, PrimaryDataDisposition,
-    PrimaryDataInspection, SegmentInspection, inspect_primary_data,
+    PrimaryDataInspection, RepairDirectoryGuard, SegmentInspection, inspect_primary_data,
 };
 pub use repair::{
     CommittedRepairPublication, IndexRepair, PendingIndexRepair, PendingRepair,

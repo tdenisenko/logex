@@ -590,7 +590,10 @@ pub use assessment::{
     RepairAssessment, RepairAssessmentLimits, RepairAssessmentReport, RepairIssue,
     SegmentRepairAssessment, SegmentRepairDisposition, assess_repair,
 };
-pub use execution::{RepairExecutionLimits, RepairExecutionOutcome, execute_repair};
+pub use execution::{
+    RepairConsensusProvider, RepairExecutionLimits, RepairExecutionOutcome, RepairExecutionPhase,
+    execute_repair, execute_repair_with_provider,
+};
 mod reconstruction;
 pub use reconstruction::{
     ReconstructedRepair, ReconstructedSegment, RepairReconstruction, RepairReconstructionLimits,

@@ -52,6 +52,9 @@ impl<'a> VerifiedRepairCandidate<'a> {
     /// Read limits apply to the independent staged-file verification. Encoding
     /// also uses the plan's row/payload limits; these do not bound total RSS,
     /// caller-owned rows, concurrent column scratch or disk consumption.
+    /// When the source plan is rooted at `.`, relative destinations remain
+    /// relative to its retained cwd. Keep that cwd unchanged through staging
+    /// and publication; absolute destinations retain their explicit meaning.
     pub fn stage(
         &self,
         destination: &Path,
@@ -79,7 +82,12 @@ impl<'a> VerifiedRepairCandidate<'a> {
         let mut verifier = self.verifier()?;
         verifier.append(rows)?;
         let source = verifier.finish()?;
-        let destination = std::path::absolute(destination)?;
+        let destination =
+            if self.plan.inspection.paths.root() == Path::new(".") && destination.is_relative() {
+                destination.to_owned()
+            } else {
+                std::path::absolute(destination)?
+            };
         fs::create_dir(&destination)?;
         let build = || {
             let paths = StorageCatalogPaths::new(destination.clone());

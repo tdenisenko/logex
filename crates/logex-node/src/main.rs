@@ -37,6 +37,7 @@ fn main() {
     let log_level = normalize_info_log_filter(cli.log_level);
 
     tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| log_level.parse().unwrap_or_default()),
@@ -49,26 +50,89 @@ fn main() {
     let partition_target_rows = cli.partition_target_rows;
     let mut checkpoint = cli.checkpoint;
     let checkpoint_sync_url = cli.checkpoint_sync_url;
+    let is_repair = matches!(cli.command, Command::Repair { .. });
+    let dry_run = matches!(cli.command, Command::Repair { dry_run: true, .. });
+    if is_repair && (checkpoint.is_some() || checkpoint_sync_url.is_some()) {
+        eprintln!(
+            "Error: repair uses retained consensus trust only; omit checkpoint and checkpoint_sync_url from the command and config file"
+        );
+        std::process::exit(1);
+    }
+    let listener_policy = match &cli.command {
+        Command::Sync {
+            http_host,
+            grpc_host,
+            dashboard_password,
+            allow_public_grpc,
+            ..
+        } => validate_listener_policy(
+            *http_host,
+            *grpc_host,
+            dashboard_password.as_deref(),
+            *allow_public_grpc,
+        ),
+        Command::Repair {
+            dry_run: false,
+            http_host,
+            dashboard_password,
+            ..
+        } => validate_listener_policy(
+            *http_host,
+            std::net::Ipv4Addr::LOCALHOST.into(),
+            dashboard_password.as_deref(),
+            false,
+        ),
+        _ => Ok(()),
+    };
+    if let Err(error) = listener_policy {
+        eprintln!("Error: {error}");
+        std::process::exit(1);
+    }
 
-    let expected_volume =
-        match volume::configured(cli.expected_volume_mount, cli.expected_volume_uuid).and_then(
-            |configured| {
-                configured
-                    .map(|(mount, uuid)| {
-                        volume::ExpectedVolume::prepare(&mount, &uuid, &data_dir, &mut checkpoint)
-                            .map(std::sync::Arc::new)
-                    })
-                    .transpose()
-            },
-        ) {
-            Ok(volume) => volume,
-            Err(error) => {
-                eprintln!("Error: storage volume preflight failed: {error}");
-                std::process::exit(1);
-            }
-        };
+    let expected_volume = match volume::configured(
+        cli.expected_volume_mount,
+        cli.expected_volume_uuid,
+    )
+    .and_then(|configured| {
+        configured
+            .map(|(mount, uuid)| {
+                let volume = if is_repair {
+                    // Repair requires an existing dataset. Even writable
+                    // repair must never initialize a missing directory.
+                    volume::ExpectedVolume::prepare_read_only(&mount, &uuid, &data_dir)
+                } else {
+                    volume::ExpectedVolume::prepare(&mount, &uuid, &data_dir, &mut checkpoint)
+                }?;
+                if is_repair && !dry_run {
+                    volume.check()?;
+                }
+                Ok::<_, std::io::Error>(std::sync::Arc::new(volume))
+            })
+            .transpose()
+    }) {
+        Ok(volume) => volume,
+        Err(error) => {
+            eprintln!("Error: storage volume preflight failed: {error}");
+            std::process::exit(1);
+        }
+    };
     if expected_volume.is_some() {
         data_dir = std::path::PathBuf::from(".");
+    }
+    if let Command::Repair {
+        dry_run: true,
+        ref repair_limits,
+        ..
+    } = cli.command
+    {
+        match runtime::repair::run_dry_run(&data_dir, repair_limits, expected_volume.as_deref()) {
+            Ok(0) => return,
+            Ok(code) => std::process::exit(code),
+            Err(error) => {
+                eprintln!("Error: repair inspection failed: {error:#}");
+                std::process::exit(1);
+            }
+        }
     }
     let mut storage_monitor = expected_volume.map(|volume| {
         volume::StorageMonitor::start_volume(volume).unwrap_or_else(|error| {
@@ -102,29 +166,15 @@ fn main() {
             cl_max_peers,
             disable_dashboard,
             dashboard_password,
-            allow_public_grpc,
+            allow_public_grpc: _,
             disable_historical_sync,
+            repair_corrupt_segments,
+            repair_limits,
         } => {
             let dashboard_enabled = !disable_dashboard;
             let checkpoint_sync_url = checkpoint_sync_url
                 .filter(|url| !url.trim().is_empty())
                 .or_else(|| Some(DEFAULT_CHECKPOINT_SYNC_URL.to_owned()));
-            if dashboard_password
-                .as_ref()
-                .is_some_and(|password| password.is_empty())
-            {
-                eprintln!("Error: dashboard password cannot be empty");
-                std::process::exit(1);
-            }
-            if let Err(error) = validate_listener_policy(
-                http_host,
-                grpc_host,
-                dashboard_password.as_deref(),
-                allow_public_grpc,
-            ) {
-                eprintln!("Error: {error}");
-                std::process::exit(1);
-            }
             let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
             let shutdown = rt.block_on(runtime::run_sync(runtime::RunSyncOptions {
                 pm_config,
@@ -148,10 +198,63 @@ fn main() {
                 dashboard_enabled,
                 dashboard_password,
                 disable_historical_sync,
+                repair_corrupt_segments,
+                repair_limits,
             }));
             if runtime::finish_runtime_shutdown(rt, shutdown, || drop(storage_monitor.take()))
                 .is_err()
             {
+                std::process::exit(1);
+            }
+        }
+        Command::Repair {
+            dry_run: _,
+            http_host,
+            http_port,
+            disable_dashboard,
+            dashboard_password,
+            discovery_port,
+            p2p_port,
+            max_peers,
+            nat,
+            p2p_bind_ip,
+            execution_bootnodes,
+            execution_discv5_port,
+            repair_limits,
+        } => {
+            let rt = tokio::runtime::Runtime::new().unwrap_or_else(|error| {
+                eprintln!("Error: cannot create repair runtime: {error}");
+                std::process::exit(1);
+            });
+            let (shutdown, result) = rt.block_on(runtime::run_repair_command(
+                runtime::repair::RunRepairOptions {
+                    root: pm_config.data_dir,
+                    limits: repair_limits,
+                    http_address: std::net::SocketAddr::new(http_host, http_port),
+                    http: logex_server::HttpServerConfig {
+                        dashboard_enabled: !disable_dashboard,
+                        dashboard_password,
+                    },
+                    network: runtime::repair::RepairNetworkOptions {
+                        discovery_port,
+                        p2p_port,
+                        max_peers,
+                        nat,
+                        p2p_bind_ip,
+                        execution_bootnodes,
+                        execution_discv5_port,
+                    },
+                },
+                &mut storage_monitor,
+            ));
+            let cleanup =
+                runtime::finish_runtime_shutdown(rt, shutdown, || drop(storage_monitor.take()));
+            if let Err(error) = result {
+                eprintln!("Error: repair failed: {error:#}");
+                std::process::exit(1);
+            }
+            if let Err(error) = cleanup {
+                eprintln!("Error: repair shutdown failed: {error}");
                 std::process::exit(1);
             }
         }
@@ -202,6 +305,9 @@ fn validate_listener_policy(
     dashboard_password: Option<&str>,
     allow_public_grpc: bool,
 ) -> Result<(), String> {
+    if dashboard_password.is_some_and(str::is_empty) {
+        return Err("dashboard password cannot be empty".to_owned());
+    }
     if is_public_listener(http_host) && dashboard_password.is_none() {
         return Err(
             "public HTTP listeners require --dashboard-password; use --http-host 127.0.0.1 for local-only access"

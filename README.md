@@ -292,6 +292,7 @@ Use `--help` at any level:
 ```bash
 ./target/release/logex --help
 ./target/release/logex sync --help
+./target/release/logex repair --help
 ./target/release/logex build-indexes --help
 ./target/release/logex compact --help
 ```
@@ -333,6 +334,7 @@ Global options:
 | `--dashboard-password <PASSWORD>` | none | Require HTTP Basic auth for dashboard, `/status`, `/query`, JSON-RPC, and WebSocket routes. Username is `logex`. Required for public HTTP. |
 | `--allow-public-grpc` | false | Allow gRPC to bind to a non-loopback host. This only disables LogEx's startup guard; use a private network or firewall. |
 | `--disable-historical-sync` | false | Fresh-data-dir only. Follow verified CL anchors forward from the checkpoint pivot and skip reverse historical EL backfill. Restart later without the flag to resume normal historical sync. |
+| `--repair-corrupt-segments` | false | Inspect existing storage and run exclusive offline repair before normal startup. Uses the same coordinator and `--repair-*` work limits as `repair`. |
 
 `build-indexes` options:
 
@@ -355,6 +357,7 @@ Other commands:
 | --- | --- | --- |
 | `compact` | `--limit <N>` | Compact eligible sealed storage segments. Omit `--limit` to compact all eligible segments. |
 | `info` | none | Show storage, checkpoint, and indexed coverage statistics for the data directory. |
+| `repair` | `--dry-run`, `--repair-*`, HTTP and EL options | Inspect or repair an existing dataset while ingestion, queries and indexing are paused. See `repair --help` for work allowances. |
 
 Command samples:
 
@@ -370,6 +373,33 @@ Normal historical sync already writes compacted sealed segments and continuously
 builds the current query index profile. `build-indexes` handles interrupted
 indexing and changed index profiles. `compact` handles older representations or
 changed compression profiles.
+
+`repair --dry-run` performs a read-only assessment and prints JSON to stdout;
+logs and diagnostics go to stderr. Exit 0 means local primary commitments and
+required index artifacts passed, 2 means pending recovery or repair work, and 1
+means a blocker, a limit or an inspection error. These checks do not establish
+chain completeness. An expected-volume dry run requires the correct existing
+mount and data directory but performs no write probe or free-space check.
+
+`repair` verifies retained WAL recovery, rebuilds derived indexes locally, and
+re-fetches damaged ranges only through retained verified consensus anchors and
+the existing EL validators. It does not bootstrap or replace consensus trust;
+omit checkpoint settings from its arguments and config. Missing or stale anchors,
+indeterminate ranges, unavailable peer history and exceeded work allowances stop
+the attempt with a diagnostic. Quarantine originals and journals are retained;
+rerun the command after resolving a blocker to resume. Never remove quarantine
+artifacts merely because a repair attempt stopped.
+
+During writable repair, `/health` and `/status` return HTTP 503 with repair state.
+Status and the dashboard retain the normal password policy; query and subscription
+routes return 503 and gRPC is not started. The listener stops before normal sync
+starts. Automatic startup inspection/repair is opt-in, with
+`sync --repair-corrupt-segments` or `repair_corrupt_segments = true` in TOML.
+It adds startup scanning work, not per-batch ingestion work. Runtime storage
+failures still stop the node; a subsequent opted-in startup performs repair.
+Maintenance allowances bound specific inputs and retained row/data work, not
+total process memory or a filesystem reservation. Use the diagnostic and
+`repair --help` to adjust a relevant allowance rather than discarding data.
 
 This version uses catalog 13 and segment manifest 11. Start sync in a new data
 directory when upgrading from earlier native formats; they are rejected without
@@ -441,6 +471,7 @@ Supported config keys:
 | `allow_public_grpc` | boolean | Permit non-loopback gRPC binding. |
 | `dashboard_enabled` | boolean | Enable or disable the embedded dashboard. |
 | `dashboard_password` | string | HTTP Basic auth password for protected HTTP routes. |
+| `repair_corrupt_segments` | boolean | Opt in to exclusive offline inspection/repair before sync. Explicit `--repair-corrupt-segments=false` overrides an enabled config setting. Work allowances use CLI `--repair-*` options. |
 
 Run with:
 

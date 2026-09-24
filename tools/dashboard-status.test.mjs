@@ -187,3 +187,25 @@ test('explicit unavailable node status wins over proximity to a fresh consensus 
   assert.equal(labels.nodeBadge, 'Disconnected');
   assert.equal(labels.nodeState, 'Disconnected');
 });
+
+test('repair progress and failure stay visible while polling resumes normal status', async () => {
+  const c = statusContext();
+  for (const [data, badge, summary] of [
+    [{ status: 'repairing', phase: 'rebuilding_indexes' }, 'Repair in progress', 'Rebuilding derived indexes. Queries are paused.'],
+    [{ status: 'repair_failed', phase: 'failed', diagnostic: '<script>untrusted diagnostic</script>' }, 'Repair failed', '<script>untrusted diagnostic</script>'],
+  ]) {
+    c.context.fetchStatus(); await settle();
+    c.calls.at(-1).resolve({ ok: false, status: 503, json: () => Promise.resolve(data) });
+    await settle();
+    assert.equal(c.labels.nodeBadge, badge);
+    assert.equal(c.labels.nodeState, badge);
+    assert.equal(c.labels.executionSummary, summary);
+    assert.equal(c.context.lastStatusReceivedAtMs, 100);
+    assert.equal(c.timers.size, 0);
+    assert.equal(c.updates.length, 0);
+  }
+  c.context.fetchStatus(); await settle();
+  c.calls.at(-1).resolve(ok({ node_state: 'syncing' })); await settle();
+  assert.deepEqual(c.updates, [{ node_state: 'syncing' }]);
+  assert.equal(c.timers.size, 0);
+});
