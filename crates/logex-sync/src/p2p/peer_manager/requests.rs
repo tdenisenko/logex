@@ -732,6 +732,7 @@ struct HeaderPageResult {
 
 pub(crate) struct ReverseHeaderPagesRequestPlan {
     pages: Vec<HeaderPageRequestPlan>,
+    parallel_candidates: usize,
 }
 
 struct HeaderPageRequestPlan {
@@ -883,7 +884,10 @@ impl PeerManager {
             });
         }
 
-        Ok(Some(ReverseHeaderPagesRequestPlan { pages }))
+        Ok(Some(ReverseHeaderPagesRequestPlan {
+            pages,
+            parallel_candidates: REVERSE_HEADER_PAGE_PARALLEL_CANDIDATES,
+        }))
     }
 
     pub(crate) fn complete_reverse_header_pages_request(
@@ -5316,6 +5320,11 @@ fn release_body_receipt_attempt_peer(
 }
 
 impl ReverseHeaderPagesRequestPlan {
+    pub(crate) fn with_sequential_candidates(mut self) -> Self {
+        self.parallel_candidates = 1;
+        self
+    }
+
     pub(crate) async fn execute(self) -> ReverseHeaderPagesRequestOutcome {
         let sessions = self
             .pages
@@ -5326,8 +5335,13 @@ impl ReverseHeaderPagesRequestPlan {
         let mut attempts = futures_util::stream::FuturesUnordered::new();
         for page in self.pages {
             attempts.push(
-                request_header_page_from_candidates(page.page_index, page.request, page.candidates)
-                    .boxed(),
+                request_header_page_from_candidates(
+                    page.page_index,
+                    page.request,
+                    page.candidates,
+                    self.parallel_candidates,
+                )
+                .boxed(),
             );
         }
 
@@ -5380,6 +5394,7 @@ async fn request_header_page_from_candidates(
         PeerId,
         PeerRequestSender<PeerRequest<LogexNetworkPrimitives>>,
     )>,
+    parallel_candidates: usize,
 ) -> HeaderPageResult {
     let requested = request.limit;
     let mut failures = Vec::new();
@@ -5387,10 +5402,7 @@ async fn request_header_page_from_candidates(
 
     loop {
         let mut attempts = futures_util::stream::FuturesUnordered::new();
-        for (peer_id, sender) in candidates
-            .by_ref()
-            .take(REVERSE_HEADER_PAGE_PARALLEL_CANDIDATES)
-        {
+        for (peer_id, sender) in candidates.by_ref().take(parallel_candidates) {
             attempts.push({
                 let request = request.clone();
                 async move {
