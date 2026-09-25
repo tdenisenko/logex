@@ -4,13 +4,23 @@ use std::task::Poll;
 /// Reuse the dormant network fixture for engine lifecycle tests. The returned
 /// resources keep its local channels, listener and temporary directory alive.
 pub(crate) async fn engine_peer_fixture() -> (PeerManager, impl Sized) {
+    let (manager, receivers, resources) = engine_peer_request_fixture().await;
+    (manager, (resources, receivers))
+}
+
+/// Expose only local request channels so engine tests can supply finite replies.
+pub(crate) async fn engine_peer_request_fixture() -> (
+    PeerManager,
+    Vec<mpsc::Receiver<PeerRequest<LogexNetworkPrimitives>>>,
+    impl Sized,
+) {
     let Fixture {
         manager,
         _network,
         _directory,
         receivers,
     } = Fixture::new().await;
-    (manager, (_network, _directory, receivers))
+    (manager, receivers, (_network, _directory))
 }
 
 pub(crate) fn empty_body_receipt_outcome() -> BodyReceiptRequestOutcome {

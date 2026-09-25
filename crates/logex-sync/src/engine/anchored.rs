@@ -22,6 +22,9 @@ mod cancellation_tests;
 #[cfg(test)]
 mod checkpoint_spool_tests;
 
+#[cfg(test)]
+mod fairness_tests;
+
 fn historical_fetch_worker_exit_error(
     kind: &str,
     sequence: u64,
@@ -37,9 +40,6 @@ fn historical_fetch_worker_exit_error(
 
 const CONSENSUS_WAIT_INTERVAL: Duration = Duration::from_secs(2);
 const CONSENSUS_ANCHOR_FORWARD_BATCH_LIMIT: u64 = 32;
-const CONSENSUS_ANCHOR_FORWARD_BATCH_LIMIT_DURING_HISTORICAL: u64 = 4;
-const CONSENSUS_ANCHOR_FORWARD_BATCH_LIMIT_DURING_STALE_HISTORICAL: u64 = 4;
-const CONSENSUS_ANCHOR_FORWARD_STALE_LAG_BLOCKS: u64 = 64;
 const CONSENSUS_ANCHOR_FORWARD_HEADER_TIMEOUT: Duration = Duration::from_secs(4);
 const CONSENSUS_ANCHOR_FORWARD_HEADER_ATTEMPTS: usize = 4;
 const CONSENSUS_ANCHOR_FORWARD_PAYLOAD_TIMEOUT: Duration = Duration::from_secs(10);
@@ -1900,27 +1900,16 @@ fn historical_header_batch_matches_child(
         && batch.child_header.hash_slow() == child_header.hash_slow()
 }
 
-fn consensus_anchor_forward_batch_limit(
-    current_block: u64,
-    target_block: u64,
-    configured_limit: u64,
-    historical_backfill_active: bool,
-) -> u64 {
+fn consensus_anchor_forward_batch_limit(current_block: u64, configured_limit: u64) -> u64 {
     if current_block == 0 {
         return 1;
     }
 
-    let fairness_limit = if historical_backfill_active {
-        let forward_lag = target_block.saturating_sub(current_block);
-        if forward_lag > CONSENSUS_ANCHOR_FORWARD_STALE_LAG_BLOCKS {
-            CONSENSUS_ANCHOR_FORWARD_BATCH_LIMIT_DURING_STALE_HISTORICAL
-        } else {
-            CONSENSUS_ANCHOR_FORWARD_BATCH_LIMIT_DURING_HISTORICAL
-        }
-    } else {
-        CONSENSUS_ANCHOR_FORWARD_BATCH_LIMIT
-    };
-    configured_limit.max(1).min(fairness_limit)
+    // Amortize live catch-up exchanges even while backfill is active. Historical
+    // fairness is enforced between batches, not by shrinking every live request.
+    configured_limit
+        .max(1)
+        .min(CONSENSUS_ANCHOR_FORWARD_BATCH_LIMIT)
 }
 
 fn consensus_anchor_forward_request_policy(
@@ -1955,6 +1944,12 @@ fn consensus_anchor_forward_payload_policy(historical_backfill_active: bool) -> 
 }
 
 impl SyncEngine {
+    fn consensus_forward_pending(&self) -> bool {
+        self.consensus
+            .next_anchor_after(self.current_block())
+            .is_some()
+    }
+
     pub(super) async fn run_consensus_sync(&mut self) -> Result<()> {
         self.refresh_consensus_status().await;
         self.set_runtime_state(NodeState::Discovering);
@@ -2070,18 +2065,22 @@ impl SyncEngine {
                 continue;
             }
 
-            let historical_pre_forward_progressed = if !self.config.disable_historical_sync {
-                self.service_ready_historical_backfill().await?
-            } else {
-                false
-            };
+            let forward_ready = self.consensus_forward_pending()
+                && std::time::Instant::now() >= next_forward_attempt_at;
+            let historical_pre_forward_progressed =
+                if !self.config.disable_historical_sync && !forward_ready {
+                    self.service_ready_historical_backfill().await?
+                } else {
+                    false
+                };
 
             let historical_backfill_active = !self.config.disable_historical_sync
                 && self.historical_resume_required_block().await.is_some();
 
             let consensus = Arc::clone(&self.consensus);
-            let historical_pre_anchor_progressed =
-                historical_backfill_active && self.ingest_historical_backfill_batch().await?;
+            let historical_pre_anchor_progressed = historical_backfill_active
+                && !self.consensus_forward_pending()
+                && self.ingest_historical_backfill_batch().await?;
 
             if historical_backfill_active && std::time::Instant::now() < next_forward_attempt_at {
                 if historical_pre_forward_progressed || historical_pre_anchor_progressed {
@@ -2099,29 +2098,31 @@ impl SyncEngine {
                 continue;
             }
 
-            let anchor_batch_limit = consensus_anchor_forward_batch_limit(
-                current,
-                self.sync_cursor().1,
-                self.config.header_batch_size,
-                historical_backfill_active,
-            );
+            let anchor_batch_limit =
+                consensus_anchor_forward_batch_limit(current, self.config.header_batch_size);
             let anchors = self
                 .next_consensus_anchor_batch(current, &consensus, anchor_batch_limit)
                 .await;
             if anchors.is_empty() {
-                if self
+                let gap_progressed = self
                     .ingest_gap_to_next_consensus_anchor(
                         current,
                         &consensus,
                         historical_backfill_active,
                     )
-                    .await?
-                {
+                    .await?;
+                // A missing/unavailable gap must still give ready history a turn.
+                let historical_gap_progressed = !self.config.disable_historical_sync
+                    && self.service_ready_historical_backfill().await?;
+                if gap_progressed {
                     continue;
                 }
                 if consensus.next_anchor_after(current).is_some() {
                     self.set_runtime_state(NodeState::Connecting);
-                    if historical_pre_forward_progressed || historical_pre_anchor_progressed {
+                    if historical_pre_forward_progressed
+                        || historical_pre_anchor_progressed
+                        || historical_gap_progressed
+                    {
                         continue;
                     }
                     if cancelable(
@@ -2140,7 +2141,10 @@ impl SyncEngine {
                 } else {
                     self.set_runtime_state(NodeState::WaitingForConsensus);
                 }
-                if historical_pre_forward_progressed || historical_pre_anchor_progressed {
+                if historical_pre_forward_progressed
+                    || historical_pre_anchor_progressed
+                    || historical_gap_progressed
+                {
                     continue;
                 }
                 if !self.config.disable_historical_sync
@@ -2237,6 +2241,11 @@ impl SyncEngine {
                 progressed |= self
                     .ingest_historical_completed_prepare(expected_sequence, completed, true)
                     .await?;
+                // Finish the owned write (including bounded coalescing), then
+                // return to live work before starting another historical write.
+                if self.consensus_forward_pending() {
+                    break;
+                }
                 continue;
             }
 
@@ -2249,6 +2258,9 @@ impl SyncEngine {
                     continue;
                 };
                 progressed |= self.ingest_historical_prepared_task(task, true).await?;
+                if self.consensus_forward_pending() {
+                    break;
+                }
                 continue;
             }
 
@@ -3427,12 +3439,22 @@ impl SyncEngine {
             return self.spawn_ready_historical_prepare_tasks().await;
         }
 
+        if self.consensus_forward_pending() {
+            return Ok(false);
+        }
+
         let Some((sequence, batch, prefetched)) = self
             .fetch_historical_combined_batch(child_header.clone())
             .await?
         else {
             if self.shutdown_requested() {
                 self.finish_shutdown()?;
+                return Ok(false);
+            }
+            if self.consensus_forward_pending() || self.pending_historical_prepare_count() > 0 {
+                // A pending fetch yielded, rather than exhausted its work. Its
+                // worker/result (including header-only empty blocks) stay owned
+                // by the existing pipeline instead of triggering another fetch.
                 return Ok(false);
             }
             return self
@@ -4413,12 +4435,8 @@ impl SyncEngine {
         let target_count = self
             .historical_fetch_window_blocks()
             .min(child_header.number() - EXECUTION_HISTORY_TARGET_BLOCK);
-        if target_count <= page_limit
-            || self.peers.peer_count() < HISTORICAL_PARALLEL_HEADER_PAGES_MIN_PEERS
-        {
-            return Ok(false);
-        }
-
+        // The same bounded plan supports a single page and a small peer pool.
+        // Keeping these requests on the foreground loop stalls live ingestion.
         let required_block = child_header.number().saturating_sub(target_count);
         match self
             .peers
@@ -4431,6 +4449,15 @@ impl SyncEngine {
             .await
         {
             Ok(Some(plan)) => {
+                // Preserve the former single-page/small-pool request policy:
+                // background ownership must not multiply ordinary header traffic.
+                let plan = if target_count <= page_limit
+                    || self.peers.peer_count() < HISTORICAL_PARALLEL_HEADER_PAGES_MIN_PEERS
+                {
+                    plan.with_sequential_candidates()
+                } else {
+                    plan
+                };
                 self.spawn_historical_header_fetch_plan(child_header, target_count, plan);
                 Ok(true)
             }
@@ -4525,7 +4552,7 @@ impl SyncEngine {
         }
 
         let child_header = outcome.child_header.clone();
-        let Some(header_batch) = self.materialize_parallel_historical_header_batch(
+        let Some(mut header_batch) = self.materialize_parallel_historical_header_batch(
             outcome.child_header,
             outcome.target_count,
             outcome.header_elapsed,
@@ -4535,6 +4562,60 @@ impl SyncEngine {
             self.historical_fetch_planned_child = Some(child_header);
             return Ok(false);
         };
+
+        let empty_prefix = header_batch
+            .headers
+            .iter()
+            .take_while(|header| historical_header_has_empty_body_and_receipts(header))
+            .count();
+        if empty_prefix > 0 {
+            // Empty commitments need no payload fetch, but an async header result
+            // cannot publish its floor ahead of earlier writes. Queue it in the
+            // same ordered prepare stream and retain the next fetch position.
+            header_batch.headers.truncate(empty_prefix);
+            let lowest_header = header_batch
+                .headers
+                .last()
+                .expect("nonempty prefix")
+                .clone();
+            let highest_block = header_batch.headers[0].number();
+            let next_child_header = Some(lowest_header.clone());
+            self.historical_fetch_planned_child = next_child_header.clone();
+            self.historical_prepare_completed.insert(
+                outcome.sequence,
+                HistoricalCompletedPrepare {
+                    next_child_header,
+                    result: Ok(Ok(PreparedHistoricalBatch {
+                        requested_headers: empty_prefix,
+                        planned_return_blocks: empty_prefix,
+                        header_elapsed: header_batch.header_elapsed,
+                        body_receipt_elapsed: Duration::ZERO,
+                        extracted: super::ingest::HistoricalExtractedBatch {
+                            chunks: vec![super::ingest::HistoricalExtractedChunk {
+                                rows: Vec::new(),
+                                row_count: 0,
+                                block_count: empty_prefix,
+                                lowest_header: lowest_header.clone(),
+                                extraction_elapsed: Duration::ZERO,
+                            }],
+                        },
+                        peer_notes: vec![header_batch.header_peer],
+                        lowest_block: lowest_header.number(),
+                        highest_block,
+                        block_count: empty_prefix,
+                        prepare_queue_elapsed: Duration::ZERO,
+                        validation_elapsed: Duration::ZERO,
+                        validation_queue_elapsed: Duration::ZERO,
+                        processing_elapsed: Duration::ZERO,
+                        residual_batch: None,
+                    })),
+                },
+            );
+            self.historical_fetch_next_sequence = self
+                .historical_fetch_next_sequence
+                .max(outcome.sequence.saturating_add(1));
+            return Ok(true);
+        }
 
         let plans = self
             .prepare_historical_fetch_plans_from_header_batch(header_batch)
@@ -4730,7 +4811,9 @@ impl SyncEngine {
             max_new_fetches
         };
         let pipeline_empty = self.pending_historical_fetch_count() == 0
-            && self.historical_fetch_planned_child.is_none();
+            && self.historical_fetch_planned_child.is_none()
+            && self.pending_historical_prepare_count() == 0
+            && self.historical_ingest_sequence.is_none();
         if !self.historical_fetch_pipeline_matches(&child_header) || pipeline_empty {
             self.reset_historical_fetch_pipeline();
             self.historical_fetch_expected_child = Some(child_header.clone());
@@ -4794,6 +4877,10 @@ impl SyncEngine {
                 continue;
             }
 
+            if self.consensus_forward_pending() {
+                self.historical_fetch_planned_child = Some(planned_child);
+                break;
+            }
             let Some(plan) = self.prepare_historical_fetch_plan(planned_child).await? else {
                 if self.pending_historical_fetch_count() == 0 {
                     self.reset_historical_fetch_pipeline();
@@ -4828,6 +4915,15 @@ impl SyncEngine {
             self.drain_historical_header_fetch_outcomes().await?;
             self.drain_historical_prepare_tasks().await?;
 
+            if self
+                .historical_prepare_completed
+                .contains_key(&self.historical_prepare_expected_sequence)
+            {
+                // An empty header result can prepare the next ordered write
+                // without producing a body/receipt outcome to wait for.
+                return Ok(None);
+            }
+
             if let Some(outcome) = self
                 .historical_fetch_completed
                 .remove(&self.historical_fetch_expected_sequence)
@@ -4851,6 +4947,10 @@ impl SyncEngine {
                 .await?;
                 wait_started = Instant::now();
                 continue;
+            }
+
+            if self.consensus_forward_pending() {
+                return Ok(None);
             }
 
             if self.historical_fetch_ready_plans.is_empty()
@@ -5616,6 +5716,25 @@ impl SyncEngine {
         let mut handle = task.handle;
         let mut last_prepare_refill = std::time::Instant::now();
         let prepared = loop {
+            if self.shutdown_requested() {
+                self.finish_shutdown()?;
+                return Ok(false);
+            }
+            if !handle.is_finished() && self.consensus_forward_pending() {
+                eyre::ensure!(
+                    !self.historical_prepare_handles.contains_key(&sequence),
+                    "historical prepare sequence {sequence} is already retained"
+                );
+                self.historical_prepare_handles.insert(
+                    sequence,
+                    HistoricalPrepareTask {
+                        sequence,
+                        next_child_header,
+                        handle,
+                    },
+                );
+                return Ok(false);
+            }
             tokio::select! {
                 result = &mut handle => {
                     break result
@@ -7504,32 +7623,11 @@ mod tests {
     }
 
     #[test]
-    fn consensus_forward_batch_limit_yields_while_historical_backfill_is_active() {
-        assert_eq!(consensus_anchor_forward_batch_limit(0, 100, 64, true), 1);
-        assert_eq!(
-            consensus_anchor_forward_batch_limit(100, 200, 64, false),
-            CONSENSUS_ANCHOR_FORWARD_BATCH_LIMIT
-        );
-        assert_eq!(
-            consensus_anchor_forward_batch_limit(
-                100,
-                100 + CONSENSUS_ANCHOR_FORWARD_STALE_LAG_BLOCKS,
-                64,
-                true
-            ),
-            CONSENSUS_ANCHOR_FORWARD_BATCH_LIMIT_DURING_HISTORICAL
-        );
-        assert_eq!(
-            consensus_anchor_forward_batch_limit(
-                100,
-                101 + CONSENSUS_ANCHOR_FORWARD_STALE_LAG_BLOCKS,
-                64,
-                true
-            ),
-            CONSENSUS_ANCHOR_FORWARD_BATCH_LIMIT_DURING_STALE_HISTORICAL
-        );
-        assert_eq!(consensus_anchor_forward_batch_limit(100, 110, 2, true), 2);
-        assert_eq!(consensus_anchor_forward_batch_limit(100, 110, 0, true), 1);
+    fn consensus_forward_batch_limit_preserves_bootstrap_and_configured_bounds() {
+        assert_eq!(consensus_anchor_forward_batch_limit(0, 64), 1);
+        assert_eq!(consensus_anchor_forward_batch_limit(100, 64), 32);
+        assert_eq!(consensus_anchor_forward_batch_limit(100, 2), 2);
+        assert_eq!(consensus_anchor_forward_batch_limit(100, 0), 1);
     }
 
     #[test]

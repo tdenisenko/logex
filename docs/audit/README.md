@@ -81,6 +81,55 @@ Build and test on the intended deployment OS before distributing binaries for it
 Service templates are validated templates; production installation and the
 48-hour live-sync acceptance test remain subsequent work.
 
+## Live/backfill scheduling follow-up
+
+The first native Intel/macOS acceptance attempt used audited merge `2e584917`.
+It ran from 2026-09-25 10:47:01 UTC until a clean, requested stop at 11:33:54 UTC.
+During initial catch-up, the execution head lag fell from 86 to 35 blocks,
+increased to 60, and later recovered to five. Consensus stayed fresh; sampled
+queries and storage health passed. These observations do not establish a
+permanent stall, a data-integrity failure or an overall ingestion regression.
+
+Review identified foreground historical network waits before eligible live
+work, a four-block live cap during backfill, and repeated historical drains
+between live turns. These scheduling choices predate the September audit. The
+follow-up gives eligible live work its turn first, uses the existing 32-block
+catch-up bound, and yields after one completed, bounded coalesced historical
+write when more live work is pending. Pending fetch/prepare workers remain
+owned and reusable; already-started writes still finish under existing shutdown
+supervision. Live request deadlines, retry limits, validation and publication
+checks are preserved. Unavailable live gaps still give history a turn.
+
+Single-page and small-peer-pool historical header requests now use the existing
+background request plan. They retain sequential peer selection, so this move
+does not introduce duplicate concurrent header requests. Existing larger-page
+parallelism remains unchanged. Empty committed header prefixes enter the ordered
+prepare/write stream without fetching empty bodies or receipts. Refill retains
+pending prepares and active writes at the terminal fetch boundary. A mixed page
+may refetch its remaining headers after an empty prefix; its payload and floor
+are never skipped or published out of order.
+
+Finite local-channel controls reproduce the original scheduling failures and
+exercise delayed history, new live anchors, empty blocks through genesis,
+unavailable live gaps, retained workers, coalesced writes and peer fallback.
+The 64-block catch-up fixture uses two live header exchanges while historical
+replies are withheld, then finishes history after those replies are released.
+This is evidence of request scheduling and operation counts, not a release
+throughput benchmark. Existing cancellation, reorg, validation and storage
+controls remain part of the workspace gates. The implementation PR records
+the exact-source validation results.
+
+The owner requires **one uninterrupted acceptance run of one final binary**.
+When code changes are needed, pause monitoring, stop the owned client promptly
+to avoid billed historical bandwidth, and remove only its owned test dataset
+after verified exit. Finish validation and compilation before a fresh sync.
+Resume the 30-minute monitor after initial analysis of the new run. The first
+attempt's logs and provenance are retained, its approximately 13.1 GiB dataset
+was removed, and none of its elapsed time or data counts toward acceptance.
+An intentional restart is not part of the new acceptance window. Report full
+sync separately, then continue through at least 48 uninterrupted issue-free
+hours. A stable tag still waits for the owner's subsequent acceptance.
+
 ## Historical milestones
 
 These reports retain their original source identities, failures, measurements

@@ -216,6 +216,7 @@ async fn header_candidate_rotation_continues_after_full_queues_time_out() {
         7,
         header_request(),
         candidates,
+        REVERSE_HEADER_PAGE_PARALLEL_CANDIDATES,
     ));
     assert!(futures_util::poll!(&mut page).is_pending());
     tokio::time::advance(REQUEST_TIMEOUT + Duration::from_millis(1)).await;
