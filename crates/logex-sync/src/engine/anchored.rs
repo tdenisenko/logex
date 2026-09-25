@@ -1907,9 +1907,7 @@ fn consensus_anchor_forward_batch_limit(current_block: u64, configured_limit: u6
 
     // Amortize live catch-up exchanges even while backfill is active. Historical
     // fairness is enforced between batches, not by shrinking every live request.
-    configured_limit
-        .max(1)
-        .min(CONSENSUS_ANCHOR_FORWARD_BATCH_LIMIT)
+    configured_limit.clamp(1, CONSENSUS_ANCHOR_FORWARD_BATCH_LIMIT)
 }
 
 fn consensus_anchor_forward_request_policy(
