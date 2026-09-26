@@ -84,3 +84,46 @@ All six CI jobs passed on `691a4649`;
 
 [Validation record](baselines/2026-09-16-execution-partial-progress.json).
 No Mac mini work or additional cleanup was needed in this milestone.
+
+## Reverse header pages found during live acceptance (2026-09-26)
+
+**B4-50 — medium, useful-prefix retention and peer attribution:** the parallel
+header collector accepted a positive short response and then appended the next
+preplanned page. Its numeric start assumed a full preceding response. For example,
+requests for `[105, 104]` and `[103, 102]` could produce `[105, 103, 102]` when the
+first supplier returned only header 105. Cross-page validation rejected the gap,
+discarded useful work and incorrectly blamed the second supplier.
+
+The [header request protocol](https://github.com/ethereum/devp2p/blob/master/caps/eth.md#getblockheaders-0x03)
+specifies a maximum reply count, so a positive short response must remain usable.
+The final collector keeps the contiguous prefix through the first short page and
+lets the next fetch continue at the missing header. Missing, empty and oversized
+pages also end the prefix; later results cannot restart it. All already completed
+requests still receive the existing session-aware success/failure accounting and
+successful-payload byte accounting, even when their headers cannot join the prefix.
+The empty-response return policy is preserved.
+
+Header ancestry and execution validation remain the ingestion gate. Request sizes,
+parallelism, retries and deadlines are unchanged. The correction adds one prefix
+state flag without payload copies, a cache or persistent writes. It avoids a
+demonstrated discarded-prefix path; no measured throughput gain is claimed.
+
+The acceptance log had eight 512-block boundary gaps between 08:11 and 08:17 UTC,
+with supplier disconnections and subsequent historical progress. Per-page reply
+lengths were not logged, so that exact live cause is inferred from the pattern and
+source. The local finite-response controls reproduce the assembly defect directly:
+short first/middle pages failed on unchanged source; complete and short final pages
+passed. With the correction, six controls cover prefix continuity, continuation,
+out-of-order completion, peer retention, received-payload accounting, completed
+timeouts and missing/empty-page behavior. These use the existing dormant loopback
+fixture and at most seven linked headers. Two fixture assumptions (channel admission
+and empty-response telemetry) were corrected before interpreting their results.
+
+The original client and supervisor exited cleanly at 2026-09-26 08:26:12 UTC after
+monitoring was paused. Only the owned acceptance dataset was deleted; logs and
+useful build artifacts were retained. Full sync and the 48-hour window require a
+new uninterrupted run after the correction is validated, merged and built natively.
+All six required local gates pass: 2,528 workspace tests, 24 existing
+ignores across 43 targets, doc tests and release build. Merge is gated on all
+required CI checks. Native compilation and fresh acceptance follow merge.
+[Validation record](baselines/2026-09-26-reverse-header-prefix.json).

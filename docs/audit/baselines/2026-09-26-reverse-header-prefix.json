@@ -1,0 +1,154 @@
+{
+  "finding": "B4-50",
+  "recorded_utc": "2026-09-26T08:50:12.346794+00:00",
+  "base_commit": "db7bdc1ef08ab88bc81d606fd8386940c4375664",
+  "toolchain": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0",
+  "source_files_sha256": {
+    "crates/logex-sync/src/p2p/peer_manager/requests.rs": "02f89e2eee68e6e3d881011edde37e8ab80a6f0be99d0ae28d2ce49ef58f8e81",
+    "crates/logex-sync/src/p2p/peer_manager/requests/partial_progress_tests.rs": "c28d6ac4ff983eb3751befbcac82ae09348d6d7206d64c599da6e0322b3a1d43"
+  },
+  "original_regression": {
+    "passed_controls": 2,
+    "failed_regressions": 2,
+    "failure_shapes": {
+      "short_first": {
+        "actual": [
+          105,
+          103,
+          102,
+          101,
+          100
+        ],
+        "expected": [
+          105
+        ]
+      },
+      "short_middle": {
+        "actual": [
+          105,
+          104,
+          103,
+          101,
+          100
+        ],
+        "expected": [
+          105,
+          104,
+          103
+        ]
+      }
+    }
+  },
+  "final_focused_controls": 6,
+  "workspace_tests": {
+    "passed": 2528,
+    "failed": 0,
+    "ignored": 24,
+    "targets": 43
+  },
+  "local_gates": [
+    {
+      "gate": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "started_utc": "2026-09-26T08:42:14.214157+00:00",
+      "finished_utc": "2026-09-26T08:42:15.554456+00:00",
+      "exit_code": 0
+    },
+    {
+      "gate": "check",
+      "command": [
+        "cargo",
+        "check",
+        "--workspace",
+        "--all-targets",
+        "--locked"
+      ],
+      "started_utc": "2026-09-26T08:42:15.554819+00:00",
+      "finished_utc": "2026-09-26T08:42:20.547701+00:00",
+      "exit_code": 0
+    },
+    {
+      "gate": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--locked",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "started_utc": "2026-09-26T08:42:20.548095+00:00",
+      "finished_utc": "2026-09-26T08:42:25.313790+00:00",
+      "exit_code": 0
+    },
+    {
+      "gate": "test",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace",
+        "--all-targets",
+        "--locked"
+      ],
+      "started_utc": "2026-09-26T08:42:25.314352+00:00",
+      "finished_utc": "2026-09-26T08:48:13.397486+00:00",
+      "exit_code": 0
+    },
+    {
+      "gate": "doc",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace",
+        "--doc",
+        "--locked"
+      ],
+      "started_utc": "2026-09-26T08:48:13.399192+00:00",
+      "finished_utc": "2026-09-26T08:48:21.551996+00:00",
+      "exit_code": 0
+    },
+    {
+      "gate": "release",
+      "command": [
+        "cargo",
+        "build",
+        "-p",
+        "logex-node",
+        "--release",
+        "--locked"
+      ],
+      "started_utc": "2026-09-26T08:48:21.552322+00:00",
+      "finished_utc": "2026-09-26T08:48:53.843767+00:00",
+      "exit_code": 0
+    }
+  ],
+  "live_run": {
+    "source_commit": "012f9543685858acbb35748fa03d633eb9ca5b30",
+    "boundary_warnings": 8,
+    "reported_gap_blocks": 512,
+    "run_exited_utc": "2026-09-26T08:26:12.421965+00:00",
+    "exit_code": 0,
+    "owned_dataset_removed_utc": "2026-09-26T08:28:14.326407+00:00",
+    "limitations": "Per-page reply lengths were not logged; source and local regression establish the faulty collector path. The superseded run did not reach genesis and contributes no time/data to new acceptance."
+  },
+  "review": {
+    "prefix": "Only a contiguous prefix can be returned; a short, absent, empty or oversized page ends collection permanently.",
+    "validation": "Existing ancestry and execution checks remain required; continued prefix validates and reaches the exact requested boundary.",
+    "ownership": "Completed outcomes retain captured-session checks and dead-peer cleanup even after the usable prefix ends.",
+    "cost": "No new requests, persistent writes, payload copies or cache; no benchmarked throughput claim."
+  },
+  "fixture_corrections": [
+    "Drain small local request channels across polls before asserting all pages are admitted.",
+    "Empty zero-progress replies retain existing telemetry policy excluding their empty-list framing byte."
+  ],
+  "ci_policy": "Merge only after all required CI jobs pass.",
+  "native_and_acceptance": "Native final compilation and a fresh uninterrupted run follow merge; monitor remains paused until initial analysis passes."
+}

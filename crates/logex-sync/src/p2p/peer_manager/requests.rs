@@ -903,6 +903,7 @@ impl PeerManager {
         let mut dead_peers = HashSet::new();
         let mut saw_empty_response = false;
         let mut pages = Vec::new();
+        let mut collecting_prefix = true;
         for result in outcome.page_results {
             for (peer_id, error) in result.failures {
                 if !captured_session_is_current(&self.peers, &outcome.sessions, peer_id) {
@@ -916,7 +917,8 @@ impl PeerManager {
             }
 
             let Some((peer_id, headers, elapsed)) = result.success else {
-                break;
+                collecting_prefix = false;
+                continue;
             };
             let current_session =
                 captured_session_is_current(&self.peers, &outcome.sessions, peer_id);
@@ -930,10 +932,13 @@ impl PeerManager {
                     );
                     dead_peers.insert(peer_id);
                 }
-                break;
+                collecting_prefix = false;
+                continue;
             }
             if headers.is_empty() && result.requested > 0 {
-                saw_empty_response = true;
+                if collecting_prefix {
+                    saw_empty_response = true;
+                }
                 if current_session {
                     self.on_zero_progress_response(
                         peer_id,
@@ -942,7 +947,8 @@ impl PeerManager {
                         result.requested as usize,
                     );
                 }
-                break;
+                collecting_prefix = false;
+                continue;
             }
             if current_session {
                 self.record_peer_request_success(
@@ -953,7 +959,13 @@ impl PeerManager {
                 );
             }
             self.record_p2p_download_payload(headers_payload_bytes(&headers), elapsed);
-            pages.push((peer_id, headers));
+            // Later page starts assume this page was full. Keep the useful
+            // contiguous prefix and let the next fetch request the missing tail;
+            // still account for all completed requests after the prefix ends.
+            if collecting_prefix {
+                collecting_prefix = headers.len() == result.requested as usize;
+                pages.push((peer_id, headers));
+            }
         }
 
         self.advance_request_cursor();
