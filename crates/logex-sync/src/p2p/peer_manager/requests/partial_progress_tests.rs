@@ -2,6 +2,286 @@
 //! the Fixture's loopback listener is dormant, with no peer/service tasks.
 use super::limit_tests::{Fixture, receipt_contexts, take_requests};
 use super::*;
+use alloy_consensus::Header;
+
+async fn reverse_header_prefix_control(short_page: Option<usize>) {
+    let mut fixture = Fixture::new().await;
+    let mut chain = Vec::new();
+    let mut parent_hash = B256::ZERO;
+    for number in 100..=106 {
+        let header = Header {
+            number,
+            parent_hash,
+            ommers_hash: alloy_consensus::constants::EMPTY_OMMER_ROOT_HASH,
+            transactions_root: alloy_consensus::constants::EMPTY_ROOT_HASH,
+            receipts_root: alloy_consensus::constants::EMPTY_ROOT_HASH,
+            gas_limit: 30_000_000,
+            timestamp: 1_700_000_000 + number,
+            withdrawals_root: Some(alloy_consensus::constants::EMPTY_ROOT_HASH),
+            ..Default::default()
+        };
+        parent_hash = header.hash_slow();
+        chain.push(header);
+    }
+
+    let mut collected = Vec::new();
+    for attempt in 0..2 {
+        let child = collected.last().unwrap_or(&chain[6]);
+        let remaining = child.number - 100;
+        if remaining == 0 {
+            break;
+        }
+        let plan = fixture
+            .manager
+            .prepare_reverse_header_pages_request(child.number, remaining, 2, 100)
+            .await
+            .unwrap()
+            .unwrap()
+            .with_sequential_candidates();
+        let mut future = Box::pin(plan.execute());
+        let mut queued = Vec::new();
+        // The fixture's small channels can require another poll after draining.
+        for _ in 0..remaining.div_ceil(2) {
+            assert!(futures_util::poll!(future.as_mut()).is_pending());
+            queued.extend(take_requests(&mut fixture.receivers));
+            if queued.len() as u64 == remaining.div_ceil(2) {
+                break;
+            }
+        }
+        let mut requests = queued
+            .into_iter()
+            .map(|(_, message)| {
+                let PeerRequest::GetBlockHeaders { request, response } = message else {
+                    panic!("expected a local header request");
+                };
+                let BlockHashOrNumber::Number(start) = request.start_block else {
+                    panic!("expected a numeric page start");
+                };
+                assert_eq!(request.skip, 0);
+                assert_eq!(request.direction, reth_eth_wire::HeadersDirection::Falling);
+                (start, request.limit, response)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(requests.len() as u64, remaining.div_ceil(2));
+        // Complete older pages first: completion order must not affect the prefix.
+        requests.sort_by_key(|(start, _, _)| *start);
+        let request_count = requests.len();
+        let bytes_before = fixture
+            .manager
+            .session_metrics
+            .p2p_download
+            .snapshot(Instant::now())
+            .total_payload_bytes;
+        let mut received_bytes = 0;
+        for (index, (start, limit, response)) in requests.into_iter().enumerate() {
+            let page_index = ((105 - start) / 2) as usize;
+            let count = if attempt == 0 && short_page == Some(page_index) {
+                1
+            } else {
+                limit
+            };
+            let headers = (0..count)
+                .map(|offset| chain[(start - 100 - offset) as usize].clone())
+                .collect::<Vec<_>>();
+            received_bytes += headers_payload_bytes(&headers);
+            response.send(Ok(BlockHeaders(headers))).unwrap();
+            if index + 1 < request_count {
+                assert!(futures_util::poll!(future.as_mut()).is_pending());
+            }
+        }
+        let pages = fixture
+            .manager
+            .complete_reverse_header_pages_request(future.await)
+            .unwrap();
+        assert_eq!(
+            fixture
+                .manager
+                .session_metrics
+                .p2p_download
+                .snapshot(Instant::now())
+                .total_payload_bytes
+                - bytes_before,
+            received_bytes
+        );
+        let headers = pages
+            .into_iter()
+            .flat_map(|(_, headers)| headers)
+            .collect::<Vec<_>>();
+        let expected_len = if attempt == 0 {
+            short_page.map_or(6, |page| page * 2 + 1)
+        } else {
+            remaining as usize
+        };
+        let expected = (100..child.number)
+            .rev()
+            .take(expected_len)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            headers
+                .iter()
+                .map(|header| header.number)
+                .collect::<Vec<_>>(),
+            expected
+        );
+        crate::validation::validate_reverse_downloaded_headers_with_hashes(child, &headers)
+            .unwrap();
+        collected.extend(headers);
+        assert_eq!(fixture.manager.peers.len(), 3);
+        assert!(
+            fixture
+                .manager
+                .peers
+                .values()
+                .all(|peer| peer.consecutive_timeouts == 0)
+        );
+    }
+    assert_eq!(
+        collected
+            .iter()
+            .map(|header| header.number)
+            .collect::<Vec<_>>(),
+        (100..106).rev().collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn reverse_header_prefix_stops_after_short_first_page() {
+    reverse_header_prefix_control(Some(0)).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn reverse_header_prefix_stops_after_short_middle_page() {
+    reverse_header_prefix_control(Some(1)).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn reverse_header_prefix_accepts_short_final_page() {
+    reverse_header_prefix_control(Some(2)).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn reverse_header_prefix_preserves_complete_pages() {
+    reverse_header_prefix_control(None).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn reverse_header_prefix_accounts_later_completed_failures() {
+    let mut fixture = Fixture::new().await;
+    let first = PeerId::repeat_byte(1);
+    let later = PeerId::repeat_byte(2);
+    fixture
+        .manager
+        .peers
+        .get_mut(&later)
+        .unwrap()
+        .consecutive_timeouts = MAX_CONSECUTIVE_TIMEOUTS - 1;
+    let sessions = fixture
+        .manager
+        .peers
+        .iter()
+        .map(|(id, peer)| (*id, peer.sender.clone()))
+        .collect();
+    let pages = fixture
+        .manager
+        .complete_reverse_header_pages_request(ReverseHeaderPagesRequestOutcome {
+            page_results: vec![
+                HeaderPageResult {
+                    page_index: 0,
+                    requested: 2,
+                    success: Some((
+                        first,
+                        vec![Header {
+                            number: 5,
+                            ..Default::default()
+                        }],
+                        Duration::from_millis(10),
+                    )),
+                    failures: Vec::new(),
+                },
+                HeaderPageResult {
+                    page_index: 1,
+                    requested: 2,
+                    success: None,
+                    failures: vec![(
+                        later,
+                        RequestAttempt::Request(reth_network::p2p::error::RequestError::Timeout),
+                    )],
+                },
+            ],
+            sessions,
+        })
+        .unwrap();
+    assert_eq!(pages.len(), 1);
+    assert_eq!(pages[0].0, first);
+    assert_eq!(pages[0].1[0].number, 5);
+    assert!(fixture.manager.peers.contains_key(&first));
+    assert!(!fixture.manager.peers.contains_key(&later));
+}
+
+#[tokio::test(start_paused = true)]
+async fn reverse_header_prefix_never_resumes_after_an_unavailable_page() {
+    for (first_empty, later_empty) in [(false, false), (true, false), (false, true)] {
+        let mut fixture = Fixture::new().await;
+        let first = PeerId::repeat_byte(1);
+        let later = PeerId::repeat_byte(2);
+        let sessions = fixture
+            .manager
+            .peers
+            .iter()
+            .map(|(id, peer)| (*id, peer.sender.clone()))
+            .collect();
+        let later_headers = if later_empty {
+            Vec::new()
+        } else {
+            vec![Header {
+                number: 3,
+                ..Default::default()
+            }]
+        };
+        let expected_bytes = if later_empty {
+            0 // Empty replies retain the existing zero-progress accounting path.
+        } else {
+            headers_payload_bytes(&later_headers)
+        };
+        let result = fixture.manager.complete_reverse_header_pages_request(
+            ReverseHeaderPagesRequestOutcome {
+                page_results: vec![
+                    HeaderPageResult {
+                        page_index: 0,
+                        requested: 1,
+                        success: first_empty.then_some((
+                            first,
+                            Vec::new(),
+                            Duration::from_millis(10),
+                        )),
+                        failures: Vec::new(),
+                    },
+                    HeaderPageResult {
+                        page_index: 1,
+                        requested: 1,
+                        success: Some((later, later_headers, Duration::from_millis(10))),
+                        failures: Vec::new(),
+                    },
+                ],
+                sessions,
+            },
+        );
+        if first_empty {
+            assert!(result.unwrap().is_empty());
+        } else {
+            assert!(result.is_err());
+        }
+        assert_eq!(
+            fixture
+                .manager
+                .session_metrics
+                .p2p_download
+                .snapshot(Instant::now())
+                .total_payload_bytes,
+            expected_bytes
+        );
+    }
+}
 
 fn request_limit(manager: &PeerManager, id: PeerId, kind: PeerRequestKind) -> usize {
     let peer = &manager.peers[&id];

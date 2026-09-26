@@ -360,6 +360,9 @@ PR #186 (`9317c42a`) after all local and CI gates.
 The [execution progress review](execution-partial-progress.md) records B4-24–27:
 useful partial-response accounting, exact tail failure context and receipt retry
 cleanup, merged in PR #187 (`02a812e4`) after all local and CI gates.
+The same report records B4-50: retaining contiguous reverse-header prefixes after
+a short page while accounting for completed suffix responses, found during live
+acceptance and covered by finite offline controls.
 
 The [execution serving review](execution-serving-contracts.md) records B4-28–32:
 truthful empty-cache availability, coherent periodic range announcements and
