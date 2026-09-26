@@ -3737,17 +3737,20 @@ impl ConsensusNetwork {
 
         match (kind, response) {
             (RpcRequestKind::Status, Eth2RpcResponse::Status(status)) => {
-                if let Some(reason) = status_irrelevance_reason(
-                    self.local_status_message(),
-                    status,
-                    current_wall_clock_slot(),
-                ) {
+                let local = self.local_status_message();
+                if let Some(reason) =
+                    status_irrelevance_reason(local, status, current_wall_clock_slot())
+                {
                     self.mark_peer_ignored_for_run(peer, format!("irrelevant status: {reason}"));
                     tracing::info!(
                         %peer,
                         %reason,
                         local_fork = %hex::encode(self.fork_digest),
                         remote_fork = %hex::encode(status.fork_digest),
+                        local_finalized_epoch = local.finalized_epoch,
+                        local_finalized_root = %local.finalized_root,
+                        remote_finalized_epoch = status.finalized_epoch,
+                        remote_finalized_root = %status.finalized_root,
                         remote_head_slot = status.head_slot,
                         "disconnecting consensus peer after an irrelevant status response"
                     );
@@ -5135,10 +5138,18 @@ impl ConsensusNetwork {
 
     fn local_status_message(&self) -> StatusMessage {
         if let Some(store) = self.consensus.light_client_store() {
+            // A checkpoint can refer to a block from an earlier epoch when
+            // boundary slots are skipped. Bootstrap and timeout recovery alone
+            // do not establish a finalized checkpoint pair for the handshake.
+            let (finalized_root, finalized_epoch) = store
+                .finalized_checkpoint
+                .map_or((B256::ZERO, 0), |checkpoint| {
+                    (checkpoint.root, checkpoint.epoch)
+                });
             return StatusMessage {
                 fork_digest: self.fork_digest,
-                finalized_root: store.finalized_header.beacon_root(),
-                finalized_epoch: store.finalized_header.beacon.slot / 32,
+                finalized_root,
+                finalized_epoch,
                 head_root: store.optimistic_header.beacon_root(),
                 head_slot: store.optimistic_header.beacon.slot,
                 earliest_available_slot: store.bootstrap_slot(),
@@ -8891,7 +8902,11 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let slot = rpc_participation_slot();
         let (mut network, _) = request_lifecycle_fixture_at_slot(&temp, slot);
-        deliver_singleton_response(&mut network, true, singleton_test_payload(slot, 1, true));
+        deliver_singleton_response(
+            &mut network,
+            true,
+            singleton_test_payload(slot + 32, 1, true),
+        );
         assert_eq!(
             network
                 .consensus
@@ -8902,7 +8917,11 @@ mod tests {
                 .slot,
             slot
         );
-        deliver_singleton_response(&mut network, true, singleton_test_payload(slot, 342, true));
+        deliver_singleton_response(
+            &mut network,
+            true,
+            singleton_test_payload(slot + 32, 342, true),
+        );
         assert_eq!(
             network
                 .consensus
@@ -8911,7 +8930,7 @@ mod tests {
                 .finalized_header
                 .beacon
                 .slot,
-            slot + 1
+            (slot + 32) / 32 * 32
         );
     }
 
@@ -10311,6 +10330,87 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn status_bootstrap_does_not_invent_a_finalized_checkpoint() {
+        let temp = TempDir::new().unwrap();
+        let (network, _) = request_lifecycle_fixture(&temp);
+        let store = network.consensus.light_client_store().unwrap();
+        let status = network.local_status_message();
+
+        assert_eq!(status.finalized_root, B256::ZERO);
+        assert_eq!(status.finalized_epoch, 0);
+        assert_eq!(status.head_root, store.optimistic_header.beacon_root());
+        assert_eq!(status.head_slot, store.optimistic_header.beacon.slot);
+        assert_eq!(status.earliest_available_slot, store.bootstrap_slot());
+        assert_eq!(
+            status_irrelevance_reason(
+                status,
+                StatusMessage {
+                    finalized_root: B256::repeat_byte(3),
+                    finalized_epoch: status.head_slot / 32,
+                    ..status
+                },
+                status.head_slot,
+            ),
+            None,
+        );
+    }
+
+    #[tokio::test]
+    async fn status_checkpoint_epoch_handles_a_skipped_boundary_without_rejecting_a_behind_peer() {
+        let temp = TempDir::new().unwrap();
+        let bootstrap_slot = rpc_participation_slot();
+        let epoch = bootstrap_slot / 32 + 1;
+        let finalized_slot = epoch * 32 - 1;
+        let (network, _) = request_lifecycle_fixture_at_slot(&temp, bootstrap_slot);
+        let (_, bytes) = crate::light_client::test_checkpoint_finality_fixture(
+            bootstrap_slot,
+            finalized_slot,
+            epoch,
+            512,
+        );
+        let (summary, store, _, _) =
+            apply_finality_update_payload(&bytes, &network.consensus.light_client_store().unwrap())
+                .unwrap();
+        let finalized_root = store.finalized_header.beacon_root();
+        assert_eq!(store.finalized_header.beacon.slot, finalized_slot);
+        network
+            .consensus
+            .record_verified_finality_update(
+                summary,
+                RawRpcResponse {
+                    context_bytes: None,
+                    bytes,
+                },
+                store,
+            )
+            .unwrap();
+
+        let local = network.local_status_message();
+        assert_eq!(local.finalized_epoch, epoch);
+        assert_eq!(local.finalized_root, finalized_root);
+        let behind = StatusMessage {
+            finalized_epoch: epoch - 1,
+            finalized_root: B256::repeat_byte(3),
+            ..local
+        };
+        assert_eq!(
+            status_irrelevance_reason(local, behind, local.head_slot),
+            None
+        );
+        assert_eq!(
+            status_irrelevance_reason(
+                local,
+                StatusMessage {
+                    finalized_epoch: epoch,
+                    ..behind
+                },
+                local.head_slot,
+            ),
+            Some("conflicting finalized root at the local finalized epoch"),
+        );
+    }
+
     const TEST_GOSSIP_TOPIC: &str = "/eth2/8c9f62fe/light_client_optimistic_update/ssz_snappy";
     const HELLO_SNAPPY: &[u8] = &[5, 16, b'h', b'e', b'l', b'l', b'o'];
     const HELLO_SPLIT_SNAPPY: &[u8] = &[5, 4, b'h', b'e', 8, b'l', b'l', b'o'];
@@ -10602,7 +10702,7 @@ mod tests {
 
     #[tokio::test]
     async fn gossip_admission_forward_history_requires_report_and_exact_finality_match() {
-        let slot = 419_072 * 32 + 16;
+        let slot = 419_072 * 32 + 48;
         for reported in [false, true] {
             let temp = TempDir::new().unwrap();
             let (mut network, _) = request_lifecycle_fixture(&temp);
@@ -10980,7 +11080,7 @@ mod tests {
     async fn gossip_admission_finality_exception_requires_identical_aggregate_at_same_slot() {
         let temp = TempDir::new().unwrap();
         let (mut network, _) = request_lifecycle_fixture(&temp);
-        let slot = 419_072 * 32 + 16;
+        let slot = 419_072 * 32 + 48;
         let (finality, _) = crate::light_client::test_gossip_payloads(slot, 342);
         let (_, other_aggregate) = crate::light_client::test_gossip_payloads(slot, 343);
         let now = gossip_test_time(slot + 3, 3499);

@@ -120,3 +120,69 @@ merged as `e79e2d23` on September 15, 2026 at 01:17:37 UTC.
 retain the exact head and outcomes. The named batch-one conformance leads now
 have an offline disposition; complete stored-state integrity, retention and
 network/lifecycle work remain tracked in their respective batches. Live sync and the staging soak remain later gates.
+
+## Finalized checkpoint identity during live acceptance (B3-74)
+
+Base: `47d235adeacc3fff37d5df8a430611255def0c9e`, September 26, 2026.
+Severity: P2, consensus interoperability and recovery. Status advertised the
+finalized block root together with `block_slot / 32`. A checkpoint instead pairs
+a root with its own epoch. When the boundary slot is skipped, that root can name
+a block in an earlier epoch. Advertising the earlier epoch can make a compatible
+behind peer appear to have conflicting finality and be ignored for the run.
+Timeout recovery also advances the light-client header without establishing a
+new supermajority-authenticated checkpoint.
+
+The [Status specification](https://github.com/ethereum/consensus-specs/blob/v1.6.0/specs/phase0/p2p-interface.md#status)
+uses the finalized checkpoint's root and epoch. The
+[beacon-state transition](https://github.com/ethereum/consensus-specs/blob/v1.6.0/specs/phase0/beacon-chain.md#get_block_root)
+looks up the epoch's start slot, including repeated roots across skipped slots.
+The existing light-client finality branch already authenticates the checkpoint:
+the root's sibling is the SSZ uint64 epoch chunk.
+
+Retain that epoch/root pair only after the branch and committee signature verify
+and participation reaches the existing supermajority threshold. Check the epoch's
+canonical padding, checked slot conversion, header bounds and default genesis
+case. Account for leading zero entries in normalized branches. Newer checkpoint
+epochs can advance independently of the finalized block; weaker updates and
+timeout forcing cannot replace the advertised pair. Before a checkpoint is known,
+Status advertises the conventional zero root/epoch. Header advancement, committee
+rotation and optimistic-head selection keep their existing algorithms.
+
+The optional pair is included in the existing checksummed consensus journal and
+periodic checkpoints, including changes that leave the block root unchanged.
+No extra network request, signature verification or dataset scan is introduced.
+Newly learned metadata uses the existing consensus publication path with no
+additional durability barrier per publication. The additional state is bounded. No throughput percentage is
+claimed, and ingestion benchmarking is not repeated for this metadata correction.
+Rejected Status responses now log both compared checkpoint pairs at the existing
+log level so later observations can distinguish real conflicts.
+
+Two live peer rejections prompted the review, but their causal relationship to
+B3-74 is **unproven**: those logs did not include the compared roots/epochs. The
+preserved latest checkpoint was aligned with its block slot and is not a live
+reproducer. The owned run exited cleanly at 15:11:53.536480 UTC after monitoring
+was paused; its owned dataset was removed at 15:14:43.969037 UTC. Logs and bounded
+consensus evidence remain. No time or data from that run counts toward its successor.
+
+Finite signed fixtures reproduce the bug offline. Restoring only the original
+Status function makes both new Status controls fail; the candidate proof/fixture
+code remains in that comparison to supply authenticated checkpoint metadata.
+It is not a whole-baseline-checkout result. A separate before-fix control rejects
+noncanonical epoch padding only after the correction. Controls cover skipped
+boundaries and whole epochs, participation thresholds, old updates, timeout
+recovery (including a retained header from a temporary branch), fork-specific
+and normalized branches, default genesis, ordinary peer
+compatibility, and journal/checkpoint reopening. Random official SSZ vectors
+remain serialization controls, not authenticated finality fixtures.
+
+The final focused consensus suite passes 423 unit tests and one local transport
+test, with one existing ignore. Final review removed an overrestrictive candidate
+check relating timeout headers to checkpoint roots after reproducing the incorrect
+reopen rejection with a signed sequence. Source `11aa9adb` passes all six local
+gates: formatting, workspace check, strict Clippy, 2,537 workspace tests (24 existing
+ignores across 43 targets), documentation tests and release build.
+[Validation records](baselines/2026-09-26-finalized-checkpoint.json) retain the
+commands, exact source hashes, evidence hashes and fixture corrections. Subsequent
+local changes record this evidence only; CI will validate the final PR head.
+CI, merge and native validation remain pending. Monitoring stays paused until a
+fresh binary has passed those gates and initial analysis of a new run.
