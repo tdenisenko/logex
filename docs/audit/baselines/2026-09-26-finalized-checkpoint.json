@@ -1,0 +1,171 @@
+{
+  "finding": "B3-74",
+  "recorded_utc": "2026-09-26T15:46:35.125779+00:00",
+  "base_commit": "47d235adeacc3fff37d5df8a430611255def0c9e",
+  "local_validated_commit": "11aa9adbdf95279785004aa8fc13c3d8a571a20a",
+  "local_validated_tree": "c418c332ec0f3aef68b3e1d04d6270d09cecdb24",
+  "toolchain": "rustc 1.100.0-nightly (fb6531d55 2026-08-23)\nbinary: rustc\ncommit-hash: fb6531d550e0075b9eb9a51464f404805eec87d9\ncommit-date: 2026-08-23\nhost: aarch64-apple-darwin\nrelease: 1.100.0-nightly\nLLVM version: 23.1.0\n",
+  "source_files_sha256": {
+    "crates/logex-cl/src/light_client.rs": "60e25080df25b340379882cb716e6f40f62259ef2c2880460d175e555d6e32d1",
+    "crates/logex-cl/src/network.rs": "345c0a63b196a58f535c0e6f4a59b06b6e29f204166088865884e2a6658c9fe5",
+    "crates/logex-cl/src/lib.rs": "e470bdae8f504e67c62065ace613046c16e4e7d8be4e9d565a7f882f067b87ed"
+  },
+  "workspace_tests": {
+    "passed": 2537,
+    "failed": 0,
+    "ignored": 24,
+    "targets": 43
+  },
+  "local_gates": [
+    {
+      "name": "format",
+      "command": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "exit_code": 0,
+      "started_utc": "2026-09-26T15:38:00.124475+00:00",
+      "finished_utc": "2026-09-26T15:38:01.409888+00:00",
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "name": "check",
+      "command": [
+        "cargo",
+        "check",
+        "--workspace",
+        "--all-targets",
+        "--locked",
+        "--offline",
+        "-j",
+        "2"
+      ],
+      "exit_code": 0,
+      "started_utc": "2026-09-26T15:38:01.433609+00:00",
+      "finished_utc": "2026-09-26T15:38:13.886579+00:00",
+      "log_sha256": "456fd3517237257d53a68da52b7c985a5179c036c4eb499ded289cebf7ca37ef"
+    },
+    {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--locked",
+        "--offline",
+        "-j",
+        "2",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit_code": 0,
+      "started_utc": "2026-09-26T15:38:13.921867+00:00",
+      "finished_utc": "2026-09-26T15:38:25.468734+00:00",
+      "log_sha256": "7a727f3d600637677d45a9b90363dcb7a8ee563f0b18508c5064bf1b1cc64d0c"
+    },
+    {
+      "name": "test",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace",
+        "--all-targets",
+        "--locked",
+        "--offline",
+        "-j",
+        "2"
+      ],
+      "exit_code": 0,
+      "started_utc": "2026-09-26T15:38:25.505955+00:00",
+      "finished_utc": "2026-09-26T15:43:55.236419+00:00",
+      "log_sha256": "4e71fd3f52bea12e88ca94601782f9012a374b61a13c47fbef12ba1fc6336e7b"
+    },
+    {
+      "name": "doc",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace",
+        "--doc",
+        "--locked",
+        "--offline",
+        "-j",
+        "2"
+      ],
+      "exit_code": 0,
+      "started_utc": "2026-09-26T15:43:55.739467+00:00",
+      "finished_utc": "2026-09-26T15:44:10.876758+00:00",
+      "log_sha256": "b0856e08977f2d841c518c20c796a99c09813d8390892113fba50ff56e4f0884"
+    },
+    {
+      "name": "release-build",
+      "command": [
+        "cargo",
+        "build",
+        "-p",
+        "logex-node",
+        "--release",
+        "--locked",
+        "--offline",
+        "-j",
+        "2"
+      ],
+      "exit_code": 0,
+      "started_utc": "2026-09-26T15:44:10.914272+00:00",
+      "finished_utc": "2026-09-26T15:45:23.425026+00:00",
+      "log_sha256": "cf6a046d91b9834368f1bc80f06cc0459dff588308ed2ce36223371bde5fb882"
+    }
+  ],
+  "focused_evidence": [
+    {
+      "file": "core-before.log",
+      "scope": "Original finality verifier accepted a locally signed proof with noncanonical SSZ epoch padding.",
+      "bytes": 1308,
+      "sha256": "2b41b1578bc6558c3d61586dcc622921d65f4d3bd0a9e346a7d7b31091912f0b"
+    },
+    {
+      "file": "status-before.log",
+      "scope": "Only original local_status_message restored; candidate authenticated fixtures retained; not a whole-baseline checkout.",
+      "bytes": 2602,
+      "sha256": "df36102c7185559037ceebb0dea1f429ae8cdee35a17e61903a50ebf8639aba2"
+    },
+    {
+      "file": "timeout-reopen-before-valid-fixture.log",
+      "scope": "Candidate review regression: timeout-forced boundary header and later supermajority skipped-boundary proof failed on reopen before removing an invalid root equality guard.",
+      "bytes": 1640,
+      "sha256": "286b4b6f87051b666cf1b84b42ad093908a40cd70a70d748bb94e89c4a8023ee"
+    },
+    {
+      "file": "cl-final.log",
+      "scope": "Final focused consensus suite: 423 unit tests, 1 existing ignore, local transport test passed.",
+      "bytes": 37734,
+      "sha256": "c122802dc454af05854762ad0fda1119124ff632ae8d36c6a87f28a74daa82b9"
+    }
+  ],
+  "fixture_corrections": [
+    "Existing signed finality fixtures used arbitrary epoch siblings or finalized blocks after their stated boundary; corrected to canonical epochs/boundaries.",
+    "First timeout reopen fixture was too recent to force recovery; moved bootstrap two committee periods back before reproducing the root consistency rejection."
+  ],
+  "review": {
+    "checkpoint": "Canonical SSZ epoch sibling and finalized root share the existing authenticated state proof; attach metadata after BLS verification.",
+    "publication": "Only supermajority-authenticated newer checkpoint epochs replace the pair; timeout forcing and weak updates retain it.",
+    "persistence": "Metadata-only epoch advancement survives both journal replay and periodic checkpoints. A forced header and authenticated checkpoint need not name the same branch.",
+    "bounds": "Checked epoch-to-slot conversion, canonical uint64 padding, finalized and attested slot bounds, genesis conventions and normalized branch offsets.",
+    "cost": "Bounded checkpoint metadata uses the existing consensus publication path; no added request, BLS check, full scan or additional durability barrier per publication. No throughput percentage claim.",
+    "cleanup": "All Status pair construction and checkpoint consumers reviewed; removed slot-derived pair and invalid candidate-only root relationship; corrected canonical synthetic fixtures and reused signed participant fixture helper."
+  },
+  "live_run": {
+    "source_commit": "314db8b240ce5fd2d0da8e22a51f3dcc39477782",
+    "run_exited_utc": "2026-09-26T15:11:53.536480+00:00",
+    "exit_code": 0,
+    "owned_dataset_removed_utc": "2026-09-26T15:14:43.969037+00:00",
+    "limitations": "Not established; compared checkpoint pairs were absent from the old live rejection logs. The preserved aligned checkpoint is not a live reproducer. Full sync was incomplete and no elapsed time or data carries forward."
+  },
+  "ci_policy": "Merge only after all required jobs pass on the final PR head. This evidence-only descendant preserves the validated source file hashes.",
+  "native_and_acceptance": "Native final compilation and a fresh uninterrupted run follow merge; monitoring remains paused until initial analysis passes."
+}

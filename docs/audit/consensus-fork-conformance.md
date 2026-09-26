@@ -150,8 +150,9 @@ rotation and optimistic-head selection keep their existing algorithms.
 
 The optional pair is included in the existing checksummed consensus journal and
 periodic checkpoints, including changes that leave the block root unchanged.
-No extra network request, signature verification, durability barrier or dataset
-scan is introduced. The additional state is bounded. No throughput percentage is
+No extra network request, signature verification or dataset scan is introduced.
+Newly learned metadata uses the existing consensus publication path with no
+additional durability barrier per publication. The additional state is bounded. No throughput percentage is
 claimed, and ingestion benchmarking is not repeated for this metadata correction.
 Rejected Status responses now log both compared checkpoint pairs at the existing
 log level so later observations can distinguish real conflicts.
@@ -177,6 +178,11 @@ remain serialization controls, not authenticated finality fixtures.
 The final focused consensus suite passes 423 unit tests and one local transport
 test, with one existing ignore. Final review removed an overrestrictive candidate
 check relating timeout headers to checkpoint roots after reproducing the incorrect
-reopen rejection with a signed sequence. Workspace gates, CI, merge and native
-validation are pending; monitoring stays paused until a fresh binary has passed
-those gates and initial analysis of a new run.
+reopen rejection with a signed sequence. Source `11aa9adb` passes all six local
+gates: formatting, workspace check, strict Clippy, 2,537 workspace tests (24 existing
+ignores across 43 targets), documentation tests and release build.
+[Validation records](baselines/2026-09-26-finalized-checkpoint.json) retain the
+commands, exact source hashes, evidence hashes and fixture corrections. Subsequent
+local changes record this evidence only; CI will validate the final PR head.
+CI, merge and native validation remain pending. Monitoring stays paused until a
+fresh binary has passed those gates and initial analysis of a new run.
