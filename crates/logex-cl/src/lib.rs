@@ -2740,6 +2740,7 @@ mod tests {
             next_sync_committee: None,
             finalized_header: verified_header(slot, 1, 100),
             optimistic_header: verified_header(slot, 1, 100),
+            finalized_checkpoint: None,
             best_valid_update: None,
             previous_max_active_participants: 0,
             current_max_active_participants: 0,
@@ -3023,6 +3024,7 @@ mod tests {
                 next_sync_committee: None,
                 finalized_header: verified_header(3_200, 0x20, 3_200),
                 optimistic_header: verified_header(3_232, 0x21, 3_232),
+                finalized_checkpoint: None,
                 best_valid_update: None,
                 previous_max_active_participants: 0,
                 current_max_active_participants: 0,
@@ -3391,6 +3393,148 @@ mod tests {
         let payload = reopened.light_client_finality_update_payload().unwrap();
         assert_eq!(payload.bytes, expected_bytes);
         assert!(payload.context_bytes.is_some());
+    }
+
+    #[test]
+    fn finalized_checkpoint_epoch_survives_journal_and_checkpoint_reopen() {
+        for checkpoint in [false, true] {
+            let temp = TempDir::new().unwrap();
+            let slot = recent_cache_fixture_slot();
+            let epoch = slot / 32 + 1;
+            let finalized_slot = epoch * 32 - 1;
+            let (fixture, _) =
+                light_client::test_checkpoint_finality_fixture(slot, finalized_slot, epoch, 512);
+            let (store, _) = initialized_fixture_store(&temp, &fixture);
+            let mut expected_root = None;
+            for epoch in [epoch, epoch + 1] {
+                let (_, bytes) = light_client::test_checkpoint_finality_fixture(
+                    slot,
+                    finalized_slot,
+                    epoch,
+                    512,
+                );
+                let initial = store.light_client_store().unwrap();
+                let (status, next, _, _) = apply_finality_update_payload(&bytes, &initial).unwrap();
+                let expected = next.finalized_checkpoint.unwrap();
+                assert_eq!(expected.epoch, epoch);
+                assert_eq!(next.finalized_header.beacon.slot, finalized_slot);
+                if let Some(root) = expected_root {
+                    assert_eq!(expected.root, root, "the checkpoint block stays unchanged");
+                }
+                expected_root = Some(expected.root);
+                if checkpoint {
+                    store.writer.lock().unwrap().force_checkpoint_due_for_test();
+                }
+                assert!(
+                    store
+                        .record_verified_finality_update(
+                            status,
+                            RawRpcResponse {
+                                context_bytes: None,
+                                bytes
+                            },
+                            next,
+                        )
+                        .unwrap()
+                );
+                let reopened = ConsensusStore::open(temp.path(), None).unwrap();
+                assert_eq!(
+                    reopened.light_client_store().unwrap().finalized_checkpoint,
+                    Some(expected)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn finalized_checkpoint_reopens_after_timeout_forced_boundary_header() {
+        let temp = TempDir::new().unwrap();
+        // Keep bootstrap within weak subjectivity, but past the update timeout.
+        let slot = recent_cache_fixture_slot() - 2 * 8192;
+        let epoch = slot / 32 + 1;
+        let boundary = epoch * 32;
+        let (fixture, finality) =
+            light_client::test_checkpoint_finality_fixture(slot, boundary - 1, epoch, 342);
+        let (store, initial) = initialized_fixture_store(&temp, &fixture);
+        let optimistic =
+            light_client::test_gossip_boundary_optimistic(slot, boundary, boundary + 1);
+        let (status, weak, _) = apply_optimistic_update_payload(&optimistic, &initial).unwrap();
+        store
+            .record_verified_optimistic_update(
+                status,
+                RawRpcResponse {
+                    context_bytes: None,
+                    bytes: optimistic,
+                },
+                weak.clone(),
+            )
+            .unwrap();
+        let forced = force_update_light_client_store(&weak).unwrap();
+        assert_eq!(forced.finalized_header.beacon.slot, boundary);
+        assert_eq!(forced.finalized_checkpoint, None);
+        store
+            .replace_verified_light_client_store(forced.clone())
+            .unwrap();
+        let (status, next, _, _) = apply_finality_update_payload(&finality, &forced).unwrap();
+        let checkpoint = next.finalized_checkpoint.unwrap();
+        assert_eq!(checkpoint.epoch, epoch);
+        assert_ne!(checkpoint.root, next.finalized_header.beacon_root());
+        assert_eq!(next.finalized_header, forced.finalized_header);
+        store
+            .record_verified_finality_update(
+                status,
+                RawRpcResponse {
+                    context_bytes: None,
+                    bytes: finality,
+                },
+                next,
+            )
+            .unwrap();
+        let reopened = ConsensusStore::open(temp.path(), None).unwrap();
+        let restored = reopened.light_client_store().unwrap();
+        assert_eq!(restored.finalized_checkpoint, Some(checkpoint));
+        assert_eq!(restored.finalized_header, forced.finalized_header);
+    }
+
+    #[test]
+    fn reopening_rejects_inconsistent_finalized_checkpoint_metadata() {
+        let temp = TempDir::new().unwrap();
+        let slot = recent_cache_fixture_slot();
+        let fixture = light_client::test_cached_light_client_fixture(slot);
+        let (store, _) = initialized_fixture_store(&temp, &fixture);
+        let mut snapshot = store.with_snapshot(Clone::clone);
+        snapshot
+            .verified_light_client_store
+            .as_mut()
+            .unwrap()
+            .best_valid_update = fixture.store.best_valid_update.clone();
+        assert!(
+            snapshot
+                .verified_light_client_store
+                .as_ref()
+                .unwrap()
+                .best_valid_update
+                .is_some()
+        );
+        let value = serde_json::to_value(&snapshot).unwrap();
+        for best_update in [false, true] {
+            let mut invalid = value.clone();
+            let target = if best_update {
+                &mut invalid["verified_light_client_store"]["best_valid_update"]
+            } else {
+                &mut invalid["verified_light_client_store"]
+            };
+            target["finalized_checkpoint"] = serde_json::json!({
+                "epoch": u64::MAX,
+                "root": format!("{:#x}", B256::repeat_byte(3)),
+            });
+            let invalid: ConsensusSnapshot = serde_json::from_value(invalid).unwrap();
+            let before = install_snapshot(store.state_path(), &invalid);
+            let error = ConsensusStore::open(temp.path(), None).unwrap_err();
+            assert!(matches!(error, ConsensusStateError::ParseState { .. }));
+            assert!(error.to_string().contains("checkpoint"));
+            assert_eq!(fs::read(store.state_path()).unwrap(), before);
+        }
     }
 
     #[test]

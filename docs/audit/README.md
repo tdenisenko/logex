@@ -364,6 +364,12 @@ The same report records B4-50: retaining contiguous reverse-header prefixes afte
 a short page while accounting for completed suffix responses, found during live
 acceptance and covered by finite offline controls.
 
+The [consensus fork report](consensus-fork-conformance.md#finalized-checkpoint-identity-during-live-acceptance-b3-74)
+records B3-74: retain the authenticated finalized checkpoint epoch/root for Status
+instead of inferring its epoch from the block slot or timeout-forced header.
+The live rejections that prompted review are not causally attributed to this
+confirmed offline defect. The acceptance run is stopped while validation completes.
+
 The [execution serving review](execution-serving-contracts.md) records B4-28–32:
 truthful empty-cache availability, coherent periodic range announcements and
 progressing ETH70 receipt pagination. Merged in PR #188 (`e07fb451`) after all local and CI gates.
