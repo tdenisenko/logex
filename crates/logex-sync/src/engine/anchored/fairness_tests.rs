@@ -29,11 +29,24 @@ async fn fixture() -> (
     Vec<Header>,
     impl Sized,
 ) {
+    fixture_with_tail(100, EMPTY_OMMER_ROOT_HASH).await
+}
+
+async fn fixture_with_tail(
+    floor: usize,
+    tail_ommers_hash: B256,
+) -> (
+    SyncEngine,
+    Requests,
+    watch::Sender<bool>,
+    Vec<Header>,
+    impl Sized,
+) {
     let (peers, requests, resources) = engine_peer_request_fixture().await;
     let directory = tempfile::tempdir().unwrap();
     let mut headers = Vec::new();
     let mut parent_hash = B256::ZERO;
-    for number in 0..=164 {
+    for number in 0..=(floor + 64) as u64 {
         let header = Header {
             number,
             parent_hash,
@@ -41,15 +54,19 @@ async fn fixture() -> (
             gas_limit: 30_000_000,
             transactions_root: EMPTY_ROOT_HASH,
             receipts_root: EMPTY_ROOT_HASH,
-            ommers_hash: EMPTY_OMMER_ROOT_HASH,
+            ommers_hash: if number + 1 == floor as u64 {
+                tail_ommers_hash
+            } else {
+                EMPTY_OMMER_ROOT_HASH
+            },
             ..Default::default()
         };
         parent_hash = header.hash_slow();
         headers.push(header);
     }
     validate_reverse_downloaded_headers_with_hashes(
-        &headers[100],
-        &headers[..100].iter().rev().cloned().collect::<Vec<_>>(),
+        &headers[floor],
+        &headers[..floor].iter().rev().cloned().collect::<Vec<_>>(),
     )
     .unwrap();
     let mut storage = PartitionManager::open(PartitionManagerConfig {
@@ -58,16 +75,18 @@ async fn fixture() -> (
     })
     .unwrap();
     storage
-        .ingest_canonical_batch(&[], &headers[100], &headers[100..101], None)
+        .ingest_canonical_batch(&[], &headers[floor], &headers[floor..=floor], None)
         .unwrap();
-    storage.ingest_historical_batch(&[], &headers[100]).unwrap();
+    storage
+        .ingest_historical_batch(&[], &headers[floor])
+        .unwrap();
     let consensus = ConsensusStore::open(
         directory.path(),
         Some("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
     )
     .unwrap();
     consensus
-        .replace_anchors(headers[100..].iter().map(anchor).collect())
+        .replace_anchors(headers[floor..].iter().map(anchor).collect())
         .unwrap();
     let (shutdown, receiver) = watch::channel(false);
     let engine = SyncEngine::new(
@@ -79,7 +98,7 @@ async fn fixture() -> (
         Arc::new(RwLock::new(storage)),
         None,
         Arc::new(std::sync::Mutex::new(SyncStatus {
-            current_block: 100,
+            current_block: floor as u64,
             ..Default::default()
         })),
         Arc::new(consensus),
@@ -395,6 +414,90 @@ async fn fairness_live_catches_up_with_delayed_history_then_history_reaches_gene
 #[tokio::test]
 async fn fairness_single_page_history_retries_an_unavailable_peer() {
     delayed_history_catchup(true).await;
+}
+
+#[tokio::test]
+async fn fairness_small_nonempty_historical_tail_reaches_genesis() {
+    let tail_body = reth_ethereum_primitives::BlockBody {
+        ommers: vec![Header::default()],
+        ..Default::default()
+    };
+    let floor = 63;
+    let (mut engine, mut requests, shutdown, headers, _resources) =
+        fixture_with_tail(floor, tail_body.calculate_ommers_root()).await;
+    // An ommer commitment prevents the all-empty-header shortcut, even though
+    // these early fixture blocks contain no transactions or log rows.
+    let tail_hash = headers[floor - 1].hash_slow();
+    let status = Arc::clone(&engine.sync_status);
+    let mut run = Box::pin(engine.run());
+    let mut historical_requests = 0;
+    let mut supplied_tail = false;
+    let result = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            assert!(futures_util::poll!(run.as_mut()).is_pending());
+            for receiver in &mut requests {
+                while let Ok(request) = receiver.try_recv() {
+                    match request {
+                        PeerRequest::GetBlockBodies { request, response } => {
+                            let bodies = request
+                                .0
+                                .iter()
+                                .map(|hash| {
+                                    if *hash == tail_hash {
+                                        supplied_tail = true;
+                                        tail_body.clone()
+                                    } else {
+                                        Default::default()
+                                    }
+                                })
+                                .collect();
+                            let _ = response.send(Ok(BlockBodies(bodies)));
+                        }
+                        request => {
+                            if matches!(&request, PeerRequest::GetBlockHeaders { request, .. }
+                                if request.direction == HeadersDirection::Falling)
+                            {
+                                historical_requests += 1;
+                            }
+                            answer(request, &headers);
+                        }
+                    }
+                }
+            }
+            let complete = {
+                let status = status.lock().unwrap();
+                status.current_block == (floor + 64) as u64
+                    && status
+                        .historical_execution_floor
+                        .is_some_and(|floor| floor.block_number == 0)
+            };
+            if complete {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    shutdown.send(true).unwrap();
+    tokio::time::timeout(Duration::from_secs(2), run)
+        .await
+        .unwrap()
+        .unwrap();
+    engine.reset_historical_fetch_pipeline();
+    let storage = engine.storage.read().await;
+    assert!(
+        result.is_ok(),
+        "small history tail stalled: floor={:?}, header_requests={historical_requests}, supplied_tail={supplied_tail}",
+        storage.historical_floor()
+    );
+    assert!(supplied_tail, "the nonempty body must actually be fetched");
+    assert_eq!(historical_requests, 1, "do not refetch the validated tail");
+    assert_eq!(storage.historical_floor().unwrap().block_number, 0);
+    assert_eq!(
+        storage.sync_head().unwrap().block_number,
+        (floor + 64) as u64
+    );
+    assert_eq!(storage.total_rows(), 0);
 }
 
 fn prepared(headers: &[Header]) -> PreparedHistoricalBatch {

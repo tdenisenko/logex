@@ -1312,7 +1312,11 @@ impl PeerManager {
         excluded_peers: &[PeerId],
     ) -> Result<Option<BodyReceiptRequestPlan>> {
         self.drain_events_now();
-        if blocks.len() < MIN_PARALLEL_BODY_REQUEST_BLOCKS {
+        // The async historical header pipeline owns this handoff even when a
+        // terminal batch is too small for parallelism. Declining a nonempty
+        // batch here can make it refetch the same headers without a payload
+        // request. The scheduler also supports a single bounded chunk.
+        if blocks.is_empty() {
             return Ok(None);
         }
         let hashes = receipt_request_hashes(&blocks);
@@ -1367,7 +1371,7 @@ impl PeerManager {
             Some(&receipt_gas_used),
             rows_per_block,
         );
-        if ranges.len() < 2 {
+        if ranges.is_empty() {
             return Ok(None);
         }
         let return_blocks =

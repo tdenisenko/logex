@@ -240,6 +240,73 @@ fn answer_prefix(request: PeerRequest<LogexNetworkPrimitives>, count: usize) {
     }
 }
 
+async fn small_combined_batch_control(block_count: usize) {
+    let mut fixture = Fixture::new().await;
+    for peer in fixture.manager.peers.values_mut() {
+        peer.body_request_limit = REQUEST_LIMIT_MAX;
+        peer.receipt_request_limit = REQUEST_LIMIT_MAX;
+    }
+    let hashes = (0..block_count)
+        .map(|index| B256::repeat_byte(index as u8))
+        .collect::<Vec<_>>();
+    let blocks = hashes
+        .iter()
+        .map(|hash| ReceiptRequestContext::test_with_hash(*hash, 0))
+        .collect();
+    let plan = fixture
+        .manager
+        .prepare_bodies_and_receipts_request_for_blocks(blocks, Some(0.0), 0, &[])
+        .await
+        .unwrap()
+        .expect("a nonempty historical tail needs an owned payload plan");
+    assert_eq!(plan.ranges.len(), 1, "this control must exercise one chunk");
+    let mut future = Box::pin(plan.execute());
+    let mut body_requests = 0;
+    let mut receipt_requests = 0;
+    let outcome = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let Poll::Ready(outcome) = futures_util::poll!(future.as_mut()) {
+                break outcome;
+            }
+            for (_, request) in take_requests(&mut fixture.receivers) {
+                assert_eq!(requested_hashes(&request), hashes);
+                match &request {
+                    PeerRequest::GetBlockBodies { .. } => body_requests += 1,
+                    PeerRequest::GetReceipts69 { .. } => receipt_requests += 1,
+                    _ => panic!("unexpected fixture request"),
+                }
+                answer(request, false);
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the small payload exchange must finish");
+    let completion = fixture
+        .manager
+        .complete_bodies_and_receipts_request(outcome)
+        .unwrap()
+        .expect("the complete tail must be returned for validation");
+    assert_eq!(completion.blocks.len(), block_count);
+    assert_eq!(completion.planned_return_blocks, block_count);
+    assert!(completion.residual_chunks.is_empty());
+    assert_eq!((body_requests, receipt_requests), (1, 1));
+}
+
+#[tokio::test]
+async fn combined_payload_plan_completes_below_parallel_threshold() {
+    for count in [1, 2, 63] {
+        small_combined_batch_control(count).await;
+    }
+}
+
+#[tokio::test]
+async fn combined_payload_plan_completes_one_chunk_above_parallel_threshold() {
+    for count in [64, 113, 128] {
+        small_combined_batch_control(count).await;
+    }
+}
+
 async fn limited_bulk_api_uses_two_second_request_deadline(kind: PeerRequestKind) {
     let mut fixture = Fixture::new().await;
     let future = fetch(&mut fixture.manager, kind, true);

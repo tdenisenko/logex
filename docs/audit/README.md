@@ -83,6 +83,13 @@ Service templates are validated templates; production installation and the
 
 ## Live/backfill scheduling follow-up
 
+The later [historical payload handoff correction](historical-tail-handoff.md)
+addresses a terminal nonempty batch that the asynchronous header pipeline could
+repeatedly refetch when the payload planner declined small or single-chunk work.
+Planner boundary controls and a real engine control reproduce the failure and
+verify progress through genesis after correction. The stalled acceptance run was
+stopped; full sync and a new uninterrupted acceptance window remain required.
+
 The first native Intel/macOS acceptance attempt used audited merge `2e584917`.
 It ran from 2026-09-25 10:47:01 UTC until a clean, requested stop at 11:33:54 UTC.
 During initial catch-up, the execution head lag fell from 86 to 35 blocks,
