@@ -644,3 +644,147 @@ async fn fairness_ready_history_yields_after_one_coalesced_write_and_keeps_the_r
     );
     assert!(engine.historical_prepare_completed.is_empty());
 }
+
+#[test]
+fn historical_generation_reset_with_new_prepares_does_not_strand_history() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .max_blocking_threads(1)
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let (mut engine, mut requests, shutdown, headers, _resources) = fixture().await;
+        engine.historical_prepare_expected_sequence = 3028;
+        engine.historical_fetch_expected_sequence = 3029;
+        engine.historical_fetch_next_sequence = 3031;
+        engine.historical_fetch_expected_child = Some(headers[99].clone());
+        engine.historical_fetch_handles.insert(
+            3029,
+            HistoricalFetchHandle {
+                attempts: HashMap::from([(
+                    0,
+                    HistoricalFetchAttemptHandle {
+                        child_header: headers[99].clone(),
+                        owner: 0,
+                        handle: AbortOnDropHandle::new(tokio::spawn(std::future::pending::<()>())),
+                    },
+                )]),
+            },
+        );
+        let outcome = HistoricalFetchOutcome {
+            generation: engine.historical_fetch_generation,
+            sequence: 3029,
+            attempt: 0,
+            header_batch: HistoricalHeaderBatch {
+                child_header: headers[99].clone(),
+                header_peer: PeerId::ZERO,
+                headers: Vec::new(),
+                hashes: Vec::new(),
+                required_block: 0,
+                header_elapsed: Duration::ZERO,
+            },
+            body_receipt_elapsed: Duration::ZERO,
+            outcome: crate::p2p::peer_manager::empty_body_receipt_outcome(),
+        };
+        let original_generation = engine.historical_fetch_generation;
+        let header_delivery = engine.historical_header_fetch_tx.clone();
+        let (header_capture, mut header_results) = mpsc::unbounded_channel();
+        engine.historical_header_fetch_tx = header_capture;
+        let tx = engine.historical_fetch_tx.clone();
+        // Keep the ordered write queued without holding storage. The scheduler
+        // can read the old floor and prepare new-generation lookahead meanwhile.
+        let (release, wait) = std::sync::mpsc::channel();
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let blocker = tokio::task::spawn_blocking(move || {
+            started.send(()).unwrap();
+            let _ = wait.recv();
+        });
+        ready.await.unwrap();
+        let mut work = Box::pin(engine.ingest_historical_prepare_result(
+            3028,
+            Some(headers[99].clone()),
+            Ok(Ok(prepared(&headers[99..100]))),
+            false,
+        ));
+        assert!(futures_util::poll!(work.as_mut()).is_pending());
+        tx.send(outcome).ok().unwrap();
+        let overlap = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                assert!(futures_util::poll!(work.as_mut()).is_pending());
+                for receiver in &mut requests {
+                    while let Ok(request) = receiver.try_recv() {
+                        answer(request, &headers);
+                    }
+                }
+                if let Ok(outcome) = header_results.try_recv() {
+                    assert_eq!(outcome.sequence, 0);
+                    assert!(outcome.generation > original_generation);
+                    header_delivery.send(outcome).ok().unwrap();
+                    // The real result is ready on the engine's channel while its
+                    // write remains blocked. Poll through its materialization.
+                    assert!(futures_util::poll!(work.as_mut()).is_pending());
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        release.send(()).unwrap();
+        blocker.await.unwrap();
+        let written = tokio::time::timeout(Duration::from_secs(5), work.as_mut()).await;
+        drop(work);
+        overlap.expect("new-generation preparation must overlap the queued write");
+        assert!(written.unwrap().unwrap());
+        assert_eq!(
+            engine
+                .storage
+                .read()
+                .await
+                .historical_floor()
+                .unwrap()
+                .block_number,
+            99
+        );
+        assert_eq!(
+            engine.historical_prepare_expected_sequence, 0,
+            "old write must not overwrite the new generation's ordered cursor"
+        );
+
+        engine.historical_header_fetch_tx = header_delivery;
+        // Drive the same engine through live catch-up and verified genesis.
+        let status = Arc::clone(&engine.sync_status);
+        let mut run = Box::pin(engine.run());
+        let resumed = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                assert!(futures_util::poll!(run.as_mut()).is_pending());
+                for receiver in &mut requests {
+                    while let Ok(request) = receiver.try_recv() {
+                        answer(request, &headers);
+                    }
+                }
+                let complete = {
+                    let status = status.lock().unwrap();
+                    status.current_block == 164
+                        && status
+                            .historical_execution_floor
+                            .is_some_and(|floor| floor.block_number == 0)
+                };
+                if complete {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        shutdown.send(true).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), run)
+            .await
+            .unwrap()
+            .unwrap();
+        engine.reset_historical_fetch_pipeline();
+        resumed.expect("the same engine must complete live and historical sync after reset");
+        let storage = engine.storage.read().await;
+        assert_eq!(storage.historical_floor().unwrap().block_number, 0);
+        assert_eq!(storage.sync_head().unwrap().block_number, 164);
+    });
+}

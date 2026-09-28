@@ -1,6 +1,6 @@
 //! Finite local shutdown controls with owned temporary storage and local channels.
 use super::*;
-use crate::p2p::peer_manager::engine_peer_fixture;
+use crate::p2p::peer_manager::{empty_body_receipt_outcome, engine_peer_fixture};
 use logex_storage::PartitionManagerConfig;
 
 async fn fixture() -> (SyncEngine, watch::Sender<bool>, impl Sized) {
@@ -192,6 +192,241 @@ impl Drop for Completion {
             let _ = sender.send(());
         }
     }
+}
+
+fn unusable_lookahead(generation: u64, sequence: u64) -> HistoricalFetchOutcome {
+    HistoricalFetchOutcome {
+        generation,
+        sequence,
+        attempt: 0,
+        header_batch: HistoricalHeaderBatch {
+            child_header: Header::default(),
+            header_peer: PeerId::ZERO,
+            headers: Vec::new(),
+            hashes: Vec::new(),
+            required_block: 0,
+            header_elapsed: Duration::ZERO,
+        },
+        body_receipt_elapsed: Duration::ZERO,
+        outcome: empty_body_receipt_outcome(),
+    }
+}
+
+#[tokio::test]
+async fn historical_generation_reset_before_write_discards_old_preparation() {
+    let (mut engine, _shutdown, _resources) = fixture().await;
+    engine.historical_prepare_expected_sequence = 3028;
+    engine.historical_fetch_expected_sequence = 3029;
+    engine.historical_fetch_completed.insert(
+        3029,
+        unusable_lookahead(engine.historical_fetch_generation, 3029),
+    );
+    let progressed = engine
+        .ingest_historical_prepare_result(3028, None, Ok(Ok(prepared(false))), false)
+        .await
+        .unwrap();
+    assert!(
+        !progressed,
+        "a reset invalidates work that has not started writing"
+    );
+    assert_eq!(engine.storage.read().await.historical_floor(), None);
+    assert_eq!(engine.historical_prepare_expected_sequence, 0);
+}
+
+#[tokio::test]
+async fn historical_generation_reset_aborts_detached_prepare_worker() {
+    let (mut engine, _shutdown, _resources) = fixture().await;
+    engine.historical_prepare_expected_sequence = 3028;
+    engine.historical_fetch_expected_sequence = 3029;
+    engine.historical_fetch_completed.insert(
+        3029,
+        unusable_lookahead(engine.historical_fetch_generation, 3029),
+    );
+    let (stopped, stopped_rx) = tokio::sync::oneshot::channel();
+    let completion = Completion(Some(stopped));
+    let task = HistoricalPrepareTask {
+        sequence: 3028,
+        next_child_header: None,
+        handle: AbortOnDropHandle::new(tokio::spawn(async move {
+            let _completion = completion;
+            std::future::pending::<HistoricalPrepareResult>().await
+        })),
+    };
+    let result = tokio::time::timeout(
+        Duration::from_secs(2),
+        engine.ingest_historical_prepared_task(task, false),
+    )
+    .await;
+    assert!(
+        matches!(result, Ok(Ok(false))),
+        "obsolete prepare must stop promptly"
+    );
+    tokio::time::timeout(Duration::from_secs(2), stopped_rx)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(engine.historical_prepare_handles.is_empty());
+    assert_eq!(engine.storage.read().await.historical_floor(), None);
+}
+
+async fn generation_reset_during_write(rejected: bool) {
+    let (mut engine, _shutdown, _resources) = fixture().await;
+    engine.historical_prepare_expected_sequence = 3028;
+    engine.historical_fetch_expected_sequence = 3029;
+    let generation = engine.historical_fetch_generation;
+    let tx = engine.historical_fetch_tx.clone();
+    let (retired, mut retired_rx) = tokio::sync::oneshot::channel();
+    let completion = Completion(Some(retired));
+    engine.historical_fetch_handles.insert(
+        3030,
+        HistoricalFetchHandle {
+            attempts: HashMap::from([(
+                0,
+                HistoricalFetchAttemptHandle {
+                    child_header: Header::default(),
+                    owner: 0,
+                    handle: AbortOnDropHandle::new(tokio::spawn(async move {
+                        let _completion = completion;
+                        std::future::pending::<()>().await;
+                    })),
+                },
+            )]),
+        },
+    );
+    let storage = Arc::clone(&engine.storage);
+    let status = Arc::clone(&engine.sync_status);
+    let reader = storage.read().await;
+    let mut work = Box::pin(engine.ingest_historical_prepare_result(
+        3028,
+        None,
+        Ok(Ok(prepared(rejected))),
+        false,
+    ));
+    assert!(futures_util::poll!(work.as_mut()).is_pending());
+    assert!(
+        status
+            .lock()
+            .unwrap()
+            .execution_network
+            .as_ref()
+            .unwrap()
+            .historical_ingest_active
+    );
+    // A failed lookahead is processed while the real storage write waits for our
+    // reader. Retirement confirms the channel event was consumed before release.
+    tx.send(unusable_lookahead(generation, 3030)).ok().unwrap();
+    let retirement = tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::select! {
+            result = &mut retired_rx => result.unwrap(),
+            _ = &mut work => panic!("the owned storage write must remain pending"),
+        }
+    })
+    .await;
+    drop(reader);
+    let result = tokio::time::timeout(Duration::from_secs(5), work.as_mut())
+        .await
+        .unwrap();
+    drop(work);
+    retirement.unwrap();
+    if rejected {
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("historical rows precede")
+        );
+        assert_eq!(storage.read().await.historical_floor(), None);
+        return;
+    }
+    assert!(result.unwrap());
+    assert!(engine.historical_fetch_generation > generation);
+    assert_eq!(
+        storage
+            .read()
+            .await
+            .historical_floor()
+            .unwrap()
+            .block_number,
+        100
+    );
+    assert_eq!(engine.historical_prepare_expected_sequence, 0);
+    assert_eq!(engine.historical_fetch_expected_sequence, 0);
+
+    // New-generation preparation must be consumable after the old write settles.
+    let mut next = prepared(false);
+    next.lowest_block = 0;
+    next.extracted.chunks[0].lowest_header.number = 0;
+    engine.historical_prepare_completed.insert(
+        0,
+        HistoricalCompletedPrepare {
+            next_child_header: None,
+            result: Ok(Ok(next)),
+        },
+    );
+    assert!(
+        engine
+            .ingest_ready_historical_backfill_batches(1)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        storage
+            .read()
+            .await
+            .historical_floor()
+            .unwrap()
+            .block_number,
+        0
+    );
+}
+
+#[tokio::test]
+async fn historical_generation_reset_during_write_keeps_commit_and_allows_new_work() {
+    generation_reset_during_write(false).await;
+}
+
+#[tokio::test]
+async fn historical_generation_reset_during_write_retains_storage_failure() {
+    generation_reset_during_write(true).await;
+}
+
+#[tokio::test]
+async fn historical_generation_reset_recognizes_only_current_prepare_owner() {
+    let (mut engine, _shutdown, _resources) = fixture().await;
+    engine.historical_fetch_expected_sequence = 2;
+    engine.historical_prepare_completed.insert(
+        1,
+        HistoricalCompletedPrepare {
+            next_child_header: None,
+            result: Ok(Ok(prepared(false))),
+        },
+    );
+    let owner = HistoricalPrepareOwner {
+        generation: engine.historical_fetch_generation,
+        sequence: 0,
+    };
+    assert!(
+        !engine
+            .recover_historical_sequence_gap(&Header::default(), Some(owner))
+            .await
+            .unwrap()
+    );
+    assert_eq!(engine.historical_prepare_completed.len(), 1);
+    assert_eq!(engine.historical_fetch_generation, owner.generation);
+    // An owner from a different generation must not hide a real missing batch.
+    assert!(
+        engine
+            .recover_historical_sequence_gap(
+                &Header::default(),
+                Some(HistoricalPrepareOwner {
+                    generation: owner.generation.wrapping_add(1),
+                    ..owner
+                })
+            )
+            .await
+            .unwrap()
+    );
+    assert!(engine.historical_prepare_completed.is_empty());
 }
 
 #[tokio::test]

@@ -81,6 +81,16 @@ Build and test on the intended deployment OS before distributing binaries for it
 Service templates are validated templates; production installation and the
 48-hour live-sync acceptance test remain subsequent work.
 
+## Historical pipeline generation correction
+
+A later acceptance run stalled at floor **6,245,027** despite healthy live sync.
+The [generation ownership review](historical-generation-ownership.md) reproduces
+an ordered write restoring obsolete sequence numbers after a pipeline reset and
+records the correction, six regression controls and live-attribution limits.
+The failed run is stopped, its owned dataset removed and monitoring paused.
+Complete the source workflow and final native build before fresh initial analysis;
+no earlier run's data or time can count toward acceptance.
+
 ## Live/backfill scheduling follow-up
 
 The later [historical payload handoff correction](historical-tail-handoff.md)
