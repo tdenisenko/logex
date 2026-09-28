@@ -201,6 +201,12 @@ enum HistoricalSequenceGapAction {
 }
 
 #[derive(Debug, Clone, Copy)]
+struct HistoricalPrepareOwner {
+    generation: u64,
+    sequence: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
 struct HistoricalSequenceGapState {
     prepare_expected: u64,
     fetch_expected: u64,
@@ -2230,7 +2236,10 @@ impl SyncEngine {
             }
 
             self.drain_historical_prepare_tasks().await?;
-            if self.recover_historical_sequence_gap(&child_header).await? {
+            if self
+                .recover_historical_sequence_gap(&child_header, None)
+                .await?
+            {
                 progressed = true;
                 continue;
             }
@@ -2326,7 +2335,9 @@ impl SyncEngine {
         let pending_prepares = self.pending_historical_prepare_count();
 
         self.drain_historical_prepare_tasks().await?;
-        let recovered_sequence_gap = self.recover_historical_sequence_gap(&child_header).await?;
+        let recovered_sequence_gap = self
+            .recover_historical_sequence_gap(&child_header, None)
+            .await?;
         let Some(fetch_child_header) = self.historical_fetch_refill_child(&child_header) else {
             return Ok(false);
         };
@@ -2984,7 +2995,10 @@ impl SyncEngine {
         Ok(())
     }
 
-    async fn refill_historical_fetch_pipeline_during_local_work(&mut self) -> Result<bool> {
+    async fn refill_historical_fetch_pipeline_during_local_work(
+        &mut self,
+        preparing: Option<HistoricalPrepareOwner>,
+    ) -> Result<bool> {
         let child_header = {
             let storage = self.storage.read().await;
             storage.historical_floor_header().cloned()
@@ -3006,7 +3020,9 @@ impl SyncEngine {
         let pending_prepares = self.pending_historical_prepare_count();
 
         self.drain_historical_prepare_tasks().await?;
-        let recovered_sequence_gap = self.recover_historical_sequence_gap(&child_header).await?;
+        let recovered_sequence_gap = self
+            .recover_historical_sequence_gap(&child_header, preparing)
+            .await?;
         let Some(fetch_child_header) = self.historical_fetch_refill_child(&child_header) else {
             return Ok(false);
         };
@@ -3405,7 +3421,10 @@ impl SyncEngine {
         }
 
         self.drain_historical_prepare_tasks().await?;
-        if self.recover_historical_sequence_gap(&child_header).await? {
+        if self
+            .recover_historical_sequence_gap(&child_header, None)
+            .await?
+        {
             return Ok(true);
         }
         let expected_prepare_sequence = self.historical_prepare_expected_sequence;
@@ -3880,7 +3899,7 @@ impl SyncEngine {
     async fn spawn_lookahead_historical_prepare_tasks_without_refill(&mut self) -> Result<bool> {
         self.drain_historical_prepare_tasks().await?;
         if historical_prepare_work_blocked_by_missing_expected_fetch(
-            self.historical_sequence_gap_action(),
+            self.historical_sequence_gap_action(None),
         ) {
             return Ok(false);
         }
@@ -3933,7 +3952,7 @@ impl SyncEngine {
         self.drain_historical_header_fetch_outcomes().await?;
         self.drain_historical_prepare_tasks().await?;
         if historical_prepare_work_blocked_by_missing_expected_fetch(
-            self.historical_sequence_gap_action(),
+            self.historical_sequence_gap_action(None),
         ) {
             return Ok(false);
         }
@@ -4100,9 +4119,19 @@ impl SyncEngine {
         )
     }
 
-    fn historical_sequence_gap_action(&self) -> HistoricalSequenceGapAction {
+    fn historical_sequence_gap_action(
+        &self,
+        preparing: Option<HistoricalPrepareOwner>,
+    ) -> HistoricalSequenceGapAction {
         let prepare_expected = self.historical_prepare_expected_sequence;
-        let missing_prepare = !self.historical_prepare_sequence_available(prepare_expected);
+        // The awaited primary worker is temporarily outside the maps. Its owner
+        // remains valid only in the generation that started the wait.
+        let owned_prepare = preparing.is_some_and(|owner| {
+            owner.generation == self.historical_fetch_generation
+                && owner.sequence == prepare_expected
+        });
+        let missing_prepare =
+            !owned_prepare && !self.historical_prepare_sequence_available(prepare_expected);
         let later_prepare = self.has_historical_prepare_after(prepare_expected);
         let fetch_expected = self.historical_fetch_expected_sequence;
         let missing_fetch = !self.historical_fetch_sequence_available(fetch_expected);
@@ -4123,8 +4152,9 @@ impl SyncEngine {
     async fn refill_missing_expected_historical_fetch(
         &mut self,
         child_header: &Header,
+        preparing: Option<HistoricalPrepareOwner>,
     ) -> Result<bool> {
-        if self.historical_sequence_gap_action()
+        if self.historical_sequence_gap_action(preparing)
             != HistoricalSequenceGapAction::RefillMissingExpectedFetch
         {
             return Ok(false);
@@ -4145,12 +4175,16 @@ impl SyncEngine {
         self.retry_expected_historical_fetch(&expected_child).await
     }
 
-    async fn recover_historical_sequence_gap(&mut self, child_header: &Header) -> Result<bool> {
+    async fn recover_historical_sequence_gap(
+        &mut self,
+        child_header: &Header,
+        preparing: Option<HistoricalPrepareOwner>,
+    ) -> Result<bool> {
         self.drain_historical_fetch_outcomes().await?;
-        match self.historical_sequence_gap_action() {
+        match self.historical_sequence_gap_action(preparing) {
             HistoricalSequenceGapAction::None => Ok(false),
             HistoricalSequenceGapAction::RefillMissingExpectedFetch => {
-                self.refill_missing_expected_historical_fetch(child_header)
+                self.refill_missing_expected_historical_fetch(child_header, preparing)
                     .await
             }
             HistoricalSequenceGapAction::Reset => {
@@ -4965,7 +4999,7 @@ impl SyncEngine {
             }
 
             if self
-                .refill_missing_expected_historical_fetch(child_header)
+                .refill_missing_expected_historical_fetch(child_header, None)
                 .await?
             {
                 wait_started = Instant::now();
@@ -5709,11 +5743,19 @@ impl SyncEngine {
         prefetched: bool,
     ) -> Result<bool> {
         let sequence = task.sequence;
+        let owner = HistoricalPrepareOwner {
+            generation: self.historical_fetch_generation,
+            sequence,
+        };
         let next_child_header = task.next_child_header.clone();
 
         let mut handle = task.handle;
         let mut last_prepare_refill = std::time::Instant::now();
         let prepared = loop {
+            if owner.generation != self.historical_fetch_generation {
+                self.sync_status_peers();
+                return Ok(false);
+            }
             if self.shutdown_requested() {
                 self.finish_shutdown()?;
                 return Ok(false);
@@ -5760,7 +5802,7 @@ impl SyncEngine {
                     self.spawn_ready_historical_prepare_tasks_without_refill().await?;
                     if last_prepare_refill.elapsed() >= HISTORICAL_LOCAL_WORK_REFILL_INTERVAL {
                         last_prepare_refill = std::time::Instant::now();
-                        self.refill_historical_fetch_pipeline_during_local_work()
+                        self.refill_historical_fetch_pipeline_during_local_work(Some(owner))
                             .await?;
                     }
                 }
@@ -5771,6 +5813,10 @@ impl SyncEngine {
             }
         };
 
+        if owner.generation != self.historical_fetch_generation {
+            self.sync_status_peers();
+            return Ok(false);
+        }
         self.ingest_historical_prepare_result(sequence, next_child_header, prepared, prefetched)
             .await
     }
@@ -5801,10 +5847,15 @@ impl SyncEngine {
             self.finish_shutdown()?;
             return Ok(false);
         }
+        let generation = self.historical_fetch_generation;
         let batch_started = std::time::Instant::now();
         let overlap_started = std::time::Instant::now();
         self.spawn_ready_historical_prepare_tasks_without_refill()
             .await?;
+        if generation != self.historical_fetch_generation {
+            self.sync_status_peers();
+            return Ok(false);
+        }
         let prepare_wait_started = std::time::Instant::now();
         let prepared = prepared?;
         let prepared = match prepared {
@@ -5843,8 +5894,15 @@ impl SyncEngine {
         self.historical_ingest_started_at = Some(std::time::Instant::now());
         self.sync_status_peers();
         let pre_write_refilled_fetch_pipeline = self
-            .refill_historical_fetch_pipeline_during_local_work()
+            .refill_historical_fetch_pipeline_during_local_work(None)
             .await?;
+        if generation != self.historical_fetch_generation {
+            // Refill can invalidate this preparation before a write starts.
+            self.historical_ingest_sequence = None;
+            self.historical_ingest_started_at = None;
+            self.sync_status_peers();
+            return Ok(false);
+        }
         let mut write_task = Box::pin(write_prepared_historical_batch(
             prepared,
             Arc::clone(&self.storage),
@@ -5878,7 +5936,7 @@ impl SyncEngine {
                     self.spawn_ready_historical_prepare_tasks_without_refill().await?;
                     if last_write_refill.elapsed() >= HISTORICAL_LOCAL_WORK_REFILL_INTERVAL {
                         last_write_refill = std::time::Instant::now();
-                        self.refill_historical_fetch_pipeline_during_local_work()
+                        self.refill_historical_fetch_pipeline_during_local_work(None)
                             .await?;
                     }
                 }
@@ -5900,13 +5958,21 @@ impl SyncEngine {
             return Ok(false);
         }
         written.prepare_wait_elapsed = prepare_wait_started.elapsed();
-        self.advance_historical_fetch_position_after_ordered_write(
-            sequence,
-            coalesced_batches,
-            coalesced_next_child_header,
-        );
-        self.historical_prepare_expected_sequence =
-            sequence.saturating_add(coalesced_batches as u64);
+        let generation_changed = generation != self.historical_fetch_generation;
+        if generation_changed {
+            // The owned write has committed, but its sequence belongs to the old
+            // generation. Discard lookahead planned against the pre-commit floor
+            // and let the caller refill from the newly persisted floor.
+            self.reset_historical_fetch_pipeline();
+        } else {
+            self.advance_historical_fetch_position_after_ordered_write(
+                sequence,
+                coalesced_batches,
+                coalesced_next_child_header,
+            );
+            self.historical_prepare_expected_sequence =
+                sequence.saturating_add(coalesced_batches as u64);
+        }
         let overlap_elapsed = overlap_started.elapsed();
         let mut newly_serving_peers = HashSet::new();
         for peer_id in &written.peer_notes {
@@ -5936,6 +6002,16 @@ impl SyncEngine {
         );
         self.maybe_trim_historical_allocator();
         self.refresh_historical_status().await;
+        if generation_changed {
+            tracing::debug!(
+                sequence,
+                generation,
+                current_generation = self.historical_fetch_generation,
+                lowest_block,
+                "historical write committed after pipeline reset; refilling from persisted floor"
+            );
+            return Ok(true);
+        }
         let residual_blocks = residual_batch
             .as_ref()
             .map(|batch| batch.header_batch.headers.len())
@@ -5956,7 +6032,7 @@ impl SyncEngine {
         }
         let refilled_missing_expected_fetch =
             if let Some(expected_child) = self.historical_fetch_expected_child.clone() {
-                self.refill_missing_expected_historical_fetch(&expected_child)
+                self.refill_missing_expected_historical_fetch(&expected_child, None)
                     .await?
             } else {
                 false
@@ -5970,7 +6046,7 @@ impl SyncEngine {
         );
         let post_write_refill = if should_block_on_post_write_refill {
             if pending_prepares > 0 {
-                self.refill_historical_fetch_pipeline_during_local_work()
+                self.refill_historical_fetch_pipeline_during_local_work(None)
                     .await?
             } else {
                 self.prime_historical_backfill_pipeline().await?

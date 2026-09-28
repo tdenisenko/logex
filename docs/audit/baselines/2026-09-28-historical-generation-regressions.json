@@ -1,0 +1,76 @@
+{
+  "recorded_utc": "2026-09-28T07:12:52.809041+00:00",
+  "original_source_commit": "6949ca48de48a9f195f9c13e11221e24e5ff0a22",
+  "original_merge_commit": "0c55ae3b379587bfe82461714a553337f31fc66e",
+  "source_branch": "fix/historical-write-generation",
+  "source_files_sha256": {
+    "crates/logex-sync/src/engine/anchored.rs": "87f46e3dfe7b2eb3512d5ece7143cd8a86d6f26b548678345492242a07a13345",
+    "crates/logex-sync/src/engine/anchored/cancellation_tests.rs": "fc900fb13499a0df73bc56ac2ce2ec3f7ab8ac728c90ed01ac3ccbff22cd3560",
+    "crates/logex-sync/src/engine/anchored/fairness_tests.rs": "34346a16237ae24214ccf23cc2d0c0e0320c378debb6d73b4b77b3b8a00895ff"
+  },
+  "logs": [
+    {
+      "file": "/private/tmp/logex-audit-historical-generation-20260928/regression-fixture-compile.log",
+      "bytes": 8803,
+      "sha256": "6ca3553ec8587b67cc28bc0439057dcf4cbf8a06a76f18943e969252e93b0cf1"
+    },
+    {
+      "file": "/private/tmp/logex-audit-historical-generation-20260928/regression-sandbox.log",
+      "bytes": 10871,
+      "sha256": "73fbbb96c310652c0783d3709bbc4b25be1e7abecc6796e77d1fc6ed37b702b9"
+    },
+    {
+      "file": "/private/tmp/logex-audit-historical-generation-20260928/regression-before.log",
+      "bytes": 10036,
+      "sha256": "03e1adf339fc5f04d736ebef3e24083bb473afe50d3b2d3989f116fb80565721"
+    },
+    {
+      "file": "/private/tmp/logex-audit-historical-generation-20260928/overlap-regression-before.log",
+      "bytes": 9505,
+      "sha256": "d253352841760661ee995a06168c5a3f3a751895602a303912b66ce2459785c5"
+    },
+    {
+      "file": "/private/tmp/logex-audit-historical-generation-20260928/overlap-regression-before-v2.log",
+      "bytes": 9443,
+      "sha256": "cc3374a05077f274f0e0a3c6db459ccebdb57b747224e8689cf035136930506f"
+    },
+    {
+      "file": "/private/tmp/logex-audit-historical-generation-20260928/overlap-fixture-diagnostic.log",
+      "bytes": 12801,
+      "sha256": "50dfd3f24221346ecad353dd5bbe02a624a4db5cf04c328df656d7174cd062c9"
+    },
+    {
+      "file": "/private/tmp/logex-audit-historical-generation-20260928/overlap-regression-before-v3.log",
+      "bytes": 9493,
+      "sha256": "c420ce22c48779af124a2d191b9752febce10aa7a98e13378074d52a5ab46606"
+    },
+    {
+      "file": "/private/tmp/logex-audit-historical-generation-20260928/regression-after.log",
+      "bytes": 9125,
+      "sha256": "3a695f61b46d9550d0be2c3ab5bcf28f3d013154465280fe7a3ca234c669661b"
+    },
+    {
+      "file": "/private/tmp/logex-audit-historical-generation-20260928/sync-tests.log",
+      "bytes": 80269,
+      "sha256": "1e9cbb99c19b485742f3b7430cbc0b50491935138ebd24343aa3783f983a976a"
+    },
+    {
+      "file": "/private/tmp/logex-audit-historical-generation-20260928/regression-controls-before.patch",
+      "bytes": 12221,
+      "sha256": "d1759f8cf5282c47924d74e4a493cd97f68dbbbab1ac8f9c4363f54f5aefa490"
+    }
+  ],
+  "regression_results": {
+    "original_obsolete_worker_and_prewrite_controls": "2 failed, 1 existing write-completion control passed; failures are assertions/timeout after valid fixture startup",
+    "original_refined_overlap_control": "failed: old write restored prepare cursor 3029 instead of zero",
+    "corrected_sync_suite": {
+      "passed": 697,
+      "failed": 0,
+      "ignored": 2
+    },
+    "setup_limits": "Compile error, sandbox listener denial and two early overlap-fixture failures were corrected and retained; not counted as scheduler reproductions."
+  },
+  "review": "Generation checks cover preparation waits, ready-work drain, pre-write refill and settled writes. Current generation/sequence ownership protects the awaited primary from false gap recovery. Reset writes preserve storage results/progress, discard speculative/residual work and return to ordinary refill. Existing cancellation, coalescing and fairness controls pass. All call sites and temporary diagnostics checked.",
+  "live_attribution_limit": "Actual live prepared-result keys, generation and reset cause were not logged; reproduction establishes a source defect capable of stranding work, not its exact remote occurrence.",
+  "acceptance_complete": false
+}
