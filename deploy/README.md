@@ -8,9 +8,10 @@ Offline evidence covers the recorded macOS ARM64/Intel component fixtures and
 Linux CI volume/template checks; it does not certify every OS or filesystem.
 Current macOS CI runs on ARM64 macOS 26.6.2 and restores dependency caches, so it
 does not establish an older macOS minimum for distributed binaries. Build and
-test on the intended deployment OS. Complete the minimum 48-hour live-sync
-acceptance test before calling a deployment release-ready; see the
-[audit evidence and limits](../docs/audit/README.md).
+test on the intended deployment OS. The PR #283 client completed genesis-to-live
+acceptance on one native binary/process over more than 63 hours; see the
+[acceptance summary](../README.md#development). That result does not certify a
+different deployment's OS, filesystem or service configuration.
 
 When the dashboard is served through an HTTPS reverse proxy, configure
 `http_allowed_origins` with the external browser origins, including scheme and

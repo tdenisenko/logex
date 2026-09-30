@@ -281,7 +281,7 @@ keywords, operators and opening delimiters) and a parser recursion budget of 16.
 Literal values, comments, whitespace and list separators do not consume the
 syntax budget, so large flat `IN` lists remain usable. Excessive complexity
 returns an explicit query error; simplify deeply nested expressions or long
-operator chains. See the [input-limit audit](docs/audit/sql-expression-limits.md).
+operator chains.
 
 The SQL endpoint has no hidden server-side row cap. Dashboard-generated queries
 default to `LIMIT 500`; remove or change the SQL `LIMIT` deliberately for
@@ -581,8 +581,6 @@ rebuild cannot establish missing identity. Explicit index builds report this
 condition; background indexing skips repeated rebuild attempts and records the
 reason at debug log level. A complete standalone raw rewrite can establish a new
 identity; there is no native in-place identity migration command.
-See the [source identity audit](docs/audit/source-publication-identity.md) for
-the format and recovery details.
 
 To roll back, use the matching older binary with a preserved pre-upgrade data
 directory or backup. Do not change version fields to bypass compatibility checks;
@@ -862,6 +860,11 @@ return an error instead of a partial or misleading result.
   exhausted.
 - Storage grows with logs, not with Ethereum state. LogEx still needs enough
   disk for the full compressed log history and indexes.
+- The dashboard's current storage-used value is logical file content size.
+  Filesystem allocation also includes block rounding and directory storage,
+  which can be substantial on ExFAT with large allocation units. Free-space
+  headroom uses filesystem availability. The dashboard currently labels binary
+  units as GB/MB even though it divides by 1024; interpret those values as GiB/MiB.
 - Blocks per second is not enough to judge sync speed. Older blocks have few
   logs; modern blocks are dense. Watch log-rate, CPU, disk headroom, peer count,
   and historical ETA together.
@@ -888,10 +891,16 @@ cargo test -p logex-server
 cargo run -p logex-node -- --help
 ```
 
-The [offline code audit](docs/audit/README.md) records subsystem dispositions,
-validation evidence and accepted limits. A minimum 48-hour live-sync acceptance
-test must pass before the first stable release. See [benchmark instructions](docs/audit/benchmarks.md) for
-deterministic storage, indexing, and query performance comparisons.
+See [benchmark instructions](docs/benchmarks.md) for reproducible storage,
+indexing and query performance comparisons. Keep machine-specific audit reports,
+raw logs and acceptance archives outside Git; retain executable regression tests
+and operational documentation in the repository.
+
+The final client from PR #283 completed genesis-to-live acceptance on September
+30, 2026 after more than 63 hours on the same native binary and process. The owner
+accepted recovered gossip and expected RPC fallback with continued functional
+progress. Periodic checks and recorded sampling gaps do not establish continuous
+API availability. This acceptance did not publish a stable release tag.
 
 Workspace layout:
 

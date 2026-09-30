@@ -438,7 +438,7 @@ fn storage_publication_preserves_rows_and_empty_block_progress() {
 }
 
 #[test]
-#[ignore = "release sync-storage publication baseline; see docs/audit/benchmarks.md"]
+#[ignore = "release sync-storage publication baseline; see docs/benchmarks.md"]
 fn benchmark_sync_storage_publication() {
     run(Config {
         history_cached_head: match std::env::var("LOGEX_PUBLICATION_HISTORY_CACHED_HEAD").as_deref()
@@ -485,7 +485,7 @@ fn benchmark_sync_storage_publication() {
 }
 
 #[test]
-#[ignore = "release cached-header encoding comparison; see docs/audit/benchmarks.md"]
+#[ignore = "release cached-header encoding comparison; see docs/benchmarks.md"]
 fn benchmark_cached_header_encoding() {
     use alloy_rlp::Decodable;
 

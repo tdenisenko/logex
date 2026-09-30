@@ -1037,7 +1037,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "explicit release WAL benchmark; see docs/audit/wal-recovery.md"]
+    #[ignore = "explicit release WAL benchmark; see docs/benchmarks.md"]
     fn wal_release_baseline() {
         use std::hint::black_box;
         use std::time::Instant;
