@@ -372,9 +372,9 @@ mod tests {
 
     #[test]
     fn mainnet_fork_digests_match_independent_boundary_vectors() {
-        // SHA256 vectors from the pinned mainnet config and corrected Fulu
-        // rule; see docs/audit/consensus-fork-conformance.md. Expected values
-        // do not call this implementation's fork/blob selection helpers.
+        // Independent SHA256 vectors from consensus-specs mainnet config
+        // 81ce8fd6 and the Fulu correction 4d623657: apply the blob-parameter
+        // XOR only from Fulu onward. Expected values do not call the helpers.
         let transitions = [
             (0, "b5303f2a"),
             (74_240, "afcaaba0"),

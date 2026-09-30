@@ -1,4 +1,4 @@
-//! Deterministic storage/query baselines. See docs/audit/benchmarks.md.
+//! Deterministic storage/query baselines. See docs/benchmarks.md.
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::{Arc, Barrier};
@@ -23,7 +23,7 @@ const HOT_ADDRESS: Address = Address::repeat_byte(0xaa);
 /// deliberately bypasses native SELECT; these projected values also have a
 /// correct representation in pre-converter baselines, allowing a fair comparison.
 #[tokio::test]
-#[ignore = "release DataFusion result conversion benchmark; see docs/audit/benchmarks.md"]
+#[ignore = "release DataFusion result conversion benchmark; see docs/benchmarks.md"]
 async fn benchmark_datafusion_result_values() {
     let config = Config::from_env();
     let rows = fixture(config.rows, config.profile);
@@ -611,7 +611,7 @@ async fn run(config: Config) {
 }
 
 #[tokio::test]
-#[ignore = "release baseline; see docs/audit/benchmarks.md"]
+#[ignore = "release baseline; see docs/benchmarks.md"]
 async fn benchmark_storage_indexes_and_queries() {
     run(Config::from_env()).await;
 }

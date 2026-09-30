@@ -15,13 +15,13 @@ use serde_json::{Value, json};
 use tonic::Request;
 
 #[tokio::test]
-#[ignore = "explicit release gRPC benchmark; see docs/audit/grpc-query-locks.md"]
+#[ignore = "explicit release gRPC benchmark; see docs/benchmarks.md"]
 async fn benchmark_grpc_query_latency() {
     benchmark_query_latency(false).await;
 }
 
 #[tokio::test]
-#[ignore = "explicit release REST benchmark; see docs/audit/query-cancellation.md"]
+#[ignore = "explicit release REST benchmark; see docs/benchmarks.md"]
 async fn benchmark_rest_query_latency() {
     benchmark_query_latency(true).await;
 }

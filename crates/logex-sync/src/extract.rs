@@ -375,7 +375,7 @@ mod tests {
         assert_eq!(rows[0].topic0, Some(topic0));
     }
     #[test]
-    #[ignore = "release comparison; see docs/audit/extraction-boundaries.md"]
+    #[ignore = "release comparison; see docs/benchmarks.md"]
     fn extraction_release_baseline() {
         use alloy_consensus::{SignableTransaction, TxLegacy};
         use alloy_primitives::{Signature, U256};
