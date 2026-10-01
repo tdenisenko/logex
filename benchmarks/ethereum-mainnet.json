@@ -3926,7 +3926,7 @@
       "contracts": [
         "univ3_usdc_weth"
       ],
-      "purpose": "What are the largest positive token0 deltas recorded by this V3 pool?",
+      "purpose": "What are the largest nonnegative token0 deltas recorded by this V3 pool?",
       "interpretation": "V3 amounts are signed int256: a leading hexadecimal digit below 8 identifies nonnegative values. Negative words must not be ranked as huge unsigned amounts.",
       "from_block": 26080000,
       "to_block": 26090000,
