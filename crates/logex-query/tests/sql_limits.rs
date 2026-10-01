@@ -1,8 +1,9 @@
 //! Untrusted SQL must fail explicitly rather than aborting the whole process.
+mod support;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
+use support::execute_sql;
 
-use logex_query::execute_sql;
 use logex_storage::{PartitionManager, PartitionManagerConfig};
 use serde_json::json;
 

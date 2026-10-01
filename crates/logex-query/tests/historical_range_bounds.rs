@@ -1,8 +1,10 @@
 //! Public native-query checks using only owned temporary storage and fixture rows.
 
+mod support;
 use alloy_primitives::{Address, B256, Bytes, keccak256};
 use logex_index::IndexBuilder;
-use logex_query::execute_log_filter;
+use support::execute_log_filter;
+
 use logex_storage::native::{LogOrder, NativeLogFilter};
 use logex_storage::{PartitionManager, PartitionManagerConfig};
 use logex_types::{LogRow, Source};

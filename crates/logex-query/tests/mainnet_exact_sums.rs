@@ -50,7 +50,7 @@ async fn check(storage: &PartitionManager, sql: &str, page: SqlQueryPage, expect
     let memory = QueryMemoryBudget::new(QueryMemoryLimit::new(8 * 1024 * 1024).unwrap());
     let result = execute_sql_page_on_snapshot_with_memory(
         sql,
-        NativeStorageSnapshot::from_storage(storage),
+        NativeStorageSnapshot::for_unverified_inspection(storage),
         storage.head_block().unwrap(),
         page,
         None,
@@ -293,7 +293,7 @@ async fn mainnet_topic_sum_releases_partial_work_on_capacity_and_cancellation() 
         let memory = QueryMemoryBudget::new(QueryMemoryLimit::new(bytes).unwrap());
         let error = execute_sql_page_on_snapshot_with_memory(
             sql,
-            NativeStorageSnapshot::from_storage(&storage),
+            NativeStorageSnapshot::for_unverified_inspection(&storage),
             storage.head_block().unwrap(),
             SqlQueryPage::default(),
             None,
@@ -318,7 +318,7 @@ async fn mainnet_topic_sum_releases_partial_work_on_capacity_and_cancellation() 
     });
     let error = execute_sql_page_on_snapshot_with_memory(
         sql,
-        NativeStorageSnapshot::from_storage(&storage),
+        NativeStorageSnapshot::for_unverified_inspection(&storage),
         storage.head_block().unwrap(),
         SqlQueryPage::default(),
         Some(cancel),
@@ -344,7 +344,7 @@ async fn mainnet_topic_sum_keeps_invalid_projection_and_order_errors() {
         let memory = QueryMemoryBudget::new(QueryMemoryLimit::new(8 * 1024 * 1024).unwrap());
         let result = execute_sql_page_on_snapshot_with_memory(
             sql,
-            NativeStorageSnapshot::from_storage(&storage),
+            NativeStorageSnapshot::for_unverified_inspection(&storage),
             storage.head_block().unwrap(),
             SqlQueryPage::default(),
             None,

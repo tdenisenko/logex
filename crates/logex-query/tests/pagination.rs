@@ -1,13 +1,14 @@
 use alloy_primitives::{Address, B256, Bytes};
+mod support;
 use logex_index::IndexBuilder;
 use logex_query::{
-    NativeStorageSnapshot, SqlQueryPage, execute_log_filter,
-    execute_log_filter_on_snapshot_with_memory, execute_sql_page,
+    NativeStorageSnapshot, SqlQueryPage, execute_log_filter_on_snapshot_with_memory,
 };
 use logex_storage::native::{LogOrder, NativeLogFilter};
 use logex_storage::{PartitionManager, PartitionManagerConfig};
 use logex_types::{LogRow, QueryMemoryBudget, QueryMemoryLimit, Source};
 use serde_json::{Value, json};
+use support::{execute_log_filter, execute_sql_page};
 use tempfile::TempDir;
 
 fn row(block: u64) -> LogRow {
@@ -161,7 +162,7 @@ async fn pagination_matches_reference_across_storage_layouts_and_equal_block_bou
                         IndexBuilder::build_all_indexes(&partition.meta.path).unwrap();
                     }
                 }
-                let snapshot = NativeStorageSnapshot::from_storage(&storage);
+                let snapshot = NativeStorageSnapshot::for_unverified_inspection(&storage);
                 let memory =
                     QueryMemoryBudget::new(QueryMemoryLimit::new(16 * 1024 * 1024).unwrap());
                 for (order, direction) in

@@ -4,9 +4,11 @@
 //! (and array membership's treatment of NULL elements), not from another query
 //! through the same optimizer. IS NULL prevents JSON's NaN encoding from hiding
 //! a non-NULL result. VALUES exercises LogEx's general query path without disk data.
-use logex_query::execute_sql;
+
+mod support;
 use logex_storage::{PartitionManager, PartitionManagerConfig};
 use serde_json::{Value, json};
+use support::execute_sql;
 
 async fn assert_expression(expression: &str, expected: [Value; 3]) {
     let tmp = tempfile::tempdir().unwrap();

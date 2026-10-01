@@ -21,13 +21,16 @@ fn state(memory_bytes: usize) -> (tempfile::TempDir, Arc<AppState>) {
         compaction_safety_margin_blocks: 2_048,
     })
     .unwrap();
-    let state = Arc::new(AppState::with_query_limits(
-        storage,
-        None,
-        SyncStatus::default(),
-        QueryConcurrencyLimit::new(2).unwrap(),
-        QueryMemoryLimit::new(memory_bytes).unwrap(),
-    ));
+    let state = Arc::new(
+        AppState::with_query_limits(
+            storage,
+            None,
+            SyncStatus::default(),
+            QueryConcurrencyLimit::new(2).unwrap(),
+            QueryMemoryLimit::new(memory_bytes).unwrap(),
+        )
+        .for_unverified_test_fixture(),
+    );
     (temp, state)
 }
 
@@ -67,13 +70,16 @@ fn state_with_logs(memory_bytes: usize, row_count: usize) -> (tempfile::TempDir,
         .collect::<Vec<_>>();
     storage.write_batch(&rows).unwrap();
     storage.checkpoint().unwrap();
-    let state = Arc::new(AppState::with_query_limits(
-        storage,
-        None,
-        SyncStatus::default(),
-        QueryConcurrencyLimit::new(2).unwrap(),
-        QueryMemoryLimit::new(memory_bytes).unwrap(),
-    ));
+    let state = Arc::new(
+        AppState::with_query_limits(
+            storage,
+            None,
+            SyncStatus::default(),
+            QueryConcurrencyLimit::new(2).unwrap(),
+            QueryMemoryLimit::new(memory_bytes).unwrap(),
+        )
+        .for_unverified_test_fixture(),
+    );
     (temp, state)
 }
 

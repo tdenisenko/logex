@@ -10,7 +10,17 @@ use crate::{
 };
 use alloy_consensus::Header;
 use alloy_primitives::B256;
-use logex_query::execute_log_filter;
+// Repair equivalence inspects deliberately uncertified fixture rows.
+fn execute_log_filter(
+    storage: &logex_storage::PartitionManager,
+    filter: &logex_storage::native::NativeLogFilter,
+) -> std::io::Result<Vec<logex_types::LogRow>> {
+    logex_query::execute_log_filter_on_snapshot_with_cancel(
+        &logex_query::NativeStorageSnapshot::for_unverified_inspection(storage),
+        filter,
+        None,
+    )
+}
 use logex_storage::{PartitionManager, PartitionManagerConfig, native::NativeLogFilter};
 use reth_network_peers::PeerId;
 use std::time::SystemTime;

@@ -4,7 +4,20 @@ use alloy_primitives::{Address, B256, bytes};
 use axum::body::Body;
 use axum::http::Request;
 use logex_index::IndexBuilder;
-use logex_query::execute_sql;
+async fn execute_sql(
+    sql: &str,
+    storage: &PartitionManager,
+    head: Option<u64>,
+) -> Result<logex_query::SqlQueryResult, logex_query::SqlQueryError> {
+    logex_query::execute_sql_page_on_snapshot(
+        sql,
+        logex_query::NativeStorageSnapshot::for_unverified_inspection(storage),
+        head.unwrap_or(0),
+        Default::default(),
+        None,
+    )
+    .await
+}
 use logex_server::grpc::pb::GetLogsRequest;
 use logex_server::grpc::pb::log_ex_service_server::LogExService;
 use logex_server::grpc::{LogExGrpcService, pb};
@@ -123,7 +136,8 @@ fn normalize_eth_logs(rows: &[serde_json::Value]) -> Vec<(u64, String, u64)> {
 #[tokio::test]
 async fn rest_grpc_sql_and_eth_get_logs_stay_consistent() {
     let (_tmp, storage) = setup_storage();
-    let state = Arc::new(AppState::new(storage, None, SyncStatus::default()));
+    let state =
+        Arc::new(AppState::new(storage, None, SyncStatus::default()).for_unverified_test_fixture());
     let app = logex_server::build_router(Arc::clone(&state));
     let grpc = LogExGrpcService::new(Arc::clone(&state));
 
@@ -250,7 +264,8 @@ async fn rest_and_grpc_reject_disallowed_sql_without_changing_storage() {
     }
 
     let (tmp, storage) = setup_storage();
-    let state = Arc::new(AppState::new(storage, None, SyncStatus::default()));
+    let state =
+        Arc::new(AppState::new(storage, None, SyncStatus::default()).for_unverified_test_fixture());
     let app = logex_server::build_router(Arc::clone(&state));
     let grpc = LogExGrpcService::new(Arc::clone(&state));
     let before = tree(tmp.path());

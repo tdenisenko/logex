@@ -30,13 +30,16 @@ fn state() -> (tempfile::TempDir, Arc<AppState>) {
             source: Source::Receipt,
         }])
         .unwrap();
-    let state = Arc::new(AppState::with_query_limits(
-        storage,
-        None,
-        SyncStatus::default(),
-        QueryConcurrencyLimit::new(2).unwrap(),
-        QueryMemoryLimit::new(64 * 1024).unwrap(),
-    ));
+    let state = Arc::new(
+        AppState::with_query_limits(
+            storage,
+            None,
+            SyncStatus::default(),
+            QueryConcurrencyLimit::new(2).unwrap(),
+            QueryMemoryLimit::new(64 * 1024).unwrap(),
+        )
+        .for_unverified_test_fixture(),
+    );
     (temp, state)
 }
 
@@ -143,7 +146,7 @@ async fn rpc_encoding_pressure_retains_native_source_and_reports_its_stage() {
     let (_temp, state) = state();
     let snapshot = {
         let storage = state.read_storage().await.unwrap();
-        NativeStorageSnapshot::from_storage(&storage)
+        NativeStorageSnapshot::for_unverified_inspection(&storage)
     };
     let rows = logex_query::execute_log_filter_on_snapshot_with_memory(
         &snapshot,

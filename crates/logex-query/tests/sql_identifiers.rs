@@ -1,6 +1,8 @@
 //! SQL identifier normalization compared with an independent in-memory table.
+mod support;
 use std::sync::Arc;
 use std::time::Instant;
+use support::execute_sql;
 
 use alloy_primitives::{Address, Bytes, keccak256};
 use datafusion::arrow::array::{ArrayRef, Int64Array, StringArray, UInt64Array};
@@ -9,7 +11,7 @@ use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::datasource::MemTable;
 use datafusion::prelude::SessionContext;
 use logex_index::IndexBuilder;
-use logex_query::execute_sql;
+
 use logex_storage::{PartitionManager, PartitionManagerConfig};
 use logex_types::{LogRow, Source};
 use serde_json::json;

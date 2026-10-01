@@ -50,6 +50,7 @@ message GetLogsRequest {
   bytes block_hash = 3;
   repeated bytes addresses = 4;
   repeated TopicFilter topics = 5;
+  // Defaults to true. Verified API queries reject false (orphan/raw inspection).
   optional bool canonical_only = 6;
   optional bool descending = 7;
   optional uint64 limit = 8;

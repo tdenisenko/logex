@@ -1,6 +1,8 @@
 //! Public aggregate contracts checked against finite values, not another SQL engine.
+mod support;
 use alloy_primitives::{Address, B256, Bytes};
-use logex_query::execute_sql;
+use support::execute_sql;
+
 use logex_storage::{PartitionManager, PartitionManagerConfig};
 use logex_types::{LogRow, Source};
 use num_bigint::BigUint;

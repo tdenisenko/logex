@@ -53,7 +53,7 @@ async fn check(storage: &PartitionManager, sql: &str, expected: &[Value], candid
     let memory = QueryMemoryBudget::new(QueryMemoryLimit::new(64 * 1024 * 1024).unwrap());
     let result = execute_sql_page_on_snapshot_with_memory(
         sql,
-        NativeStorageSnapshot::from_storage(storage),
+        NativeStorageSnapshot::for_unverified_inspection(storage),
         storage.head_block().unwrap(),
         SqlQueryPage::default(),
         None,
@@ -155,7 +155,7 @@ async fn mainnet_parallel_selection_releases_capacity_and_canceled_work() {
         let memory = QueryMemoryBudget::new(QueryMemoryLimit::new(bytes).unwrap());
         let error = execute_sql_page_on_snapshot_with_memory(
             sql,
-            NativeStorageSnapshot::from_storage(&storage),
+            NativeStorageSnapshot::for_unverified_inspection(&storage),
             storage.head_block().unwrap(),
             SqlQueryPage::default(),
             None,
@@ -178,7 +178,7 @@ async fn mainnet_parallel_selection_releases_capacity_and_canceled_work() {
     });
     let error = execute_sql_page_on_snapshot_with_memory(
         sql,
-        NativeStorageSnapshot::from_storage(&storage),
+        NativeStorageSnapshot::for_unverified_inspection(&storage),
         storage.head_block().unwrap(),
         SqlQueryPage::default(),
         Some(cancel),

@@ -64,6 +64,8 @@ pub struct AppState {
     pub(crate) query_control: Arc<QueryControl>,
     pub(crate) query_memory: QueryMemoryBudget,
     blocking_query_workers: OnceLock<Arc<tokio::sync::Semaphore>>,
+    #[cfg(test)]
+    unverified_test_fixture: bool,
 }
 
 impl AppState {
@@ -110,7 +112,18 @@ impl AppState {
             query_control: Arc::new(QueryControl::new(concurrency)),
             query_memory: QueryMemoryBudget::new(memory),
             blocking_query_workers: OnceLock::new(),
+            #[cfg(test)]
+            unverified_test_fixture: false,
         }
+    }
+
+    /// Transport/memory fixtures intentionally contain arbitrary, unauthenticated
+    /// rows. This opt-in does not exist in a production build. Integrity tests
+    /// use the normal constructor and actual verified publication instead.
+    #[cfg(test)]
+    pub(crate) fn for_unverified_test_fixture(mut self) -> Self {
+        self.unverified_test_fixture = true;
+        self
     }
 
     /// Permanently close storage admission and cancel outstanding queries.
@@ -180,10 +193,14 @@ impl AppState {
         };
         let (snapshot, head) = {
             let storage = self.read_storage().await.map_err(io::Error::other)?;
-            (
-                NativeStorageSnapshot::from_storage(&storage),
-                storage.head_block().unwrap_or(0),
-            )
+            let snapshot = NativeStorageSnapshot::from_storage(&storage);
+            #[cfg(test)]
+            let snapshot = if self.unverified_test_fixture {
+                NativeStorageSnapshot::for_unverified_inspection(&storage)
+            } else {
+                snapshot
+            };
+            (snapshot, storage.head_block().unwrap_or(0))
         };
         let cancel = query.cancel_check();
         let mut worker = BlockingQueryWorker(tokio::task::spawn_blocking(move || {
@@ -248,7 +265,9 @@ impl AppState {
 }
 
 fn sql_worker_error(error: io::Error) -> SqlQueryError {
-    if error.kind() == io::ErrorKind::WouldBlock {
+    if let Some(coverage) = logex_query::query_coverage_error(&error) {
+        SqlQueryError::Coverage(coverage)
+    } else if error.kind() == io::ErrorKind::WouldBlock {
         SqlQueryError::SnapshotChanged
     } else if is_capacity_error(&error) {
         SqlQueryError::Capacity(error.to_string())
@@ -629,6 +648,9 @@ async fn dispatch_jsonrpc(
         Some(reason) => Json(JsonRpcResponse::internal_error(&**id, reason)).into_response(),
         None => match response {
             Ok(bytes) => ([(header::CONTENT_TYPE, "application/json")], bytes).into_response(),
+            Err(error) if logex_query::query_coverage_error(&error).is_some() => {
+                Json(JsonRpcResponse::error(&**id, -32001, error.to_string())).into_response()
+            }
             Err(error) if is_capacity_error(&error) => {
                 Json(JsonRpcResponse::error(&**id, -32005, error.to_string())).into_response()
             }
@@ -697,7 +719,9 @@ mod tests {
         use std::future::Future;
         use std::task::Poll;
         let (_tmp, storage) = setup_storage();
-        let state = Arc::new(AppState::new(storage, None, SyncStatus::default()));
+        let state = Arc::new(
+            AppState::new(storage, None, SyncStatus::default()).for_unverified_test_fixture(),
+        );
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .max_blocking_threads(1)
@@ -779,7 +803,9 @@ mod tests {
     async fn failure_wakes_requests_waiting_for_storage_and_rejects_rpc() {
         use std::task::Poll;
         let (_tmp, storage) = setup_storage();
-        let state = Arc::new(AppState::new(storage, None, SyncStatus::default()));
+        let state = Arc::new(
+            AppState::new(storage, None, SyncStatus::default()).for_unverified_test_fixture(),
+        );
         let _writer = state.storage.write().await;
         let mut pending = Box::pin(state.read_storage());
         assert!(
@@ -1004,7 +1030,9 @@ mod tests {
     #[tokio::test]
     async fn dropping_native_request_cancels_started_worker() {
         let (_tmp, storage) = setup_storage();
-        let state = Arc::new(AppState::new(storage, None, SyncStatus::default()));
+        let state = Arc::new(
+            AppState::new(storage, None, SyncStatus::default()).for_unverified_test_fixture(),
+        );
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
         let (resume_tx, resume_rx) = std::sync::mpsc::channel();
         let (finished_tx, finished_rx) = tokio::sync::oneshot::channel();
@@ -1044,7 +1072,9 @@ mod tests {
     #[tokio::test]
     async fn native_worker_completion_checks_cancellation_after_conversion() {
         let (_tmp, storage) = setup_storage();
-        let state = Arc::new(AppState::new(storage, None, SyncStatus::default()));
+        let state = Arc::new(
+            AppState::new(storage, None, SyncStatus::default()).for_unverified_test_fixture(),
+        );
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
         let (resume_tx, resume_rx) = std::sync::mpsc::channel();
         let request_state = Arc::clone(&state);
@@ -1073,7 +1103,9 @@ mod tests {
     async fn native_worker_revalidates_after_conversion_and_prioritizes_reorg() {
         for cancel_after_conversion in [false, true] {
             let (_tmp, storage) = setup_storage();
-            let state = Arc::new(AppState::new(storage, None, SyncStatus::default()));
+            let state = Arc::new(
+                AppState::new(storage, None, SyncStatus::default()).for_unverified_test_fixture(),
+            );
             let (started_tx, started_rx) = tokio::sync::oneshot::channel();
             let (resume_tx, resume_rx) = std::sync::mpsc::channel();
             let request_state = Arc::clone(&state);
@@ -1121,12 +1153,15 @@ mod tests {
         use std::task::Poll;
 
         let (_tmp, storage) = setup_storage();
-        let state = Arc::new(AppState::with_query_concurrency(
-            storage,
-            None,
-            SyncStatus::default(),
-            QueryConcurrencyLimit::new(1).unwrap(),
-        ));
+        let state = Arc::new(
+            AppState::with_query_concurrency(
+                storage,
+                None,
+                SyncStatus::default(),
+                QueryConcurrencyLimit::new(1).unwrap(),
+            )
+            .for_unverified_test_fixture(),
+        );
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .max_blocking_threads(1)
@@ -1178,7 +1213,8 @@ mod tests {
     #[tokio::test]
     async fn native_worker_propagates_operation_errors() {
         let (_tmp, storage) = setup_storage();
-        let state = AppState::new(storage, None, SyncStatus::default());
+        let state =
+            AppState::new(storage, None, SyncStatus::default()).for_unverified_test_fixture();
         let query = state.query_control.start_concurrent().unwrap();
         let error = state
             .run_blocking_query(&query, |_snapshot, _head, _cancel| {
@@ -1199,7 +1235,9 @@ mod tests {
         use std::task::Poll;
 
         let (_tmp, storage) = setup_storage();
-        let state = Arc::new(AppState::new(storage, None, SyncStatus::default()));
+        let state = Arc::new(
+            AppState::new(storage, None, SyncStatus::default()).for_unverified_test_fixture(),
+        );
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
         let (resume_tx, resume_rx) = std::sync::mpsc::channel();
         let request_state = Arc::clone(&state);
@@ -1265,7 +1303,9 @@ mod tests {
     #[tokio::test]
     async fn test_eth_get_logs_full() {
         let (_tmp, storage) = setup_storage();
-        let state = Arc::new(AppState::new(storage, None, SyncStatus::default()));
+        let state = Arc::new(
+            AppState::new(storage, None, SyncStatus::default()).for_unverified_test_fixture(),
+        );
 
         let addr = hex::encode(Address::repeat_byte(0xAA));
         let req_json = serde_json::json!({
@@ -1293,7 +1333,9 @@ mod tests {
     #[tokio::test]
     async fn test_eth_block_number() {
         let (_tmp, storage) = setup_storage();
-        let state = Arc::new(AppState::new(storage, None, SyncStatus::default()));
+        let state = Arc::new(
+            AppState::new(storage, None, SyncStatus::default()).for_unverified_test_fixture(),
+        );
 
         let req_json = serde_json::json!({
             "jsonrpc": "2.0",
@@ -1314,7 +1356,9 @@ mod tests {
     #[tokio::test]
     async fn test_web3_client_version() {
         let (_tmp, storage) = setup_storage();
-        let state = Arc::new(AppState::new(storage, None, SyncStatus::default()));
+        let state = Arc::new(
+            AppState::new(storage, None, SyncStatus::default()).for_unverified_test_fixture(),
+        );
 
         let req_json = serde_json::json!({
             "jsonrpc": "2.0",

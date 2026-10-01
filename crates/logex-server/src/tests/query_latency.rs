@@ -74,11 +74,14 @@ async fn benchmark_query_latency(rest: bool) {
     }
     storage.compact_eligible_segments().unwrap();
     drop(storage);
-    let state = Arc::new(AppState::new(
-        PartitionManager::open(config).unwrap(),
-        None,
-        SyncStatus::default(),
-    ));
+    let state = Arc::new(
+        AppState::new(
+            PartitionManager::open(config).unwrap(),
+            None,
+            SyncStatus::default(),
+        )
+        .for_unverified_test_fixture(),
+    );
     let service = LogExGrpcService::new(state.clone());
     let expected_page: Vec<_> = rows.iter().rev().take(1000).map(|r| json!({
         "block_number":r.block_number,"block_hash":r.block_hash.to_string(),"timestamp":r.timestamp,

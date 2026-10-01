@@ -1137,11 +1137,10 @@ mod tests {
                 compaction_safety_margin_blocks: 2048,
             })
             .unwrap();
-        let state = Arc::new(AppState::new(
-            storage,
-            Some(manager.clone()),
-            Default::default(),
-        ));
+        let state = Arc::new(
+            AppState::new(storage, Some(manager.clone()), Default::default())
+                .for_unverified_test_fixture(),
+        );
         let router = axum::Router::new()
             .route(
                 "/subscriptions",
@@ -1728,7 +1727,10 @@ mod tests {
                     compaction_safety_margin_blocks: 2048,
                 })
                 .unwrap();
-            let state = Arc::new(AppState::new(storage, Some(manager), Default::default()));
+            let state = Arc::new(
+                AppState::new(storage, Some(manager), Default::default())
+                    .for_unverified_test_fixture(),
+            );
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let address = listener.local_addr().unwrap();
             let app = axum::Router::new()

@@ -1,7 +1,9 @@
 //! Checked fixed-width SUM contracts with independent finite arithmetic bounds.
-use logex_query::execute_sql;
+
+mod support;
 use logex_storage::{PartitionManager, PartitionManagerConfig};
 use serde_json::json;
+use support::execute_sql;
 
 fn fixture() -> (tempfile::TempDir, PartitionManager) {
     let tmp = tempfile::tempdir().unwrap();

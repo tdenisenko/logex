@@ -185,3 +185,8 @@ async fn shutdown_signal(mut rx: tokio::sync::watch::Receiver<bool>) {
     }
     tracing::info!("HTTP server shutting down");
 }
+
+#[cfg(test)]
+extern crate self as logex_server;
+#[cfg(test)]
+mod tests;

@@ -85,13 +85,16 @@ impl AccountedRoute {
 
 fn limited_state() -> (TempDir, Arc<AppState>) {
     let (tmp, storage) = setup_storage();
-    let state = Arc::new(AppState::with_query_limits(
-        storage,
-        None,
-        SyncStatus::default(),
-        QueryConcurrencyLimit::new(1).unwrap(),
-        QueryMemoryLimit::default(),
-    ));
+    let state = Arc::new(
+        AppState::with_query_limits(
+            storage,
+            None,
+            SyncStatus::default(),
+            QueryConcurrencyLimit::new(1).unwrap(),
+            QueryMemoryLimit::default(),
+        )
+        .for_unverified_test_fixture(),
+    );
     (tmp, state)
 }
 
@@ -160,7 +163,8 @@ async fn generated_client_routes_match_expected_values() {
     let expected_rows = make_test_rows();
     let expected_logs = expected_rows.iter().map(expected_entry).collect::<Vec<_>>();
     let (tmp, storage) = setup_storage();
-    let state = Arc::new(AppState::new(storage, None, SyncStatus::default()));
+    let state =
+        Arc::new(AppState::new(storage, None, SyncStatus::default()).for_unverified_test_fixture());
     let mut client = LogExServiceClient::new(grpc_service(Arc::clone(&state)));
 
     let query = client

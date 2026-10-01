@@ -111,7 +111,8 @@ fn snapshot_while_worker_queued(protocol: Protocol, reorg: bool) {
     .unwrap();
     storage.write_batch(&[row(100), row(200)]).unwrap();
     storage.checkpoint().unwrap();
-    let state = Arc::new(AppState::new(storage, None, SyncStatus::default()));
+    let state =
+        Arc::new(AppState::new(storage, None, SyncStatus::default()).for_unverified_test_fixture());
     // Occupy the one blocking worker. This deterministically pauses real API
     // execution after snapshot capture without slowing or replacing storage I/O.
     let runtime = tokio::runtime::Builder::new_current_thread()
