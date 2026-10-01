@@ -174,6 +174,14 @@ buffer capacity. Protected range reads select the requested interval; legacy
 formats retain complete validation. Candidate IDs are refined in place against
 accounted columns and canonical bits. Their charge follows the physical plan
 and its executing streams, including retained capacity after a pushed limit.
+General SQL preserves exact address/topic membership filters expressed as `IN`
+or same-column equality disjunctions. Scans without a pushed limit select up to
+eight independent partitions concurrently under the shared memory budget;
+limited scans select sequentially so they can stop at the required prefix.
+For general SQL, `total_scanned` counts selected candidates before residual
+filtering and pushed limits, accumulating each planned table scan in joins and
+unions. Limited native paths may stop selection early. This does not count
+physical rows read or repeated execution of a reused scan.
 
 Server native log filters and native SQL SELECT keep candidate, column and row
 allocations charged through materialization, sorting, pagination and protocol
