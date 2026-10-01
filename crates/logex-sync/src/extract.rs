@@ -30,7 +30,8 @@ fn check_indexed_count(count: usize, field: &str) -> Result<()> {
 
 /// Extract authenticated receipt logs using caller-supplied block/tx metadata.
 /// Returns an error if the logs cannot be represented without truncation.
-pub fn extract_logs(ctx: &BlockContext, txs: &[(B256, Vec<Log>)]) -> Result<Vec<LogRow>> {
+#[cfg(test)]
+fn extract_logs(ctx: &BlockContext, txs: &[(B256, Vec<Log>)]) -> Result<Vec<LogRow>> {
     check_indexed_count(txs.len(), "transaction")?;
     let total = checked_log_count(txs.iter().map(|(_, logs)| logs.len()))?;
     let mut rows = Vec::new();
@@ -44,8 +45,9 @@ pub fn extract_logs(ctx: &BlockContext, txs: &[(B256, Vec<Log>)]) -> Result<Vec<
     Ok(rows)
 }
 
-/// Convenience wrapper for the primary sync path.
-pub fn extract_from_block(
+/// Independent extraction control for primitive/schema regression tests.
+#[cfg(test)]
+fn extract_from_block(
     block_number: u64,
     block_hash: B256,
     timestamp: u64,

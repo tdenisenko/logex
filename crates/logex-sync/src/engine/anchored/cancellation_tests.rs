@@ -60,6 +60,13 @@ fn prepared(rejected: bool) -> PreparedHistoricalBatch {
         body_receipt_elapsed: Duration::ZERO,
         extracted: super::super::ingest::HistoricalExtractedBatch {
             chunks: vec![super::super::ingest::HistoricalExtractedChunk {
+                verified_blocks: vec![
+                    logex_storage::VerifiedBlockLogs::from_empty_header(&Header {
+                        number: 100,
+                        ..Default::default()
+                    })
+                    .unwrap(),
+                ],
                 row_count: rows.len() as u64,
                 rows,
                 block_count: 1,
@@ -98,12 +105,26 @@ fn shutdown_write_control(rejected: bool, stop: bool) {
     let (was_pending, finished_early, result, storage, _resources) = runtime.block_on(async {
         let (mut engine, shutdown, resources) = fixture().await;
         let storage = Arc::clone(&engine.storage);
-        // Readers allow the pre-write status lookup, but hold the actual write.
-        let reader = storage.read().await;
         let mut batch = prepared(rejected);
         batch.lowest_block = floor;
         batch.highest_block = floor;
-        batch.extracted.chunks[0].lowest_header.number = floor;
+        let chunk = &mut batch.extracted.chunks[0];
+        chunk.lowest_header.number = floor;
+        chunk.verified_blocks = vec![
+            logex_storage::VerifiedBlockLogs::from_empty_header(&chunk.lowest_header).unwrap(),
+        ];
+        let child = Header {
+            number: floor + 1,
+            parent_hash: chunk.lowest_header.hash_slow(),
+            ..Default::default()
+        };
+        storage
+            .write()
+            .await
+            .ingest_historical_batch(&[], &child)
+            .unwrap();
+        // Readers allow the pre-write status lookup, but hold the actual write.
+        let reader = storage.read().await;
         let mut work =
             Box::pin(engine.ingest_historical_prepare_result(0, None, Ok(Ok(batch)), false));
         let was_pending = futures_util::poll!(work.as_mut()).is_pending();
@@ -130,10 +151,17 @@ fn shutdown_write_control(rejected: bool, stop: bool) {
     if rejected {
         let error = result.expect_err("shutdown discarded the pending storage failure");
         assert!(
-            error.to_string().contains("historical rows precede"),
+            error.to_string().contains("row has no verified block"),
             "{error}"
         );
-        assert_eq!(storage.blocking_read().historical_floor(), None);
+        assert_eq!(
+            storage
+                .blocking_read()
+                .historical_floor()
+                .unwrap()
+                .block_number,
+            floor + 1
+        );
     } else {
         assert_eq!(result.unwrap(), !stop);
         assert_eq!(
@@ -273,6 +301,35 @@ async fn generation_reset_during_write(rejected: bool) {
     let (mut engine, _shutdown, _resources) = fixture().await;
     engine.historical_prepare_expected_sequence = 3028;
     engine.historical_fetch_expected_sequence = 3029;
+    let mut headers = Vec::new();
+    let mut parent_hash = B256::ZERO;
+    for number in 0..=101 {
+        let header = Header {
+            number,
+            parent_hash,
+            ..Default::default()
+        };
+        parent_hash = header.hash_slow();
+        headers.push(header);
+    }
+    engine.historical_fetch_next_sequence = 3031;
+    engine.historical_fetch_expected_child = Some(headers[100].clone());
+    engine.historical_fetch_planned_child = Some(headers[99].clone());
+    // Keep the next expected fetch owned so pre-write refill does not itself
+    // repair a deliberately incomplete fixture before the write can start.
+    engine.historical_fetch_handles.insert(
+        3029,
+        HistoricalFetchHandle {
+            attempts: HashMap::from([(
+                0,
+                HistoricalFetchAttemptHandle {
+                    child_header: headers[100].clone(),
+                    owner: 0,
+                    handle: AbortOnDropHandle::new(tokio::spawn(std::future::pending())),
+                },
+            )]),
+        },
+    );
     let generation = engine.historical_fetch_generation;
     let tx = engine.historical_fetch_tx.clone();
     let (retired, mut retired_rx) = tokio::sync::oneshot::channel();
@@ -283,7 +340,7 @@ async fn generation_reset_during_write(rejected: bool) {
             attempts: HashMap::from([(
                 0,
                 HistoricalFetchAttemptHandle {
-                    child_header: Header::default(),
+                    child_header: headers[99].clone(),
                     owner: 0,
                     handle: AbortOnDropHandle::new(tokio::spawn(async move {
                         let _completion = completion;
@@ -295,14 +352,29 @@ async fn generation_reset_during_write(rejected: bool) {
     );
     let storage = Arc::clone(&engine.storage);
     let status = Arc::clone(&engine.sync_status);
+    let mut batch = prepared(rejected);
+    batch.extracted.chunks[0].lowest_header = headers[100].clone();
+    batch.extracted.chunks[0].verified_blocks =
+        vec![logex_storage::VerifiedBlockLogs::from_empty_header(&headers[100]).unwrap()];
+    storage
+        .write()
+        .await
+        .ingest_historical_batch(&[], &headers[101])
+        .unwrap();
     let reader = storage.read().await;
-    let mut work = Box::pin(engine.ingest_historical_prepare_result(
-        3028,
-        None,
-        Ok(Ok(prepared(rejected))),
-        false,
-    ));
-    assert!(futures_util::poll!(work.as_mut()).is_pending());
+    let mut work =
+        Box::pin(engine.ingest_historical_prepare_result(3028, None, Ok(Ok(batch)), false));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            assert!(futures_util::poll!(work.as_mut()).is_pending());
+            if storage.try_read().is_err() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the blocking write must acquire its place in the storage queue");
     assert!(
         status
             .lock()
@@ -318,7 +390,7 @@ async fn generation_reset_during_write(rejected: bool) {
     let retirement = tokio::time::timeout(Duration::from_secs(2), async {
         tokio::select! {
             result = &mut retired_rx => result.unwrap(),
-            _ = &mut work => panic!("the owned storage write must remain pending"),
+            result = &mut work => panic!("the owned storage write must remain pending: {result:?}"),
         }
     })
     .await;
@@ -333,9 +405,17 @@ async fn generation_reset_during_write(rejected: bool) {
             result
                 .unwrap_err()
                 .to_string()
-                .contains("historical rows precede")
+                .contains("row has no verified block")
         );
-        assert_eq!(storage.read().await.historical_floor(), None);
+        assert_eq!(
+            storage
+                .read()
+                .await
+                .historical_floor()
+                .unwrap()
+                .block_number,
+            101
+        );
         return;
     }
     assert!(result.unwrap());
@@ -360,7 +440,12 @@ async fn generation_reset_during_write(rejected: bool) {
     next.requested_headers = 100;
     next.planned_return_blocks = 100;
     next.extracted.chunks[0].block_count = 100;
-    next.extracted.chunks[0].lowest_header.number = 0;
+    next.extracted.chunks[0].lowest_header = headers[0].clone();
+    next.extracted.chunks[0].verified_blocks = headers[..100]
+        .iter()
+        .map(logex_storage::VerifiedBlockLogs::from_empty_header)
+        .collect::<std::io::Result<_>>()
+        .unwrap();
     engine.historical_prepare_completed.insert(
         0,
         HistoricalCompletedPrepare {
@@ -1023,10 +1108,12 @@ async fn committed_reorg_publishes_exact_removal_after_storage_success() {
             number: 100,
             ..Default::default()
         };
+        let (payload_header, payload) = super::checkpoint_spool_tests::payload();
         let old_tip = Header {
             number: 101,
             parent_hash: ancestor.hash_slow(),
-            ..Default::default()
+            timestamp: 0,
+            ..payload_header
         };
         let replacement = Header {
             timestamp: 1,
@@ -1048,22 +1135,15 @@ async fn committed_reorg_publishes_exact_removal_after_storage_success() {
             .consensus
             .append_anchors(vec![ancestor_record, record(&replacement, 2)])
             .unwrap();
-        let row = logex_types::LogRow {
-            block_number: 101,
-            block_hash: old_tip.hash_slow(),
-            timestamp: 0,
-            tx_hash: B256::repeat_byte(9),
-            tx_index: 0,
-            log_index: 0,
-            address: alloy_primitives::Address::repeat_byte(1),
-            topic0: None,
-            topic1: None,
-            topic2: None,
-            topic3: None,
-            data: Default::default(),
-            data_len: 0,
-            source: logex_types::Source::Receipt,
-        };
+        let mut old_rows = Vec::new();
+        logex_storage::VerifiedBlockLogs::verify_and_append(
+            &old_tip,
+            BlockBody::transactions(&payload.0.1),
+            &payload.1.1,
+            &mut old_rows,
+        )
+        .unwrap();
+        let row = old_rows.remove(0);
         {
             let mut storage = engine.storage.write().await;
             storage
@@ -1105,14 +1185,21 @@ async fn committed_reorg_publishes_exact_removal_after_storage_success() {
                 engine.storage.read().await.sync_head().unwrap().block_hash,
                 ancestor.hash_slow()
             );
-            let mut replacement_row = row.clone();
-            replacement_row.block_hash = replacement.hash_slow();
-            replacement_row.timestamp = replacement.timestamp;
+            let mut replacement_rows = Vec::new();
+            let verified = logex_storage::VerifiedBlockLogs::verify_and_append(
+                &replacement,
+                BlockBody::transactions(&payload.0.1),
+                &payload.1.1,
+                &mut replacement_rows,
+            )
+            .unwrap();
+            let replacement_row = replacement_rows.remove(0);
             let replacement_anchor = record(&replacement, 2).anchor;
             assert!(
                 engine
                     .publish_selected_forward_rows(
                         std::slice::from_ref(&replacement_row),
+                        std::slice::from_ref(&verified),
                         std::slice::from_ref(&replacement),
                         std::slice::from_ref(&replacement_row.block_hash),
                         &replacement_anchor,

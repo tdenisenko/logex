@@ -1,11 +1,11 @@
-use alloy_consensus::{BlockHeader, Header, ReceiptWithBloom, TxReceipt, transaction::TxHashRef};
-use alloy_primitives::{B256, Log};
+use alloy_consensus::{BlockHeader, Header, ReceiptWithBloom, TxReceipt};
+use alloy_primitives::B256;
 use eyre::Result;
 use logex_cl::ConsensusStore;
 use reth_eth_wire::NetworkPrimitives;
 use reth_ethereum_forks::Head;
 use reth_network_peers::{NodeRecord, PeerId};
-use reth_primitives_traits::{BlockBody, SignedTransaction};
+use reth_primitives_traits::BlockBody;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -38,7 +38,7 @@ mod ingest;
 mod memory;
 
 use self::helpers::{
-    assemble_txs, cancelable, execution_head, historical_backfill_peer_floor, peer_refill_goal,
+    cancelable, execution_head, historical_backfill_peer_floor, peer_refill_goal,
     preferred_body_peers, refill_peer_floor, wait_for_shutdown,
 };
 
@@ -52,7 +52,6 @@ const HISTORICAL_BACKFILL_HEADER_BATCH_LIMIT: u64 = 1024;
 pub(super) struct HistoricalValidatedBlock {
     index: usize,
     header: Header,
-    block_hash: B256,
     body_peer: PeerId,
     body: <LogexNetworkPrimitives as NetworkPrimitives>::BlockBody,
     receipt_peer: PeerId,

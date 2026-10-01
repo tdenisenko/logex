@@ -510,6 +510,11 @@ fn prepared(headers: &[Header]) -> PreparedHistoricalBatch {
         body_receipt_elapsed: Duration::ZERO,
         extracted: super::super::ingest::HistoricalExtractedBatch {
             chunks: vec![super::super::ingest::HistoricalExtractedChunk {
+                verified_blocks: headers
+                    .iter()
+                    .map(logex_storage::VerifiedBlockLogs::from_empty_header)
+                    .collect::<std::io::Result<_>>()
+                    .unwrap(),
                 rows: Vec::new(),
                 row_count: 0,
                 block_count: headers.len(),

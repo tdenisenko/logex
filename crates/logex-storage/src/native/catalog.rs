@@ -12,7 +12,8 @@ use logex_types::{ChainAnchors, ExecutionAnchor};
 use serde::{Deserialize, Serialize};
 
 pub const STORAGE_FORMAT_VERSION: u32 = 11;
-pub const CATALOG_FORMAT_VERSION: u32 = 13;
+pub const CATALOG_FORMAT_VERSION: u32 = 14;
+const UNVERIFIED_CATALOG_FORMAT_VERSION: u32 = 13;
 const CATALOG_MAGIC: &[u8; 8] = b"LXCAT013";
 const CATALOG_PREFIX_BYTES: usize = 20;
 const MAX_CACHED_HEADERS: usize = 8192;
@@ -298,6 +299,8 @@ impl CanonicalReorgIntent {
 #[serde(deny_unknown_fields)]
 pub struct StorageState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verified_log_coverage: Option<crate::VerifiedLogCoverage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) canonical_reorg: Option<CanonicalReorgIntent>,
     pub sync_head: Option<SyncHead>,
     // Encoded as a bounded canonical RLP list after the catalog metadata.
@@ -431,6 +434,16 @@ impl NativeStorageCatalog {
         let split = CATALOG_PREFIX_BYTES + metadata_len;
         let mut catalog: Self = serde_json::from_slice(&bytes[CATALOG_PREFIX_BYTES..split])
             .map_err(|error| invalid_catalog(format!("invalid catalog metadata: {error}")))?;
+        if catalog.format_version == UNVERIFIED_CATALOG_FORMAT_VERSION {
+            if catalog.state.verified_log_coverage.is_some() {
+                return Err(invalid_catalog(
+                    "legacy catalog cannot assert verified event coverage",
+                ));
+            }
+            // Reading old data does not certify it. Future writes use the new
+            // version so an older binary cannot silently ignore this invariant.
+            catalog.format_version = CATALOG_FORMAT_VERSION;
+        }
         let mut encoded = &bytes[split..];
         let mut headers = alloy_rlp::Header::decode_bytes(&mut encoded, true)
             .map_err(|error| invalid_catalog(format!("invalid cached header list: {error}")))?;
@@ -495,7 +508,9 @@ impl NativeStorageCatalog {
             return Err(invalid_catalog("truncated catalog metadata"));
         }
         let hint: Hint = serde_json::from_slice(&metadata).map_err(io::Error::other)?;
-        if hint.format_version != CATALOG_FORMAT_VERSION {
+        if hint.format_version != CATALOG_FORMAT_VERSION
+            && hint.format_version != UNVERIFIED_CATALOG_FORMAT_VERSION
+        {
             return Err(invalid_catalog("unsupported catalog metadata version"));
         }
         Ok(hint.active_hot_segment)
@@ -510,6 +525,27 @@ impl NativeStorageCatalog {
             ));
         }
         validate_cached_headers(&self.state.recent_headers)?;
+        if let Some(coverage) = self.state.verified_log_coverage
+            && (coverage.from.block_number > coverage.to.block_number
+                || self.state.sync_head.is_none_or(|head| {
+                    head.block_number != coverage.to.block_number
+                        || head.block_hash != coverage.to.block_hash
+                        || head.timestamp != coverage.to.timestamp
+                })
+                || self
+                    .state
+                    .historical_floor_header
+                    .as_ref()
+                    .is_some_and(|floor| {
+                        floor.number > coverage.from.block_number
+                            || (floor.number == coverage.from.block_number
+                                && floor.hash_slow() != coverage.from.block_hash)
+                    }))
+        {
+            return Err(invalid_catalog(
+                "verified event coverage does not match canonical progress",
+            ));
+        }
         if let Some(intent) = &self.state.canonical_reorg {
             intent.validate(&self.state)?;
         }
@@ -912,6 +948,117 @@ mod tests {
     }
 
     #[test]
+    fn previous_catalog_is_readable_but_never_implies_verified_events() {
+        let tmp = TempDir::new().unwrap();
+        let config = NativeStorageConfig {
+            data_dir: tmp.path().to_owned(),
+            ..Default::default()
+        };
+        let (mut catalog, paths) = NativeStorageCatalog::open_or_create(&config).unwrap();
+        catalog.format_version = UNVERIFIED_CATALOG_FORMAT_VERSION;
+        catalog.state.sync_head = Some(SyncHead {
+            block_number: 100,
+            block_hash: Default::default(),
+            timestamp: 5,
+        });
+        catalog.state.historical_floor_header = Some(Header::default());
+        let bytes = encode_frame(&serde_json::to_vec(&catalog).unwrap(), &[]).unwrap();
+        fs::write(paths.catalog_path(), &bytes).unwrap();
+        let (loaded, _) = NativeStorageCatalog::open_or_create(&config).unwrap();
+        assert_eq!(loaded.format_version, CATALOG_FORMAT_VERSION);
+        assert!(loaded.state.verified_log_coverage.is_none());
+        assert_eq!(fs::read(paths.catalog_path()).unwrap(), bytes);
+
+        let marker = logex_types::ExecutionBlockMarker {
+            block_number: 100,
+            block_hash: Default::default(),
+            timestamp: 5,
+        };
+        catalog.state.verified_log_coverage = Some(crate::VerifiedLogCoverage {
+            from: marker,
+            to: marker,
+        });
+        let forged = encode_frame(&serde_json::to_vec(&catalog).unwrap(), &[]).unwrap();
+        assert!(NativeStorageCatalog::decode(&forged).is_err());
+    }
+
+    #[test]
+    fn verified_coverage_rejects_inconsistent_progress_even_with_valid_frame() {
+        let tmp = TempDir::new().unwrap();
+        let (mut catalog, _) = NativeStorageCatalog::open_or_create(&NativeStorageConfig {
+            data_dir: tmp.path().to_owned(),
+            ..Default::default()
+        })
+        .unwrap();
+        let header = Header {
+            number: 100,
+            timestamp: 12,
+            ..Default::default()
+        };
+        let marker = logex_types::ExecutionBlockMarker {
+            block_number: header.number,
+            block_hash: header.hash_slow(),
+            timestamp: header.timestamp,
+        };
+        catalog.state.sync_head = Some(SyncHead {
+            block_number: marker.block_number,
+            block_hash: marker.block_hash,
+            timestamp: marker.timestamp,
+        });
+        catalog.state.historical_floor_header = Some(header);
+        catalog.state.verified_log_coverage = Some(crate::VerifiedLogCoverage {
+            from: marker,
+            to: marker,
+        });
+        assert_eq!(
+            NativeStorageCatalog::decode(&catalog.encode().unwrap()).unwrap(),
+            catalog
+        );
+        for field in 0..7 {
+            let mut changed = catalog.clone();
+            match field {
+                0 => changed.state.sync_head = None,
+                1 => changed.state.sync_head.as_mut().unwrap().block_number += 1,
+                2 => {
+                    changed.state.sync_head.as_mut().unwrap().block_hash =
+                        alloy_primitives::B256::ZERO
+                }
+                3 => changed.state.sync_head.as_mut().unwrap().timestamp += 1,
+                4 => {
+                    changed
+                        .state
+                        .verified_log_coverage
+                        .as_mut()
+                        .unwrap()
+                        .from
+                        .block_number += 1
+                }
+                5 => {
+                    changed
+                        .state
+                        .historical_floor_header
+                        .as_mut()
+                        .unwrap()
+                        .number += 1
+                }
+                _ => {
+                    changed
+                        .state
+                        .historical_floor_header
+                        .as_mut()
+                        .unwrap()
+                        .timestamp += 1
+                }
+            }
+            let bytes = encode_frame(&serde_json::to_vec(&changed).unwrap(), &[]).unwrap();
+            assert!(
+                NativeStorageCatalog::decode(&bytes).is_err(),
+                "field {field}"
+            );
+        }
+    }
+
+    #[test]
     fn catalog_rejects_old_versions_and_invalid_identity_without_rewriting() {
         let tmp = TempDir::new().unwrap();
         let config = NativeStorageConfig {
@@ -927,9 +1074,9 @@ mod tests {
         assert!(NativeStorageCatalog::open_or_create(&config).is_err());
         assert_eq!(fs::read(paths.catalog_path()).unwrap(), bytes);
 
-        // Reject each earlier framed version with either its old magic or
-        // today's magic and an old metadata version, even with a valid CRC.
-        for version in 2..CATALOG_FORMAT_VERSION {
+        // Version 13 has the current framing but no event verification record.
+        // Earlier incompatible formats are rejected even with a valid CRC.
+        for version in 2..UNVERIFIED_CATALOG_FORMAT_VERSION {
             for old_magic in [false, true] {
                 let mut previous = catalog.clone();
                 previous.format_version = version;

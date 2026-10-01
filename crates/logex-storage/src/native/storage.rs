@@ -56,6 +56,8 @@ mod recovery_space;
 #[path = "reorg.rs"]
 mod reorg;
 pub use reorg::PendingCanonicalReorg;
+#[path = "verified.rs"]
+mod verified;
 
 const HISTORICAL_STAGING_MAX_BLOCK_SPAN: u64 = 65_536;
 
@@ -401,6 +403,7 @@ impl NativeStorage {
             return Ok(());
         }
 
+        self.require_unverified_storage()?;
         self.catalog.state.sync_head = Some(next);
         self.persist_state()
     }
@@ -428,6 +431,7 @@ impl NativeStorage {
             return Ok(());
         }
 
+        self.require_unverified_storage()?;
         self.catalog.state.sync_head = Some(next_sync_head);
         self.catalog.state.recent_headers = next_recent_headers;
         self.persist_state()
@@ -463,6 +467,7 @@ impl NativeStorage {
             return Ok(());
         }
 
+        self.require_unverified_storage()?;
         self.catalog.state.historical_floor_header = Some(header.clone());
         if self.catalog.state.historical_anchor_header.is_none() {
             self.catalog.state.historical_anchor_header = Some(header.clone());
@@ -510,6 +515,7 @@ impl NativeStorage {
             || self.catalog.state.recent_headers != next_recent_headers;
         let anchors_changed = self.catalog.anchors != next_anchors;
 
+        self.catalog.state.verified_log_coverage = None;
         self.catalog.state.sync_head = next_sync_head;
         self.catalog.state.recent_headers = next_recent_headers;
         self.catalog.anchors = next_anchors;
@@ -524,16 +530,28 @@ impl NativeStorage {
         Ok(())
     }
 
-    /// Publish validated canonical rows and their restart marker together.
-    /// Restart may re-fetch the bounded sync window since the last full flush.
-    /// Call `checkpoint_durable` before requiring
-    /// the latest progress to survive power loss.
+    /// Unchecked legacy import of rows and their restart marker. This never
+    /// certifies receipts and is rejected once verified coverage exists.
+    /// Restart may re-fetch uncheckpointed work; `checkpoint_durable` persists
+    /// the latest progress across power loss.
     pub fn ingest_canonical_batch(
         &mut self,
         rows: &[LogRow],
         header: &Header,
         recent_headers: &[Header],
         anchor: Option<&ExecutionAnchor>,
+    ) -> io::Result<()> {
+        self.require_unverified_storage()?;
+        self.apply_canonical_batch(rows, header, recent_headers, anchor, None)
+    }
+
+    fn apply_canonical_batch(
+        &mut self,
+        rows: &[LogRow],
+        header: &Header,
+        recent_headers: &[Header],
+        anchor: Option<&ExecutionAnchor>,
+        verification: Option<(&Header, crate::VerifiedLogCoverage)>,
     ) -> io::Result<()> {
         validate_cached_headers(recent_headers)?;
         let hash = header.hash_slow();
@@ -548,8 +566,14 @@ impl NativeStorage {
                 "canonical ingestion progress does not match its batch",
             ));
         }
+        let start = verification
+            .is_some()
+            .then(|| self.capture_verified_append(IngestRoute::Live));
         self.begin_ingestion(rows, IngestRoute::Live)?;
         self.commit_rows_to_segments(rows)?;
+        if let Some(start) = start {
+            self.verify_appended_events(start, rows)?;
+        }
         durability::checkpoint("ingestion_rows_applied", self.paths.root())?;
         self.catalog.state.sync_head = Some(SyncHead {
             block_number: header.number,
@@ -557,6 +581,13 @@ impl NativeStorage {
             timestamp: header.timestamp,
         });
         self.catalog.state.recent_headers = recent_headers.to_vec();
+        self.catalog.state.verified_log_coverage = verification.map(|(_, coverage)| coverage);
+        if let Some((first, _)) = verification {
+            // Checkpoint-gap chunks are already authenticated by their terminal
+            // anchor. Keep their first checked header even before that terminal
+            // block is published; history must not skip this earlier boundary.
+            self.advance_historical_floor(first);
+        }
         if let Some(anchor) = anchor {
             self.catalog.anchors.indexed_head = Some(*anchor);
             self.advance_historical_floor(header);
@@ -564,9 +595,20 @@ impl NativeStorage {
         self.complete_ingestion_batch()
     }
 
-    /// Publish a complete validated historical chunk and its floor together.
-    /// Uncheckpointed chunks may be re-fetched after restart, including empty blocks.
+    /// Unchecked legacy import with progress metadata; never certifies receipts.
+    /// Rejected once verified coverage exists.
     pub fn ingest_historical_batch(&mut self, rows: &[LogRow], floor: &Header) -> io::Result<()> {
+        self.require_unverified_storage()?;
+        self.apply_historical_batch(rows, floor, false, None)
+    }
+
+    fn apply_historical_batch(
+        &mut self,
+        rows: &[LogRow],
+        floor: &Header,
+        verify_readback: bool,
+        coverage: Option<crate::VerifiedLogCoverage>,
+    ) -> io::Result<()> {
         validate_cached_headers(std::slice::from_ref(floor))?;
         if rows.iter().any(|row| row.block_number < floor.number) {
             return Err(io::Error::new(
@@ -574,12 +616,17 @@ impl NativeStorage {
                 "historical rows precede their ingestion floor",
             ));
         }
+        let start = verify_readback.then(|| self.capture_verified_append(IngestRoute::Historical));
         self.begin_ingestion(rows, IngestRoute::Historical)?;
         if !rows.is_empty() {
             self.write_historical_rows(rows)?;
         }
+        if let Some(start) = start {
+            self.verify_appended_events(start, rows)?;
+        }
         durability::checkpoint("ingestion_rows_applied", self.paths.root())?;
         self.advance_historical_floor(floor);
+        self.catalog.state.verified_log_coverage = coverage;
         self.complete_ingestion_batch()
     }
 
@@ -1096,7 +1143,7 @@ impl NativeStorage {
             return Ok(());
         }
 
-        self.ensure_writable()?;
+        self.require_unverified_storage()?;
         self.begin_checkpoint_batch(rows, IngestRoute::Live)?;
         self.commit_rows_to_segments(rows)?;
         self.complete_checkpoint_batch()
@@ -1112,6 +1159,7 @@ impl NativeStorage {
             return Ok(Vec::new());
         }
 
+        self.require_unverified_storage()?;
         self.begin_checkpoint_batch(rows, IngestRoute::Historical)?;
         let appended = self.write_historical_rows(rows)?;
         self.complete_checkpoint_batch()?;
@@ -1663,7 +1711,7 @@ impl NativeStorage {
     /// Change one block's row flags without rewinding canonical progress.
     /// Use `apply_canonical_reorg` for a recoverable chain-level reorg.
     pub fn mark_non_canonical(&mut self, block_hash: B256) -> std::io::Result<u64> {
-        self.ensure_writable()?;
+        self.require_unverified_storage()?;
         self.checkpoint_durable()?;
         self.recovery_required = true;
         let marked = self.apply_non_canonical_hashes(&BTreeSet::from([block_hash]), None)?;

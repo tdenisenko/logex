@@ -1457,6 +1457,7 @@ fn validate_and_extract_historical_block_chunk(
     rows.try_reserve(total_log_capacity)
         .map_err(|error| eyre::eyre!("reserve historical log rows: {error}"))?;
     let mut peer_notes = Vec::new();
+    let mut verified_blocks = Vec::with_capacity(block_count);
     let mut lowest_header = None;
     let mut lowest_block = u64::MAX;
     let mut highest_block = 0u64;
@@ -1499,14 +1500,12 @@ fn validate_and_extract_historical_block_chunk(
         }
 
         let extraction_started = std::time::Instant::now();
-        extract::append_from_body_receipts(
-            &mut rows,
-            block_number,
-            job.block_hash,
-            job.header.timestamp(),
-            &job.body,
+        verified_blocks.push(logex_storage::VerifiedBlockLogs::verify_and_append(
+            &job.header,
+            BlockBody::transactions(&job.body),
             &job.receipts,
-        )?;
+            &mut rows,
+        )?);
         extraction_elapsed += extraction_started.elapsed();
 
         push_unique_peer_note(&mut peer_notes, job.body_peer);
@@ -1530,6 +1529,7 @@ fn validate_and_extract_historical_block_chunk(
         start_index,
         peer_notes,
         extracted: super::ingest::HistoricalExtractedChunk {
+            verified_blocks,
             rows,
             row_count,
             block_count,
@@ -1614,7 +1614,6 @@ fn validate_historical_block(
     Ok(HistoricalValidatedBlock {
         index,
         header,
-        block_hash,
         body_peer,
         body,
         receipt_peer,
@@ -2927,18 +2926,17 @@ impl SyncEngine {
 
         let block_count = validated.len() as u64;
         let mut rows = Vec::new();
+        let mut verified_blocks = Vec::with_capacity(validated.len());
         for block in &validated {
-            extract::append_from_body_receipts(
-                &mut rows,
-                block.header.number(),
-                block.block_hash,
-                block.header.timestamp(),
-                &block.body,
+            verified_blocks.push(logex_storage::VerifiedBlockLogs::verify_and_append(
+                &block.header,
+                BlockBody::transactions(&block.body),
                 &block.receipts,
-            )?;
+                &mut rows,
+            )?);
         }
         if !self
-            .publish_selected_forward_rows(&rows, &headers, &hashes, &anchor)
+            .publish_selected_forward_rows(&rows, &verified_blocks, &headers, &hashes, &anchor)
             .await?
         {
             return Ok((false, None));
@@ -3277,16 +3275,17 @@ impl SyncEngine {
                     return Ok(progressed);
                 }
 
-                let txs = assemble_txs(body, block_receipts);
-                let rows = extract::extract_from_block(
-                    block_number,
-                    block_hash,
-                    header.timestamp(),
-                    &txs,
+                let mut rows = Vec::new();
+                let verified_block = logex_storage::VerifiedBlockLogs::verify_and_append(
+                    header,
+                    BlockBody::transactions(body),
+                    block_receipts,
+                    &mut rows,
                 )?;
                 if !self
                     .publish_selected_forward_rows(
                         &rows,
+                        std::slice::from_ref(&verified_block),
                         std::slice::from_ref(header),
                         std::slice::from_ref(&block_hash),
                         &anchor,
@@ -4634,6 +4633,11 @@ impl SyncEngine {
                         body_receipt_elapsed: Duration::ZERO,
                         extracted: super::ingest::HistoricalExtractedBatch {
                             chunks: vec![super::ingest::HistoricalExtractedChunk {
+                                verified_blocks: header_batch
+                                    .headers
+                                    .iter()
+                                    .map(logex_storage::VerifiedBlockLogs::from_empty_header)
+                                    .collect::<std::io::Result<Vec<_>>>()?,
                                 rows: Vec::new(),
                                 row_count: 0,
                                 block_count: empty_prefix,
@@ -6896,10 +6900,14 @@ impl SyncEngine {
             .unwrap_or_else(|| lowest_header.number());
         let block_count = headers.len() as u64;
         let floor = super::ingest::execution_marker_from_header(lowest_header);
+        let verified_blocks = headers
+            .iter()
+            .map(logex_storage::VerifiedBlockLogs::from_empty_header)
+            .collect::<std::io::Result<Vec<_>>>()?;
         let anchor = {
             let mut storage = self.storage.write().await;
             storage
-                .record_historical_floor(lowest_header)
+                .ingest_verified_historical_batch(&[], &verified_blocks)
                 .map_err(|error| eyre::eyre!("historical metadata error: {error}"))?;
             storage.historical_anchor()
         };
@@ -7436,7 +7444,7 @@ mod tests {
             for (index, block) in validated.iter().enumerate() {
                 assert_eq!(block.index, index);
                 assert_eq!(block.header, headers[index]);
-                assert_eq!(block.block_hash, hashes[index]);
+                assert_eq!(block.header.hash_slow(), hashes[index]);
             }
             let (extracted, _, _, _, extracted_blocks, _, _) =
                 validate_and_extract_historical_blocks_streaming(&headers, &hashes, blocks)
@@ -7471,7 +7479,7 @@ mod tests {
         // Deliberately inconsistent with EVM log rules, but self-consistent
         // commitments let us test the local extraction error channel separately.
         let receipt = crate::primitives::LogexReceipt {
-            logs: vec![Log {
+            logs: vec![alloy_primitives::Log {
                 address: Address::ZERO,
                 data: LogData::new_unchecked(vec![B256::ZERO; 5], Bytes::new()),
             }],
@@ -7545,6 +7553,7 @@ mod tests {
             body_receipt_elapsed: Duration::from_millis(20),
             extracted: super::ingest::HistoricalExtractedBatch {
                 chunks: vec![super::ingest::HistoricalExtractedChunk {
+                    verified_blocks: Vec::new(),
                     rows,
                     row_count: row_count as u64,
                     block_count,
