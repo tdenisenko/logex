@@ -74,7 +74,7 @@ pub(super) fn assessment_report(report: &RepairAssessmentReport) -> Value {
                 let mut value = match &segment.disposition {
                     SegmentRepairDisposition::Verified => json!({
                         "status": "verified",
-                        "summary": "Primary rows match the local commitment and required index artifacts passed binding and payload checks.",
+                        "summary": "Primary rows match the local commitment and required index artifacts passed binding, payload and exhaustive source-membership checks.",
                     }),
                     SegmentRepairDisposition::IndexRebuildRequired(issue) => json!({
                         "status": "index_rebuild_required",

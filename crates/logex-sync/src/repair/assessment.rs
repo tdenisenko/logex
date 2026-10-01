@@ -35,8 +35,8 @@ pub struct RepairIssue {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SegmentRepairDisposition {
     /// Primary rows match their local commitment; required index artifacts pass
-    /// binding and payload checks. Neither check authenticates chain completeness
-    /// or proves semantic correspondence of every index entry to its source.
+    /// binding, payload and exhaustive source-membership checks. These local
+    /// checks do not authenticate canonical-chain membership or completeness.
     Verified,
     /// Primary rows passed. The selected index profile is absent, stale or fails
     /// artifact verification. A rebuild still needs exclusive index ownership.
