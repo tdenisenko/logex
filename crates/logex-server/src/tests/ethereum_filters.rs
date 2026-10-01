@@ -90,7 +90,7 @@ fn setup_mode(mode: Fixture) -> (tempfile::TempDir, Arc<AppState>) {
     }
     (
         dir,
-        Arc::new(AppState::new(storage, None, SyncStatus::default())),
+        Arc::new(AppState::new(storage, None, SyncStatus::default()).for_unverified_test_fixture()),
     )
 }
 
@@ -421,25 +421,37 @@ async fn independent_filter_oracle_agrees_across_protocols_and_storage_plans() {
             let mut native = filter.to_native_filter(storage.head_block().unwrap_or(0));
             native.limit = case.limit;
             native.offset = case.offset;
-            let got = logex_query::execute_log_filter(&storage, &native)
-                .unwrap()
-                .into_iter()
-                .map(|row| row.log_index)
-                .collect::<Vec<_>>();
+            let got = logex_query::execute_log_filter_on_snapshot_with_cancel(
+                &logex_query::NativeStorageSnapshot::for_unverified_inspection(&storage),
+                &native,
+                None,
+            )
+            .unwrap()
+            .into_iter()
+            .map(|row| row.log_index)
+            .collect::<Vec<_>>();
             assert_eq!(got, expected, "native {mode:?} {}", case.wire);
         }
         let storage = state.storage.read().await;
         assert_eq!(
-            logex_query::execute_log_filter(&storage, &NativeLogFilter::new())
-                .unwrap()
-                .len(),
+            logex_query::execute_log_filter_on_snapshot_with_cancel(
+                &logex_query::NativeStorageSnapshot::for_unverified_inspection(&storage),
+                &NativeLogFilter::new(),
+                None
+            )
+            .unwrap()
+            .len(),
             5
         );
         let empty = NativeLogFilter::new().with_topic(0, TopicConstraint::AnyOf(vec![]));
         assert!(
-            logex_query::execute_log_filter(&storage, &empty)
-                .unwrap()
-                .is_empty()
+            logex_query::execute_log_filter_on_snapshot_with_cancel(
+                &logex_query::NativeStorageSnapshot::for_unverified_inspection(&storage),
+                &empty,
+                None
+            )
+            .unwrap()
+            .is_empty()
         );
     }
 }

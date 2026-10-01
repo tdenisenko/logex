@@ -37,13 +37,16 @@ fn state() -> (tempfile::TempDir, Arc<AppState>) {
             source: Source::Receipt,
         }])
         .unwrap();
-    let state = Arc::new(AppState::with_query_limits(
-        storage,
-        None,
-        SyncStatus::default(),
-        QueryConcurrencyLimit::new(PERMITS).unwrap(),
-        QueryMemoryLimit::new(128 * 1024).unwrap(),
-    ));
+    let state = Arc::new(
+        AppState::with_query_limits(
+            storage,
+            None,
+            SyncStatus::default(),
+            QueryConcurrencyLimit::new(PERMITS).unwrap(),
+            QueryMemoryLimit::new(128 * 1024).unwrap(),
+        )
+        .for_unverified_test_fixture(),
+    );
     (temp, state)
 }
 

@@ -1,6 +1,8 @@
 //! Parsed SQL modifiers must not be silently dropped by LogEx execution paths.
 
+mod support;
 use std::sync::Arc;
+use support::execute_sql;
 
 use alloy_primitives::{Address, Bytes, keccak256};
 use datafusion::arrow::array::{Array, ArrayRef, StringArray, UInt64Array};
@@ -8,7 +10,7 @@ use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::datasource::MemTable;
 use datafusion::prelude::SessionContext;
-use logex_query::execute_sql;
+
 use logex_storage::{PartitionManager, PartitionManagerConfig};
 use logex_types::{LogRow, Source};
 use serde_json::json;

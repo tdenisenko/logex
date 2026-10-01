@@ -79,6 +79,7 @@ use crate::native::{
     retain_ordered_prefix_with_memory, scan_native_partition_with_memory,
     sort_native_rows_with_memory,
 };
+use crate::{QueryCoverageError, query_coverage_error};
 #[path = "native_sum_memory.rs"]
 mod native_sum_memory;
 use crate::result::{JsonResultBuilder, QueryJsonRows, SQL_RESULT_STAGE, btree_node_bytes};
@@ -103,6 +104,8 @@ pub const DEFAULT_QUERY_PAGE_SIZE: usize = 50;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SqlQueryError {
+    #[error("{0}")]
+    Coverage(#[from] QueryCoverageError),
     #[error("query snapshot changed during a reorg or storage restart; retry")]
     SnapshotChanged,
     #[error("storage error: {0}")]
@@ -117,6 +120,9 @@ pub enum SqlQueryError {
 
 impl From<DataFusionError> for SqlQueryError {
     fn from(error: DataFusionError) -> Self {
+        if let Some(coverage) = query_coverage_error(&error) {
+            return Self::Coverage(coverage);
+        }
         match capacity_error_message(&error) {
             Some(message) => Self::Capacity(message),
             None => Self::DataFusion(error),
@@ -518,6 +524,11 @@ impl TableProvider for LogexTableProvider {
         limit: Option<usize>,
     ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
         let native_filters = build_native_scan_filters(filters)?;
+        for filter in &native_filters {
+            self.snapshot
+                .require_coverage(filter)
+                .map_err(|error| DataFusionError::External(Box::new(error)))?;
+        }
         let filter = &native_filters[0];
         let projected_schema = projected_schema(self.schema(), projection)?;
         let projected_columns = projected_column_names(self.schema(), projection);
@@ -809,7 +820,7 @@ pub async fn execute_sql_page_on_snapshot(
 
 /// Execute one SQL page against a captured storage view using a shared memory budget.
 ///
-/// The view remains subject to optimistic invalidation checks. DataFusion operator
+/// The view requires verified coverage and reorg invalidation checks. DataFusion operator
 /// reservations, index candidates, exact retained row IDs, fixed and variable-column
 /// scan sources, retained Arrow output from custom scans, and structured output from
 /// DataFusion and native SQL shortcuts participate in `memory` across concurrent queries.
@@ -971,6 +982,7 @@ fn try_execute_native_select(
     let Some(mut native_query) = parse_native_select_query(sql)? else {
         return Ok(None);
     };
+    snapshot.require_coverage(&native_query.filter)?;
     unique_names(
         native_query
             .columns
@@ -1854,6 +1866,7 @@ fn try_execute_native_count_aggregate(
     let Some(native_query) = parse_native_count_query(sql)? else {
         return Ok(None);
     };
+    snapshot.require_coverage(&native_query.filter)?;
     check_query_canceled(cancel_check.as_ref()).map_err(SqlQueryError::DataFusion)?;
     unique_names(
         native_query
@@ -2340,6 +2353,10 @@ fn try_execute_native_data_sum(
     let Some(native_query) = parse_native_data_sum_query(sql)? else {
         return Ok(None);
     };
+    snapshot.require_coverage(&native_query.filter)?;
+    for filter in &native_query.candidate_filters {
+        snapshot.require_coverage(filter)?;
+    }
     unique_names(
         native_query
             .projections
@@ -4515,7 +4532,9 @@ fn sql_numeric_bigint_expr(expr: &SqlAstExpr) -> Option<BigInt> {
 }
 
 fn map_native_query_io_error(err: std::io::Error) -> SqlQueryError {
-    if err.kind() == std::io::ErrorKind::Interrupted {
+    if let Some(coverage) = query_coverage_error(&err) {
+        SqlQueryError::Coverage(coverage)
+    } else if err.kind() == std::io::ErrorKind::Interrupted {
         SqlQueryError::DataFusion(DataFusionError::Execution("query canceled".to_owned()))
     } else if let Some(message) = capacity_error_message(&err) {
         SqlQueryError::Capacity(message)
@@ -8008,6 +8027,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+    use crate::test_support::{execute_sql, execute_sql_page};
 
     const BATCHED_SUM_TEST_ROWS: usize = 16_385;
 
@@ -8824,7 +8844,7 @@ mod tests {
         for (kind, (_tmp, storage)) in [("raw", raw), ("bundled", bundled)] {
             let budget = QueryMemoryBudget::new(QueryMemoryLimit::new(64 * 1024 * 1024).unwrap());
             let provider = LogexTableProvider::new(
-                StorageSnapshot::from_storage(&storage),
+                StorageSnapshot::for_unverified_inspection(&storage),
                 Arc::new(AtomicU64::new(0)),
                 None,
                 budget.clone(),
@@ -8866,7 +8886,7 @@ mod tests {
         let budget = QueryMemoryBudget::new(QueryMemoryLimit::new(64 * 1024 * 1024).unwrap());
         let result = execute_sql_page_on_snapshot_with_memory(
             "SELECT block_number FROM logs ORDER BY block_number + 0",
-            StorageSnapshot::from_storage(&storage),
+            StorageSnapshot::for_unverified_inspection(&storage),
             storage.head_block().unwrap_or(0),
             SqlQueryPage::default(),
             None,
@@ -8887,7 +8907,7 @@ mod tests {
         let budget = QueryMemoryBudget::new(QueryMemoryLimit::new(1_024).unwrap());
         let result = execute_sql_page_on_snapshot_with_memory(
             "SELECT block_number FROM logs ORDER BY block_number + 0",
-            StorageSnapshot::from_storage(&storage),
+            StorageSnapshot::for_unverified_inspection(&storage),
             storage.head_block().unwrap_or(0),
             SqlQueryPage::default(),
             Some(Arc::new(|| true)),
@@ -8906,7 +8926,7 @@ mod tests {
     #[tokio::test]
     async fn native_structured_results_reject_one_byte_short_and_release() {
         let (_tmp, storage) = setup_storage();
-        let snapshot = StorageSnapshot::from_storage(&storage);
+        let snapshot = StorageSnapshot::for_unverified_inspection(&storage);
         let head = storage.head_block().unwrap_or(0);
         for sql in ["SELECT table_name FROM information_schema.tables"] {
             let probe = QueryMemoryBudget::new(QueryMemoryLimit::new(64 * 1024 * 1024).unwrap());
@@ -9477,7 +9497,7 @@ mod tests {
     #[test]
     fn native_select_rows_remain_charged_through_json_materialization() {
         let (_tmp, storage) = setup_storage();
-        let snapshot = StorageSnapshot::from_storage(&storage);
+        let snapshot = StorageSnapshot::for_unverified_inspection(&storage);
         let query = parse_native_select_query(
             "SELECT block_number, block_hash, data FROM logs \
              ORDER BY block_number, tx_index, log_index",
@@ -9528,7 +9548,7 @@ mod tests {
         let result = execute_sql_page_on_snapshot_with_memory(
             "SELECT block_number, log_index, topic1 AS selected_topic, data_len \
              FROM logs ORDER BY block_number DESC, tx_index DESC, log_index DESC",
-            StorageSnapshot::from_storage(&storage),
+            StorageSnapshot::for_unverified_inspection(&storage),
             storage.head_block().unwrap_or(0),
             SqlQueryPage::new(Some(1), 1),
             None,
@@ -9567,7 +9587,7 @@ mod tests {
     #[test]
     fn native_select_cancellation_after_entry_releases_working_sets() {
         let (_tmp, storage) = setup_storage();
-        let snapshot = StorageSnapshot::from_storage(&storage);
+        let snapshot = StorageSnapshot::for_unverified_inspection(&storage);
         let query = parse_native_select_query(
             "SELECT block_number, data FROM logs \
              ORDER BY block_number, tx_index, log_index",
@@ -9690,7 +9710,7 @@ mod tests {
         let budget = QueryMemoryBudget::new(QueryMemoryLimit::new(64 * 1024 * 1024).unwrap());
         let scanned = Arc::new(AtomicU64::new(0));
         let provider = LogexTableProvider::new(
-            StorageSnapshot::from_storage(&storage),
+            StorageSnapshot::for_unverified_inspection(&storage),
             scanned.clone(),
             None,
             budget.clone(),
@@ -9718,7 +9738,7 @@ mod tests {
     #[tokio::test]
     async fn limited_scan_does_not_open_unneeded_later_sources() {
         let (_tmp, storage) = setup_two_candidate_segments();
-        let snapshot = StorageSnapshot::from_storage(&storage);
+        let snapshot = StorageSnapshot::for_unverified_inspection(&storage);
         let sources = snapshot.partitions_in_order(logex_storage::native::LogOrder::Ascending);
         assert_eq!(sources.len(), 2);
         // A temporary local source is made unavailable after snapshot capture.
@@ -9760,7 +9780,7 @@ mod tests {
     #[tokio::test]
     async fn multiple_segment_candidate_ids_contend_and_clean_up_as_one_plan() {
         let (_tmp, storage) = setup_two_candidate_segments();
-        let snapshot = StorageSnapshot::from_storage(&storage);
+        let snapshot = StorageSnapshot::for_unverified_inspection(&storage);
         let partitions = snapshot.partitions_in_order(logex_storage::native::LogOrder::Ascending);
         assert_eq!(partitions.len(), 2);
 
@@ -11314,7 +11334,7 @@ mod tests {
     #[test]
     fn native_count_candidates_overlap_accounted_source_and_release() {
         let (_tmp, storage) = setup_source_storage();
-        let snapshot = StorageSnapshot::from_storage(&storage);
+        let snapshot = StorageSnapshot::for_unverified_inspection(&storage);
         let partition = snapshot
             .partitions_in_order(logex_storage::native::LogOrder::Ascending)
             .into_iter()
@@ -11360,7 +11380,7 @@ mod tests {
     #[test]
     fn native_count_cancellation_after_entry_releases_working_sets() {
         let (_tmp, storage) = setup_source_storage();
-        let snapshot = StorageSnapshot::from_storage(&storage);
+        let snapshot = StorageSnapshot::for_unverified_inspection(&storage);
         let query = parse_native_count_query(
             "SELECT source, COUNT(*) AS total FROM logs GROUP BY source ORDER BY source",
         )
@@ -11401,7 +11421,7 @@ mod tests {
     #[tokio::test]
     async fn native_count_uses_captured_rows_after_append() {
         let (_tmp, mut storage) = setup_source_storage();
-        let snapshot = StorageSnapshot::from_storage(&storage);
+        let snapshot = StorageSnapshot::for_unverified_inspection(&storage);
         let mut appended = make_test_rows().remove(0);
         appended.block_number = 300;
         appended.log_index = 2;
@@ -11466,7 +11486,7 @@ mod tests {
             let memory = QueryMemoryBudget::new(QueryMemoryLimit::new(1024 * 1024).unwrap());
             let error = execute_sql_page_on_snapshot_with_memory(
                 sql,
-                StorageSnapshot::from_storage(&storage),
+                StorageSnapshot::for_unverified_inspection(&storage),
                 storage.head_block().unwrap_or(0),
                 page,
                 Some(Arc::new(|| true)),

@@ -12,18 +12,41 @@ use logex_storage::native::{LogOrder, NativeLogFilter, ReadViewToken, TopicConst
 use logex_storage::{IndexReadCheckpoint, PartitionManager, SegmentReader};
 use logex_types::{LogRow, PartitionMeta, QueryBuffer, QueryMemoryBudget};
 
-/// A bounded optimistic query view. Later appends/new segments are excluded;
+use crate::coverage::{QueryCoverage, QueryCoverageError};
+
+/// A bounded query view. Later appends/new segments are excluded;
 /// representation-only compaction preserves rows. A reorg or storage close
 /// invalidates the view, so execution must fail and retry on a fresh snapshot.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct StorageSnapshot {
     sealed_partitions: Vec<PartitionMeta>,
     hot_partition: Option<PartitionMeta>,
     pub(crate) validity: Option<ReadViewToken>,
+    coverage: Option<QueryCoverage>,
+}
+
+impl Default for StorageSnapshot {
+    fn default() -> Self {
+        Self {
+            sealed_partitions: Vec::new(),
+            hot_partition: None,
+            validity: None,
+            coverage: Some(QueryCoverage::default()),
+        }
+    }
 }
 
 impl StorageSnapshot {
     pub fn from_storage(storage: &PartitionManager) -> Self {
+        let mut snapshot = Self::for_unverified_inspection(storage);
+        snapshot.coverage = Some(QueryCoverage::capture(storage));
+        snapshot
+    }
+
+    /// Explicit low-level inspection of raw imported or damaged data. Results
+    /// from this view are NOT certified Ethereum history. Network APIs must
+    /// always use `from_storage`; this view exists for diagnostics and fixtures.
+    pub fn for_unverified_inspection(storage: &PartitionManager) -> Self {
         let sealed_partitions = storage
             .sealed_partitions()
             .iter()
@@ -39,7 +62,17 @@ impl StorageSnapshot {
             sealed_partitions,
             hot_partition,
             validity: Some(storage.read_view_token()),
+            coverage: None,
         }
+    }
+
+    pub(crate) fn require_coverage(
+        &self,
+        filter: &NativeLogFilter,
+    ) -> Result<(), QueryCoverageError> {
+        self.coverage
+            .as_ref()
+            .map_or(Ok(()), |coverage| coverage.check(filter))
     }
 
     /// Check whether reorg or storage-close invalidation changed this view.
@@ -105,7 +138,10 @@ pub fn execute_log_filter_on_snapshot_with_cancel(
     cancel: Option<&crate::QueryCancelCheck>,
 ) -> std::io::Result<Vec<LogRow>> {
     snapshot.validate()?;
-    let result = execute_log_filter_snapshot_inner(snapshot, filter, cancel);
+    let result = snapshot
+        .require_coverage(filter)
+        .map_err(io::Error::other)
+        .and_then(|()| execute_log_filter_snapshot_inner(snapshot, filter, cancel));
     snapshot.validate()?;
     result
 }
@@ -121,6 +157,9 @@ pub fn execute_log_filter_on_snapshot_with_memory(
 ) -> io::Result<QueryBuffer<LogRow>> {
     snapshot.validate()?;
     let result = (|| {
+        snapshot
+            .require_coverage(filter)
+            .map_err(io::Error::other)?;
         check_candidate_canceled(cancel)?;
         let mut rows = QueryBuffer::try_with_capacity(0, Some(memory), "native query rows")?;
         if filter.limit == Some(0) || filter.min_topic_count > filter.topics.len() {
@@ -2141,6 +2180,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+    use crate::test_support::execute_log_filter;
 
     fn make_test_rows() -> Vec<LogRow> {
         vec![
@@ -3494,7 +3534,7 @@ mod tests {
     #[test]
     fn accounted_native_query_matches_pages_and_retains_payload_aliases() {
         let (_tmp, storage) = setup_storage();
-        let snapshot = StorageSnapshot::from_storage(&storage);
+        let snapshot = StorageSnapshot::for_unverified_inspection(&storage);
         let memory = QueryMemoryBudget::new(QueryMemoryLimit::new(16 * 1024 * 1024).unwrap());
         for order in [LogOrder::Ascending, LogOrder::Descending] {
             for offset in 0..4 {
@@ -3546,7 +3586,7 @@ mod tests {
         };
 
         let (_tmp, storage) = setup_storage();
-        let snapshot = StorageSnapshot::from_storage(&storage);
+        let snapshot = StorageSnapshot::for_unverified_inspection(&storage);
         let memory = QueryMemoryBudget::new(QueryMemoryLimit::new(16 * 1024 * 1024).unwrap());
         let held = memory.reserve(memory.limit(), "other query").unwrap();
         let error = execute_log_filter_on_snapshot_with_memory(

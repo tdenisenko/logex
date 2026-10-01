@@ -12,12 +12,15 @@ fn state(limit: usize) -> (tempfile::TempDir, Arc<AppState>) {
         compaction_safety_margin_blocks: 2_048,
     })
     .unwrap();
-    let state = Arc::new(AppState::with_query_concurrency(
-        storage,
-        None,
-        SyncStatus::default(),
-        QueryConcurrencyLimit::new(limit).unwrap(),
-    ));
+    let state = Arc::new(
+        AppState::with_query_concurrency(
+            storage,
+            None,
+            SyncStatus::default(),
+            QueryConcurrencyLimit::new(limit).unwrap(),
+        )
+        .for_unverified_test_fixture(),
+    );
     (temp, state)
 }
 

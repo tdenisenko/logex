@@ -1,3 +1,4 @@
+mod support;
 use alloy_primitives::{Address, B256, Bytes};
 use logex_query::{
     NativeStorageSnapshot, SqlQueryError, SqlQueryPage, execute_sql_page_on_snapshot_with_memory,
@@ -90,7 +91,7 @@ async fn native_data_sum_rejects_working_set_that_exceeds_shared_budget() {
     let memory = QueryMemoryBudget::new(limit);
     let error = execute_sql_page_on_snapshot_with_memory(
         sql,
-        NativeStorageSnapshot::from_storage(&storage),
+        NativeStorageSnapshot::for_unverified_inspection(&storage),
         storage.head_block().unwrap_or(0),
         SqlQueryPage::default(),
         None,
@@ -119,7 +120,7 @@ async fn grouped_native_data_sum_rejects_working_set_that_exceeds_shared_budget(
 
     let sql = "SELECT address, SUM(data) AS total \
                FROM logs GROUP BY address HAVING total > 0";
-    let snapshot = NativeStorageSnapshot::from_storage(&storage);
+    let snapshot = NativeStorageSnapshot::for_unverified_inspection(&storage);
     let head = storage.head_block().unwrap_or(0);
 
     let generous_memory = QueryMemoryBudget::new(QueryMemoryLimit::new(1024 * 1024).unwrap());
@@ -177,7 +178,7 @@ async fn grouped_native_sum_rejects_retained_group_state_before_empty_output() {
     let fixture = (0..ROWS).map(grouped_row).collect::<Vec<_>>();
     storage.write_batch(&fixture).unwrap();
     storage.checkpoint().unwrap();
-    let snapshot = NativeStorageSnapshot::from_storage(&storage);
+    let snapshot = NativeStorageSnapshot::for_unverified_inspection(&storage);
     let head = storage.head_block().unwrap_or(0);
     let sql = "SELECT address, SUM(data) AS total \
                FROM logs GROUP BY address HAVING total > 1";
@@ -260,7 +261,7 @@ async fn grouped_native_data_sum_preserves_residual_case_partition_and_cancel_se
     let memory = QueryMemoryBudget::new(QueryMemoryLimit::new(1024 * 1024).unwrap());
     let result = execute_sql_page_on_snapshot_with_memory(
         sql,
-        NativeStorageSnapshot::from_storage(&storage),
+        NativeStorageSnapshot::for_unverified_inspection(&storage),
         storage.head_block().unwrap_or(0),
         SqlQueryPage::default(),
         None,
@@ -299,7 +300,7 @@ async fn grouped_native_data_sum_preserves_residual_case_partition_and_cancel_se
     });
     let error = execute_sql_page_on_snapshot_with_memory(
         sql,
-        NativeStorageSnapshot::from_storage(&storage),
+        NativeStorageSnapshot::for_unverified_inspection(&storage),
         storage.head_block().unwrap_or(0),
         SqlQueryPage::default(),
         Some(cancel),
@@ -373,7 +374,7 @@ async fn grouped_native_sum_preserves_null_ties_having_and_page_order() {
         })
     };
     let memory = QueryMemoryBudget::new(QueryMemoryLimit::new(1024 * 1024).unwrap());
-    let snapshot = NativeStorageSnapshot::from_storage(&storage);
+    let snapshot = NativeStorageSnapshot::for_unverified_inspection(&storage);
     let head = storage.head_block().unwrap_or(0);
 
     let ascending = execute_sql_page_on_snapshot_with_memory(
@@ -450,12 +451,13 @@ async fn grouped_native_sum_preserves_null_ties_having_and_page_order() {
 
 #[tokio::test]
 async fn general_native_sum_preserves_empty_group_and_ungrouped_null() {
+    let (_empty_dir, empty_storage) = support::empty_verified_storage();
     let memory = QueryMemoryBudget::new(QueryMemoryLimit::new(64 * 1024).unwrap());
     let grouped = execute_sql_page_on_snapshot_with_memory(
         "SELECT address, \
                 SUM(CASE WHEN log_index % 2 = 0 THEN data END) AS total \
          FROM logs WHERE source + 0 >= 0 GROUP BY address",
-        NativeStorageSnapshot::default(),
+        NativeStorageSnapshot::from_storage(&empty_storage),
         0,
         SqlQueryPage::default(),
         None,
@@ -473,7 +475,7 @@ async fn general_native_sum_preserves_empty_group_and_ungrouped_null() {
                 SUM(CASE WHEN log_index % 2 = 0 THEN data END) - \
                     SUM(CASE WHEN log_index % 2 = 0 THEN data END) AS zero \
          FROM logs WHERE source + 0 >= 0",
-        NativeStorageSnapshot::default(),
+        NativeStorageSnapshot::from_storage(&empty_storage),
         0,
         SqlQueryPage::default(),
         None,
@@ -492,10 +494,11 @@ async fn general_native_sum_preserves_empty_group_and_ungrouped_null() {
 
 #[tokio::test]
 async fn empty_native_data_sum_accounts_projection_value_headers() {
+    let (_empty_dir, empty_storage) = support::empty_verified_storage();
     let memory = QueryMemoryBudget::new(QueryMemoryLimit::new(1).unwrap());
     let error = execute_sql_page_on_snapshot_with_memory(
         "SELECT SUM(data) AS total FROM logs",
-        NativeStorageSnapshot::default(),
+        NativeStorageSnapshot::from_storage(&empty_storage),
         0,
         SqlQueryPage::default(),
         None,
@@ -512,10 +515,11 @@ async fn empty_native_data_sum_accounts_projection_value_headers() {
 
 #[tokio::test]
 async fn native_data_sum_preserves_exact_page_snapshot_and_cancellation_semantics() {
+    let (_empty_dir, empty_storage) = support::empty_verified_storage();
     let empty_memory = QueryMemoryBudget::new(QueryMemoryLimit::new(64 * 1024).unwrap());
     let empty = execute_sql_page_on_snapshot_with_memory(
         "SELECT SUM(data) AS total, SUM(data) + SUM(data) AS doubled FROM logs",
-        NativeStorageSnapshot::default(),
+        NativeStorageSnapshot::from_storage(&empty_storage),
         0,
         SqlQueryPage::default(),
         None,
@@ -539,7 +543,7 @@ async fn native_data_sum_preserves_exact_page_snapshot_and_cancellation_semantic
     .unwrap();
     storage.write_batch(&rows()).unwrap();
     storage.checkpoint().unwrap();
-    let snapshot = NativeStorageSnapshot::from_storage(&storage);
+    let snapshot = NativeStorageSnapshot::for_unverified_inspection(&storage);
     storage.write_batch(&[row(ROWS)]).unwrap();
 
     let sql = "SELECT SUM(data) AS total, SUM(data) AS duplicate, \
@@ -598,7 +602,7 @@ async fn native_data_sum_preserves_exact_page_snapshot_and_cancellation_semantic
 
     let canceled = execute_sql_page_on_snapshot_with_memory(
         "SELECT SUM(data) AS total FROM logs LIMIT 0",
-        NativeStorageSnapshot::from_storage(&storage),
+        NativeStorageSnapshot::for_unverified_inspection(&storage),
         storage.head_block().unwrap_or(0),
         SqlQueryPage::default(),
         Some(Arc::new(|| true)),
@@ -651,7 +655,7 @@ async fn native_data_sum_merges_nonempty_partitions_with_limb_carry() {
     let memory = QueryMemoryBudget::new(QueryMemoryLimit::new(1024 * 1024).unwrap());
     let result = execute_sql_page_on_snapshot_with_memory(
         "SELECT SUM(data) AS total, SUM(data) + SUM(data) AS doubled FROM logs",
-        NativeStorageSnapshot::from_storage(&storage),
+        NativeStorageSnapshot::for_unverified_inspection(&storage),
         storage.head_block().unwrap_or(0),
         SqlQueryPage::default(),
         None,

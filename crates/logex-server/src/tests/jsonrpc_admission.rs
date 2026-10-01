@@ -20,7 +20,7 @@ fn setup() -> (tempfile::TempDir, Arc<AppState>) {
     .unwrap();
     (
         dir,
-        Arc::new(AppState::new(storage, None, SyncStatus::default())),
+        Arc::new(AppState::new(storage, None, SyncStatus::default()).for_unverified_test_fixture()),
     )
 }
 

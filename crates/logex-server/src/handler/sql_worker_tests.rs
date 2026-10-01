@@ -33,12 +33,15 @@ fn state() -> (tempfile::TempDir, Arc<AppState>, Vec<LogRow>) {
         storage.write_batch(block).unwrap();
     }
     storage.checkpoint().unwrap();
-    let state = Arc::new(AppState::with_query_concurrency(
-        storage,
-        None,
-        SyncStatus::default(),
-        QueryConcurrencyLimit::new(1).unwrap(),
-    ));
+    let state = Arc::new(
+        AppState::with_query_concurrency(
+            storage,
+            None,
+            SyncStatus::default(),
+            QueryConcurrencyLimit::new(1).unwrap(),
+        )
+        .for_unverified_test_fixture(),
+    );
     (temp, state, fixture.rows)
 }
 

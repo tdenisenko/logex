@@ -1,4 +1,5 @@
 use alloy_consensus::Header;
+mod support;
 use alloy_primitives::{Address, B256, Bytes};
 use logex_index::IndexBuilder;
 use logex_query::{
@@ -8,6 +9,7 @@ use logex_storage::{PartitionManager, PartitionManagerConfig, SegmentReader};
 use logex_types::{LogRow, Source};
 use serde_json::json;
 use std::{fs, path::Path};
+use support::execute_log_filter;
 use tempfile::TempDir;
 
 fn header(number: u64, parent: B256) -> Header {
@@ -64,7 +66,7 @@ async fn snapshot_after_change(bundled: bool, reorg: bool) {
         &first,
         &[row(&first, 0), row(&first, 1)],
     );
-    let snapshot = NativeStorageSnapshot::from_storage(&storage);
+    let snapshot = NativeStorageSnapshot::for_unverified_inspection(&storage);
     if reorg {
         assert_eq!(storage.mark_non_canonical(first.hash_slow()).unwrap(), 2);
     } else {
@@ -100,7 +102,7 @@ async fn snapshot_after_change(bundled: bool, reorg: bool) {
             );
             let retry = execute_sql_page_on_snapshot(
                 sql,
-                NativeStorageSnapshot::from_storage(&storage),
+                NativeStorageSnapshot::for_unverified_inspection(&storage),
                 100,
                 SqlQueryPage::default(),
                 None,
@@ -164,7 +166,7 @@ async fn snapshot_survives_completed_raw_compaction() {
         &first,
         &[row(&first, 0), row(&first, 1)],
     );
-    let snapshot = NativeStorageSnapshot::from_storage(&storage);
+    let snapshot = NativeStorageSnapshot::for_unverified_inspection(&storage);
     assert_eq!(storage.compact_eligible_segments().unwrap(), 1);
     let result = execute_sql_page_on_snapshot(
         "SELECT log_index FROM logs ORDER BY block_number ASC, tx_index ASC, log_index ASC",
@@ -225,7 +227,7 @@ async fn reorg_at_each_query_checkpoint_returns_retryable_error() {
             let counter = calls.clone();
             execute_sql_page_on_snapshot(
                 sql,
-                NativeStorageSnapshot::from_storage(&storage),
+                NativeStorageSnapshot::for_unverified_inspection(&storage),
                 100,
                 SqlQueryPage::default(),
                 Some(Arc::new(move || {
@@ -241,7 +243,7 @@ async fn reorg_at_each_query_checkpoint_returns_retryable_error() {
             drop(tmp);
             for change_at in 0..checks {
                 let (_tmp, storage, first) = fixture(bundled);
-                let snapshot = NativeStorageSnapshot::from_storage(&storage);
+                let snapshot = NativeStorageSnapshot::for_unverified_inspection(&storage);
                 let storage = Arc::new(Mutex::new(storage));
                 let writer = storage.clone();
                 let calls = AtomicUsize::new(0);
@@ -287,7 +289,7 @@ async fn snapshots_bound_current_indexes_and_every_aggregate_path() {
                     .unwrap();
                 storage.checkpoint().unwrap();
             }
-            let snapshot = NativeStorageSnapshot::from_storage(&storage);
+            let snapshot = NativeStorageSnapshot::for_unverified_inspection(&storage);
             let mut expected = Vec::new();
             for &sql in QUERIES {
                 expected.push(
@@ -347,7 +349,7 @@ async fn snapshots_bound_current_indexes_and_every_aggregate_path() {
 #[tokio::test]
 async fn closing_storage_invalidates_old_views_even_after_reopen() {
     let (tmp, storage, _) = fixture(true);
-    let snapshot = NativeStorageSnapshot::from_storage(&storage);
+    let snapshot = NativeStorageSnapshot::for_unverified_inspection(&storage);
     drop(storage);
     let reopened = PartitionManager::open(PartitionManagerConfig {
         data_dir: tmp.path().to_owned(),
@@ -364,7 +366,7 @@ async fn closing_storage_invalidates_old_views_even_after_reopen() {
     }
     let result = execute_sql_page_on_snapshot(
         QUERIES[2],
-        NativeStorageSnapshot::from_storage(&reopened),
+        NativeStorageSnapshot::for_unverified_inspection(&reopened),
         100,
         SqlQueryPage::default(),
         None,
@@ -408,7 +410,7 @@ async fn captured_prefix_survives_sparse_bundle_repacking() {
             prior = next;
         }
         storage.checkpoint().unwrap();
-        let snapshot = NativeStorageSnapshot::from_storage(&storage);
+        let snapshot = NativeStorageSnapshot::for_unverified_inspection(&storage);
         let path = snapshot.partitions_in_order(logex_storage::native::LogOrder::Ascending)[0]
             .path
             .clone();
@@ -532,7 +534,7 @@ async fn divergent_complete_copy_indexes_preserve_public_sql_results() {
     assert_eq!(expected.len(), 1);
     copy_index_directory(&source_dir.join("indexes"), &target_dir.join("indexes"));
 
-    let snapshot = NativeStorageSnapshot::from_storage(&target);
+    let snapshot = NativeStorageSnapshot::for_unverified_inspection(&target);
     let address = format!("0x{}", hex::encode(Address::repeat_byte(0xcc)));
     let selected = execute_sql_page_on_snapshot(
         &format!(
@@ -575,7 +577,7 @@ async fn old_snapshot_uses_current_source_with_stale_checkpoint() {
         let (_tmp, mut storage, first) = fixture(bundled);
         let path = storage.hot_partition().meta.path.clone();
         IndexBuilder::build_all_indexes(&path).unwrap();
-        let snapshot = NativeStorageSnapshot::from_storage(&storage);
+        let snapshot = NativeStorageSnapshot::for_unverified_inspection(&storage);
         let captured_rows = snapshot
             .partitions_in_order(logex_storage::native::LogOrder::Ascending)
             .into_iter()
@@ -643,11 +645,11 @@ async fn old_snapshot_uses_current_source_with_stale_checkpoint() {
 // snapshot after releasing its borrow of the live storage manager.
 #[test]
 fn native_snapshot_pages_exclude_appends_and_preserve_order() {
-    use logex_query::{execute_log_filter, execute_log_filter_on_snapshot_with_cancel};
+    use logex_query::execute_log_filter_on_snapshot_with_cancel;
     use logex_storage::native::{LogOrder, NativeLogFilter};
     for bundled in [false, true] {
         let (_tmp, mut storage, first) = fixture(bundled);
-        let snapshot = NativeStorageSnapshot::from_storage(&storage);
+        let snapshot = NativeStorageSnapshot::for_unverified_inspection(&storage);
         let next = header(101, first.hash_slow());
         write(&mut storage, bundled, &next, &[row(&next, 0)]);
         for (order, expected_index) in [(LogOrder::Ascending, 1), (LogOrder::Descending, 0)] {
@@ -701,7 +703,7 @@ fn native_snapshot_survives_raw_compaction() {
         &first,
         &[row(&first, 0), row(&first, 1)],
     );
-    let snapshot = NativeStorageSnapshot::from_storage(&storage);
+    let snapshot = NativeStorageSnapshot::for_unverified_inspection(&storage);
     assert_eq!(storage.compact_eligible_segments().unwrap(), 1);
     let rows =
         execute_log_filter_on_snapshot_with_cancel(&snapshot, &Default::default(), None).unwrap();
@@ -720,7 +722,7 @@ fn native_snapshot_checks_cancellation_and_invalidation_at_each_checkpoint() {
     };
     for bundled in [false, true] {
         let (_tmp, storage, _) = fixture(bundled);
-        let snapshot = NativeStorageSnapshot::from_storage(&storage);
+        let snapshot = NativeStorageSnapshot::for_unverified_inspection(&storage);
         let calls = Arc::new(AtomicUsize::new(0));
         let count = calls.clone();
         let check: QueryCancelCheck = Arc::new(move || {
@@ -734,7 +736,7 @@ fn native_snapshot_checks_cancellation_and_invalidation_at_each_checkpoint() {
         for checkpoint in 0..checkpoints {
             for invalidate in [false, true] {
                 let (_tmp, storage, first) = fixture(bundled);
-                let snapshot = NativeStorageSnapshot::from_storage(&storage);
+                let snapshot = NativeStorageSnapshot::for_unverified_inspection(&storage);
                 let storage = Arc::new(Mutex::new(storage));
                 let owner = storage.clone();
                 let calls = AtomicUsize::new(0);
@@ -792,7 +794,7 @@ fn native_snapshot_rejects_closed_or_invalid_views_even_for_zero_limit() {
     use std::sync::Arc;
     for bundled in [false, true] {
         let (_tmp, mut storage, first) = fixture(bundled);
-        let snapshot = NativeStorageSnapshot::from_storage(&storage);
+        let snapshot = NativeStorageSnapshot::for_unverified_inspection(&storage);
         let empty = NativeLogFilter {
             limit: Some(0),
             ..Default::default()
@@ -816,7 +818,7 @@ fn native_snapshot_rejects_closed_or_invalid_views_even_for_zero_limit() {
                 .kind(),
             std::io::ErrorKind::WouldBlock
         );
-        let snapshot = NativeStorageSnapshot::from_storage(&storage);
+        let snapshot = NativeStorageSnapshot::for_unverified_inspection(&storage);
         drop(storage);
         for filter in [empty, NativeLogFilter::default()] {
             assert_eq!(

@@ -1,14 +1,15 @@
 //! Deterministic storage/query baselines. See docs/benchmarks.md.
+mod support;
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::{Arc, Barrier};
 use std::time::{Duration, Instant};
+use support::{execute_log_filter, execute_sql};
 
 use alloy_primitives::{Address, B256, Bytes, keccak256};
 use logex_index::IndexBuilder;
 use logex_query::{
-    NativeStorageSnapshot, SqlQueryError, SqlQueryPage, execute_log_filter, execute_sql,
-    execute_sql_page_on_snapshot_with_memory,
+    NativeStorageSnapshot, SqlQueryError, SqlQueryPage, execute_sql_page_on_snapshot_with_memory,
 };
 use logex_storage::native::{NativeLogFilter, TopicConstraint};
 use logex_storage::{PartitionManager, PartitionManagerConfig};
@@ -125,6 +126,7 @@ async fn benchmark_datafusion_result_values() {
 
 #[tokio::test]
 async fn native_count_rejects_candidate_working_set_that_exceeds_shared_budget() {
+    let (_empty_dir, empty_storage) = support::empty_verified_storage();
     const MEMORY_BYTES: usize = 2 * 1024;
     const ROWS: usize = 1_024;
     let sql = "SELECT COUNT(*) AS total FROM logs";
@@ -136,7 +138,7 @@ async fn native_count_rejects_candidate_working_set_that_exceeds_shared_budget()
     let output_memory = QueryMemoryBudget::new(limit);
     let output = execute_sql_page_on_snapshot_with_memory(
         sql,
-        NativeStorageSnapshot::default(),
+        NativeStorageSnapshot::from_storage(&empty_storage),
         0,
         SqlQueryPage::default(),
         None,
@@ -162,7 +164,7 @@ async fn native_count_rejects_candidate_working_set_that_exceeds_shared_budget()
     let memory = QueryMemoryBudget::new(limit);
     let error = execute_sql_page_on_snapshot_with_memory(
         sql,
-        NativeStorageSnapshot::from_storage(&storage),
+        NativeStorageSnapshot::for_unverified_inspection(&storage),
         storage.head_block().unwrap_or(0),
         SqlQueryPage::default(),
         None,
@@ -179,6 +181,7 @@ async fn native_count_rejects_candidate_working_set_that_exceeds_shared_budget()
 
 #[tokio::test]
 async fn native_select_rejects_candidate_working_set_that_exceeds_shared_budget() {
+    let (_empty_dir, empty_storage) = support::empty_verified_storage();
     const MEMORY_BYTES: usize = 2 * 1024;
     const ROWS: usize = 1_024;
     let sql = "SELECT block_number FROM logs \
@@ -189,7 +192,7 @@ async fn native_select_rejects_candidate_working_set_that_exceeds_shared_budget(
     let output_memory = QueryMemoryBudget::new(limit);
     let output = execute_sql_page_on_snapshot_with_memory(
         sql,
-        NativeStorageSnapshot::default(),
+        NativeStorageSnapshot::from_storage(&empty_storage),
         0,
         SqlQueryPage::default(),
         None,
@@ -214,7 +217,7 @@ async fn native_select_rejects_candidate_working_set_that_exceeds_shared_budget(
     let memory = QueryMemoryBudget::new(limit);
     let error = execute_sql_page_on_snapshot_with_memory(
         sql,
-        NativeStorageSnapshot::from_storage(&storage),
+        NativeStorageSnapshot::for_unverified_inspection(&storage),
         storage.head_block().unwrap_or(0),
         SqlQueryPage::default(),
         None,

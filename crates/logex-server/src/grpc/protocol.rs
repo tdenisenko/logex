@@ -385,7 +385,9 @@ fn check_cancel(cancel: Option<&QueryCancelCheck>) -> io::Result<()> {
 }
 
 pub(super) fn into_status(error: io::Error) -> Status {
-    if crate::query_encoding::is_capacity_error(&error) {
+    if let Some(coverage) = logex_query::query_coverage_error(&error) {
+        Status::failed_precondition(coverage.to_string())
+    } else if crate::query_encoding::is_capacity_error(&error) {
         Status::resource_exhausted(error.to_string())
     } else {
         match error.kind() {

@@ -58,7 +58,7 @@ LOGEX_BENCH_PROFILE=dense cargo test -p logex-query --test audit_harness --relea
 LOGEX_AGGREGATE_BENCH_ROWS=20000 cargo test -p logex-query --test sql_aggregates --release --locked aggregate_latency -- --exact --ignored --nocapture --test-threads=1
 
 # Direct REST/gRPC handlers; these exclude network transport and live peers.
-cargo test -p logex-server --test query_latency --release --locked -- --ignored --nocapture --test-threads=1
+cargo test -p logex-server --lib tests::query_latency --release --locked -- --ignored --nocapture --test-threads=1
 
 # Receipt extraction and WAL encoding/replay.
 cargo test -p logex-sync --lib --release --locked extraction_release_baseline -- --ignored --nocapture --test-threads=1

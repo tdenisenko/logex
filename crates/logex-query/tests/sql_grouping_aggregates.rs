@@ -1,8 +1,10 @@
 //! Grouping and aggregate equivalence against an independent in-memory table.
 
+mod support;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Instant;
+use support::execute_sql;
 
 use alloy_primitives::{Address, B256, Bytes, keccak256};
 use datafusion::arrow::array::{Array, ArrayRef, Decimal128Array, StringArray, UInt64Array};
@@ -21,7 +23,7 @@ use datafusion::optimizer::simplify_expressions::ExprSimplifier;
 use datafusion::optimizer::{OptimizerContext, OptimizerRule};
 use datafusion::prelude::SessionContext;
 use datafusion::{common::ScalarValue, common::ToDFSchema};
-use logex_query::execute_sql;
+
 use logex_storage::{PartitionManager, PartitionManagerConfig};
 use logex_types::{LogRow, Source};
 use serde_json::{Value, json};

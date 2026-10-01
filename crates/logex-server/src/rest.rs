@@ -139,6 +139,15 @@ async fn execute_query(
     }
     let body = match encoded {
         Ok(r) => r,
+        Err(SqlQueryError::Coverage(error)) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(ErrorResponse {
+                    error: error.to_string(),
+                }),
+            )
+                .into_response();
+        }
         Err(error @ SqlQueryError::SnapshotChanged) => {
             return (
                 StatusCode::CONFLICT,
@@ -926,7 +935,9 @@ mod tests {
         assert_eq!(storage.sealed_partitions().len(), 2);
         (
             tmp,
-            Arc::new(AppState::new(storage, None, SyncStatus::default())),
+            Arc::new(
+                AppState::new(storage, None, SyncStatus::default()).for_unverified_test_fixture(),
+            ),
         )
     }
 
@@ -1050,11 +1061,13 @@ mod tests {
         let query = "SELECT data FROM logs";
 
         let (_probe_tmp, probe_storage) = setup_storage_with_rows(&rows);
-        let probe = Arc::new(AppState::new(probe_storage, None, SyncStatus::default()));
+        let probe = Arc::new(
+            AppState::new(probe_storage, None, SyncStatus::default()).for_unverified_test_fixture(),
+        );
         let (snapshot, head) = {
             let storage = probe.storage.read().await;
             (
-                logex_query::NativeStorageSnapshot::from_storage(&storage),
+                logex_query::NativeStorageSnapshot::for_unverified_inspection(&storage),
                 storage.head_block().unwrap_or(0),
             )
         };
@@ -1104,13 +1117,16 @@ mod tests {
             .unwrap();
         assert!(limit > structured_charge.max(encoded_charge));
         let (_limited_tmp, limited_storage) = setup_storage_with_rows(&rows);
-        let limited = Arc::new(AppState::with_query_limits(
-            limited_storage,
-            None,
-            SyncStatus::default(),
-            Default::default(),
-            QueryMemoryLimit::new(limit).unwrap(),
-        ));
+        let limited = Arc::new(
+            AppState::with_query_limits(
+                limited_storage,
+                None,
+                SyncStatus::default(),
+                Default::default(),
+                QueryMemoryLimit::new(limit).unwrap(),
+            )
+            .for_unverified_test_fixture(),
+        );
         let response = handle_query(
             State(limited.clone()),
             Json(QueryRequest {
@@ -1174,7 +1190,9 @@ mod tests {
 
     async fn assert_basic_header_compatibility(valid_headers: &[&str]) {
         let (_tmp, storage) = setup_storage();
-        let state = Arc::new(AppState::new(storage, None, SyncStatus::default()));
+        let state = Arc::new(
+            AppState::new(storage, None, SyncStatus::default()).for_unverified_test_fixture(),
+        );
         let config = crate::HttpServerConfig {
             dashboard_password: Some("secret".to_owned()),
             ..Default::default()
@@ -1291,22 +1309,27 @@ mod tests {
     #[tokio::test]
     async fn test_status_endpoint_decays_stale_historical_rate() {
         let (_tmp, storage) = setup_storage();
-        let state = Arc::new(AppState::new(
-            storage,
-            None,
-            SyncStatus {
-                historical_execution_floor: Some(ExecutionBlockMarker {
-                    block_number: 1_000,
-                    block_hash: B256::repeat_byte(0x11),
-                    timestamp: 1_700_000_000,
-                }),
-                historical_target_block: 0,
-                historical_blocks_per_sec: 500.0,
-                historical_rate_updated_at_unix_ms: Some(unix_time_millis().saturating_sub(60_000)),
-                historical_eta_seconds: Some(2.0),
-                ..Default::default()
-            },
-        ));
+        let state = Arc::new(
+            AppState::new(
+                storage,
+                None,
+                SyncStatus {
+                    historical_execution_floor: Some(ExecutionBlockMarker {
+                        block_number: 1_000,
+                        block_hash: B256::repeat_byte(0x11),
+                        timestamp: 1_700_000_000,
+                    }),
+                    historical_target_block: 0,
+                    historical_blocks_per_sec: 500.0,
+                    historical_rate_updated_at_unix_ms: Some(
+                        unix_time_millis().saturating_sub(60_000),
+                    ),
+                    historical_eta_seconds: Some(2.0),
+                    ..Default::default()
+                },
+            )
+            .for_unverified_test_fixture(),
+        );
         let app = crate::build_router(state);
 
         let req = Request::builder()
@@ -1332,27 +1355,30 @@ mod tests {
         let (_tmp, storage) = setup_storage();
         let top_block = HISTORICAL_LOG_ESTIMATE_REFERENCE_BLOCK + 10;
         let estimated_total = HISTORICAL_LOG_ESTIMATE_REFERENCE_TOTAL + 7_330.0;
-        let state = Arc::new(AppState::new(
-            storage,
-            None,
-            SyncStatus {
-                historical_execution_floor: Some(ExecutionBlockMarker {
-                    block_number: top_block,
-                    block_hash: B256::repeat_byte(0x11),
-                    timestamp: 1_700_000_000,
-                }),
-                historical_execution_anchor: Some(ExecutionBlockMarker {
-                    block_number: top_block,
-                    block_hash: B256::repeat_byte(0x22),
-                    timestamp: 1_700_000_000,
-                }),
-                historical_target_block: 0,
-                historical_blocks_per_sec: 1_000.0,
-                historical_logs_per_sec: 7_330.0,
-                historical_rate_updated_at_unix_ms: Some(unix_time_millis()),
-                ..Default::default()
-            },
-        ));
+        let state = Arc::new(
+            AppState::new(
+                storage,
+                None,
+                SyncStatus {
+                    historical_execution_floor: Some(ExecutionBlockMarker {
+                        block_number: top_block,
+                        block_hash: B256::repeat_byte(0x11),
+                        timestamp: 1_700_000_000,
+                    }),
+                    historical_execution_anchor: Some(ExecutionBlockMarker {
+                        block_number: top_block,
+                        block_hash: B256::repeat_byte(0x22),
+                        timestamp: 1_700_000_000,
+                    }),
+                    historical_target_block: 0,
+                    historical_blocks_per_sec: 1_000.0,
+                    historical_logs_per_sec: 7_330.0,
+                    historical_rate_updated_at_unix_ms: Some(unix_time_millis()),
+                    ..Default::default()
+                },
+            )
+            .for_unverified_test_fixture(),
+        );
         let app = crate::build_router(state);
 
         let req = Request::builder()
@@ -1382,23 +1408,26 @@ mod tests {
     #[tokio::test]
     async fn test_status_endpoint_suppresses_historical_eta_when_disabled() {
         let (_tmp, storage) = setup_storage();
-        let state = Arc::new(AppState::new(
-            storage,
-            None,
-            SyncStatus {
-                historical_sync_disabled: true,
-                historical_execution_floor: Some(ExecutionBlockMarker {
-                    block_number: 1_000,
-                    block_hash: B256::repeat_byte(0x11),
-                    timestamp: 1_700_000_000,
-                }),
-                historical_target_block: 0,
-                historical_blocks_per_sec: 500.0,
-                historical_logs_per_sec: 7_330.0,
-                historical_rate_updated_at_unix_ms: Some(unix_time_millis()),
-                ..Default::default()
-            },
-        ));
+        let state = Arc::new(
+            AppState::new(
+                storage,
+                None,
+                SyncStatus {
+                    historical_sync_disabled: true,
+                    historical_execution_floor: Some(ExecutionBlockMarker {
+                        block_number: 1_000,
+                        block_hash: B256::repeat_byte(0x11),
+                        timestamp: 1_700_000_000,
+                    }),
+                    historical_target_block: 0,
+                    historical_blocks_per_sec: 500.0,
+                    historical_logs_per_sec: 7_330.0,
+                    historical_rate_updated_at_unix_ms: Some(unix_time_millis()),
+                    ..Default::default()
+                },
+            )
+            .for_unverified_test_fixture(),
+        );
         let app = crate::build_router(state);
 
         let req = Request::builder()
@@ -1424,7 +1453,9 @@ mod tests {
     #[tokio::test]
     async fn test_dashboard_can_be_disabled() {
         let (_tmp, storage) = setup_storage();
-        let state = Arc::new(AppState::new(storage, None, SyncStatus::default()));
+        let state = Arc::new(
+            AppState::new(storage, None, SyncStatus::default()).for_unverified_test_fixture(),
+        );
         let app = crate::build_router_with_config(
             state,
             crate::HttpServerConfig {
@@ -1447,7 +1478,9 @@ mod tests {
     #[tokio::test]
     async fn test_dashboard_password_protects_status_and_query_routes() {
         let (_tmp, storage) = setup_storage();
-        let state = Arc::new(AppState::new(storage, None, SyncStatus::default()));
+        let state = Arc::new(
+            AppState::new(storage, None, SyncStatus::default()).for_unverified_test_fixture(),
+        );
         let app = crate::build_router_with_config(
             state,
             crate::HttpServerConfig {
@@ -1498,7 +1531,9 @@ mod tests {
     #[tokio::test]
     async fn test_post_query() {
         let (_tmp, storage) = setup_storage();
-        let state = Arc::new(AppState::new(storage, None, SyncStatus::default()));
+        let state = Arc::new(
+            AppState::new(storage, None, SyncStatus::default()).for_unverified_test_fixture(),
+        );
         let app = crate::build_router(state);
 
         let body = serde_json::json!({ "sql": "SELECT * FROM logs" });
@@ -1523,7 +1558,9 @@ mod tests {
     #[tokio::test]
     async fn test_query_cancel_endpoint_reports_active_query() {
         let (_tmp, storage) = setup_storage();
-        let state = Arc::new(AppState::new(storage, None, SyncStatus::default()));
+        let state = Arc::new(
+            AppState::new(storage, None, SyncStatus::default()).for_unverified_test_fixture(),
+        );
         let active_query = state.query_control.start().unwrap();
         let app = crate::build_router(state);
 
@@ -1546,7 +1583,9 @@ mod tests {
 
     async fn assert_cancel_rejects_foreign_browser_origin(password: Option<&str>) {
         let (_tmp, storage) = setup_storage();
-        let state = Arc::new(AppState::new(storage, None, SyncStatus::default()));
+        let state = Arc::new(
+            AppState::new(storage, None, SyncStatus::default()).for_unverified_test_fixture(),
+        );
         let app = crate::build_router_with_config(
             Arc::clone(&state),
             crate::HttpServerConfig {
@@ -1612,7 +1651,9 @@ mod tests {
     async fn test_post_query_without_transport_limit_returns_all_rows() {
         let rows = make_many_test_rows(DEFAULT_QUERY_PAGE_SIZE + 25);
         let (_tmp, storage) = setup_storage_with_rows(&rows);
-        let state = Arc::new(AppState::new(storage, None, SyncStatus::default()));
+        let state = Arc::new(
+            AppState::new(storage, None, SyncStatus::default()).for_unverified_test_fixture(),
+        );
         let app = crate::build_router(state);
 
         let body = serde_json::json!({
@@ -1642,7 +1683,9 @@ mod tests {
     #[tokio::test]
     async fn test_post_query_explicit_transport_limit_pages_results() {
         let (_tmp, storage) = setup_storage();
-        let state = Arc::new(AppState::new(storage, None, SyncStatus::default()));
+        let state = Arc::new(
+            AppState::new(storage, None, SyncStatus::default()).for_unverified_test_fixture(),
+        );
         let app = crate::build_router(state);
 
         let body = serde_json::json!({
@@ -1672,7 +1715,9 @@ mod tests {
     #[tokio::test]
     async fn test_post_query_with_filter() {
         let (_tmp, storage) = setup_storage();
-        let state = Arc::new(AppState::new(storage, None, SyncStatus::default()));
+        let state = Arc::new(
+            AppState::new(storage, None, SyncStatus::default()).for_unverified_test_fixture(),
+        );
         let app = crate::build_router(state);
 
         let addr = hex::encode(Address::repeat_byte(0xAA));
@@ -1699,7 +1744,9 @@ mod tests {
     #[tokio::test]
     async fn test_post_query_projection() {
         let (_tmp, storage) = setup_storage();
-        let state = Arc::new(AppState::new(storage, None, SyncStatus::default()));
+        let state = Arc::new(
+            AppState::new(storage, None, SyncStatus::default()).for_unverified_test_fixture(),
+        );
         let app = crate::build_router(state);
 
         let body = serde_json::json!({
@@ -1729,7 +1776,9 @@ mod tests {
     #[tokio::test]
     async fn test_post_query_aggregate() {
         let (_tmp, storage) = setup_storage();
-        let state = Arc::new(AppState::new(storage, None, SyncStatus::default()));
+        let state = Arc::new(
+            AppState::new(storage, None, SyncStatus::default()).for_unverified_test_fixture(),
+        );
         let app = crate::build_router(state);
 
         let body = serde_json::json!({
@@ -1757,7 +1806,9 @@ mod tests {
     #[tokio::test]
     async fn test_post_query_desc_limit() {
         let (_tmp, storage) = setup_storage();
-        let state = Arc::new(AppState::new(storage, None, SyncStatus::default()));
+        let state = Arc::new(
+            AppState::new(storage, None, SyncStatus::default()).for_unverified_test_fixture(),
+        );
         let app = crate::build_router(state);
 
         let body = serde_json::json!({
@@ -1785,7 +1836,9 @@ mod tests {
     #[tokio::test]
     async fn test_post_query_missing_projection_defaults_to_full_rows() {
         let (_tmp, storage) = setup_storage();
-        let state = Arc::new(AppState::new(storage, None, SyncStatus::default()));
+        let state = Arc::new(
+            AppState::new(storage, None, SyncStatus::default()).for_unverified_test_fixture(),
+        );
         let app = crate::build_router(state);
 
         let body = serde_json::json!({
@@ -1814,7 +1867,9 @@ mod tests {
     #[tokio::test]
     async fn test_post_query_parse_error() {
         let (_tmp, storage) = setup_storage();
-        let state = Arc::new(AppState::new(storage, None, SyncStatus::default()));
+        let state = Arc::new(
+            AppState::new(storage, None, SyncStatus::default()).for_unverified_test_fixture(),
+        );
         let app = crate::build_router(state);
 
         let body = serde_json::json!({ "sql": "NOT A QUERY" });
@@ -1832,7 +1887,9 @@ mod tests {
     #[tokio::test]
     async fn test_post_query_rejects_invalid_desc_without_order_by() {
         let (_tmp, storage) = setup_storage();
-        let state = Arc::new(AppState::new(storage, None, SyncStatus::default()));
+        let state = Arc::new(
+            AppState::new(storage, None, SyncStatus::default()).for_unverified_test_fixture(),
+        );
         let app = crate::build_router(state);
 
         let body = serde_json::json!({ "sql": "select * from logs desc limit 10;" });
@@ -1856,7 +1913,9 @@ mod tests {
     #[tokio::test]
     async fn test_health_endpoint() {
         let (_tmp, storage) = setup_storage();
-        let state = Arc::new(AppState::new(storage, None, SyncStatus::default()));
+        let state = Arc::new(
+            AppState::new(storage, None, SyncStatus::default()).for_unverified_test_fixture(),
+        );
         let app = crate::build_router(state);
 
         let req = Request::builder()
@@ -1893,7 +1952,9 @@ mod tests {
         storage
             .ingest_verified_canonical_batch(&[], &[proof], std::slice::from_ref(&header), None)
             .unwrap();
-        let state = Arc::new(AppState::new(storage, None, SyncStatus::default()));
+        let state = Arc::new(
+            AppState::new(storage, None, SyncStatus::default()).for_unverified_test_fixture(),
+        );
         let response = handle_status(State(state)).await;
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
@@ -2184,7 +2245,7 @@ mod tests {
                     optimistic_update: None,
                 }),
             },
-        ));
+        ).for_unverified_test_fixture());
         let data_dir = {
             let storage = state.storage.read().await;
             storage.data_dir().to_path_buf()
@@ -2402,24 +2463,27 @@ mod tests {
     #[tokio::test]
     async fn test_status_endpoint_does_not_mark_disconnected_node_as_synced() {
         let (_tmp, storage) = setup_storage();
-        let state = Arc::new(AppState::new(
-            storage,
-            None,
-            SyncStatus {
-                node_state: NodeState::Disconnected,
-                syncing: false,
-                connected_peers: 0,
-                serving_peers: 0,
-                pending_peers: 0,
-                current_block: 0,
-                target_block: 0,
-                blocks_per_sec: 0.0,
-                blocks_per_minute: 0.0,
-                logs_ingested: 0,
-                eta_seconds: None,
-                ..Default::default()
-            },
-        ));
+        let state = Arc::new(
+            AppState::new(
+                storage,
+                None,
+                SyncStatus {
+                    node_state: NodeState::Disconnected,
+                    syncing: false,
+                    connected_peers: 0,
+                    serving_peers: 0,
+                    pending_peers: 0,
+                    current_block: 0,
+                    target_block: 0,
+                    blocks_per_sec: 0.0,
+                    blocks_per_minute: 0.0,
+                    logs_ingested: 0,
+                    eta_seconds: None,
+                    ..Default::default()
+                },
+            )
+            .for_unverified_test_fixture(),
+        );
         let app = crate::build_router(state);
 
         let req = Request::builder()
@@ -2440,19 +2504,22 @@ mod tests {
     #[tokio::test]
     async fn test_status_endpoint_does_not_report_stale_consensus_as_synced() {
         let (_tmp, storage) = setup_storage();
-        let state = Arc::new(AppState::new(
-            storage,
-            None,
-            SyncStatus {
-                node_state: NodeState::Synced,
-                current_block: 100,
-                target_block: 100,
-                consensus_current_slot: Some(1_050),
-                consensus_head_lag_slots: Some(50),
-                consensus_head_fresh: Some(false),
-                ..Default::default()
-            },
-        ));
+        let state = Arc::new(
+            AppState::new(
+                storage,
+                None,
+                SyncStatus {
+                    node_state: NodeState::Synced,
+                    current_block: 100,
+                    target_block: 100,
+                    consensus_current_slot: Some(1_050),
+                    consensus_head_lag_slots: Some(50),
+                    consensus_head_fresh: Some(false),
+                    ..Default::default()
+                },
+            )
+            .for_unverified_test_fixture(),
+        );
         let app = crate::build_router(state);
 
         let req = Request::builder()
@@ -2499,28 +2566,31 @@ mod tests {
         storage
             .record_sync_head(100, B256::repeat_byte(0xFE), 1_650_000_000)
             .unwrap();
-        let state = Arc::new(AppState::new(
-            storage,
-            None,
-            SyncStatus {
-                node_state: NodeState::Syncing,
-                syncing: true,
-                current_block: 100,
-                target_block: 100,
-                eta_seconds: Some(0.0),
-                checkpoint: Some(WeakSubjectivityCheckpoint {
-                    beacon_root: B256::repeat_byte(0x77),
-                    beacon_slot: Some(1_000),
-                }),
-                consensus_current_slot: Some(1_000),
-                consensus_head_lag_slots: Some(0),
-                consensus_head_fresh: Some(true),
-                consensus_status_updated_at_unix_ms: Some(
-                    unix_time_millis().saturating_sub(CONSENSUS_STATUS_STALE_AFTER_MS + 1),
-                ),
-                ..Default::default()
-            },
-        ));
+        let state = Arc::new(
+            AppState::new(
+                storage,
+                None,
+                SyncStatus {
+                    node_state: NodeState::Syncing,
+                    syncing: true,
+                    current_block: 100,
+                    target_block: 100,
+                    eta_seconds: Some(0.0),
+                    checkpoint: Some(WeakSubjectivityCheckpoint {
+                        beacon_root: B256::repeat_byte(0x77),
+                        beacon_slot: Some(1_000),
+                    }),
+                    consensus_current_slot: Some(1_000),
+                    consensus_head_lag_slots: Some(0),
+                    consensus_head_fresh: Some(true),
+                    consensus_status_updated_at_unix_ms: Some(
+                        unix_time_millis().saturating_sub(CONSENSUS_STATUS_STALE_AFTER_MS + 1),
+                    ),
+                    ..Default::default()
+                },
+            )
+            .for_unverified_test_fixture(),
+        );
         let app = crate::build_router(state);
 
         let req = Request::builder()
@@ -2550,22 +2620,25 @@ mod tests {
     async fn dashboard_status_observes_sync_changes_after_storage_wait() {
         use std::task::Poll;
         let (_tmp, storage) = setup_storage();
-        let state = Arc::new(AppState::new(
-            storage,
-            None,
-            SyncStatus {
-                node_state: NodeState::Synced,
-                consensus_head_fresh: Some(true),
-                consensus_status_updated_at_unix_ms: Some(unix_time_millis()),
-                checkpoint: Some(WeakSubjectivityCheckpoint {
-                    beacon_root: B256::repeat_byte(7),
-                    beacon_slot: Some(1000),
-                }),
-                current_block: 100,
-                target_block: 100,
-                ..Default::default()
-            },
-        ));
+        let state = Arc::new(
+            AppState::new(
+                storage,
+                None,
+                SyncStatus {
+                    node_state: NodeState::Synced,
+                    consensus_head_fresh: Some(true),
+                    consensus_status_updated_at_unix_ms: Some(unix_time_millis()),
+                    checkpoint: Some(WeakSubjectivityCheckpoint {
+                        beacon_root: B256::repeat_byte(7),
+                        beacon_slot: Some(1000),
+                    }),
+                    current_block: 100,
+                    target_block: 100,
+                    ..Default::default()
+                },
+            )
+            .for_unverified_test_fixture(),
+        );
         let writer = state.storage.write().await;
         let mut response = Box::pin(handle_status(State(state.clone())));
         assert!(
@@ -2614,38 +2687,41 @@ mod tests {
             ("disabled history", true, 100, true, false),
         ] {
             let (_tmp, storage) = setup_storage();
-            let state = Arc::new(AppState::new(
-                storage,
-                None,
-                SyncStatus {
-                    node_state: if active {
-                        NodeState::Syncing
-                    } else {
-                        NodeState::Disconnected
+            let state = Arc::new(
+                AppState::new(
+                    storage,
+                    None,
+                    SyncStatus {
+                        node_state: if active {
+                            NodeState::Syncing
+                        } else {
+                            NodeState::Disconnected
+                        },
+                        syncing: active,
+                        historical_sync_disabled: disabled,
+                        historical_execution_floor: Some(ExecutionBlockMarker {
+                            block_number: floor,
+                            block_hash: B256::repeat_byte(8),
+                            timestamp: 1_700_000_000,
+                        }),
+                        historical_target_block: 0,
+                        historical_blocks_per_sec: 10.0,
+                        historical_rate_updated_at_unix_ms: Some(unix_time_millis()),
+                        consensus_head_fresh: Some(true),
+                        consensus_status_updated_at_unix_ms: Some(
+                            unix_time_millis().saturating_sub(CONSENSUS_STATUS_STALE_AFTER_MS + 1),
+                        ),
+                        checkpoint: Some(WeakSubjectivityCheckpoint {
+                            beacon_root: B256::repeat_byte(7),
+                            beacon_slot: Some(1000),
+                        }),
+                        current_block: 100,
+                        target_block: 110,
+                        ..Default::default()
                     },
-                    syncing: active,
-                    historical_sync_disabled: disabled,
-                    historical_execution_floor: Some(ExecutionBlockMarker {
-                        block_number: floor,
-                        block_hash: B256::repeat_byte(8),
-                        timestamp: 1_700_000_000,
-                    }),
-                    historical_target_block: 0,
-                    historical_blocks_per_sec: 10.0,
-                    historical_rate_updated_at_unix_ms: Some(unix_time_millis()),
-                    consensus_head_fresh: Some(true),
-                    consensus_status_updated_at_unix_ms: Some(
-                        unix_time_millis().saturating_sub(CONSENSUS_STATUS_STALE_AFTER_MS + 1),
-                    ),
-                    checkpoint: Some(WeakSubjectivityCheckpoint {
-                        beacon_root: B256::repeat_byte(7),
-                        beacon_slot: Some(1000),
-                    }),
-                    current_block: 100,
-                    target_block: 110,
-                    ..Default::default()
-                },
-            ));
+                )
+                .for_unverified_test_fixture(),
+            );
             let response = handle_status(State(state)).await;
             let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
                 .await

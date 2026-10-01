@@ -140,6 +140,9 @@ impl LogExService for LogExGrpcService {
         }
         let protocol = match execution {
             Ok(result) => result,
+            Err(SqlQueryError::Coverage(error)) => {
+                return Err(Status::failed_precondition(error.to_string()));
+            }
             Err(error @ SqlQueryError::SnapshotChanged) => {
                 return Err(Status::aborted(error.to_string()));
             }
@@ -412,12 +415,15 @@ mod tests {
 
         for method in ["Query", "GetLogs", "StreamLogs"] {
             let (_tmp, storage) = setup_storage();
-            let state = Arc::new(AppState::with_query_concurrency(
-                storage,
-                None,
-                SyncStatus::default(),
-                crate::handler::QueryConcurrencyLimit::new(1).unwrap(),
-            ));
+            let state = Arc::new(
+                AppState::with_query_concurrency(
+                    storage,
+                    None,
+                    SyncStatus::default(),
+                    crate::handler::QueryConcurrencyLimit::new(1).unwrap(),
+                )
+                .for_unverified_test_fixture(),
+            );
             let message = if method == "Query" {
                 QueryRequest {
                     sql: "SELECT * FROM logs".to_owned(),
@@ -477,12 +483,15 @@ mod tests {
     #[tokio::test]
     async fn grpc_unary_response_extensions_own_admission_before_encoding() {
         let (_tmp, storage) = setup_storage();
-        let state = Arc::new(AppState::with_query_concurrency(
-            storage,
-            None,
-            SyncStatus::default(),
-            crate::handler::QueryConcurrencyLimit::new(1).unwrap(),
-        ));
+        let state = Arc::new(
+            AppState::with_query_concurrency(
+                storage,
+                None,
+                SyncStatus::default(),
+                crate::handler::QueryConcurrencyLimit::new(1).unwrap(),
+            )
+            .for_unverified_test_fixture(),
+        );
         let service = LogExGrpcService::new(Arc::clone(&state));
         let response = service
             .get_logs(Request::new(GetLogsRequest::default()))
@@ -565,7 +574,9 @@ mod tests {
         }
         storage.checkpoint().unwrap();
         assert_eq!(storage.sealed_partitions().len(), 2);
-        let state = Arc::new(AppState::new(storage, None, SyncStatus::default()));
+        let state = Arc::new(
+            AppState::new(storage, None, SyncStatus::default()).for_unverified_test_fixture(),
+        );
         (tmp, state)
     }
 
@@ -765,7 +776,9 @@ mod tests {
     #[tokio::test]
     async fn test_grpc_query() {
         let (_tmp, storage) = setup_storage();
-        let state = Arc::new(AppState::new(storage, None, SyncStatus::default()));
+        let state = Arc::new(
+            AppState::new(storage, None, SyncStatus::default()).for_unverified_test_fixture(),
+        );
         let service = LogExGrpcService::new(state);
 
         let request = Request::new(QueryRequest {
@@ -786,7 +799,9 @@ mod tests {
     #[tokio::test]
     async fn test_grpc_query_with_filter() {
         let (_tmp, storage) = setup_storage();
-        let state = Arc::new(AppState::new(storage, None, SyncStatus::default()));
+        let state = Arc::new(
+            AppState::new(storage, None, SyncStatus::default()).for_unverified_test_fixture(),
+        );
         let service = LogExGrpcService::new(state);
 
         let addr = hex::encode(Address::repeat_byte(0xAA));
@@ -809,7 +824,9 @@ mod tests {
     #[tokio::test]
     async fn test_grpc_query_aggregate() {
         let (_tmp, storage) = setup_storage();
-        let state = Arc::new(AppState::new(storage, None, SyncStatus::default()));
+        let state = Arc::new(
+            AppState::new(storage, None, SyncStatus::default()).for_unverified_test_fixture(),
+        );
         let service = LogExGrpcService::new(state);
 
         let request = Request::new(QueryRequest {
@@ -826,7 +843,9 @@ mod tests {
     #[tokio::test]
     async fn test_grpc_query_desc_limit() {
         let (_tmp, storage) = setup_storage();
-        let state = Arc::new(AppState::new(storage, None, SyncStatus::default()));
+        let state = Arc::new(
+            AppState::new(storage, None, SyncStatus::default()).for_unverified_test_fixture(),
+        );
         let service = LogExGrpcService::new(state);
 
         let request = Request::new(QueryRequest {
@@ -843,7 +862,9 @@ mod tests {
     #[tokio::test]
     async fn test_grpc_head_block() {
         let (_tmp, storage) = setup_storage();
-        let state = Arc::new(AppState::new(storage, None, SyncStatus::default()));
+        let state = Arc::new(
+            AppState::new(storage, None, SyncStatus::default()).for_unverified_test_fixture(),
+        );
         let service = LogExGrpcService::new(state);
 
         let response = service
@@ -856,7 +877,9 @@ mod tests {
     #[tokio::test]
     async fn test_grpc_invalid_sql() {
         let (_tmp, storage) = setup_storage();
-        let state = Arc::new(AppState::new(storage, None, SyncStatus::default()));
+        let state = Arc::new(
+            AppState::new(storage, None, SyncStatus::default()).for_unverified_test_fixture(),
+        );
         let service = LogExGrpcService::new(state);
 
         let request = Request::new(QueryRequest {
@@ -872,7 +895,9 @@ mod tests {
     #[tokio::test]
     async fn test_grpc_get_logs() {
         let (_tmp, storage) = setup_storage();
-        let state = Arc::new(AppState::new(storage, None, SyncStatus::default()));
+        let state = Arc::new(
+            AppState::new(storage, None, SyncStatus::default()).for_unverified_test_fixture(),
+        );
         let service = LogExGrpcService::new(state);
 
         let request = Request::new(GetLogsRequest {
@@ -907,7 +932,9 @@ mod tests {
     #[tokio::test]
     async fn test_grpc_stream_logs_descending() {
         let (_tmp, storage) = setup_storage();
-        let state = Arc::new(AppState::new(storage, None, SyncStatus::default()));
+        let state = Arc::new(
+            AppState::new(storage, None, SyncStatus::default()).for_unverified_test_fixture(),
+        );
         let service = LogExGrpcService::new(state);
 
         let request = Request::new(GetLogsRequest {
@@ -933,7 +960,9 @@ mod tests {
     #[tokio::test]
     async fn test_grpc_get_logs_rejects_invalid_address() {
         let (_tmp, storage) = setup_storage();
-        let state = Arc::new(AppState::new(storage, None, SyncStatus::default()));
+        let state = Arc::new(
+            AppState::new(storage, None, SyncStatus::default()).for_unverified_test_fixture(),
+        );
         let service = LogExGrpcService::new(state);
 
         let request = Request::new(GetLogsRequest {

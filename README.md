@@ -148,6 +148,23 @@ The query engine exposes:
 - Dashboard and metrics: `GET /status`
 - Health check: `GET /health`
 
+Historical queries require the entire requested block range to be inside the
+snapshot's verified coverage. Unspecified bounds mean genesis through that
+snapshot's verified head, so a full-history aggregate fails while backfill is
+incomplete. Explicit recent bounds work as soon as those blocks are verified;
+verified empty blocks correctly return no events. A cached canonical block hash
+can identify a verified block even when it emitted no logs. Otherwise hash-only
+queries require genesis coverage or an explicit verified block range.
+
+Requests reaching unverified data fail with HTTP 503 for REST SQL, JSON-RPC
+`-32001` for `eth_getLogs`, or gRPC `FAILED_PRECONDITION`. Served queries include
+canonical events only; gRPC `canonical_only = false` is rejected. Coverage is checked
+before index pruning and aggregate shortcuts and on every SQL table scan,
+including joins and subqueries. No query silently narrows a requested range.
+Metadata queries and expressions that read no event rows remain available.
+The low-level Rust `NativeStorageSnapshot::for_unverified_inspection` constructor
+is reserved for explicit diagnostics of raw data; network APIs cannot select it.
+
 Query admission uses one shared concurrency limit across REST SQL, JSON-RPC
 `eth_getLogs`, and gRPC SQL/native log queries. Configure it with
 `sync --query-max-concurrent <N>` or TOML `query_max_concurrent`; the default is
