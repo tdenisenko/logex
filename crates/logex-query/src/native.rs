@@ -1790,60 +1790,61 @@ fn erc20_event_bloom_reader_excludes(
     reader: &mut Erc20EventBloomReader,
     filter: &NativeLogFilter,
 ) -> io::Result<bool> {
-    let (Some(address), Some(topic0)) = (
-        single_address(&filter.addresses),
-        single_topic(&filter.topics[0]),
-    ) else {
-        return Ok(false);
-    };
-    let topic0 = B256::from(topic0);
-    if !is_common_erc20_event_topic0(&topic0) {
-        return Ok(false);
-    }
-    let address = Address::from(address);
-    for topic_index in [1usize, 2usize] {
-        let Some(topics) = topic_values(&filter.topics[topic_index]) else {
-            continue;
-        };
-        let mut any_present = false;
-        for topic in topics {
-            if reader.may_contain(&topic0, &address, topic_index, topic)? {
-                any_present = true;
-                break;
-            }
-        }
-        if !any_present {
-            return Ok(true);
-        }
-    }
-    Ok(false)
+    event_bloom_excludes_keys(
+        filter,
+        is_common_erc20_event_topic0,
+        |event, address, index, topic| reader.may_contain(event, address, index, topic),
+    )
 }
 
 fn legacy_transfer_bloom_reader_excludes(
     reader: &mut TransferBloomReader,
     filter: &NativeLogFilter,
 ) -> io::Result<bool> {
-    let (Some(address), Some(topic0)) = (
-        single_address(&filter.addresses),
-        single_topic(&filter.topics[0]),
-    ) else {
+    event_bloom_excludes_keys(
+        filter,
+        |event| *event == transfer_topic0(),
+        |_, address, index, topic| reader.may_contain(address, index, topic),
+    )
+}
+
+const MAX_EVENT_BLOOM_PROBES: usize = 256;
+
+fn event_bloom_excludes_keys(
+    filter: &NativeLogFilter,
+    supported: impl Fn(&B256) -> bool,
+    mut may_contain: impl FnMut(&B256, &Address, usize, &B256) -> io::Result<bool>,
+) -> io::Result<bool> {
+    let Some(events) = topic_values(&filter.topics[0]) else {
         return Ok(false);
     };
-    if B256::from(topic0) != transfer_topic0() {
+    if filter.addresses.is_empty() || !events.iter().all(supported) {
         return Ok(false);
     }
-    let address = Address::from(address);
-    for topic_index in [1usize, 2usize] {
-        let Some(topics) = topic_values(&filter.topics[topic_index]) else {
+    // Bound cross-products from large IN lists. Falling back to the normal
+    // column scan is conservative and keeps each filter's probe work bounded.
+    let mut remaining = MAX_EVENT_BLOOM_PROBES;
+    for index in [1usize, 2usize] {
+        let Some(topics) = topic_values(&filter.topics[index]) else {
             continue;
         };
         let mut any_present = false;
-        for topic in topics {
-            if reader.may_contain(&address, topic_index, topic)? {
-                any_present = true;
-                break;
+        'keys: for address in &filter.addresses {
+            for event in events {
+                for topic in topics {
+                    if remaining == 0 {
+                        return Ok(false);
+                    }
+                    remaining -= 1;
+                    if may_contain(event, address, index, topic)? {
+                        any_present = true;
+                        break 'keys;
+                    }
+                }
             }
         }
+        // A single absent AND constraint excludes this segment only after
+        // every permitted emitter/event/value combination was checked.
         if !any_present {
             return Ok(true);
         }
@@ -2710,6 +2711,123 @@ mod tests {
         drop(ids);
         drop(reader);
         assert_eq!(memory.used(), 0);
+    }
+
+    #[test]
+    fn mainnet_event_blooms_preserve_multiple_emitters_and_event_alternatives() {
+        #[derive(serde::Deserialize)]
+        struct Fixture {
+            rows: Vec<LogRow>,
+        }
+        let mut rows = serde_json::from_str::<Fixture>(include_str!(
+            "../tests/fixtures/mainnet-exact-sums.json"
+        ))
+        .unwrap()
+        .rows;
+        rows.extend(
+            serde_json::from_str::<Fixture>(include_str!(
+                "../tests/fixtures/mainnet-transfer-filters.json"
+            ))
+            .unwrap()
+            .rows,
+        );
+        let transfer = rows
+            .iter()
+            .find(|row| row.topic0 == Some(transfer_topic0()))
+            .unwrap();
+        let other = rows
+            .iter()
+            .find(|row| row.address != transfer.address && row.topic0 == Some(transfer_topic0()))
+            .unwrap();
+        let unsupported = rows
+            .iter()
+            .find(|row| row.topic0 != Some(transfer_topic0()))
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        write_legacy_source(dir.path(), &rows);
+        IndexBuilder::build_all_indexes(dir.path()).unwrap();
+        let indexes = dir.path().join("indexes");
+        logex_index::TransferBloom::build(dir.path(), &indexes).unwrap();
+        let mut current =
+            Erc20EventBloomReader::open(&indexes.join(ERC20_EVENTS_BLOOM_FILE)).unwrap();
+        let mut legacy = TransferBloomReader::open(&indexes.join(TRANSFER_BLOOM_FILE)).unwrap();
+        let absent = B256::repeat_byte(0xff);
+        let mut filter = NativeLogFilter::new()
+            .with_addresses(vec![other.address, transfer.address])
+            .with_topic(
+                0,
+                TopicConstraint::AnyOf(vec![logex_index::approval_topic0(), transfer_topic0()]),
+            )
+            .with_topic(
+                1,
+                TopicConstraint::AnyOf(vec![absent, transfer.topic1.unwrap()]),
+            );
+        // The matching key is in the last emitter/event/value combination.
+        assert!(!erc20_event_bloom_reader_excludes(&mut current, &filter).unwrap());
+        assert!(!legacy_transfer_bloom_reader_excludes(&mut legacy, &filter).unwrap());
+        filter.topics[1] = TopicConstraint::One(absent);
+        assert!(erc20_event_bloom_reader_excludes(&mut current, &filter).unwrap());
+        // A Transfer-only file cannot prove that an Approval is absent.
+        assert!(!legacy_transfer_bloom_reader_excludes(&mut legacy, &filter).unwrap());
+        filter.topics[0] = TopicConstraint::One(transfer_topic0());
+        assert!(legacy_transfer_bloom_reader_excludes(&mut legacy, &filter).unwrap());
+        filter.topics[1] = TopicConstraint::One(transfer.topic1.unwrap());
+        assert!(!legacy_transfer_bloom_reader_excludes(&mut legacy, &filter).unwrap());
+        // An absent second AND constraint still excludes a possible first key.
+        filter.topics[2] = TopicConstraint::One(absent);
+        assert!(erc20_event_bloom_reader_excludes(&mut current, &filter).unwrap());
+        filter.topics[0] =
+            TopicConstraint::AnyOf(vec![transfer_topic0(), unsupported.topic0.unwrap()]);
+        assert!(!erc20_event_bloom_reader_excludes(&mut current, &filter).unwrap());
+    }
+
+    #[test]
+    fn event_bloom_probe_budget_falls_back_and_read_errors_propagate() {
+        let mut filter = NativeLogFilter::new()
+            .with_addresses(vec![Address::ZERO])
+            .with_topic(0, TopicConstraint::One(transfer_topic0()))
+            .with_topic(
+                1,
+                TopicConstraint::AnyOf(vec![B256::ZERO; MAX_EVENT_BLOOM_PROBES + 1]),
+            );
+        let mut probes = 0;
+        assert!(
+            !event_bloom_excludes_keys(&filter, is_common_erc20_event_topic0, |_, _, _, _| {
+                probes += 1;
+                Ok(false)
+            })
+            .unwrap()
+        );
+        assert_eq!(probes, MAX_EVENT_BLOOM_PROBES);
+        filter.topics[1] = TopicConstraint::AnyOf(vec![B256::ZERO; MAX_EVENT_BLOOM_PROBES]);
+        assert!(
+            event_bloom_excludes_keys(&filter, is_common_erc20_event_topic0, |_, _, _, _| Ok(
+                false
+            ))
+            .unwrap()
+        );
+        let error =
+            event_bloom_excludes_keys(&filter, is_common_erc20_event_topic0, |_, _, _, _| {
+                Err(io::Error::new(io::ErrorKind::InvalidData, "invalid bloom"))
+            })
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        // No emitter or unrestricted event must decline without any probes.
+        filter.addresses.clear();
+        assert!(
+            !event_bloom_excludes_keys(&filter, is_common_erc20_event_topic0, |_, _, _, _| panic!(
+                "unrestricted emitter"
+            ))
+            .unwrap()
+        );
+        filter.addresses.push(Address::ZERO);
+        filter.topics[0] = TopicConstraint::Any;
+        assert!(
+            !event_bloom_excludes_keys(&filter, is_common_erc20_event_topic0, |_, _, _, _| panic!(
+                "unrestricted event"
+            ))
+            .unwrap()
+        );
     }
 
     #[test]

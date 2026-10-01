@@ -182,7 +182,14 @@ formats retain complete validation. Candidate IDs are refined in place against
 accounted columns and canonical bits. Their charge follows the physical plan
 and its executing streams, including retained capacity after a pushed limit.
 General SQL preserves exact address/topic membership filters expressed as `IN`
-or same-column equality disjunctions. Scans without a pushed limit select up to
+or same-column equality disjunctions. Mixed address/topic disjunctions (such as
+sender or recipient) can also narrow candidates, while SQL retains the complete
+predicate. Expansion is limited to 32 branches; a hint that would exceed the
+bound remains a SQL residual instead of losing alternatives. Existing event
+blooms support multiple emitters and Transfer/Approval alternatives, checking
+every allowed combination before excluding a segment. Probes are bounded and
+unsupported events fall back to column selection; no index rebuild is needed.
+Scans without a pushed limit select up to
 eight independent partitions concurrently under the shared memory budget;
 limited scans select sequentially so they can stop at the required prefix.
 For general SQL, `total_scanned` counts selected candidates before residual

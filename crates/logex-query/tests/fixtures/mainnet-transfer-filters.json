@@ -1,0 +1,58 @@
+{
+  "chain_id": 1,
+  "origin": "Unmodified mainnet LINK and UNI Transfer events selected from bounded eth_getLogs/SQL equality captures. Source Receipt follows the receipt-only ingestion provenance; capture responses are retained outside Git.",
+  "capture_sources": [
+    {
+      "file": "link-topic2-sql.json",
+      "sha256": "b44574716bd2df9fab6fd71d86f509abaa5741f86c0ac9a52ec96c836aceb80c",
+      "captured_utc": "2026-10-01T03:20:16.969409+00:00"
+    },
+    {
+      "file": "link-topic2-rpc.json",
+      "sha256": "3811c4a9609f2551f4d2eb384a009dc33f3d8a92d0d388f258d2d9f36ed0eef7"
+    },
+    {
+      "file": "uni-topic2-sql.json",
+      "sha256": "4d5945ab6ffe3eb5983f458dadf145050f9dc248cdbedd212b6dce9557d2b0fb",
+      "captured_utc": "2026-10-01T03:20:45.388114+00:00"
+    },
+    {
+      "file": "uni-topic2-rpc.json",
+      "sha256": "3d44374589b3604495ddca0d91239428b69c897f73b26f782a91d7e1c0ab8978"
+    }
+  ],
+  "rows": [
+    {
+      "address": "0x514910771af9ca656af840dff83e8264ecf986ca",
+      "block_hash": "0x411903b297dcf75ce3c5b376fb388359357d06abecc1fad4a10109f189317584",
+      "block_number": 15448277,
+      "data": "0x0000000000000000000000000000000000000000000000000de0b6b3a7640000",
+      "data_len": 32,
+      "log_index": 215,
+      "timestamp": 1661971361,
+      "topic0": "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+      "topic1": "0x00000000000000000000000061986f0f9ba1d786951e05be8effffa8b29ad185",
+      "topic2": "0x000000000000000000000000d8da6bf26964af9d7eed9e03e53415d37aa96045",
+      "topic3": null,
+      "tx_hash": "0xb86152296a8184c7be0dcdf778d616aeefb09b419dda9206f2b0d52aa06db235",
+      "tx_index": 116,
+      "source": "Receipt"
+    },
+    {
+      "address": "0x1f9840a85d5af5bf1d1762f925bdaddc4201f984",
+      "block_hash": "0xeb0be11f2754d10770fb0513a68c12c1dfbe398ef88a83a601d17659378b87c1",
+      "block_number": 17596015,
+      "data": "0x00000000000000000000000000000000000000000000000000000f478e084000",
+      "data_len": 32,
+      "log_index": 186,
+      "timestamp": 1688175719,
+      "topic0": "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+      "topic1": "0x000000000000000000000000a2782804a09d2137a4be64ff103139053fe6cc2a",
+      "topic2": "0x000000000000000000000000d8da6bf26964af9d7eed9e03e53415d37aa96045",
+      "topic3": null,
+      "tx_hash": "0x1eaf6f86b1e05b4c18796e6b2502c786fbe55bb9f2bd6b505d5f94f1bc00d663",
+      "tx_index": 69,
+      "source": "Receipt"
+    }
+  ]
+}
