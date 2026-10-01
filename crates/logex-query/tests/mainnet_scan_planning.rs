@@ -190,3 +190,86 @@ async fn mainnet_parallel_selection_releases_capacity_and_canceled_work() {
     assert!(error.to_string().contains("query canceled"), "{error}");
     assert_eq!(memory.used(), 0);
 }
+
+#[tokio::test]
+async fn mainnet_mixed_topic_disjunctions_select_unique_candidates() {
+    let rows = fixture();
+    let (_tmp, mut storage, config) = storage(&rows);
+    let wallet = rows
+        .iter()
+        .find_map(|row| {
+            (row.topic1.is_some() && row.topic1 == row.topic2)
+                .then_some(row.topic1)
+                .flatten()
+        })
+        .expect("actual event with the same indexed participant twice");
+    let deposit = rows
+        .iter()
+        .find(|row| row.topic2.is_none())
+        .unwrap()
+        .topic0
+        .unwrap();
+    for layout in 0..4 {
+        if layout == 1 {
+            storage.compact_eligible_segments().unwrap();
+        }
+        if layout == 2 {
+            for partition in storage
+                .sealed_partitions()
+                .iter()
+                .chain(std::iter::once(storage.hot_partition()))
+            {
+                if partition.meta.row_count > 0 {
+                    IndexBuilder::build_all_indexes(&partition.meta.path).unwrap();
+                }
+            }
+        }
+        if layout == 3 {
+            drop(storage);
+            storage = PartitionManager::open(config.clone()).unwrap();
+        }
+        for with_deposits in [false, true] {
+            let predicate = format!(
+                "topic1='{wallet}' OR topic2='{wallet}'{}",
+                if with_deposits {
+                    format!(" OR topic0='{deposit}'")
+                } else {
+                    String::new()
+                }
+            );
+            let expected = projected(
+                rows.iter()
+                    .filter(|row| {
+                        row.topic1 == Some(wallet)
+                            || row.topic2 == Some(wallet)
+                            || (with_deposits && row.topic0 == Some(deposit))
+                    })
+                    .cloned(),
+            );
+            assert!(!expected.is_empty() && expected.len() < rows.len());
+            let sql = format!(
+                "SELECT block_number, CAST(log_index+0 AS BIGINT) AS log_index FROM logs WHERE {predicate} ORDER BY block_number, log_index"
+            );
+            check(&storage, &sql, &expected, expected.len() as u64).await;
+            // A pushed LIMIT must not run before the retained SQL predicate.
+            let limited = format!("{sql} LIMIT 2 OFFSET 1");
+            check(&storage, &limited, &expected[1..3], expected.len() as u64).await;
+            let residual = projected(
+                rows.iter()
+                    .filter(|row| {
+                        (row.topic1 == Some(wallet)
+                            || row.topic2 == Some(wallet)
+                            || (with_deposits && row.topic0 == Some(deposit)))
+                            && row.topic2.is_some()
+                            && row.log_index % 2 == 0
+                    })
+                    .cloned(),
+            );
+            assert!(residual.len() > 1 && residual.len() < expected.len());
+            let sql = format!(
+                "SELECT block_number, CAST(log_index+0 AS BIGINT) AS log_index FROM logs WHERE ({predicate}) AND topic2 IS NOT NULL AND log_index % 2 = 0 ORDER BY block_number, log_index LIMIT 1 OFFSET 1"
+            );
+            check(&storage, &sql, &residual[1..2], expected.len() as u64).await;
+        }
+    }
+}

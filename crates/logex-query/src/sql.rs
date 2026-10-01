@@ -74,9 +74,10 @@ use crate::json::{
 use crate::lexer::{Token, tokenize};
 use crate::native::{
     StorageSnapshot, candidate_refinement_columns_for_filters,
-    candidate_row_ids_for_filters_on_reader_with_memory, candidate_row_ids_with_memory,
-    ordered_page_is_complete, partition_matches_filter, retain_ordered_prefix_with_memory,
-    scan_native_partition_with_memory, sort_native_rows_with_memory,
+    candidate_row_ids_for_filters_on_reader_with_memory, candidate_row_ids_for_filters_with_memory,
+    candidate_row_ids_with_memory, ordered_page_is_complete, partition_matches_filter,
+    retain_ordered_prefix_with_memory, scan_native_partition_with_memory,
+    sort_native_rows_with_memory,
 };
 #[path = "native_sum_memory.rs"]
 mod native_sum_memory;
@@ -498,6 +499,10 @@ impl TableProvider for LogexTableProvider {
             .map(|expr| {
                 if supports_exact_pushdown(expr) {
                     TableProviderFilterPushDown::Exact
+                } else if bounded_disjunction_arms(expr).is_some() {
+                    // Retain SQL evaluation, including when a combined branch
+                    // budget later prevents this hint from being expanded.
+                    TableProviderFilterPushDown::Inexact
                 } else {
                     TableProviderFilterPushDown::Unsupported
                 }
@@ -512,7 +517,8 @@ impl TableProvider for LogexTableProvider {
         filters: &[DataFusionExpr],
         limit: Option<usize>,
     ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
-        let filter = build_native_pushdown_filter(filters)?;
+        let native_filters = build_native_scan_filters(filters)?;
+        let filter = &native_filters[0];
         let projected_schema = projected_schema(self.schema(), projection)?;
         let projected_columns = projected_column_names(self.schema(), projection);
         let mut scanned_rows = 0u64;
@@ -523,7 +529,11 @@ impl TableProvider for LogexTableProvider {
             .snapshot
             .partitions_in_order(filter.order)
             .into_iter()
-            .filter(|partition| partition_matches_filter(partition, &filter))
+            .filter(|partition| {
+                native_filters
+                    .iter()
+                    .any(|filter| partition_matches_filter(partition, filter))
+            })
             .collect();
         // A pushed LIMIT must stop selection in source order. Unbounded scans
         // can select independent snapshots concurrently, under the same shared
@@ -539,9 +549,9 @@ impl TableProvider for LogexTableProvider {
         };
         let select = |partition: &PartitionMeta| {
             check_query_canceled(self.cancel_check.as_ref())?;
-            candidate_row_ids_with_memory(
+            candidate_row_ids_for_filters_with_memory(
                 &partition.path,
-                &filter,
+                &native_filters,
                 true,
                 partition.row_count,
                 &self.memory,
@@ -7226,14 +7236,88 @@ fn supports_in_list_pushdown(in_list: &InList) -> bool {
     }
 }
 
-fn build_native_pushdown_filter(filters: &[DataFusionExpr]) -> DataFusionResult<NativeLogFilter> {
-    let mut filter = NativeLogFilter::new();
+const MAX_SQL_FILTER_BRANCHES: usize = 32;
 
-    for expr in filters {
-        apply_pushdown_expr(&mut filter, expr)?;
+/// Only canonical address/topic equality or membership arms from the same
+/// relation can become a candidate hint. SQL retains the whole predicate.
+/// Bound traversal as well as the later Cartesian product of separate hints.
+fn bounded_disjunction_arms(expr: &DataFusionExpr) -> Option<Vec<&DataFusionExpr>> {
+    if !matches!(expr, DataFusionExpr::BinaryExpr(binary) if binary.op == Operator::Or) {
+        return None;
     }
+    let mut pending = vec![expr];
+    let mut arms = Vec::new();
+    let mut first_column: Option<&datafusion::common::Column> = None;
+    while let Some(next) = pending.pop() {
+        let column = match next {
+            DataFusionExpr::BinaryExpr(binary) if binary.op == Operator::Or => {
+                pending.push(&binary.right);
+                pending.push(&binary.left);
+                if arms.len() + pending.len() > MAX_SQL_FILTER_BRANCHES {
+                    return None;
+                }
+                continue;
+            }
+            DataFusionExpr::BinaryExpr(binary)
+                if binary.op == Operator::Eq && supports_binary_pushdown(binary) =>
+            {
+                let DataFusionExpr::Column(column) = binary.left.as_ref() else {
+                    return None;
+                };
+                column
+            }
+            DataFusionExpr::InList(list) if supports_in_list_pushdown(list) => {
+                let DataFusionExpr::Column(column) = list.expr.as_ref() else {
+                    return None;
+                };
+                column
+            }
+            _ => return None,
+        };
+        if (column.name != "address" && topic_column_index(&column.name).is_none())
+            || first_column.is_some_and(|first| first.relation != column.relation)
+        {
+            return None;
+        }
+        first_column = Some(column);
+        arms.push(next);
+    }
+    Some(arms)
+}
 
-    Ok(filter)
+fn build_native_scan_filters(filters: &[DataFusionExpr]) -> DataFusionResult<Vec<NativeLogFilter>> {
+    let mut common = NativeLogFilter::new();
+    let mut disjunctions = Vec::new();
+    for expr in filters {
+        if supports_exact_pushdown(expr) {
+            apply_pushdown_expr(&mut common, expr)?;
+        } else if let Some(arms) = bounded_disjunction_arms(expr) {
+            disjunctions.push(arms);
+        } else {
+            return Err(DataFusionError::Plan(format!(
+                "unsupported pushed filter: {}",
+                expr.human_display()
+            )));
+        }
+    }
+    let mut selected = vec![common];
+    for arms in disjunctions {
+        if selected.len() * arms.len() > MAX_SQL_FILTER_BRANCHES {
+            // This hint was advertised as Inexact: the residual SQL predicate
+            // still enforces it. Never truncate a disjunction and lose matches.
+            continue;
+        }
+        let mut expanded = Vec::with_capacity(selected.len() * arms.len());
+        for filter in selected {
+            for arm in &arms {
+                let mut branch = filter.clone();
+                apply_pushdown_expr(&mut branch, arm)?;
+                expanded.push(branch);
+            }
+        }
+        selected = expanded;
+    }
+    Ok(selected)
 }
 
 fn apply_pushdown_expr(
@@ -7957,7 +8041,9 @@ mod tests {
         let b = col("a.address").eq(lit(other.clone()));
         let valid = a.clone().or(b.clone());
         assert!(supports_exact_pushdown(&valid));
-        let filter = build_native_pushdown_filter(&[valid, a.clone()]).unwrap();
+        let filters = build_native_scan_filters(&[valid, a.clone()]).unwrap();
+        assert_eq!(filters.len(), 1);
+        let filter = &filters[0];
         assert_eq!(filter.addresses, vec![parse_sql_address(&address).unwrap()]);
         for invalid in [
             a.clone().or(col("b.address").eq(lit(other))),
@@ -7977,8 +8063,44 @@ mod tests {
             a.or(col("a.address").in_list(vec![lit(address)], true)),
         ] {
             assert!(!supports_exact_pushdown(&invalid), "{invalid}");
-            assert!(build_native_pushdown_filter(&[invalid]).is_err());
+            assert!(apply_pushdown_expr(&mut NativeLogFilter::new(), &invalid).is_err());
         }
+    }
+
+    #[test]
+    fn mixed_disjunction_hints_bound_expansion_without_dropping_common_constraints() {
+        use datafusion::prelude::{col, lit};
+        let topic = format!("0x{}", "ab".repeat(32));
+        let arm = |index: usize| col(format!("a.topic{}", index % 4)).eq(lit(topic.clone()));
+        let disjunction = |count: usize| (0..count).map(arm).reduce(DataFusionExpr::or).unwrap();
+        let hint = disjunction(8);
+        assert!(!supports_exact_pushdown(&hint));
+        assert_eq!(bounded_disjunction_arms(&hint).unwrap().len(), 8);
+        assert!(bounded_disjunction_arms(&disjunction(MAX_SQL_FILTER_BRANCHES)).is_some());
+        assert!(bounded_disjunction_arms(&disjunction(MAX_SQL_FILTER_BRANCHES + 1)).is_none());
+        let filters = build_native_scan_filters(&[
+            hint.clone(),
+            col("a.block_number").gt_eq(lit(123u64)),
+            hint,
+        ])
+        .unwrap();
+        // The second eight-arm hint would require 64 branches. Keep the first
+        // hint and every exact predicate; SQL evaluates the whole second hint.
+        assert_eq!(filters.len(), 8);
+        assert!(filters.iter().all(|filter| filter.from_block == Some(123)));
+        for invalid in [
+            arm(1).or(col("b.topic2").eq(lit(topic.clone()))),
+            arm(1).or(col("a.topic2").is_null()),
+            arm(1).or(col("a.topic2").eq(lit(ScalarValue::Utf8(None)))),
+            arm(1).or(col("a.topic2").eq(lit(topic.to_uppercase()))),
+            arm(1).or(col("a.topic2").not_eq(lit(topic.clone()))),
+            arm(1).or(col("a.block_number").eq(lit(123u64))),
+        ] {
+            assert!(bounded_disjunction_arms(&invalid).is_none(), "{invalid}");
+            assert!(build_native_scan_filters(&[invalid]).is_err());
+        }
+        let member = col("a.topic2").in_list(vec![lit(topic.clone())], false);
+        assert!(bounded_disjunction_arms(&arm(1).or(member)).is_some());
     }
 
     #[test]
