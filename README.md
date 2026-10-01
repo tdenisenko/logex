@@ -143,6 +143,13 @@ response bytes; disconnecting a caller does not free a slot while its worker
 continues. Metadata, status, cancellation and subscription operations are
 exempt. REST's existing exclusive-query behavior still applies.
 
+SQL planning, native scans and response conversion run on bounded blocking
+workers shared with native API queries, so their synchronous filesystem work
+does not occupy the async serving threads. The worker limit follows the serving
+runtime's worker count; admitted requests also retain the shared concurrency
+slot while waiting. Cancellation is cooperative between filesystem operations,
+and the captured storage view is revalidated after response conversion.
+
 DataFusion operators, index candidates, fallback scan reads, scan output buffers,
 native row selection, COUNT, native sums and structured SQL results use a shared
 accounted-memory budget across REST, JSON-RPC and gRPC queries. Response encoding
