@@ -66,6 +66,12 @@ full-history balance or demonstrate that a rare event was exercised. Read range,
 input-row count and expected output together. Use full-history event captures for
 balance/ownership claims and nonempty historical ranges for rare protocol events.
 
+The WBTC Mint/Burn cases use blocks 12,000,000–12,010,000, which include three
+mints and one burn in the captured data. Their full measurement and verification
+ranges match. Earlier recent-window empty results remain valid empty-input
+checks, but are not a timing baseline for this historical workload. Compare
+results only with matching SQL and block ranges, even when case IDs match.
+
 ## Interpretation
 
 - ERC20 Transfer signatures also occur in ERC721, whose amount/token-ID layout
