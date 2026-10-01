@@ -165,3 +165,35 @@ test('chart range selection exposes the selected toggle state', () => {
   }
   assert.equal(renders, 3);
 });
+
+test('storage distinguishes allocated files/directories from logical contents in binary units', () => {
+  const labels = {};
+  const c = context(['numberOrNull', 'fmtBytes', 'updateStorageUsage'], {
+    setText: (id, value) => { labels[id] = value; },
+    fmtDecimal: (value, digits) => value.toFixed(digits),
+  });
+  const gib = 1024 ** 3;
+  c.updateStorageUsage({ storage_used_bytes: 325 * gib,
+    storage_allocated_bytes: 410 * gib, storage_file_allocated_bytes: 371 * gib,
+    storage_directory_allocated_bytes: 39 * gib });
+  assert.equal(labels.storageLabel, 'Allocated on disk');
+  assert.equal(labels.storageUsed, '410 GiB');
+  assert.match(labels.storageDetail, /^325 GiB file contents;/);
+  assert.equal(labels.debugStorageUsed, '325 GiB');
+  assert.equal(labels.debugStorageFiles, '371 GiB');
+  assert.equal(labels.debugStorageDirectories, '39 GiB');
+  // Sparse files can have less allocation than their logical size.
+  c.updateStorageUsage({ storage_used_bytes: gib, storage_allocated_bytes: 4096 });
+  assert.equal(labels.storageUsed, '4.0 KiB');
+  assert.match(labels.storageDetail, /^1.0 GiB file contents;/);
+  c.updateStorageUsage({ storage_used_bytes: gib });
+  assert.equal(labels.storageLabel, 'File contents');
+  assert.equal(labels.storageUsed, '1.0 GiB');
+  assert.equal(labels.storageDetail, 'Disk allocation unavailable.');
+  assert.equal(labels.debugStorageFiles, '--');
+  c.updateStorageUsage({ storage_used_bytes: null, storage_allocated_bytes: null });
+  assert.equal(labels.storageUsed, '--');
+  c.updateStorageUsage({ storage_used_bytes: 0, storage_allocated_bytes: 0 });
+  assert.equal(labels.storageLabel, 'Allocated on disk');
+  assert.equal(labels.storageUsed, '0 B');
+});

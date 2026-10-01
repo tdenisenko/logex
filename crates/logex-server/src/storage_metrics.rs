@@ -11,7 +11,11 @@ const STORAGE_METRICS_TTL: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Debug, Default)]
 pub struct StorageMetrics {
+    /// Logical file lengths, including indexes and metadata (legacy API field).
     pub storage_used_bytes: Option<u64>,
+    pub storage_allocated_bytes: Option<u64>,
+    pub storage_file_allocated_bytes: Option<u64>,
+    pub storage_directory_allocated_bytes: Option<u64>,
     pub disk_free_bytes: Option<u64>,
     pub storage_write_free_bytes: Option<u64>,
     pub storage_write_path: Option<String>,
@@ -143,7 +147,7 @@ fn collect_storage_metrics(
     data_dir: &Path,
     mut size_cache: StorageSizeCache,
 ) -> (StorageMetrics, StorageSizeCache) {
-    let storage_used_bytes = dir_size_bytes(data_dir, &mut size_cache).ok();
+    let usage = dir_usage(data_dir, &mut size_cache).ok();
     let storage_write_path = data_dir
         .canonicalize()
         .unwrap_or_else(|_| data_dir.to_path_buf());
@@ -162,7 +166,11 @@ fn collect_storage_metrics(
     );
     (
         StorageMetrics {
-            storage_used_bytes,
+            storage_used_bytes: usage.map(|usage| usage.logical_bytes),
+            storage_allocated_bytes: usage.and_then(StorageUsage::allocated_bytes),
+            storage_file_allocated_bytes: usage.and_then(|usage| usage.file_allocated_bytes),
+            storage_directory_allocated_bytes: usage
+                .and_then(|usage| usage.directory_allocated_bytes),
             disk_free_bytes,
             storage_write_free_bytes,
             storage_write_path: Some(storage_write_path.display().to_string()),
@@ -222,25 +230,36 @@ struct StorageSizeCache {
 #[derive(Clone, Debug)]
 struct CachedDirSize {
     signature: SegmentDirSignature,
-    bytes: u64,
+    // Keep identities, not just a subtotal: aliases can cross cached/uncached
+    // subtrees, and directory iteration order is unspecified.
+    entries: Arc<[UsageEntry]>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct SegmentDirSignature {
-    dir_modified: Option<SystemTime>,
-    dir_len: u64,
-    manifest_modified: Option<SystemTime>,
-    manifest_len: u64,
-    manifest_id: Option<MetadataId>,
-    index_files: Vec<SegmentIndexFileSignature>,
+    directory: PathMetadataSignature,
+    manifest: PathMetadataSignature,
+    indexes_directory: Option<PathMetadataSignature>,
+    index_files: Vec<(std::ffi::OsString, PathMetadataSignature)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct SegmentIndexFileSignature {
-    name: String,
+struct PathMetadataSignature {
     modified: Option<SystemTime>,
     len: u64,
+    allocated_bytes: Option<u64>,
     id: Option<MetadataId>,
+}
+
+impl From<&fs::Metadata> for PathMetadataSignature {
+    fn from(metadata: &fs::Metadata) -> Self {
+        Self {
+            modified: metadata.modified().ok(),
+            len: metadata.len(),
+            allocated_bytes: allocated_bytes(metadata),
+            id: metadata_id(metadata),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -249,7 +268,103 @@ enum SizeCacheKey {
     Path(PathBuf),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct StorageUsage {
+    logical_bytes: u64,
+    file_allocated_bytes: Option<u64>,
+    directory_allocated_bytes: Option<u64>,
+}
+
+impl Default for StorageUsage {
+    fn default() -> Self {
+        Self {
+            logical_bytes: 0,
+            file_allocated_bytes: cfg!(unix).then_some(0),
+            directory_allocated_bytes: cfg!(unix).then_some(0),
+        }
+    }
+}
+
+impl StorageUsage {
+    fn allocated_bytes(self) -> Option<u64> {
+        self.file_allocated_bytes?
+            .checked_add(self.directory_allocated_bytes?)
+    }
+
+    fn add(&mut self, other: Self) -> io::Result<()> {
+        self.logical_bytes = self
+            .logical_bytes
+            .checked_add(other.logical_bytes)
+            .ok_or_else(|| io::Error::other("logical storage usage overflow"))?;
+        self.file_allocated_bytes = self
+            .file_allocated_bytes
+            .zip(other.file_allocated_bytes)
+            .and_then(|(a, b)| a.checked_add(b));
+        self.directory_allocated_bytes = self
+            .directory_allocated_bytes
+            .zip(other.directory_allocated_bytes)
+            .and_then(|(a, b)| a.checked_add(b));
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug)]
+struct UsageEntry {
+    key: SizeCacheKey,
+    usage: StorageUsage,
+}
+
+impl UsageEntry {
+    fn new(path: &Path, metadata: &fs::Metadata) -> Self {
+        let mut usage = StorageUsage::default();
+        if metadata.is_file() {
+            usage.logical_bytes = metadata.len();
+            usage.file_allocated_bytes = allocated_bytes(metadata);
+        } else if metadata.is_dir() {
+            usage.directory_allocated_bytes = allocated_bytes(metadata);
+        }
+        Self {
+            key: size_cache_key(path, metadata),
+            usage,
+        }
+    }
+
+    fn account(
+        &self,
+        visited: &mut HashSet<SizeCacheKey>,
+        total: &mut StorageUsage,
+    ) -> io::Result<()> {
+        if visited.insert(self.key.clone()) {
+            total.add(self.usage)?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+fn allocated_bytes(metadata: &fs::Metadata) -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
+    // st_blocks uses 512-byte units even when the filesystem allocation unit
+    // is larger. File lengths and directory lengths are not allocated sizes.
+    metadata.blocks().checked_mul(512)
+}
+
+#[cfg(not(unix))]
+fn allocated_bytes(_metadata: &fs::Metadata) -> Option<u64> {
+    None
+}
+
+#[cfg(test)]
 fn dir_size_bytes(root: &Path, cache: &mut StorageSizeCache) -> io::Result<u64> {
+    Ok(dir_usage(root, cache)?.logical_bytes)
+}
+
+fn dir_usage(root: &Path, cache: &mut StorageSizeCache) -> io::Result<StorageUsage> {
+    // Missing/unreadable storage is unknown, never a measured zero.
+    let root_metadata = fs::metadata(root)?;
+    if !root_metadata.is_dir() {
+        return Err(io::Error::other("storage root is not a directory"));
+    }
     let segments_dir = root.join("segments");
     let (active_hot_segment, cache_segments) = match active_hot_segment_path(root) {
         Ok(active_hot_segment) => (active_hot_segment, true),
@@ -260,15 +375,14 @@ fn dir_size_bytes(root: &Path, cache: &mut StorageSizeCache) -> io::Result<u64> 
         active_hot_segment: active_hot_segment.as_deref(),
         cache_segments,
         seen_cached_segments: HashSet::new(),
-        visited_dirs: HashSet::new(),
-        visited_files: HashSet::new(),
+        visited: HashSet::new(),
+        total: StorageUsage::default(),
     };
-
-    let total = walk.size(root, cache)?;
+    walk.visit(root, cache)?;
     cache
         .segment_dirs
         .retain(|key, _| walk.seen_cached_segments.contains(key));
-    Ok(total)
+    Ok(walk.total)
 }
 
 struct DirSizeWalk<'a> {
@@ -276,66 +390,89 @@ struct DirSizeWalk<'a> {
     active_hot_segment: Option<&'a Path>,
     cache_segments: bool,
     seen_cached_segments: HashSet<SizeCacheKey>,
-    visited_dirs: HashSet<MetadataId>,
-    visited_files: HashSet<MetadataId>,
+    visited: HashSet<SizeCacheKey>,
+    total: StorageUsage,
 }
 
 impl DirSizeWalk<'_> {
-    fn size(&mut self, path: &Path, cache: &mut StorageSizeCache) -> io::Result<u64> {
-        let metadata = match fs::metadata(path) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(0),
-            Err(error) => return Err(error),
+    fn visit(&mut self, path: &Path, cache: &mut StorageSizeCache) -> io::Result<()> {
+        let metadata = fs::metadata(path)?;
+        let entry = UsageEntry::new(path, &metadata);
+        if self.visited.contains(&entry.key) {
+            return Ok(());
+        }
+        let cacheable_segment = if self.cache_segments && metadata.is_dir() {
+            cacheable_segment_dir(path, self.segments_dir, self.active_hot_segment, &metadata)?
+        } else {
+            None
         };
-
-        if metadata.is_file() {
-            return Ok(file_size_bytes(&mut self.visited_files, &metadata));
-        }
-
-        if !metadata.is_dir() {
-            return Ok(0);
-        }
-
-        if let Some(id) = metadata_id(&metadata)
-            && !self.visited_dirs.insert(id)
-        {
-            return Ok(0);
-        }
-
-        let cacheable_segment = self
-            .cache_segments
-            .then(|| {
-                cacheable_segment_dir(path, self.segments_dir, self.active_hot_segment, &metadata)
-            })
-            .transpose()?
-            .flatten();
-        if let Some((key, signature)) = cacheable_segment.as_ref() {
+        if let Some((key, signature)) = cacheable_segment {
             self.seen_cached_segments.insert(key.clone());
-            if let Some(cached) = cache.segment_dirs.get(key)
-                && cached.signature == *signature
+            if let Some(cached) = cache.segment_dirs.get(&key)
+                && cached.signature == signature
             {
-                return Ok(cached.bytes);
+                for entry in cached.entries.iter() {
+                    entry.account(&mut self.visited, &mut self.total)?;
+                }
+                return Ok(());
+            }
+            // Inventory independently of the outer visited set; otherwise a
+            // first walk can cache a partial subtotal when aliases come first.
+            let mut entries = Vec::new();
+            let mut local_visited = HashSet::new();
+            let cache_safe =
+                collect_usage_entries(path, &metadata, &mut entries, &mut local_visited)?;
+            for entry in &entries {
+                entry.account(&mut self.visited, &mut self.total)?;
+            }
+            // A nested symlink may point at mutable data outside the sealed
+            // segment. A manifest signature cannot validate that target.
+            if cache_safe
+                && segment_dir_signature(path, &fs::metadata(path)?)? == Some(signature.clone())
+            {
+                cache.segment_dirs.insert(
+                    key,
+                    CachedDirSize {
+                        signature,
+                        entries: entries.into(),
+                    },
+                );
+            } else {
+                cache.segment_dirs.remove(&key);
+            }
+            return Ok(());
+        }
+        entry.account(&mut self.visited, &mut self.total)?;
+        if metadata.is_dir() {
+            for entry in fs::read_dir(path)? {
+                self.visit(&entry?.path(), cache)?;
             }
         }
+        Ok(())
+    }
+}
 
-        let mut total = 0_u64;
+fn collect_usage_entries(
+    path: &Path,
+    metadata: &fs::Metadata,
+    entries: &mut Vec<UsageEntry>,
+    visited: &mut HashSet<SizeCacheKey>,
+) -> io::Result<bool> {
+    let entry = UsageEntry::new(path, metadata);
+    if !visited.insert(entry.key.clone()) {
+        return Ok(true);
+    }
+    entries.push(entry);
+    let mut cache_safe = true;
+    if metadata.is_dir() {
         for entry in fs::read_dir(path)? {
             let entry = entry?;
-            total = total.saturating_add(self.size(&entry.path(), cache)?);
+            cache_safe &= !entry.file_type()?.is_symlink();
+            let path = entry.path();
+            cache_safe &= collect_usage_entries(&path, &fs::metadata(&path)?, entries, visited)?;
         }
-
-        if let Some((key, signature)) = cacheable_segment {
-            cache.segment_dirs.insert(
-                key,
-                CachedDirSize {
-                    signature,
-                    bytes: total,
-                },
-            );
-        }
-
-        Ok(total)
     }
+    Ok(cache_safe)
 }
 
 fn active_hot_segment_path(root: &Path) -> io::Result<Option<PathBuf>> {
@@ -381,61 +518,42 @@ fn segment_dir_signature(
         Err(error) => return Err(error),
     };
 
-    Ok(Some(SegmentDirSignature {
-        dir_modified: metadata.modified().ok(),
-        dir_len: metadata.len(),
-        manifest_modified: manifest_metadata.modified().ok(),
-        manifest_len: manifest_metadata.len(),
-        manifest_id: metadata_id(&manifest_metadata),
-        index_files: segment_index_file_signatures(path)?,
-    }))
-}
-
-fn segment_index_file_signatures(path: &Path) -> io::Result<Vec<SegmentIndexFileSignature>> {
     let indexes_dir = path.join("indexes");
-    let entries = match fs::read_dir(&indexes_dir) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+    let indexes_metadata = match fs::metadata(&indexes_dir) {
+        Ok(metadata) => Some(metadata),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
         Err(error) => return Err(error),
     };
-
-    let mut signatures = Vec::new();
-    for entry in entries {
-        let entry = entry?;
-        let metadata = entry.metadata()?;
-        if !metadata.is_file() {
-            continue;
+    let mut index_files = Vec::new();
+    if indexes_metadata.is_some() {
+        for entry in fs::read_dir(&indexes_dir)? {
+            let entry = entry?;
+            if !entry.file_type()?.is_file() {
+                // Nonstandard nested or linked indexes have no cheap stable
+                // signature; measure them without caching the segment.
+                return Ok(None);
+            }
+            index_files.push((
+                entry.file_name(),
+                PathMetadataSignature::from(&entry.metadata()?),
+            ));
         }
-
-        signatures.push(SegmentIndexFileSignature {
-            name: entry.file_name().to_string_lossy().into_owned(),
-            modified: metadata.modified().ok(),
-            len: metadata.len(),
-            id: metadata_id(&metadata),
-        });
+        index_files.sort_by(|left, right| left.0.cmp(&right.0));
     }
-    signatures.sort_by(|left, right| {
-        left.name
-            .cmp(&right.name)
-            .then_with(|| left.id.cmp(&right.id))
-    });
-    Ok(signatures)
+    Ok(Some(SegmentDirSignature {
+        directory: metadata.into(),
+        manifest: (&manifest_metadata).into(),
+        indexes_directory: indexes_metadata.as_ref().map(PathMetadataSignature::from),
+        index_files,
+    }))
 }
 
 fn size_cache_key(path: &Path, metadata: &fs::Metadata) -> SizeCacheKey {
     metadata_id(metadata)
         .map(SizeCacheKey::Metadata)
-        .unwrap_or_else(|| SizeCacheKey::Path(path.to_path_buf()))
-}
-
-fn file_size_bytes(visited_files: &mut HashSet<MetadataId>, metadata: &fs::Metadata) -> u64 {
-    if let Some(id) = metadata_id(metadata)
-        && !visited_files.insert(id)
-    {
-        return 0;
-    }
-
-    metadata.len()
+        .unwrap_or_else(|| {
+            SizeCacheKey::Path(path.canonicalize().unwrap_or_else(|_| path.to_path_buf()))
+        })
 }
 
 #[cfg(unix)]
@@ -754,6 +872,186 @@ mod tests {
         let stale = load_or_refresh(Arc::clone(&cache), tmp.path().to_path_buf()).await;
         assert_eq!(stale.storage_used_bytes, Some(9));
         assert!(refresh_in_progress_for_test(cache).await);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn storage_usage_counts_sparse_allocation_and_directories() {
+        use std::os::unix::fs::MetadataExt;
+        let tmp = TempDir::new().unwrap();
+        let nested = tmp.path().join("nested");
+        fs::create_dir(&nested).unwrap();
+        let sparse = nested.join("sparse.bin");
+        let file = fs::File::create(&sparse).unwrap();
+        file.set_len(8 * 1024 * 1024).unwrap();
+        file.sync_all().unwrap();
+        let file_blocks = fs::metadata(&sparse).unwrap().blocks() * 512;
+        let directory_blocks = [tmp.path(), nested.as_path()]
+            .into_iter()
+            .map(|p| fs::metadata(p).unwrap().blocks() * 512)
+            .sum::<u64>();
+        let (metrics, _) = collect_storage_metrics(tmp.path(), StorageSizeCache::default());
+        assert_eq!(metrics.storage_used_bytes, Some(8 * 1024 * 1024));
+        assert_eq!(metrics.storage_file_allocated_bytes, Some(file_blocks));
+        assert_eq!(
+            metrics.storage_directory_allocated_bytes,
+            Some(directory_blocks)
+        );
+        assert_eq!(
+            metrics.storage_allocated_bytes,
+            Some(file_blocks + directory_blocks)
+        );
+        assert!(file_blocks < metrics.storage_used_bytes.unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cached_segments_deduplicate_hard_links_across_warm_cold_and_uncached_paths() {
+        use std::os::unix::fs::MetadataExt;
+        let tmp = TempDir::new().unwrap();
+        let first = create_segment(tmp.path(), 1, 4);
+        let second = create_segment(tmp.path(), 2, 0);
+        fs::remove_file(second.join("rows.bin")).unwrap();
+        fs::hard_link(first.join("rows.bin"), second.join("rows.bin")).unwrap();
+        let mut cache = StorageSizeCache::default();
+        let cold = dir_usage(tmp.path(), &mut cache).unwrap();
+        assert_eq!(cache.segment_dirs.len(), 2);
+        let expected_logical = 4 + 2 * fs::metadata(first.join("segment.json")).unwrap().len();
+        assert_eq!(cold.logical_bytes, expected_logical);
+        let entries = cache
+            .segment_dirs
+            .iter()
+            .map(|(key, value)| (key.clone(), Arc::clone(&value.entries)))
+            .collect::<HashMap<_, _>>();
+        assert_eq!(dir_usage(tmp.path(), &mut cache).unwrap(), cold);
+        // Add an alias outside cached subtrees without changing their signatures.
+        fs::hard_link(first.join("rows.bin"), tmp.path().join("alias.bin")).unwrap();
+        let warm = dir_usage(tmp.path(), &mut cache).unwrap();
+        assert_eq!(warm.logical_bytes, expected_logical);
+        assert_eq!(warm.file_allocated_bytes, cold.file_allocated_bytes);
+        for (key, before) in &entries {
+            assert!(Arc::ptr_eq(before, &cache.segment_dirs[key].entries));
+        }
+        let expected_directories = [
+            tmp.path().to_owned(),
+            tmp.path().join("segments"),
+            first.clone(),
+            second.clone(),
+        ]
+        .into_iter()
+        .map(|p| fs::metadata(p).unwrap().blocks() * 512)
+        .sum::<u64>();
+        assert_eq!(warm.directory_allocated_bytes, Some(expected_directories));
+        // Invalidate just one subtree while the other keeps its inventory.
+        fs::write(second.join("extra.bin"), [1; 7]).unwrap();
+        let partial = dir_usage(tmp.path(), &mut cache).unwrap();
+        assert_eq!(partial.logical_bytes, expected_logical + 7);
+        let mut uncached = StorageSizeCache::default();
+        assert_eq!(partial, dir_usage(tmp.path(), &mut uncached).unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn index_allocation_changes_invalidate_cache_without_length_or_mtime_changes() {
+        let tmp = TempDir::new().unwrap();
+        let segment = create_segment(tmp.path(), 1, 4);
+        let indexes = segment.join("indexes");
+        fs::create_dir(&indexes).unwrap();
+        let path = indexes.join("address.bptree");
+        let mut file = fs::File::create(&path).unwrap();
+        file.set_len(8 * 1024 * 1024).unwrap();
+        file.sync_all().unwrap();
+        let original = file.metadata().unwrap();
+        let mut cache = StorageSizeCache::default();
+        let before = dir_usage(tmp.path(), &mut cache).unwrap();
+        file.write_all(&[1; 64 * 1024]).unwrap();
+        file.sync_all().unwrap();
+        file.set_times(fs::FileTimes::new().set_modified(original.modified().unwrap()))
+            .unwrap();
+        let updated = file.metadata().unwrap();
+        assert_eq!(original.len(), updated.len());
+        assert_eq!(original.modified().unwrap(), updated.modified().unwrap());
+        assert_ne!(allocated_bytes(&original), allocated_bytes(&updated));
+        let after = dir_usage(tmp.path(), &mut cache).unwrap();
+        assert_eq!(after.logical_bytes, before.logical_bytes);
+        assert_eq!(
+            after.file_allocated_bytes.unwrap() - before.file_allocated_bytes.unwrap(),
+            allocated_bytes(&updated).unwrap() - allocated_bytes(&original).unwrap()
+        );
+        assert_eq!(
+            after,
+            dir_usage(tmp.path(), &mut StorageSizeCache::default()).unwrap()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn nested_symlink_targets_are_not_hidden_by_a_segment_cache() {
+        use std::os::unix::fs::symlink;
+        let tmp = TempDir::new().unwrap();
+        let external = TempDir::new().unwrap();
+        let segment = create_segment(tmp.path(), 1, 4);
+        fs::write(external.path().join("mutable.bin"), [1; 7]).unwrap();
+        symlink(external.path(), segment.join("external")).unwrap();
+        symlink(tmp.path(), external.path().join("cycle")).unwrap();
+        let mut cache = StorageSizeCache::default();
+        let before = dir_usage(tmp.path(), &mut cache).unwrap();
+        assert!(cache.segment_dirs.is_empty());
+        fs::write(external.path().join("mutable.bin"), [1; 17]).unwrap();
+        let after = dir_usage(tmp.path(), &mut cache).unwrap();
+        assert_eq!(after.logical_bytes, before.logical_bytes + 10);
+        assert!(cache.segment_dirs.is_empty());
+    }
+
+    #[test]
+    fn missing_storage_is_unknown_not_zero() {
+        let tmp = TempDir::new().unwrap();
+        let (metrics, _) =
+            collect_storage_metrics(&tmp.path().join("missing"), StorageSizeCache::default());
+        assert_eq!(metrics.storage_used_bytes, None);
+        assert_eq!(metrics.storage_allocated_bytes, None);
+        assert_eq!(metrics.storage_file_allocated_bytes, None);
+        assert_eq!(metrics.storage_directory_allocated_bytes, None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_symlink_target_does_not_return_a_partial_total() {
+        use std::os::unix::fs::symlink;
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join("file.bin"), [1; 7]).unwrap();
+        symlink(tmp.path().join("missing"), tmp.path().join("dangling")).unwrap();
+        let (metrics, _) = collect_storage_metrics(tmp.path(), StorageSizeCache::default());
+        assert_eq!(metrics.storage_used_bytes, None);
+        assert_eq!(metrics.storage_allocated_bytes, None);
+        assert!(metrics.storage_write_free_bytes.is_some());
+    }
+
+    #[test]
+    fn allocation_overflow_is_unknown_and_logical_overflow_is_an_error() {
+        let mut usage = StorageUsage {
+            logical_bytes: 1,
+            file_allocated_bytes: Some(u64::MAX),
+            directory_allocated_bytes: Some(1),
+        };
+        assert_eq!(usage.allocated_bytes(), None);
+        usage
+            .add(StorageUsage {
+                logical_bytes: 1,
+                file_allocated_bytes: Some(1),
+                directory_allocated_bytes: Some(0),
+            })
+            .unwrap();
+        assert_eq!(usage.file_allocated_bytes, None);
+        assert_eq!(usage.logical_bytes, 2);
+        assert!(
+            usage
+                .add(StorageUsage {
+                    logical_bytes: u64::MAX,
+                    ..StorageUsage::default()
+                })
+                .is_err()
+        );
     }
 
     fn write_active_hot_catalog(root: &Path, active_hot_segment: u64) {

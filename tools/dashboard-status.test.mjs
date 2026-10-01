@@ -179,7 +179,7 @@ test('explicit unavailable node status wins over proximity to a fresh consensus 
   c.clamp = (n, lo, hi) => Math.min(hi, Math.max(lo, n));
   for (const name of ['refreshLastUpdated', 'setWidth', 'setExecutionBarState',
     'setParentHidden', 'updateDefaultQuery', 'maybeApplyBuilderRange',
-    'addPerfSample', 'renderChart']) c[name] = () => {};
+    'addPerfSample', 'renderChart', 'updateStorageUsage']) c[name] = () => {};
   vm.createContext(c); vm.runInContext(functions('updateStatus'), c);
   c.updateStatus({ node_state: 'disconnected', node_state_label: 'Disconnected',
     historical_sync_disabled: true, consensus_head_fresh: true,
