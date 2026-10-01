@@ -3,7 +3,7 @@
 use super::*;
 use crate::p2p::peer_manager::engine_peer_fixture;
 use alloy_consensus::{SignableTransaction, TxLegacy, proofs};
-use alloy_primitives::{Address, LogData, Signature, U256};
+use alloy_primitives::{Address, Log, LogData, Signature, U256};
 use logex_storage::{PartitionManagerConfig, SegmentReader};
 use tempfile::TempDir;
 
@@ -37,7 +37,7 @@ async fn fixture(initial: &Header) -> (SyncEngine, watch::Sender<bool>, impl Siz
     (engine, shutdown, (resources, directory))
 }
 
-fn payload() -> (Header, SourcedBodyReceipts) {
+pub(super) fn payload() -> (Header, SourcedBodyReceipts) {
     let mut body = reth_ethereum_primitives::BlockBody::default();
     body.transactions.push(
         TxLegacy::default()
@@ -392,21 +392,24 @@ async fn selection_missing_anchor_after_storage_wait_rejects_single_block_public
     let (mut engine, _shutdown, _resources) = fixture(&initial).await;
     let (_, headers, anchor) = spool(&engine, &initial, 1).await;
     let mut rows = Vec::new();
-    extract::append_from_body_receipts(
-        &mut rows,
-        headers[0].number,
-        headers[0].hash_slow(),
-        headers[0].timestamp,
-        &payload.0.1,
+    let verified = logex_storage::VerifiedBlockLogs::verify_and_append(
+        &headers[0],
+        BlockBody::transactions(&payload.0.1),
         &payload.1.1,
+        &mut rows,
     )
     .unwrap();
     let hashes = vec![headers[0].hash_slow()];
     let storage = Arc::clone(&engine.storage);
     let consensus = Arc::clone(&engine.consensus);
     let held = storage.read().await;
-    let mut publish =
-        Box::pin(engine.publish_selected_forward_rows(&rows, &headers, &hashes, &anchor));
+    let mut publish = Box::pin(engine.publish_selected_forward_rows(
+        &rows,
+        std::slice::from_ref(&verified),
+        &headers,
+        &hashes,
+        &anchor,
+    ));
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             assert!(futures::poll!(&mut publish).is_pending());
@@ -434,20 +437,24 @@ async fn selection_storage_rejection_leaves_tracker_unchanged() {
     let (mut engine, _shutdown, _resources) = fixture(&initial).await;
     let (_, headers, anchor) = spool(&engine, &initial, 1).await;
     let mut rows = Vec::new();
-    extract::append_from_body_receipts(
-        &mut rows,
-        headers[0].number,
-        headers[0].hash_slow(),
-        headers[0].timestamp,
-        &payload.0.1,
+    let verified = logex_storage::VerifiedBlockLogs::verify_and_append(
+        &headers[0],
+        BlockBody::transactions(&payload.0.1),
         &payload.1.1,
+        &mut rows,
     )
     .unwrap();
     // Deterministic storage InvalidInput, not an injected physical I/O failure.
     rows[0].block_number += 1;
     assert!(
         engine
-            .publish_selected_forward_rows(&rows, &headers, &[headers[0].hash_slow()], &anchor)
+            .publish_selected_forward_rows(
+                &rows,
+                &[verified],
+                &headers,
+                &[headers[0].hash_slow()],
+                &anchor
+            )
             .await
             .is_err()
     );

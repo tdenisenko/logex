@@ -5,8 +5,8 @@ use crate::SegmentReader;
 use crate::{SyncHead, durability};
 use alloy_consensus::Header;
 use alloy_primitives::B256;
-use logex_types::ExecutionAnchor;
 use logex_types::LogRow;
+use logex_types::{ExecutionAnchor, ExecutionBlockMarker};
 use std::collections::BTreeSet;
 use std::io;
 use std::sync::Arc;
@@ -194,6 +194,44 @@ impl NativeStorage {
                     block_hash: header.hash_slow(),
                     timestamp: header.timestamp,
                 });
+        self.catalog.state.verified_log_coverage = self
+            .catalog
+            .state
+            .verified_log_coverage
+            .and_then(|mut coverage| {
+                let head = self.catalog.state.sync_head?;
+                if head.block_number < coverage.from.block_number {
+                    return None;
+                }
+                coverage.to = ExecutionBlockMarker {
+                    block_number: head.block_number,
+                    block_hash: head.block_hash,
+                    timestamp: head.timestamp,
+                };
+                Some(coverage)
+            });
+        // Retiring a legacy tip's entire checked suffix also retires its
+        // starting floor. Do not retain an orphan as the next history parent.
+        if let Some(retained) = self.catalog.state.recent_headers.last().cloned() {
+            if self
+                .catalog
+                .state
+                .historical_floor_header
+                .as_ref()
+                .is_some_and(|floor| floor.number > retained.number)
+            {
+                self.catalog.state.historical_floor_header = Some(retained.clone());
+            }
+            if self
+                .catalog
+                .state
+                .historical_anchor_header
+                .as_ref()
+                .is_some_and(|anchor| anchor.number > retained.number)
+            {
+                self.catalog.state.historical_anchor_header = Some(retained);
+            }
+        }
         self.catalog.anchors.indexed_head = intent.indexed_head;
         self.catalog.state.canonical_reorg = None;
         self.persist_catalog()?;

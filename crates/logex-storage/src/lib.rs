@@ -12,6 +12,7 @@ mod reader;
 mod row_bounds;
 mod segment_reader;
 mod state;
+mod verified_block;
 mod wal;
 
 pub use bundle::BundleReference;
@@ -23,4 +24,5 @@ pub use partition::{Partition, PartitionManager, PartitionManagerConfig};
 pub use reader::ColumnReader;
 pub use segment_reader::{CanonicalBitmap, PreparedSegmentSelection, SegmentReader};
 pub use state::SyncHead;
+pub use verified_block::{EMPTY_TRIE_ROOT, VerifiedBlockLogs, VerifiedLogCoverage};
 pub use wal::{WalReadLimits, WriteAheadLog};

@@ -51,7 +51,25 @@ LogEx accepts a log only after it can tie that log back to Ethereum consensus:
 6. Receipts are rebuilt into the receipt trie and checked against each header's
    `receiptsRoot`.
 7. Cumulative gas and log bloom commitments are checked for consistency.
-8. Only logs inside the verified contiguous coverage range are queryable.
+8. Storage checks the complete receipt-derived event sequence for every block,
+   including zero-event blocks, and reads back every newly written event before
+   publishing verified coverage. Gaps, overlaps and replayed canonical blocks
+   are rejected; legitimate identical emissions at different log indices remain
+   separate events.
+
+Event verification is deterministic, not optimistic: receipt and transaction
+roots, parent links, event fields, counts and persisted row positions must agree.
+This is separate from consensus finality. A verified nonfinalized head can still
+reorganize; fork rows are retired before replacement canonical rows are published.
+The trust model retains Ethereum's checkpoint, consensus and cryptographic
+assumptions and does not add EVM execution.
+
+`/status` reports the separately persisted `query_coverage.verified_from_block`
+and `verified_to_block`; stored row bounds and sync progress are not substitutes.
+Legacy catalog version 13 is readable but does not acquire verified coverage
+merely by opening or resuming it. New writes publish catalog version 14, which
+older binaries cannot open. Legacy history requires authenticated revalidation
+or rebuilding before it can be treated as a complete Ethereum result.
 
 This gives LogEx a different trust model from an RPC-backed indexer. Peers can
 withhold data, rate-limit, disconnect, or send invalid data, but they cannot

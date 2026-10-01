@@ -86,6 +86,10 @@ impl PartitionManager {
         Ok(())
     }
 
+    pub fn verified_log_coverage(&self) -> Option<crate::VerifiedLogCoverage> {
+        self.inner.verified_log_coverage()
+    }
+
     pub fn read_view_token(&self) -> ReadViewToken {
         self.inner.read_view_token()
     }
@@ -98,8 +102,9 @@ impl PartitionManager {
         Ok(())
     }
 
-    /// Atomically associate canonical rows with their restart progress.
-    /// Uncheckpointed work can be re-fetched after restart.
+    /// Unchecked legacy import: associate rows with restart progress without
+    /// certifying receipts. Rejected once verified coverage exists; sync uses
+    /// `ingest_verified_canonical_batch` instead.
     pub fn ingest_canonical_batch(
         &mut self,
         rows: &[LogRow],
@@ -113,13 +118,37 @@ impl PartitionManager {
         Ok(())
     }
 
-    /// Associate a whole historical chunk, including empty blocks, with its floor.
+    /// Unchecked legacy import with a progress floor, not a completeness proof.
+    /// Rejected once verified coverage exists.
     pub fn ingest_historical_batch(
         &mut self,
         rows: &[LogRow],
         floor: &Header,
     ) -> std::io::Result<()> {
         self.inner.ingest_historical_batch(rows, floor)?;
+        self.refresh_views();
+        Ok(())
+    }
+
+    pub fn ingest_verified_canonical_batch(
+        &mut self,
+        rows: &[LogRow],
+        blocks: &[crate::VerifiedBlockLogs],
+        recent_headers: &[Header],
+        anchor: Option<&ExecutionAnchor>,
+    ) -> std::io::Result<()> {
+        self.inner
+            .ingest_verified_canonical_batch(rows, blocks, recent_headers, anchor)?;
+        self.refresh_views();
+        Ok(())
+    }
+
+    pub fn ingest_verified_historical_batch(
+        &mut self,
+        rows: &[LogRow],
+        blocks: &[crate::VerifiedBlockLogs],
+    ) -> std::io::Result<()> {
+        self.inner.ingest_verified_historical_batch(rows, blocks)?;
         self.refresh_views();
         Ok(())
     }

@@ -260,6 +260,7 @@ pub async fn handle_status(State(state): State<Arc<AppState>>) -> Response {
         head_timestamp,
         indexed_head_block,
         stored_log_range,
+        verified_log_coverage,
         historical_floor,
         historical_anchor,
         chain_anchors,
@@ -277,6 +278,7 @@ pub async fn handle_status(State(state): State<Arc<AppState>>) -> Response {
             sync_head.and_then(|head| (head.timestamp > 0).then_some(head.timestamp)),
             storage.indexed_head_block(),
             stored_log_range(&storage),
+            storage.verified_log_coverage(),
             storage.historical_floor(),
             storage.historical_anchor(),
             storage.chain_anchors(),
@@ -387,10 +389,8 @@ pub async fn handle_status(State(state): State<Arc<AppState>>) -> Response {
                 )
             })
     };
-    let verified_from_block = historical_floor
-        .map(|floor| floor.block_number)
-        .or(stored_log_range.map(|range| range.0));
-    let verified_to_block = head_block.or(canonical_top_block);
+    let verified_from_block = verified_log_coverage.map(|coverage| coverage.from.block_number);
+    let verified_to_block = verified_log_coverage.map(|coverage| coverage.to.block_number);
     let reported_canonical_top_block = live_head_available.then_some(canonical_top_block).flatten();
     let latest_block = live_head_available.then_some(head_block).flatten();
     let latest_timestamp = latest_block
@@ -429,6 +429,7 @@ pub async fn handle_status(State(state): State<Arc<AppState>>) -> Response {
             "stored_log_to_block": stored_log_range.map(|range| range.1),
             "verified_from_block": verified_from_block,
             "verified_to_block": verified_to_block,
+            "verification": verified_log_coverage,
             "latest_block": latest_block,
             "latest_timestamp": latest_timestamp,
             "indexed_head_block": indexed_head_block,
@@ -1876,6 +1877,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn status_reports_verified_empty_blocks_without_inventing_stored_rows() {
+        let dir = TempDir::new().unwrap();
+        let mut storage = PartitionManager::open(PartitionManagerConfig {
+            data_dir: dir.path().to_owned(),
+            ..Default::default()
+        })
+        .unwrap();
+        let header = alloy_consensus::Header {
+            number: 100,
+            timestamp: 1_700_000_000,
+            ..Default::default()
+        };
+        let proof = logex_storage::VerifiedBlockLogs::from_empty_header(&header).unwrap();
+        storage
+            .ingest_verified_canonical_batch(&[], &[proof], std::slice::from_ref(&header), None)
+            .unwrap();
+        let state = Arc::new(AppState::new(storage, None, SyncStatus::default()));
+        let response = handle_status(State(state)).await;
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let status: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let coverage = &status["query_coverage"];
+        assert_eq!(coverage["verified_from_block"], 100);
+        assert_eq!(coverage["verified_to_block"], 100);
+        assert_eq!(
+            coverage["verification"]["from"]["block_hash"],
+            serde_json::json!(header.hash_slow())
+        );
+        assert_eq!(coverage["stored_rows"], 0);
+        assert!(coverage["stored_log_from_block"].is_null());
+        assert!(coverage["stored_log_to_block"].is_null());
+    }
+
+    #[tokio::test]
     async fn test_status_endpoint_reports_indexed_head() {
         let (_tmp, mut storage) = setup_storage();
         storage
@@ -2174,6 +2210,9 @@ mod tests {
         assert_eq!(status["indexed_head_block"], 200);
         assert_eq!(status["query_coverage"]["stored_log_from_block"], 100);
         assert_eq!(status["query_coverage"]["stored_log_to_block"], 200);
+        assert!(status["query_coverage"]["verified_from_block"].is_null());
+        assert!(status["query_coverage"]["verified_to_block"].is_null());
+        assert!(status["query_coverage"]["verification"].is_null());
         assert_eq!(status["query_coverage"]["latest_block"], 250);
         assert_eq!(status["query_coverage"]["latest_timestamp"], 1_650_000_000);
         assert_eq!(status["query_coverage"]["indexed_head_block"], 200);

@@ -21,8 +21,7 @@ static EXECUTION_CONSENSUS: LazyLock<EthBeaconConsensus<ChainSpec>> =
 ///
 /// This is the receipts_root reported by Ethereum headers for blocks
 /// containing zero transactions.
-pub const EMPTY_TRIE_ROOT: B256 =
-    alloy_primitives::b256!("56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421");
+pub use logex_storage::EMPTY_TRIE_ROOT;
 
 /// Receipt validation error aligned with Ethereum mainnet consensus rules.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

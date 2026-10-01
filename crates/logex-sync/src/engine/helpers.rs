@@ -261,25 +261,6 @@ pub(super) async fn cancelable<T>(
     }
 }
 
-/// Zip block body tx hashes with receipt logs into the format the engine
-/// expects for log extraction.
-pub(super) fn assemble_txs<B, R>(body: &B, receipts: &[R]) -> Vec<(B256, Vec<Log>)>
-where
-    B: reth_primitives_traits::BlockBody,
-    B::Transaction: SignedTransaction,
-    R: TxReceipt<Log = Log>,
-{
-    body.transactions()
-        .iter()
-        .zip(receipts.iter())
-        .map(|(tx, receipt)| {
-            let tx_hash = *tx.tx_hash();
-            let logs = receipt.logs().to_vec();
-            (tx_hash, logs)
-        })
-        .collect()
-}
-
 pub(super) fn refill_peer_floor(max_peers: usize) -> usize {
     max_peers.clamp(1, TARGET_ACTIVE_SYNC_PEERS.max(MIN_ACTIVE_SYNC_PEERS))
 }

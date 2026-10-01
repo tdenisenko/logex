@@ -26,6 +26,7 @@ tower = "0.5"
 url = "=2.5.8"
 
 [dev-dependencies]
+alloy-consensus = { workspace = true }
 logex-index = { workspace = true }
 tempfile = "3"
 tokio = { workspace = true }

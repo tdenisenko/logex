@@ -1,5 +1,6 @@
 use super::*;
 use crate::extract;
+use logex_storage::VerifiedBlockLogs;
 use logex_types::{ExecutionAnchor, ExecutionBlockMarker, LogRow};
 use std::collections::VecDeque;
 
@@ -16,6 +17,7 @@ pub(super) struct HistoricalExtractedBatch {
 }
 
 pub(super) struct HistoricalExtractedChunk {
+    pub(super) verified_blocks: Vec<VerifiedBlockLogs>,
     pub(super) rows: Vec<LogRow>,
     pub(super) row_count: u64,
     pub(super) block_count: usize,
@@ -52,6 +54,7 @@ struct HistoricalWriteBuffer {
 impl HistoricalExtractedChunk {
     fn merge(&mut self, mut other: Self) -> Result<()> {
         ensure_historical_chunk_follows(&self.lowest_header, &other)?;
+        self.verified_blocks.append(&mut other.verified_blocks);
         self.rows.append(&mut other.rows);
         self.row_count = self.row_count.saturating_add(other.row_count);
         self.block_count = self.block_count.saturating_add(other.block_count);
@@ -115,11 +118,14 @@ impl HistoricalWriteBuffer {
         }
 
         let mut rows = Vec::with_capacity(self.row_count.min(usize::MAX as u64) as usize);
+        let mut verified_blocks = Vec::with_capacity(self.block_count);
         for mut chunk in self.chunks {
             rows.append(&mut chunk.rows);
+            verified_blocks.append(&mut chunk.verified_blocks);
         }
 
         HistoricalExtractedChunk {
+            verified_blocks,
             rows,
             row_count: self.row_count,
             block_count: self.block_count,
@@ -229,6 +235,7 @@ impl SyncEngine {
     pub(super) async fn publish_selected_forward_rows(
         &mut self,
         rows: &[LogRow],
+        verified_blocks: &[VerifiedBlockLogs],
         headers: &[Header],
         hashes: &[B256],
         anchor: &ExecutionAnchor,
@@ -259,7 +266,12 @@ impl SyncEngine {
         let published = consensus
             .with_current_anchor(anchor, || -> Result<()> {
                 storage
-                    .ingest_canonical_batch(rows, last, &recent_headers, indexed_anchor)
+                    .ingest_verified_canonical_batch(
+                        rows,
+                        verified_blocks,
+                        &recent_headers,
+                        indexed_anchor,
+                    )
                     .map_err(|error| eyre::eyre!("storage ingestion error: {error}"))?;
                 // Continuity was checked above; only append new headers, without
                 // restoring/rehashing the retained persistence window.
@@ -436,11 +448,12 @@ fn next_historical_extract_task(
 
             let extraction_started = std::time::Instant::now();
             let block_count = chunk.len();
-            let rows = collect_validated_historical_rows(chunk)?;
+            let (rows, verified_blocks) = collect_validated_historical_rows(chunk)?;
             let extraction_elapsed = extraction_started.elapsed();
             let row_count = rows.len() as u64;
 
             Ok(HistoricalExtractedChunk {
+                verified_blocks,
                 rows,
                 row_count,
                 block_count,
@@ -468,8 +481,12 @@ async fn write_extracted_historical_chunk(
             if let Some(current) = storage.historical_floor_header() {
                 ensure_historical_chunk_follows(current, &extracted)?;
             }
+            eyre::ensure!(
+                extracted.verified_blocks.len() == extracted.block_count,
+                "historical block proof count differs from planned block count"
+            );
             storage
-                .ingest_historical_batch(&extracted.rows, &extracted.lowest_header)
+                .ingest_verified_historical_batch(&extracted.rows, &extracted.verified_blocks)
                 .map_err(|e| eyre::eyre!("historical storage ingestion error: {e}"))?;
             Ok(HistoricalChunkWriteOutcome {
                 floor: storage.historical_floor(),
@@ -569,7 +586,7 @@ fn historical_write_chunk_row_limit_for_available_memory(
 
 fn collect_validated_historical_rows(
     mut blocks: Vec<HistoricalValidatedBlock>,
-) -> Result<Vec<LogRow>> {
+) -> Result<(Vec<LogRow>, Vec<VerifiedBlockLogs>)> {
     blocks.sort_unstable_by_key(|block| block.header.number());
 
     let total_rows = extract::checked_row_count(
@@ -581,17 +598,16 @@ fn collect_validated_historical_rows(
     let mut rows = Vec::new();
     rows.try_reserve(total_rows)
         .map_err(|error| eyre::eyre!("reserve historical log rows: {error}"))?;
+    let mut verified_blocks = Vec::with_capacity(blocks.len());
     for block in blocks {
-        extract::append_from_body_receipts(
-            &mut rows,
-            block.header.number(),
-            block.block_hash,
-            block.header.timestamp(),
-            &block.body,
+        verified_blocks.push(VerifiedBlockLogs::verify_and_append(
+            &block.header,
+            BlockBody::transactions(&block.body),
             &block.receipts,
-        )?;
+            &mut rows,
+        )?);
     }
-    Ok(rows)
+    Ok((rows, verified_blocks))
 }
 
 pub(super) fn execution_marker_from_header(header: &Header) -> ExecutionBlockMarker {
@@ -616,6 +632,7 @@ mod tests {
         lowest_block: u64,
     ) -> HistoricalExtractedChunk {
         HistoricalExtractedChunk {
+            verified_blocks: Vec::new(),
             rows: Vec::new(),
             row_count,
             block_count,
@@ -690,14 +707,19 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
+        let mut chain = Vec::new();
+        let mut parent_hash = B256::ZERO;
+        for number in 10..=100 {
+            let header = Header {
+                number,
+                parent_hash,
+                ..Default::default()
+            };
+            parent_hash = header.hash_slow();
+            chain.push(header);
+        }
         manager
-            .ingest_historical_batch(
-                &[],
-                &Header {
-                    number: 100,
-                    ..Default::default()
-                },
-            )
+            .ingest_historical_batch(&[], chain.last().unwrap())
             .unwrap();
         let storage = Arc::new(RwLock::new(manager));
         for blocks in [80, 95] {
@@ -722,7 +744,14 @@ mod tests {
             );
             assert_eq!(storage.read().await.total_rows(), 0);
         }
-        write_extracted_historical_chunk(Arc::clone(&storage), extracted_chunk(90, 10))
+        let mut chunk = extracted_chunk(90, 10);
+        chunk.lowest_header = chain[0].clone();
+        chunk.verified_blocks = chain[..90]
+            .iter()
+            .map(VerifiedBlockLogs::from_empty_header)
+            .collect::<std::io::Result<_>>()
+            .unwrap();
+        write_extracted_historical_chunk(Arc::clone(&storage), chunk)
             .await
             .unwrap();
         assert_eq!(
@@ -786,6 +815,7 @@ mod cancellation_controls {
         let was_pending = runtime.block_on(async {
             observed.await.unwrap();
             let chunk = HistoricalExtractedChunk {
+                verified_blocks: Vec::new(),
                 rows: Vec::new(),
                 row_count: 0,
                 block_count: 1,
@@ -830,15 +860,27 @@ mod cancellation_controls {
             .build()
             .unwrap();
         let (pending, started) = runtime.block_on(async {
+            let header = Header {
+                number: 100,
+                ..Default::default()
+            };
+            let child = Header {
+                number: 101,
+                parent_hash: header.hash_slow(),
+                ..Default::default()
+            };
+            storage
+                .write()
+                .await
+                .ingest_historical_batch(&[], &child)
+                .unwrap();
             let reader = storage.read().await;
             let chunk = HistoricalExtractedChunk {
+                verified_blocks: vec![VerifiedBlockLogs::from_empty_header(&header).unwrap()],
                 rows: Vec::new(),
                 row_count: 0,
                 block_count: 1,
-                lowest_header: Header {
-                    number: 100,
-                    ..Default::default()
-                },
+                lowest_header: header,
                 extraction_elapsed: Duration::ZERO,
             };
             let mut write = Box::pin(write_extracted_historical_chunk(
@@ -882,7 +924,6 @@ mod cancellation_controls {
                     number: number as u64,
                     ..Default::default()
                 },
-                block_hash: B256::ZERO,
                 body_peer: PeerId::ZERO,
                 body: Default::default(),
                 receipt_peer: PeerId::ZERO,

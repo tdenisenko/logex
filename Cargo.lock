@@ -5217,6 +5217,7 @@ dependencies = [
 name = "logex-server"
 version = "0.1.0"
 dependencies = [
+ "alloy-consensus",
  "alloy-primitives",
  "axum",
  "base64",
@@ -5246,6 +5247,7 @@ name = "logex-storage"
 version = "0.1.0"
 dependencies = [
  "alloy-consensus",
+ "alloy-eips",
  "alloy-primitives",
  "alloy-rlp",
  "blake3",
