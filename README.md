@@ -632,11 +632,12 @@ Maintenance allowances bound specific inputs and retained row/data work, not
 total process memory or a filesystem reservation. Use the diagnostic and
 `repair --help` to adjust a relevant allowance rather than discarding data.
 
-This version uses catalog 13 and segment manifest 11. Start sync in a new data
-directory when upgrading from earlier native formats; they are rejected without
-migration or reset. Retain the original directory until its replacement is
-validated. The version checks also prevent earlier native readers and writers
-from silently ignoring the new source metadata.
+This version writes catalog 14 and segment manifest 11. Catalog 13 is readable
+but its historical rows remain uncertified; opening it does not establish
+verified query coverage. Other incompatible native formats are rejected without
+migration or reset. Retain an original directory until its replacement is
+validated. Version checks prevent older readers and writers from silently
+ignoring the new source and verification metadata.
 
 Indexes require a storage-owned namespace and a commitment to the exact logical
 row prefix. Standalone legacy raw sources remain scan-readable, but an index
@@ -644,6 +645,17 @@ rebuild cannot establish missing identity. Explicit index builds report this
 condition; background indexing skips repeated rebuild attempts and records the
 reason at debug log level. A complete standalone raw rewrite can establish a new
 identity; there is no native in-place identity migration command.
+
+Before publishing an index checkpoint, every B-tree key and row reference is
+compared with its source columns, including all expected memberships and null
+exclusions. Bloom filters are checked for every supported event tuple; harmless
+false positives are allowed, but false negatives prevent publication. This is
+exhaustive local verification, separate from receipt-root authentication during
+sync. The offline index verifier performs the same comparisons. It retains one
+index and its source columns at a time; its logical-byte cap is not an RSS limit.
+Index checkpoints before version 7 are treated as missing caches and rebuilt
+locally. Rebuilding these indexes preserves primary data and requires no
+Ethereum history download.
 
 To roll back, use the matching older binary with a preserved pre-upgrade data
 directory or backup. Do not change version fields to bypass compatibility checks;

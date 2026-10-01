@@ -7,6 +7,7 @@ mod composite;
 mod index_file;
 mod query_bitmap;
 mod transfer_bloom;
+mod verification;
 
 pub use btree::{BTreeIndex, BTreeIndexReader};
 pub use builder::{IndexBuildProfile, IndexBuilder, IndexVerificationError};
