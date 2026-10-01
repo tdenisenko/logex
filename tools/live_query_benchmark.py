@@ -159,19 +159,32 @@ class Client:
 def healthy(response, required_to=0):
     if response.get("http_status") != 200:
         return False
-    s = response["body"]
+    s = response.get("body")
+    if not isinstance(s, dict):
+        return False
+    coverage = s.get("query_coverage")
+    finalized = s.get("finalized_execution_head")
+    if not isinstance(coverage, dict) or not isinstance(finalized, dict):
+        return False
+    # Storage metrics refresh asynchronously, and startup can legitimately
+    # return null. Unknown or malformed values must defer the workload rather
+    # than crash its observer or silently count as a healthy zero.
+    for value, minimum, maximum in (
+        (coverage.get("verified_from_block"), 0, 0),
+        (coverage.get("verified_to_block"), required_to, None),
+        (finalized.get("block_number"), required_to, None),
+        (s.get("connected_peers"), 1, None),
+        (s.get("index_lag_blocks"), 0, 64),
+        (s.get("finality_lag_blocks"), 0, 512),
+        (s.get("raw_log_segment_backlog"), 0, 0),
+        (s.get("disk_free_bytes"), 50 * 1024**3 + 1, None),
+    ):
+        if type(value) is not int or value < minimum or (maximum is not None and value > maximum):
+            return False
     return (
         s.get("historical_sync_disabled") is False
-        and s.get("query_coverage", {}).get("verified_from_block") == 0
-        and s.get("query_coverage", {}).get("verified_to_block", -1) >= required_to
-        and s.get("finalized_execution_head", {}).get("block_number", -1) >= required_to
         and s.get("consensus_head_fresh") is True
         and s.get("consensus_status_stale") is False
-        and s.get("connected_peers", 0) > 0
-        and s.get("index_lag_blocks", 65) <= 64
-        and s.get("finality_lag_blocks", 513) <= 512
-        and s.get("raw_log_segment_backlog") == 0
-        and s.get("disk_free_bytes", 0) > 50 * 1024**3
     )
 
 

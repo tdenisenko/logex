@@ -39,6 +39,8 @@ identity and before/after health snapshots. First trials are not guaranteed cold
 repeats may be warm. A timeout is an incomplete measurement, not a duration for a
 completed query. Socket timeout does not prove server execution stopped. Stop and
 investigate transport, admission or health failures before submitting more work.
+Unknown startup metrics, including a temporarily null free-space value, defer
+the workload until the health snapshot is complete.
 The global cancellation endpoint is deliberately not used because it cannot
 identify which caller owns the active query.
 
