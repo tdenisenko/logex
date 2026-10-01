@@ -148,6 +148,12 @@ pub struct BTreeIndexReader {
 }
 
 impl BTreeIndexReader {
+    pub(crate) fn entries(&self) -> impl Iterator<Item = (&[u8], &RoaringBitmap)> {
+        self.entries
+            .iter()
+            .map(|(key, bitmap)| (key.as_slice(), bitmap))
+    }
+
     /// Load and structurally validate every entry and bitmap in an index.
     pub fn open(path: &Path) -> io::Result<Self> {
         let data = IndexFile::read_all_from_path(path)?;

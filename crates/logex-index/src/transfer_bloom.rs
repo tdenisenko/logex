@@ -19,6 +19,73 @@ const HASH_ROUNDS: u64 = 4;
 pub const ERC20_EVENTS_BLOOM_FILE: &str = "erc20_events.bloom";
 pub const TRANSFER_BLOOM_FILE: &str = "erc20_transfer.bloom";
 
+/// Check every source tuple against the actual query presence predicate. Extra
+/// bloom bits are harmless false positives; a single false negative is an error.
+/// The bounded bit vector is retained once instead of doing random file reads
+/// for each row. All protected pages are checked, including unused bits.
+pub(crate) fn verify_source_membership(
+    source: &Path,
+    path: &Path,
+    name: &str,
+    file_id: [u8; 16],
+) -> io::Result<()> {
+    let legacy = name == TRANSFER_BLOOM_FILE;
+    let magic = if legacy {
+        TRANSFER_MAGIC
+    } else {
+        ERC20_EVENTS_MAGIC
+    };
+    let (mut file, mask) = open_bloom(IndexFile::open_bound(path, file_id)?, magic)?;
+    let mut bits = vec![0; ((mask + 1) / 8) as usize];
+    file.read_exact(&mut bits)?;
+    let reader = SegmentReader::open_projected(source, &["address", "topic0", "topic1", "topic2"])?;
+    u32::try_from(reader.read_row_count()?).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "source exceeds index row-ID limit",
+        )
+    })?;
+    let addresses = reader.read_address(None)?;
+    let topic0s = reader.read_nullable_b256("topic0", None)?;
+    let topic1s = reader.read_nullable_b256("topic1", None)?;
+    let topic2s = reader.read_nullable_b256("topic2", None)?;
+    validate_source_rows(
+        &reader,
+        &[
+            ("address", addresses.len()),
+            ("topic0", topic0s.len()),
+            ("topic1", topic1s.len()),
+            ("topic2", topic2s.len()),
+        ],
+    )?;
+    let transfer = transfer_topic0();
+    let approval = approval_topic0();
+    for row in 0..addresses.len() {
+        let Some(topic0) = topic0s[row] else { continue };
+        if topic0 != transfer && (legacy || topic0 != approval) {
+            continue;
+        }
+        for (position, topic) in [(1, topic1s[row]), (2, topic2s[row])] {
+            let Some(topic) = topic else { continue };
+            let (h1, h2) = if legacy {
+                transfer_key_hashes(&addresses[row], position, &topic)
+            } else {
+                erc20_event_key_hashes(&topic0, &addresses[row], position, &topic)
+            };
+            for round in 0..HASH_ROUNDS {
+                let bit = h1.wrapping_add(round.wrapping_mul(h2)) & mask;
+                if bits[(bit / 8) as usize] & (1 << (bit % 8)) == 0 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("bloom omits source row {row} topic {position}"),
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn transfer_topic0() -> B256 {
     keccak256(b"Transfer(address,address,uint256)")
 }

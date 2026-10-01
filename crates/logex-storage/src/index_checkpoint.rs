@@ -10,7 +10,10 @@ use serde::{Deserialize, Serialize};
 use crate::{BundleReference, SegmentReader, durability};
 
 pub(crate) const INDEX_CHECKPOINT_FILE: &str = "index-checkpoint";
-const MAGIC: &[u8; 8] = b"LXICP006";
+// Version 7 publications require exhaustive derived-entry/source comparison.
+// Earlier caches remain scan-readable source data but must be rebuilt locally.
+const MAGIC: &[u8; 8] = b"LXICP007";
+const UNCHECKED_CONTENT_MAGIC: &[u8; 8] = b"LXICP006";
 const NAMESPACE_ONLY_MAGIC: &[u8; 8] = b"LXICP005";
 const UNBOUND_SOURCE_MAGIC: &[u8; 8] = b"LXICP004";
 const UNBOUND_MAGIC: &[u8; 8] = b"LXICP003";
@@ -298,6 +301,7 @@ fn read_checkpoint(index_dir: &Path) -> io::Result<Option<Checkpoint>> {
     if bytes.len() > MAX_CHECKPOINT_BYTES
         || bytes.len() < 40
         || (&bytes[..8] != MAGIC
+            && &bytes[..8] != UNCHECKED_CONTENT_MAGIC
             && &bytes[..8] != NAMESPACE_ONLY_MAGIC
             && &bytes[..8] != UNBOUND_SOURCE_MAGIC
             && &bytes[..8] != UNBOUND_MAGIC
@@ -744,7 +748,12 @@ mod tests {
 
     #[test]
     fn unbound_checkpoint_versions_require_rebuilding() {
-        for magic in [NAMESPACE_ONLY_MAGIC, UNBOUND_SOURCE_MAGIC, UNBOUND_MAGIC] {
+        for magic in [
+            UNCHECKED_CONTENT_MAGIC,
+            NAMESPACE_ONLY_MAGIC,
+            UNBOUND_SOURCE_MAGIC,
+            UNBOUND_MAGIC,
+        ] {
             let dir = tempfile::tempdir().unwrap();
             ColumnFile::write_batch(dir.path(), &[row()]).unwrap();
             IndexBuildCheckpoint::begin(dir.path())

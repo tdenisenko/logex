@@ -1,5 +1,5 @@
 use std::fs;
-use std::io::{self, Read};
+use std::io;
 use std::path::Path;
 
 use logex_storage::{IndexBuildCheckpoint, IndexReadCheckpoint, SegmentReader};
@@ -108,9 +108,11 @@ impl IndexBuilder {
     }
 
     /// Verify every required published artifact without rebuilding or modifying it.
-    /// Holds the checkpoint's read lock while streaming all logical bytes through
-    /// the bound reader's page checks. This verifies derived-file integrity, not
-    /// the semantic correspondence of index entries to authenticated source rows.
+    /// Holds the checkpoint's read lock while checking every logical byte and
+    /// comparing every key/row association with the captured source columns.
+    /// Every expected row membership and bloom tuple is checked without sampling.
+    /// This verifies local derived contents; source Ethereum authentication is a
+    /// separate invariant established by verified ingestion.
     /// The caller must retain storage ownership for offline source stability.
     pub fn verify_indexes(partition_dir: &Path, profile: IndexBuildProfile) -> io::Result<()> {
         match Self::verify_indexes_inner(
@@ -130,8 +132,10 @@ impl IndexBuilder {
     /// Verify required published artifacts with a cumulative logical payload cap.
     /// The cap does not bound physical I/O, memory, or elapsed time: opening a file
     /// can prefetch bytes before its logical length is known. Each artifact is
-    /// charged before its payload is streamed. `required` is the cumulative size
+    /// charged before its payload is decoded. `required` is the cumulative size
     /// through the first artifact that exceeds the cap, not a full inventory.
+    /// Source column reads for semantic comparison are additional work, outside
+    /// this derived-payload cap.
     ///
     /// This offline operation requires retained storage ownership. Symlink and
     /// non-ordinary index paths are rejected; ownership must prevent path changes
@@ -195,7 +199,6 @@ impl IndexBuilder {
                 "index checkpoint is missing or stale",
             )
         })?;
-        let mut scratch = [0u8; 16 * 1024];
         let mut total = 0u64;
         for name in Self::required_index_files(profile) {
             let expected = checkpoint.artifact_id(name).ok_or_else(|| {
@@ -209,10 +212,10 @@ impl IndexBuilder {
                 if limit.is_some() {
                     require_ordinary_index_path(&path, false)?;
                 }
-                let mut file = IndexFile::open_bound(&path, expected)?;
-                let mut remaining = file.logical_len();
+                let file = IndexFile::open_bound(&path, expected)?;
+                let length = file.logical_len();
                 if let Some(limit) = limit {
-                    total = total.checked_add(remaining).ok_or_else(|| {
+                    total = total.checked_add(length).ok_or_else(|| {
                         io::Error::new(
                             io::ErrorKind::InvalidData,
                             "index logical byte sum overflow",
@@ -225,18 +228,8 @@ impl IndexBuilder {
                         });
                     }
                 }
-                while remaining != 0 {
-                    let count = remaining.min(scratch.len() as u64) as usize;
-                    file.read_exact(&mut scratch[..count])?;
-                    remaining -= count as u64;
-                }
-                if file.read(&mut scratch[..1])? != 0 {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "index exceeds logical length",
-                    )
-                    .into());
-                }
+                drop(file);
+                crate::verification::verify_artifact(partition_dir, &path, name, expected)?;
                 Ok(())
             })();
             result.map_err(|error| match error {
@@ -298,7 +291,7 @@ impl IndexBuilder {
         let checkpoint = Self::begin_publication(partition_dir)?;
         let index_dir = partition_dir.join("indexes");
         Self::build_indexes_unpublished(partition_dir, &index_dir, profile)?;
-        Self::publish_at(&index_dir, checkpoint)
+        Self::publish_at(partition_dir, &index_dir, checkpoint)
     }
 
     /// Build a fresh index tree without copying or modifying primary columns.
@@ -311,7 +304,7 @@ impl IndexBuilder {
     ) -> io::Result<()> {
         let checkpoint = IndexBuildCheckpoint::begin_fresh_at(source_dir, index_dir)?;
         Self::build_indexes_unpublished(source_dir, index_dir, profile)?;
-        Self::publish_at(index_dir, checkpoint)
+        Self::publish_at(source_dir, index_dir, checkpoint)
     }
 
     fn build_indexes_unpublished(
@@ -406,10 +399,14 @@ impl IndexBuilder {
     }
 
     fn publish(partition_dir: &Path, checkpoint: IndexBuildCheckpoint) -> std::io::Result<()> {
-        Self::publish_at(&partition_dir.join("indexes"), checkpoint)
+        Self::publish_at(partition_dir, &partition_dir.join("indexes"), checkpoint)
     }
 
-    fn publish_at(index_dir: &Path, mut checkpoint: IndexBuildCheckpoint) -> std::io::Result<()> {
+    fn publish_at(
+        source_dir: &Path,
+        index_dir: &Path,
+        mut checkpoint: IndexBuildCheckpoint,
+    ) -> std::io::Result<()> {
         for name in Self::required_index_files(IndexBuildProfile::All)
             .iter()
             .copied()
@@ -417,7 +414,10 @@ impl IndexBuilder {
         {
             let path = index_dir.join(name);
             match IndexFile::protected_file_id(&path) {
-                Ok(file_id) => checkpoint.register_artifact(name, file_id)?,
+                Ok(file_id) => {
+                    crate::verification::verify_artifact(source_dir, &path, name, file_id)?;
+                    checkpoint.register_artifact(name, file_id)?;
+                }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => return Err(error),
             }
@@ -741,6 +741,181 @@ mod tests {
                 source: Source::Receipt,
             },
         ]
+    }
+
+    #[test]
+    fn publication_rejects_checksum_valid_but_incomplete_indexes() {
+        let source = TempDir::new().unwrap();
+        let mut rows = make_test_rows();
+        rows[0].topic1 = Some(B256::repeat_byte(7));
+        rows[0].topic2 = Some(B256::repeat_byte(8));
+        ColumnFile::write_batch(source.path(), &rows).unwrap();
+        for (name, width) in [
+            ("address.bptree", 20),
+            ("topic0.bptree", 32),
+            ("block_number.bptree", 8),
+            ("timestamp.bptree", 8),
+            ("block_hash.bptree", 32),
+            ("address_topic0.bptree", 52),
+            ("address_topic0_block.bptree", 60),
+            ("topic0_topic1.bptree", 64),
+            ("address_topic0_topic1.bptree", 84),
+            ("address_topic0_topic2.bptree", 84),
+        ] {
+            let parent = TempDir::new().unwrap();
+            let stage = parent.path().join("stage");
+            let checkpoint = IndexBuildCheckpoint::begin_fresh_at(source.path(), &stage).unwrap();
+            // This artifact has valid structure, checksums and a fresh identity,
+            // but omits all expected memberships. File validation alone passes.
+            BTreeIndex::new(width)
+                .write_to_file(&stage.join(name))
+                .unwrap();
+            BTreeIndexReader::open(&stage.join(name)).unwrap();
+            let error = IndexBuilder::publish_at(source.path(), &stage, checkpoint).unwrap_err();
+            assert!(
+                error.to_string().contains("omits required source row"),
+                "{name}: {error}"
+            );
+            assert!(!stage.join("index-checkpoint").exists());
+        }
+        assert_eq!(
+            SegmentReader::open(source.path())
+                .unwrap()
+                .read_row_count()
+                .unwrap(),
+            3
+        );
+    }
+
+    #[test]
+    fn exhaustive_verifier_rejects_wrong_extra_and_repeated_memberships() {
+        let dir = TempDir::new().unwrap();
+        let rows = make_test_rows();
+        ColumnFile::write_batch(dir.path(), &rows).unwrap();
+        for defect in ["wrong-key", "extra-row", "repeated-row", "missing-row"] {
+            IndexBuilder::build_all_indexes(dir.path()).unwrap();
+            let mut checkpoint = IndexBuildCheckpoint::begin(dir.path()).unwrap();
+            let path = dir.path().join("indexes/address.bptree");
+            let mut index = BTreeIndex::new(20);
+            for (position, row) in rows.iter().enumerate() {
+                if defect == "missing-row" && position == 2 {
+                    continue;
+                }
+                let key = if defect == "wrong-key" && position == 1 {
+                    Address::repeat_byte(0xCC)
+                } else {
+                    row.address
+                };
+                index.insert(key.as_slice(), position as u32);
+            }
+            if defect == "extra-row" {
+                index.insert(rows[0].address.as_slice(), 3);
+            }
+            if defect == "repeated-row" {
+                index.insert(Address::repeat_byte(0xCC).as_slice(), 0);
+            }
+            index.write_to_file(&path).unwrap();
+            // Emulate a correctly bound publication by an unchecked builder:
+            // the offline verifier must compare contents, not just IDs or CRCs.
+            for name in IndexBuilder::required_index_files(IndexBuildProfile::All) {
+                checkpoint
+                    .register_artifact(
+                        name,
+                        IndexFile::protected_file_id(&dir.path().join("indexes").join(name))
+                            .unwrap(),
+                    )
+                    .unwrap();
+            }
+            checkpoint.publish().unwrap();
+            let before = verification_tree(dir.path());
+            let error =
+                IndexBuilder::verify_indexes(dir.path(), IndexBuildProfile::All).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{defect}");
+            assert_eq!(verification_tree(dir.path()), before);
+        }
+    }
+
+    #[test]
+    fn publication_checks_bloom_false_negatives_and_accepts_false_positives() {
+        use std::io::Read;
+        let source = TempDir::new().unwrap();
+        let mut rows = make_test_rows();
+        rows[0].topic0 = Some(crate::transfer_topic0());
+        rows[0].topic1 = Some(B256::repeat_byte(7));
+        rows[1].topic0 = Some(crate::approval_topic0());
+        rows[1].topic2 = Some(B256::repeat_byte(8));
+        ColumnFile::write_batch(source.path(), &rows).unwrap();
+        for name in [ERC20_EVENTS_BLOOM_FILE, crate::TRANSFER_BLOOM_FILE] {
+            for fill in [0, 255] {
+                let parent = TempDir::new().unwrap();
+                let stage = parent.path().join("stage");
+                let checkpoint =
+                    IndexBuildCheckpoint::begin_fresh_at(source.path(), &stage).unwrap();
+                if name == ERC20_EVENTS_BLOOM_FILE {
+                    crate::Erc20EventBloom::build(source.path(), &stage).unwrap();
+                } else {
+                    crate::TransferBloom::build(source.path(), &stage).unwrap();
+                }
+                let path = stage.join(name);
+                let mut payload = Vec::new();
+                IndexFile::open(&path)
+                    .unwrap()
+                    .read_to_end(&mut payload)
+                    .unwrap();
+                // Preserve the valid bloom geometry and regenerate file CRCs.
+                payload[20..].fill(fill);
+                crate::index_file::write_index_file(&path, payload.len() as u64, |writer| {
+                    writer.write_all(&payload)
+                })
+                .unwrap();
+                let result = IndexBuilder::publish_at(source.path(), &stage, checkpoint);
+                if fill == 0 {
+                    assert!(
+                        result
+                            .unwrap_err()
+                            .to_string()
+                            .contains("bloom omits source row")
+                    );
+                    assert!(!stage.join("index-checkpoint").exists());
+                } else {
+                    result.unwrap();
+                    assert!(stage.join("index-checkpoint").is_file());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn version_six_indexes_are_rebuilt_without_rewriting_source() {
+        let dir = TempDir::new().unwrap();
+        ColumnFile::write_batch(dir.path(), &make_test_rows()).unwrap();
+        IndexBuilder::build_all_indexes(dir.path()).unwrap();
+        let primary = |path: &Path| {
+            verification_tree(path)
+                .into_iter()
+                .filter(|(name, _)| !name.as_os_str().is_empty() && !name.starts_with("indexes"))
+                .collect::<VerificationTree>()
+        };
+        let before = primary(dir.path());
+        let marker = dir.path().join("indexes/index-checkpoint");
+        let mut bytes = fs::read(&marker).unwrap();
+        bytes[..8].copy_from_slice(b"LXICP006");
+        let mut digest = alloy_primitives::Keccak256::new();
+        digest.update(&bytes[..8]);
+        digest.update(&bytes[40..]);
+        bytes[8..40].copy_from_slice(digest.finalize().as_slice());
+        fs::write(&marker, bytes).unwrap();
+        assert!(IndexBuilder::indexes_missing(dir.path(), IndexBuildProfile::All).unwrap());
+        let reader = SegmentReader::open(dir.path()).unwrap();
+        assert!(
+            IndexReadCheckpoint::open(dir.path(), &reader)
+                .unwrap()
+                .is_none()
+        );
+        IndexBuilder::build_missing_indexes(dir.path(), IndexBuildProfile::All).unwrap();
+        IndexBuilder::verify_indexes(dir.path(), IndexBuildProfile::All).unwrap();
+        assert_eq!(primary(dir.path()), before);
+        assert_eq!(&fs::read(marker).unwrap()[..8], b"LXICP007");
     }
 
     type VerificationTree =
