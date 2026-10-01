@@ -18,3 +18,8 @@ sums the remaining rows and uses zero for an empty selection. No Ethereum value
 was changed to create edge cases. The tests exercise nullable topics, values above
 u64, CASE, HAVING, numeric ordering, pagination, memory rejection and cancellation
 across raw, compacted, indexed and reopened storage.
+
+The scan-planning tests reuse these same rows to check exact address/topic
+disjunctions, cumulative UNION candidate counts, and cleanup after bounded
+parallel selection encounters capacity limits or cancellation. No further
+benchmark rows are generated.

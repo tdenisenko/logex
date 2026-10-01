@@ -60,7 +60,8 @@ use serde_json::{Map, Value};
 use logex_storage::native::{NativeLogFilter, TopicConstraint};
 use logex_storage::{PartitionManager, PreparedSegmentSelection, SegmentReader};
 use logex_types::{
-    QueryBuffer, QueryMemoryBudget, QueryMemoryError, QueryMemoryLimit, QueryMemoryReservation,
+    PartitionMeta, QueryBuffer, QueryMemoryBudget, QueryMemoryError, QueryMemoryLimit,
+    QueryMemoryReservation,
 };
 
 #[cfg(test)]
@@ -168,6 +169,10 @@ fn capacity_error_message(root: &(dyn std::error::Error + 'static)) -> Option<St
 #[derive(Debug)]
 pub struct SqlQueryResult {
     pub rows: QueryJsonRows,
+    /// Selected rows considered by execution. General SQL accumulates candidates
+    /// from each planned table scan before residual filtering and pushed limits;
+    /// limited native paths may stop selection early. This is not physical rows
+    /// read, or a count of executions that reuse a captured scan.
     pub total_scanned: u64,
 }
 
@@ -514,13 +519,27 @@ impl TableProvider for LogexTableProvider {
         let mut remaining_limit = limit;
         let mut partitions: Vec<Arc<dyn PartitionStream>> = Vec::new();
 
-        for partition in self.snapshot.partitions_in_order(filter.order) {
+        let sources: Vec<_> = self
+            .snapshot
+            .partitions_in_order(filter.order)
+            .into_iter()
+            .filter(|partition| partition_matches_filter(partition, &filter))
+            .collect();
+        // A pushed LIMIT must stop selection in source order. Unbounded scans
+        // can select independent snapshots concurrently, under the same shared
+        // memory/cancellation owners. Keep the I/O fan-out bounded even on
+        // hosts with many CPUs, and retain source order when assembling plans.
+        let width = if limit.is_some() {
+            1
+        } else {
+            std::thread::available_parallelism()
+                .map(usize::from)
+                .unwrap_or(1)
+                .clamp(1, 8)
+        };
+        let select = |partition: &PartitionMeta| {
             check_query_canceled(self.cancel_check.as_ref())?;
-            if !partition_matches_filter(&partition, &filter) {
-                continue;
-            }
-
-            let mut row_ids = candidate_row_ids_with_memory(
+            candidate_row_ids_with_memory(
                 &partition.path,
                 &filter,
                 true,
@@ -528,35 +547,75 @@ impl TableProvider for LogexTableProvider {
                 &self.memory,
                 self.cancel_check.as_ref(),
             )
-            .map_err(DataFusionError::IoError)?;
-            if row_ids.is_empty() {
-                continue;
-            }
-
-            scanned_rows += row_ids.len() as u64;
-
-            if let Some(limit) = remaining_limit {
-                if row_ids.len() > limit {
-                    row_ids.truncate(limit);
+            .map_err(DataFusionError::IoError)
+        };
+        for chunk in sources.chunks(width) {
+            check_query_canceled(self.cancel_check.as_ref())?;
+            let selections = if chunk.len() == 1 {
+                vec![select(&chunk[0])]
+            } else {
+                std::thread::scope(|scope| {
+                    let handles: Vec<_> = chunk
+                        .iter()
+                        .map(|partition| {
+                            let select = &select;
+                            scope.spawn(move || select(partition))
+                        })
+                        .collect();
+                    // Join every started worker before propagating any failure.
+                    // Successful buffers move into the plan; failed work must
+                    // not leave a detached reader or reservation behind.
+                    handles
+                        .into_iter()
+                        .map(|handle| {
+                            handle.join().unwrap_or_else(|_| {
+                                Err(DataFusionError::Execution(
+                                    "query selection worker panicked".to_owned(),
+                                ))
+                            })
+                        })
+                        .collect::<Vec<_>>()
+                })
+            };
+            check_query_canceled(self.cancel_check.as_ref())?;
+            for (partition, selection) in chunk.iter().zip(selections) {
+                let mut row_ids = selection?;
+                if row_ids.is_empty() {
+                    continue;
                 }
-                remaining_limit = Some(limit.saturating_sub(row_ids.len()));
+
+                scanned_rows = scanned_rows
+                    .checked_add(row_ids.len() as u64)
+                    .ok_or_else(|| {
+                        DataFusionError::Execution("query candidate count overflow".to_owned())
+                    })?;
+
+                if let Some(limit) = remaining_limit {
+                    if row_ids.len() > limit {
+                        row_ids.truncate(limit);
+                    }
+                    remaining_limit = Some(limit.saturating_sub(row_ids.len()));
+                }
+
+                partitions.push(Arc::new(LogSegmentPartition::new(
+                    partition.path.clone(),
+                    projected_schema.clone(),
+                    projected_columns.clone(),
+                    row_ids,
+                    self.cancel_check.clone(),
+                    self.memory.clone(),
+                )));
             }
-
-            partitions.push(Arc::new(LogSegmentPartition::new(
-                partition.path.clone(),
-                projected_schema.clone(),
-                projected_columns.clone(),
-                row_ids,
-                self.cancel_check.clone(),
-                self.memory.clone(),
-            )));
-
             if remaining_limit == Some(0) {
                 break;
             }
         }
 
-        self.total_scanned.store(scanned_rows, Ordering::Relaxed);
+        self.total_scanned
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |total| {
+                total.checked_add(scanned_rows)
+            })
+            .map_err(|_| DataFusionError::Execution("query candidate count overflow".to_owned()))?;
         if partitions.is_empty() {
             partitions.push(Arc::new(EmptyLogPartition {
                 schema: projected_schema.clone(),
@@ -7046,6 +7105,9 @@ fn supports_exact_pushdown(expr: &DataFusionExpr) -> bool {
 }
 
 fn supports_binary_pushdown(binary: &BinaryExpr) -> bool {
+    if binary.op == Operator::Or {
+        return disjunction_as_in_list(binary).is_some();
+    }
     let Some((column, literal, reversed)) = normalize_binary(binary) else {
         return false;
     };
@@ -7074,6 +7136,61 @@ fn supports_binary_pushdown(binary: &BinaryExpr) -> bool {
         }
         _ => false,
     }
+}
+
+/// The optimizer can turn a short IN list into an OR tree. Preserve the same
+/// exact membership filter only when every arm constrains the same qualified
+/// address/topic column to canonical, non-null literals. Mixed columns, NULLs
+/// and noncanonical strings must retain normal SQL evaluation.
+fn disjunction_as_in_list(binary: &BinaryExpr) -> Option<InList> {
+    fn collect<'a>(
+        expr: &'a DataFusionExpr,
+        column: &mut Option<&'a datafusion::common::Column>,
+        values: &mut Vec<DataFusionExpr>,
+    ) -> Option<()> {
+        let (next, literals) = match expr {
+            DataFusionExpr::BinaryExpr(binary) if binary.op == Operator::Or => {
+                collect(&binary.left, column, values)?;
+                return collect(&binary.right, column, values);
+            }
+            DataFusionExpr::BinaryExpr(binary)
+                if binary.op == Operator::Eq && supports_binary_pushdown(binary) =>
+            {
+                let DataFusionExpr::Column(next) = binary.left.as_ref() else {
+                    return None;
+                };
+                (next, std::slice::from_ref(binary.right.as_ref()))
+            }
+            DataFusionExpr::InList(list) if supports_in_list_pushdown(list) => {
+                let DataFusionExpr::Column(next) = list.expr.as_ref() else {
+                    return None;
+                };
+                (next, list.list.as_slice())
+            }
+            _ => return None,
+        };
+        if next.name != "address" && topic_column_index(&next.name).is_none() {
+            return None;
+        }
+        if column.is_some_and(|current| current != next) {
+            return None;
+        }
+        *column = Some(next);
+        values.extend_from_slice(literals);
+        Some(())
+    }
+    if binary.op != Operator::Or {
+        return None;
+    }
+    let mut column = None;
+    let mut list = Vec::new();
+    collect(&binary.left, &mut column, &mut list)?;
+    collect(&binary.right, &mut column, &mut list)?;
+    Some(InList {
+        expr: Box::new(DataFusionExpr::Column(column?.clone())),
+        list,
+        negated: false,
+    })
 }
 
 fn supports_between_pushdown(between: &Between) -> bool {
@@ -7138,6 +7255,11 @@ fn apply_binary_pushdown(
     filter: &mut NativeLogFilter,
     binary: &BinaryExpr,
 ) -> DataFusionResult<()> {
+    if binary.op == Operator::Or {
+        let list = disjunction_as_in_list(binary)
+            .ok_or_else(|| DataFusionError::Plan("unsupported pushed disjunction".to_owned()))?;
+        return apply_in_list_pushdown(filter, &list);
+    }
     let Some((column, literal, reversed)) = normalize_binary(binary) else {
         return Err(DataFusionError::Plan(format!(
             "unable to normalize pushed filter {}",
@@ -7824,6 +7946,40 @@ mod tests {
     use super::*;
 
     const BATCHED_SUM_TEST_ROWS: usize = 16_385;
+
+    #[test]
+    fn disjunction_pushdown_preserves_qualified_columns_and_sql_null_semantics() {
+        use datafusion::prelude::{col, lit};
+        let address = format!("0x{}", "ab".repeat(20));
+        let other = format!("0x{}", "cd".repeat(20));
+        let topic = format!("0x{}", "ab".repeat(32));
+        let a = col("a.address").eq(lit(address.clone()));
+        let b = col("a.address").eq(lit(other.clone()));
+        let valid = a.clone().or(b.clone());
+        assert!(supports_exact_pushdown(&valid));
+        let filter = build_native_pushdown_filter(&[valid, a.clone()]).unwrap();
+        assert_eq!(filter.addresses, vec![parse_sql_address(&address).unwrap()]);
+        for invalid in [
+            a.clone().or(col("b.address").eq(lit(other))),
+            a.clone().or(col("a.topic0").eq(lit(topic.clone()))),
+            a.clone().or(col("a.address").is_null()),
+            a.clone()
+                .or(col("a.address").eq(lit(ScalarValue::Utf8(None)))),
+            a.clone()
+                .or(col("a.address").eq(lit(address.to_uppercase()))),
+            a.clone().or(col("a.address").not_eq(lit(address.clone()))),
+            col("topic1")
+                .eq(lit(topic.clone()))
+                .or(col("topic2").eq(lit(topic))),
+            col("block_number")
+                .eq(lit(1u64))
+                .or(col("block_number").eq(lit(3u64))),
+            a.or(col("a.address").in_list(vec![lit(address)], true)),
+        ] {
+            assert!(!supports_exact_pushdown(&invalid), "{invalid}");
+            assert!(build_native_pushdown_filter(&[invalid]).is_err());
+        }
+    }
 
     #[test]
     fn datafusion_task_context_retains_query_lifetime() {
@@ -9374,6 +9530,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn limited_scan_does_not_open_unneeded_later_sources() {
+        let (_tmp, storage) = setup_two_candidate_segments();
+        let snapshot = StorageSnapshot::from_storage(&storage);
+        let sources = snapshot.partitions_in_order(logex_storage::native::LogOrder::Ascending);
+        assert_eq!(sources.len(), 2);
+        // A temporary local source is made unavailable after snapshot capture.
+        // Selecting a one-row prefix must never attempt to open that source.
+        std::fs::rename(
+            &sources[1].path,
+            sources[1].path.with_extension("unavailable"),
+        )
+        .unwrap();
+        let budget = QueryMemoryBudget::new(QueryMemoryLimit::new(64 * 1024 * 1024).unwrap());
+        let scanned = Arc::new(AtomicU64::new(0));
+        let provider = LogexTableProvider::new(snapshot, scanned.clone(), None, budget.clone());
+        let state = SessionContext::new().state();
+        let plan = provider
+            .scan(&state, Some(&vec![0]), &[], Some(1))
+            .await
+            .unwrap();
+        assert_eq!(scanned.load(Ordering::Relaxed), 1);
+        drop(plan);
+        assert_eq!(budget.used(), 0);
+        assert!(
+            provider
+                .scan(&state, Some(&vec![0]), &[], None)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            scanned.load(Ordering::Relaxed),
+            1,
+            "failed scans do not publish partial counts"
+        );
+        assert_eq!(
+            budget.used(),
+            0,
+            "all failed selection workers have released their buffers"
+        );
+    }
+
+    #[tokio::test]
     async fn multiple_segment_candidate_ids_contend_and_clean_up_as_one_plan() {
         let (_tmp, storage) = setup_two_candidate_segments();
         let snapshot = StorageSnapshot::from_storage(&storage);
@@ -9403,6 +9601,10 @@ mod tests {
         drop(calibration);
         assert_eq!(calibration_memory.used(), 0);
         let first_partition_checks = calibration_calls.load(Ordering::Relaxed);
+        // These phase-specific controls need sequential source admission. A
+        // pushed limit preserves that path without excluding either partition.
+        // The mainnet multi-partition controls also cover unbounded selection.
+        let sequential_limit = Some(usize::MAX);
         let cancellation_calls = Arc::new(AtomicU64::new(0));
         let calls = cancellation_calls.clone();
         let canceled_memory =
@@ -9416,7 +9618,7 @@ mod tests {
             canceled_memory.clone(),
         );
         let error = canceled
-            .scan(&state, Some(&projection), &[], None)
+            .scan(&state, Some(&projection), &[], sequential_limit)
             .await
             .unwrap_err();
         assert!(matches!(
@@ -9458,7 +9660,7 @@ mod tests {
             constrained.clone(),
         );
         let error = provider
-            .scan(&state, Some(&projection), &[], None)
+            .scan(&state, Some(&projection), &[], sequential_limit)
             .await
             .unwrap_err();
         assert!(matches!(
