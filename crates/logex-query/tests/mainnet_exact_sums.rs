@@ -69,6 +69,74 @@ fn integer(value: &Value) -> BigInt {
 }
 
 #[tokio::test]
+async fn mainnet_weth_wallet_refinement_preserves_wrapping_flows() {
+    let rows = fixture().rows;
+    let weth = "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2";
+    let deposit = "0xe1fffcc4923d04b559f4d29a8bfc6cda04eb5b0d3c460751c2402c5c5cc9109c";
+    let withdrawal = "0x7fcf532c15f0a6db0bd6d0e038bea71d30d808c7d98cb3bf7268a95bf5081b65";
+    let wallet = rows
+        .iter()
+        .find(|row| row.topic0.is_some_and(|topic| topic.to_string() == deposit))
+        .unwrap()
+        .topic1
+        .unwrap()
+        .to_string();
+    let matching: Vec<_> = rows
+        .iter()
+        .filter(|row| {
+            format!("0x{}", hex::encode(row.address)) == weth
+                && row.topic1.is_some_and(|topic| topic.to_string() == wallet)
+                && row.topic0.is_some_and(|topic| {
+                    [deposit, withdrawal].contains(&topic.to_string().as_str())
+                })
+        })
+        .collect();
+    assert!(!matching.is_empty());
+    let expected: BigInt = matching
+        .iter()
+        .map(|row| {
+            let units = BigInt::from_bytes_be(num_bigint::Sign::Plus, &row.data);
+            if row.topic0.unwrap().to_string() == deposit {
+                units
+            } else {
+                -units
+            }
+        })
+        .sum();
+    let (_tmp, mut storage, config) = storage(&rows);
+    for layout in 0..4 {
+        if layout == 1 {
+            storage.compact_eligible_segments().unwrap();
+        }
+        if layout == 2 {
+            for partition in storage
+                .sealed_partitions()
+                .iter()
+                .chain(std::iter::once(storage.hot_partition()))
+            {
+                if partition.meta.row_count > 0 {
+                    IndexBuilder::build_all_indexes(&partition.meta.path).unwrap();
+                }
+            }
+        }
+        if layout == 3 {
+            drop(storage);
+            storage = PartitionManager::open(config.clone()).unwrap();
+        }
+        let sql = format!(
+            "SELECT SUM(CASE WHEN topic0='{deposit}' THEN data ELSE 0 END)-SUM(CASE WHEN topic0='{withdrawal}' THEN data ELSE 0 END) AS net_units FROM logs WHERE address='{weth}' AND topic0 IN ('{deposit}','{withdrawal}') AND (topic1='{wallet}' OR topic2='{wallet}') AND data_len=32"
+        );
+        check(
+            &storage,
+            &sql,
+            SqlQueryPage::default(),
+            &[json!({"net_units":expected.to_string()})],
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
 async fn mainnet_topic_sums_match_independent_integers_across_storage_layouts() {
     let fixture = fixture();
     assert_eq!(fixture.rows.len(), 64);
