@@ -1011,6 +1011,44 @@ fn try_execute_native_select(
     }))
 }
 
+/// The lookahead window can contain several partitions per worker. Keep the
+/// number of simultaneous decode buffers bounded independently of that window.
+/// Join every worker before propagating errors, so query memory and cancellation
+/// ownership cannot outlive the caller. Contiguous slices retain input order.
+fn scan_native_partition_window<P: Sync, T: Send>(
+    partitions: &[P],
+    worker_count: usize,
+    scan: impl Fn(&P) -> Result<T, SqlQueryError> + Sync,
+) -> Result<Vec<T>, SqlQueryError> {
+    if partitions.is_empty() {
+        return Ok(Vec::new());
+    }
+    let per_worker = partitions.len().div_ceil(worker_count.max(1));
+    let results = std::thread::scope(|scope| {
+        let scan = &scan;
+        let handles: Vec<_> = partitions
+            .chunks(per_worker)
+            .map(|batch| scope.spawn(move || batch.iter().map(scan).collect::<Result<Vec<_>, _>>()))
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| {
+                handle.join().unwrap_or_else(|_| {
+                    Err(SqlQueryError::Storage(std::io::Error::other(
+                        "query worker panicked",
+                    )))
+                })
+            })
+            .collect::<Vec<_>>()
+    });
+    Ok(results
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .flatten()
+        .collect())
+}
+
 fn execute_native_sql_filter(
     snapshot: &StorageSnapshot,
     filter: &NativeLogFilter,
@@ -1047,32 +1085,19 @@ fn execute_native_sql_filter(
         if ordered_page_is_complete(&chunk[0], &rows, filter.order, scan_limit) {
             break;
         }
-        let chunk_results = std::thread::scope(|scope| {
-            let mut handles = Vec::with_capacity(chunk.len());
-            for partition in chunk {
-                handles.push(scope.spawn(move || {
-                    scan_native_partition_with_memory(
-                        &partition.path,
-                        filter,
-                        scan_limit,
-                        cancel_check,
-                        partition.row_count,
-                        memory,
-                    )
-                }));
-            }
-            handles
-                .into_iter()
-                .map(|handle| {
-                    handle
-                        .join()
-                        .unwrap_or_else(|_| Err(std::io::Error::other("query worker panicked")))
-                })
-                .collect::<Vec<_>>()
-        });
+        let chunk_results = scan_native_partition_window(chunk, worker_count, |partition| {
+            scan_native_partition_with_memory(
+                &partition.path,
+                filter,
+                scan_limit,
+                cancel_check,
+                partition.row_count,
+                memory,
+            )
+            .map_err(map_native_query_io_error)
+        })?;
 
-        for result in chunk_results {
-            let mut partition_rows = result.map_err(map_native_query_io_error)?;
+        for mut partition_rows in chunk_results {
             total_scanned += partition_rows.len() as u64;
             rows.try_append(&mut partition_rows)
                 .map_err(map_native_query_io_error)?;
@@ -2104,33 +2129,19 @@ fn execute_native_count_aggregate(
 
     for chunk in partitions.chunks(window_size) {
         check_query_canceled(cancel_check).map_err(SqlQueryError::DataFusion)?;
-        let chunk_results = std::thread::scope(|scope| {
-            let mut handles = Vec::with_capacity(chunk.len());
-            for partition in chunk {
-                handles.push(scope.spawn(move || {
-                    scan_native_count_partition(
-                        &partition.path,
-                        filter,
-                        group_by,
-                        cancel_check,
-                        partition.row_count,
-                        memory,
-                    )
-                }));
-            }
-            handles
-                .into_iter()
-                .map(|handle| {
-                    handle
-                        .join()
-                        .unwrap_or_else(|_| Err(std::io::Error::other("query worker panicked")))
-                })
-                .collect::<Vec<_>>()
-        });
+        let chunk_results = scan_native_partition_window(chunk, worker_count, |partition| {
+            scan_native_count_partition(
+                &partition.path,
+                filter,
+                group_by,
+                cancel_check,
+                partition.row_count,
+                memory,
+            )
+            .map_err(map_native_query_io_error)
+        })?;
 
-        for result in chunk_results {
-            let (partition_counts, partition_scanned) =
-                result.map_err(map_native_query_io_error)?;
+        for (partition_counts, partition_scanned) in chunk_results {
             for (count, partition_count) in
                 counts.by_source.iter_mut().zip(partition_counts.by_source)
             {
@@ -2955,31 +2966,16 @@ fn execute_native_data_only_sum(
 
     for chunk in partitions.chunks(window_size) {
         check_query_canceled(cancel_check.as_ref()).map_err(SqlQueryError::DataFusion)?;
-        let partials = std::thread::scope(|scope| {
-            let mut handles = Vec::with_capacity(chunk.len());
-            for partition in chunk {
-                let path = &partition.path;
-                let visible_rows = partition.row_count;
-                let filter = &query.filter;
-                let memory = memory.clone();
-                let cancel = cancel_check.as_ref();
-                handles.push(scope.spawn(move || {
-                    scan_native_data_only_sum_partition(path, filter, visible_rows, &memory, cancel)
-                }));
-            }
-            handles
-                .into_iter()
-                .map(|handle| {
-                    handle.join().unwrap_or_else(|_| {
-                        Err(SqlQueryError::Storage(std::io::Error::other(
-                            "query worker panicked",
-                        )))
-                    })
-                })
-                .collect::<Vec<_>>()
-        });
-        for partial in partials {
-            let (partial, scanned) = partial?;
+        let partials = scan_native_partition_window(chunk, worker_count, |partition| {
+            scan_native_data_only_sum_partition(
+                &partition.path,
+                &query.filter,
+                partition.row_count,
+                &memory,
+                cancel_check.as_ref(),
+            )
+        })?;
+        for (partial, scanned) in partials {
             accumulator
                 .merge(partial, || {
                     cancel_check.as_ref().is_some_and(|check| check())
@@ -3268,37 +3264,21 @@ fn execute_native_data_sum(
 
     for chunk in partitions.chunks(window_size) {
         check_query_canceled(cancel_check).map_err(SqlQueryError::DataFusion)?;
-        let chunk_results = std::thread::scope(|scope| {
-            let mut handles = Vec::with_capacity(chunk.len());
-            for partition in chunk {
-                let scan = NativeDataSumPartitionScan {
-                    visible_rows: partition.row_count,
-                    candidate_filters,
-                    selection: prepared.selection.as_deref(),
-                    cases: prepared.cases.as_ref(),
-                    group_by,
-                    sum_inputs,
-                    cancel_check,
-                    memory,
-                };
-                handles.push(
-                    scope.spawn(move || scan_native_data_sum_partition(&partition.path, scan)),
-                );
-            }
-            handles
-                .into_iter()
-                .map(|handle| {
-                    handle.join().unwrap_or_else(|_| {
-                        Err(SqlQueryError::Storage(std::io::Error::other(
-                            "query worker panicked",
-                        )))
-                    })
-                })
-                .collect::<Vec<_>>()
-        });
+        let chunk_results = scan_native_partition_window(chunk, worker_count, |partition| {
+            let scan = NativeDataSumPartitionScan {
+                visible_rows: partition.row_count,
+                candidate_filters,
+                selection: prepared.selection.as_deref(),
+                cases: prepared.cases.as_ref(),
+                group_by,
+                sum_inputs,
+                cancel_check,
+                memory,
+            };
+            scan_native_data_sum_partition(&partition.path, scan)
+        })?;
 
-        for result in chunk_results {
-            let (partition_groups, partition_scanned) = result?;
+        for (partition_groups, partition_scanned) in chunk_results {
             groups = groups.merge(partition_groups, cancel_check)?;
             total_scanned = total_scanned
                 .checked_add(partition_scanned)
@@ -8101,6 +8081,90 @@ mod tests {
         }
         let member = col("a.topic2").in_list(vec![lit(topic.clone())], false);
         assert!(bounded_disjunction_arms(&arm(1).or(member)).is_some());
+    }
+
+    #[test]
+    fn native_partition_window_bounds_decode_memory_and_preserves_order() {
+        use std::sync::Barrier;
+        use std::sync::atomic::AtomicUsize;
+
+        let workers = 3;
+        let scratch_bytes = 32 * 1024;
+        let memory =
+            QueryMemoryBudget::new(QueryMemoryLimit::new(workers * scratch_bytes).unwrap());
+        let barrier = Barrier::new(workers);
+        let active = AtomicUsize::new(0);
+        let peak = AtomicUsize::new(0);
+        let partitions: Vec<_> = (0..workers * 4).collect();
+        let rows = scan_native_partition_window(&partitions, workers, |partition| {
+            let scratch = memory
+                .reserve(scratch_bytes, "test decode scratch")
+                .unwrap();
+            let count = active.fetch_add(1, Ordering::SeqCst) + 1;
+            peak.fetch_max(count, Ordering::SeqCst);
+            // Force overlapping scans in every wave without timing assumptions.
+            barrier.wait();
+            barrier.wait();
+            active.fetch_sub(1, Ordering::SeqCst);
+            drop(scratch);
+            Ok(*partition)
+        })
+        .unwrap();
+        assert_eq!(rows, partitions);
+        assert_eq!(peak.load(Ordering::SeqCst), workers);
+        assert_eq!(active.load(Ordering::SeqCst), 0);
+        assert_eq!(memory.used(), 0);
+    }
+
+    #[test]
+    fn native_partition_window_joins_all_workers_after_panic() {
+        use std::sync::Barrier;
+        use std::sync::atomic::AtomicUsize;
+
+        let memory = QueryMemoryBudget::new(QueryMemoryLimit::new(1024).unwrap());
+        let barrier = Barrier::new(3);
+        let completed = AtomicUsize::new(0);
+        let result = scan_native_partition_window(&[0, 1, 2], 3, |partition| {
+            let _scratch = memory.reserve(128, "test decode scratch").unwrap();
+            barrier.wait();
+            assert_ne!(*partition, 0, "intentional worker panic");
+            completed.fetch_add(1, Ordering::SeqCst);
+            Ok(*partition)
+        });
+        assert!(
+            matches!(result, Err(SqlQueryError::Storage(error)) if error.to_string() == "query worker panicked")
+        );
+        assert_eq!(completed.load(Ordering::SeqCst), 2);
+        assert_eq!(memory.used(), 0);
+    }
+
+    #[test]
+    fn native_partition_window_cancellation_joins_and_skips_remaining_work() {
+        use std::sync::Barrier;
+        use std::sync::atomic::{AtomicBool, AtomicUsize};
+
+        let memory = QueryMemoryBudget::new(QueryMemoryLimit::new(1024).unwrap());
+        let barrier = Barrier::new(3);
+        let canceled = Arc::new(AtomicBool::new(false));
+        let cancel: QueryCancelCheck = {
+            let canceled = Arc::clone(&canceled);
+            Arc::new(move || canceled.load(Ordering::SeqCst))
+        };
+        let started = AtomicUsize::new(0);
+        let partitions: Vec<_> = (0..12).collect();
+        let result = scan_native_partition_window(&partitions, 3, |partition| {
+            let _scratch = memory.reserve(128, "test decode scratch").unwrap();
+            started.fetch_add(1, Ordering::SeqCst);
+            if *partition == 0 {
+                canceled.store(true, Ordering::SeqCst);
+            }
+            barrier.wait();
+            check_query_canceled(Some(&cancel))?;
+            Ok(*partition)
+        });
+        assert!(result.is_err());
+        assert_eq!(started.load(Ordering::SeqCst), 3);
+        assert_eq!(memory.used(), 0);
     }
 
     #[test]
