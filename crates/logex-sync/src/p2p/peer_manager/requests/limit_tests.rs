@@ -27,12 +27,28 @@ pub(crate) fn empty_body_receipt_outcome() -> BodyReceiptRequestOutcome {
     BodyReceiptRequestOutcome {
         total_hashes: 0,
         return_blocks: 0,
-        planned_return_blocks: 0,
+        completed_prefix_blocks: 0,
         chunks: BTreeMap::new(),
         failures: Default::default(),
         stats: Default::default(),
         accounting_forwarded: false,
         sessions: HashMap::new(),
+    }
+}
+
+/// Completed payload prefix with the same shortened accounting used by the
+/// request executor. Engine controls retain the original queued range separately.
+pub(crate) fn body_receipt_prefix_outcome(
+    requested: usize,
+    blocks: Vec<SourcedBodyReceipts>,
+) -> BodyReceiptRequestOutcome {
+    let completed = blocks.len();
+    BodyReceiptRequestOutcome {
+        total_hashes: requested,
+        return_blocks: requested,
+        completed_prefix_blocks: completed,
+        chunks: BTreeMap::from([(0, blocks)]),
+        ..empty_body_receipt_outcome()
     }
 }
 
@@ -288,7 +304,6 @@ async fn small_combined_batch_control(block_count: usize) {
         .unwrap()
         .expect("the complete tail must be returned for validation");
     assert_eq!(completion.blocks.len(), block_count);
-    assert_eq!(completion.planned_return_blocks, block_count);
     assert!(completion.residual_chunks.is_empty());
     assert_eq!((body_requests, receipt_requests), (1, 1));
 }

@@ -375,7 +375,7 @@ pub(super) struct BodyReceiptRequestReservation {
 pub(crate) struct BodyReceiptRequestOutcome {
     total_hashes: usize,
     return_blocks: usize,
-    planned_return_blocks: usize,
+    completed_prefix_blocks: usize,
     chunks: BTreeMap<usize, Vec<SourcedBodyReceipts>>,
     failures: ParallelChunkFailures,
     stats: TypedRequestStats,
@@ -681,7 +681,6 @@ struct BodyReceiptActiveRequestGuard {
 
 pub(crate) struct BodyReceiptRequestCompletion {
     pub(crate) blocks: Vec<SourcedBodyReceipts>,
-    pub(crate) planned_return_blocks: usize,
     pub(crate) residual_chunks: BTreeMap<usize, Vec<SourcedBodyReceipts>>,
 }
 
@@ -1476,7 +1475,7 @@ impl PeerManager {
         let BodyReceiptRequestOutcome {
             total_hashes,
             return_blocks,
-            planned_return_blocks,
+            completed_prefix_blocks,
             chunks,
             failures: _,
             stats: _,
@@ -1486,12 +1485,11 @@ impl PeerManager {
 
         let completion_return_blocks = body_receipt_completion_return_blocks(
             return_blocks,
-            planned_return_blocks,
+            completed_prefix_blocks,
             total_hashes,
         );
         let BodyReceiptCompletionChunks {
             blocks,
-            planned_return_blocks,
             residual_chunks,
             min_accepted_prefix,
         } = body_receipt_completion_chunks(
@@ -1503,7 +1501,6 @@ impl PeerManager {
             self.advance_request_cursor();
             Ok(Some(BodyReceiptRequestCompletion {
                 blocks,
-                planned_return_blocks,
                 residual_chunks,
             }))
         } else {
@@ -2289,7 +2286,7 @@ impl BodyReceiptRequestPlan {
         BodyReceiptRequestOutcome {
             total_hashes: self.hashes.len(),
             return_blocks: self.return_blocks,
-            planned_return_blocks: body_receipt_completed_plan_return_blocks(
+            completed_prefix_blocks: body_receipt_completed_prefix_blocks(
                 &chunks,
                 self.return_blocks,
             ),
@@ -5676,7 +5673,6 @@ fn contiguous_chunk_blocks<T>(chunks: &BTreeMap<usize, Vec<T>>) -> usize {
 
 struct BodyReceiptCompletionChunks<T> {
     blocks: Vec<T>,
-    planned_return_blocks: usize,
     residual_chunks: BTreeMap<usize, Vec<T>>,
     min_accepted_prefix: usize,
 }
@@ -5693,11 +5689,6 @@ fn body_receipt_completion_chunks<T>(
         min_accepted_prefix_override,
         !residual_chunks.is_empty(),
     );
-    let planned_return_blocks = if preserve_residual_chunks {
-        completion_return_blocks
-    } else {
-        blocks.len()
-    };
     let residual_chunks = if preserve_residual_chunks {
         residual_chunks
     } else {
@@ -5706,7 +5697,6 @@ fn body_receipt_completion_chunks<T>(
 
     BodyReceiptCompletionChunks {
         blocks,
-        planned_return_blocks,
         residual_chunks,
         min_accepted_prefix,
     }
@@ -6365,10 +6355,10 @@ fn planned_body_receipt_prefix_blocks(
 
 fn body_receipt_completion_return_blocks(
     return_blocks: usize,
-    planned_return_blocks: usize,
+    completed_prefix_blocks: usize,
     total_hashes: usize,
 ) -> usize {
-    planned_return_blocks.min(return_blocks).min(total_hashes)
+    completed_prefix_blocks.min(return_blocks).min(total_hashes)
 }
 
 fn body_receipt_has_accepted_contiguous_prefix<T>(
@@ -6380,7 +6370,7 @@ fn body_receipt_has_accepted_contiguous_prefix<T>(
         && contiguous_blocks >= body_receipt_min_accepted_prefix(contiguous_blocks)
 }
 
-fn body_receipt_completed_plan_return_blocks<T>(
+fn body_receipt_completed_prefix_blocks<T>(
     chunks: &BTreeMap<usize, Vec<T>>,
     return_blocks: usize,
 ) -> usize {
@@ -6992,27 +6982,18 @@ mod tests {
     }
 
     #[test]
-    fn body_receipt_completed_plan_return_blocks_tracks_contiguous_progress() {
+    fn body_receipt_completed_prefix_blocks_tracks_contiguous_progress() {
         let mut chunks = BTreeMap::new();
-        assert_eq!(body_receipt_completed_plan_return_blocks(&chunks, 2048), 0);
+        assert_eq!(body_receipt_completed_prefix_blocks(&chunks, 2048), 0);
 
         chunks.insert(0, vec![0u8; 512]);
-        assert_eq!(
-            body_receipt_completed_plan_return_blocks(&chunks, 2048),
-            512
-        );
+        assert_eq!(body_receipt_completed_prefix_blocks(&chunks, 2048), 512);
 
         chunks.insert(512, vec![0u8; 256]);
-        assert_eq!(
-            body_receipt_completed_plan_return_blocks(&chunks, 2048),
-            768
-        );
+        assert_eq!(body_receipt_completed_prefix_blocks(&chunks, 2048), 768);
 
         chunks.insert(1536, vec![0u8; 1024]);
-        assert_eq!(
-            body_receipt_completed_plan_return_blocks(&chunks, 2048),
-            768
-        );
+        assert_eq!(body_receipt_completed_prefix_blocks(&chunks, 2048), 768);
     }
 
     #[test]
@@ -7142,7 +7123,7 @@ mod tests {
     }
 
     #[test]
-    fn body_receipt_completion_return_blocks_caps_to_planned_prefix() {
+    fn body_receipt_completion_return_blocks_caps_to_completed_prefix() {
         assert_eq!(
             body_receipt_completion_return_blocks(5_000, 1_024, 5_000),
             1_024
@@ -8150,7 +8131,6 @@ mod tests {
         let completion = body_receipt_completion_chunks(512, chunks, None);
 
         assert_eq!(completion.blocks.len(), 128);
-        assert_eq!(completion.planned_return_blocks, 128);
         assert!(completion.residual_chunks.is_empty());
         assert_eq!(
             completion.min_accepted_prefix,
@@ -8171,7 +8151,6 @@ mod tests {
         );
 
         assert_eq!(completion.blocks.len(), 128);
-        assert_eq!(completion.planned_return_blocks, 512);
         assert_eq!(completion.residual_chunks.get(&128), Some(&vec![1u8; 128]));
         assert_eq!(
             completion.min_accepted_prefix,
@@ -8185,7 +8164,7 @@ mod tests {
         let mut outcome = BodyReceiptRequestOutcome {
             total_hashes: 4,
             return_blocks: 4,
-            planned_return_blocks: 4,
+            completed_prefix_blocks: 4,
             chunks: BTreeMap::new(),
             failures: vec![ChunkRequestFailure {
                 role: ChunkRequestRole::Receipts,

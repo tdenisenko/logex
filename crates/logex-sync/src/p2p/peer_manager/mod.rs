@@ -66,8 +66,8 @@ mod state;
 
 #[cfg(test)]
 pub(crate) use self::requests::limit_tests::{
-    empty_body_receipt_outcome, empty_header_outcome, engine_peer_fixture,
-    engine_peer_request_fixture,
+    body_receipt_prefix_outcome, empty_body_receipt_outcome, empty_header_outcome,
+    engine_peer_fixture, engine_peer_request_fixture,
 };
 
 pub use self::requests::ReceiptRequestContext;

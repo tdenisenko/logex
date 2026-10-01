@@ -530,6 +530,172 @@ fn prepared(headers: &[Header]) -> PreparedHistoricalBatch {
 }
 
 #[tokio::test]
+async fn historical_partial_payload_retains_gap_before_queued_lookahead() {
+    let (mut engine, _requests, _shutdown, headers, _resources) = fixture().await;
+    let requested = 64;
+    let completed = 24;
+    let reverse_headers = headers[36..100].iter().rev().cloned().collect::<Vec<_>>();
+    let blocks = (0..completed)
+        .map(|_| ((PeerId::ZERO, Default::default()), (PeerId::ZERO, vec![])))
+        .collect();
+    let outcome = HistoricalFetchOutcome {
+        generation: engine.historical_fetch_generation,
+        sequence: 0,
+        attempt: 0,
+        header_batch: HistoricalHeaderBatch {
+            child_header: headers[100].clone(),
+            header_peer: PeerId::ZERO,
+            hashes: reverse_headers.iter().map(Header::hash_slow).collect(),
+            headers: reverse_headers,
+            required_block: 36,
+            header_elapsed: Duration::ZERO,
+        },
+        body_receipt_elapsed: Duration::ZERO,
+        outcome: crate::p2p::peer_manager::body_receipt_prefix_outcome(requested, blocks),
+    };
+    let (_, batch, next_child) = engine
+        .materialize_historical_fetch_outcome(outcome)
+        .unwrap()
+        .expect("valid short payload");
+    assert_eq!(batch.blocks.len(), completed);
+    assert_eq!(batch.planned_return_blocks, requested);
+    assert_eq!(next_child.unwrap(), headers[36]);
+    let residual = batch.residual_batch.as_ref().expect("retain missing range");
+    assert_eq!(residual.header_batch.child_header, headers[76]);
+    assert_eq!(
+        residual.header_batch.headers,
+        headers[36..76].iter().rev().cloned().collect::<Vec<_>>()
+    );
+    let processed = process_historical_batch(batch, std::time::Instant::now())
+        .await
+        .unwrap()
+        .ok()
+        .unwrap();
+    assert_eq!(processed.block_count, completed);
+    assert!(!prepared_historical_batch_can_coalesce(&processed));
+    let mut written = write_prepared_historical_batch(processed, Arc::clone(&engine.storage))
+        .await
+        .unwrap();
+    assert_eq!(
+        engine
+            .storage
+            .read()
+            .await
+            .historical_floor()
+            .unwrap()
+            .block_number,
+        76
+    );
+    assert!(
+        engine
+            .ingest_historical_residual_batch(written.residual_batch.take().unwrap())
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        engine
+            .storage
+            .read()
+            .await
+            .historical_floor()
+            .unwrap()
+            .block_number,
+        36
+    );
+    write_prepared_historical_batch(prepared(&headers[..36]), Arc::clone(&engine.storage))
+        .await
+        .unwrap();
+    assert_eq!(
+        engine
+            .storage
+            .read()
+            .await
+            .historical_floor()
+            .unwrap()
+            .block_number,
+        0
+    );
+}
+
+#[tokio::test]
+async fn historical_single_page_plan_freezes_queued_boundary() {
+    let (mut engine, _requests, _shutdown, headers, _resources) =
+        fixture_with_tail(1_024, B256::repeat_byte(1)).await;
+    let reversed = headers[..1_024].iter().rev().cloned().collect::<Vec<_>>();
+    let plan = engine
+        .prepare_historical_fetch_plan_from_header_batch(HistoricalHeaderBatch {
+            child_header: headers[1_024].clone(),
+            header_peer: PeerId::ZERO,
+            hashes: reversed.iter().map(Header::hash_slow).collect(),
+            headers: reversed,
+            required_block: 0,
+            header_elapsed: Duration::ZERO,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    let boundary = plan.planned_next_child_header.unwrap();
+    assert!(plan.header_batch.headers.len() < 1_024);
+    assert_eq!(plan.header_batch.headers.last(), Some(&boundary));
+    assert_eq!(plan.header_batch.hashes.last(), Some(&boundary.hash_slow()));
+    assert_eq!(
+        plan.body_receipt_plan.planned_prefix_blocks(),
+        plan.header_batch.headers.len()
+    );
+    assert_eq!(plan.header_batch.required_block, boundary.number());
+}
+
+#[tokio::test]
+async fn historical_coalescing_rejects_a_gap_between_ready_sequences() {
+    let (mut engine, _requests, _shutdown, headers, _resources) = fixture().await;
+    let mut first = prepared(&headers[90..100]);
+    engine.historical_prepare_completed.insert(
+        1,
+        HistoricalCompletedPrepare {
+            next_child_header: Some(headers[0].clone()),
+            result: Ok(Ok(prepared(&headers[..85]))),
+        },
+    );
+    let (merged, child) =
+        engine.coalesce_ready_historical_prepares(0, &mut first, Some(headers[90].clone()));
+    assert_eq!(
+        merged, 1,
+        "sequence adjacency does not prove block continuity"
+    );
+    assert_eq!(child, Some(headers[90].clone()));
+    assert_eq!(first.block_count, 10);
+    assert!(engine.historical_prepare_completed.contains_key(&1));
+}
+
+#[tokio::test]
+async fn historical_stale_lookahead_refills_without_publishing_a_gap() {
+    let (mut engine, _requests, _shutdown, headers, _resources) = fixture().await;
+    let generation = engine.historical_fetch_generation;
+    let advanced = engine
+        .ingest_historical_prepare_result(
+            1,
+            Some(headers[0].clone()),
+            Ok(Ok(prepared(&headers[..85]))),
+            true,
+        )
+        .await
+        .unwrap();
+    assert!(!advanced);
+    assert_ne!(engine.historical_fetch_generation, generation);
+    assert_eq!(
+        engine
+            .storage
+            .read()
+            .await
+            .historical_floor()
+            .unwrap()
+            .block_number,
+        100
+    );
+    assert_eq!(engine.storage.read().await.total_rows(), 0);
+}
+
+#[tokio::test]
 async fn fairness_yielded_prepare_keeps_its_worker_and_publishes_after_completion() {
     let (mut engine, _requests, _shutdown, headers, _resources) = fixture().await;
     let (release, receiver) = tokio::sync::oneshot::channel();
