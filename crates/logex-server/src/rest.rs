@@ -12,7 +12,7 @@ use logex_storage::PartitionManager;
 use serde::Serialize;
 
 use crate::handler::{ActiveQueryGuard, AppState, QueryAdmissionError};
-use crate::query_encoding::{is_capacity_error, serialize_json};
+use crate::query_encoding::serialize_json;
 use crate::query_response::retain_query_lease;
 use crate::storage_metrics;
 
@@ -112,32 +112,32 @@ async fn execute_query(
     req: QueryRequest,
     query_guard: &ActiveQueryGuard,
 ) -> Response {
-    let cancel_check = query_guard.cancel_check();
-    let (storage_snapshot, head_block) = {
-        let storage = match state.read_storage().await {
-            Ok(storage) => storage,
-            Err(reason) => return storage_unavailable_response(reason),
-        };
-        (
-            logex_query::NativeStorageSnapshot::from_storage(&storage),
-            storage.head_block().unwrap_or(0),
-        )
-    };
     let requested_limit = req.limit;
     let page = SqlQueryPage::new(requested_limit, req.offset);
-    let execution = logex_query::execute_sql_page_on_snapshot_with_memory(
-        &req.sql,
-        storage_snapshot,
-        head_block,
-        page,
-        Some(Arc::clone(&cancel_check)),
-        state.query_memory.clone(),
-    );
-    let result = match tokio::select! {
-        biased;
-        reason = state.storage_unavailable() => return storage_unavailable_response(reason),
-        result = execution => result,
-    } {
+    let encoded = state
+        .run_sql_query(query_guard, req.sql, page, move |result, memory, cancel| {
+            let row_count = result.rows.len();
+            let next_offset = requested_limit
+                .filter(|limit| *limit > 0 && row_count == *limit)
+                .map(|_| req.offset + row_count);
+            let response = QueryResponse {
+                rows: result.rows,
+                total_scanned: result.total_scanned,
+                row_count,
+                limit: requested_limit.unwrap_or(0),
+                offset: req.offset,
+                next_offset,
+                max_limit: 0,
+            };
+            serialize_json(&response, memory, Some(cancel))
+        })
+        .await;
+    // A service-wide storage failure takes priority over execution, conversion
+    // and cancellation errors, including those returned by the blocking worker.
+    if let Some(reason) = state.storage_failure() {
+        return storage_unavailable_response(reason);
+    }
+    let body = match encoded {
         Ok(r) => r,
         Err(error @ SqlQueryError::SnapshotChanged) => {
             return (
@@ -174,6 +174,17 @@ async fn execute_query(
             }
             .into_response();
         }
+        Err(SqlQueryError::Storage(e))
+            if e.kind() == std::io::ErrorKind::Interrupted || query_guard.was_canceled() =>
+        {
+            return (
+                StatusCode::CONFLICT,
+                Json(ErrorResponse {
+                    error: "query canceled".to_owned(),
+                }),
+            )
+                .into_response();
+        }
         Err(SqlQueryError::Storage(e)) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -185,52 +196,6 @@ async fn execute_query(
         }
     };
 
-    let row_count = result.rows.len();
-    let next_offset = requested_limit
-        .filter(|limit| *limit > 0 && row_count == *limit)
-        .map(|_| req.offset + row_count);
-
-    let response = QueryResponse {
-        rows: result.rows,
-        total_scanned: result.total_scanned,
-        row_count,
-        limit: requested_limit.unwrap_or(0),
-        offset: req.offset,
-        next_offset,
-        max_limit: 0,
-    };
-    let encoded = serialize_json(&response, &state.query_memory, Some(&cancel_check));
-    // Storage failure closes admission and cancels active work. Preserve that service-wide
-    // failure priority even when it arrives during synchronous response encoding.
-    if let Some(reason) = state.storage_failure() {
-        return storage_unavailable_response(reason);
-    }
-    let body = match encoded {
-        Ok(body) => body,
-        Err(error) if is_capacity_error(&error) => {
-            return query_memory_capacity_response(error.to_string());
-        }
-        Err(error)
-            if error.kind() == std::io::ErrorKind::Interrupted || query_guard.was_canceled() =>
-        {
-            return (
-                StatusCode::CONFLICT,
-                Json(ErrorResponse {
-                    error: "query canceled".to_owned(),
-                }),
-            )
-                .into_response();
-        }
-        Err(error) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: format!("cannot serialize SQL result: {error}"),
-                }),
-            )
-                .into_response();
-        }
-    };
     let mut response = Response::new(Body::from(body));
     response
         .headers_mut()

@@ -7,7 +7,10 @@ use axum::extract::rejection::JsonRejection;
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Json, Response};
 
-use logex_query::{self, DEFAULT_QUERY_PAGE_SIZE, NativeStorageSnapshot, QueryCancelCheck};
+use logex_query::{
+    self, DEFAULT_QUERY_PAGE_SIZE, NativeStorageSnapshot, QueryCancelCheck, SqlQueryError,
+    SqlQueryPage, SqlQueryResult,
+};
 use logex_storage::PartitionManager;
 use logex_types::{LOGEX_CLIENT_VERSION, QueryMemoryBudget, QueryMemoryLimit, SyncStatus};
 
@@ -60,7 +63,7 @@ pub struct AppState {
     pub(crate) storage_metrics: Arc<tokio::sync::Mutex<CachedStorageMetrics>>,
     pub(crate) query_control: Arc<QueryControl>,
     pub(crate) query_memory: QueryMemoryBudget,
-    native_query_workers: OnceLock<Arc<tokio::sync::Semaphore>>,
+    blocking_query_workers: OnceLock<Arc<tokio::sync::Semaphore>>,
 }
 
 impl AppState {
@@ -106,7 +109,7 @@ impl AppState {
             storage_metrics: Arc::new(tokio::sync::Mutex::new(CachedStorageMetrics::default())),
             query_control: Arc::new(QueryControl::new(concurrency)),
             query_memory: QueryMemoryBudget::new(memory),
-            native_query_workers: OnceLock::new(),
+            blocking_query_workers: OnceLock::new(),
         }
     }
 
@@ -160,10 +163,10 @@ impl AppState {
         T: Send + 'static,
         F: FnOnce(&NativeStorageSnapshot, u64, QueryCancelCheck) -> io::Result<T> + Send + 'static,
     {
-        // Native scans previously occupied an async runtime worker. Size their
+        // SQL planning and native scans must not occupy async runtime workers. Size the
         // blocking gate from the serving runtime, even when AppState was built
         // outside it, rather than adopting the much larger blocking-pool limit.
-        let workers = self.native_query_workers.get_or_init(|| {
+        let workers = self.blocking_query_workers.get_or_init(|| {
             Arc::new(tokio::sync::Semaphore::new(
                 tokio::runtime::Handle::current().metrics().num_workers(),
             ))
@@ -172,7 +175,7 @@ impl AppState {
             biased;
             reason = self.storage_unavailable() => return Err(io::Error::other(reason)),
             permit = Arc::clone(workers).acquire_owned() => {
-                permit.map_err(|_| io::Error::other("native query workers are unavailable"))?
+                permit.map_err(|_| io::Error::other("query workers are unavailable"))?
             }
         };
         let (snapshot, head) = {
@@ -203,6 +206,54 @@ impl AppState {
                 result.map_err(|error| io::Error::other(format!("query worker failed: {error}")))?
             }
         }
+    }
+
+    /// SQL planning and native shortcuts perform synchronous filesystem work.
+    /// Drive their future and protocol conversion on the same bounded workers
+    /// as native API queries, retaining the snapshot and cancellation owner
+    /// until conversion finishes. The serving runtime still drives DataFusion
+    /// tasks spawned by its execution plans; no nested runtime is created.
+    pub(crate) async fn run_sql_query<T, F>(
+        &self,
+        query: &ActiveQueryGuard,
+        sql: String,
+        page: SqlQueryPage,
+        convert: F,
+    ) -> Result<T, SqlQueryError>
+    where
+        T: Send + 'static,
+        F: FnOnce(SqlQueryResult, &QueryMemoryBudget, &QueryCancelCheck) -> io::Result<T>
+            + Send
+            + 'static,
+    {
+        let runtime = tokio::runtime::Handle::current();
+        let memory = self.query_memory.clone();
+        // Keep SQL errors typed inside the I/O worker result. Its final view
+        // validation must override even a failed execution or conversion.
+        self.run_blocking_query(query, move |snapshot, head, cancel| {
+            let result = runtime.block_on(logex_query::execute_sql_page_on_snapshot_with_memory(
+                &sql,
+                snapshot.clone(),
+                head,
+                page,
+                Some(Arc::clone(&cancel)),
+                memory.clone(),
+            ));
+            Ok(result
+                .and_then(|result| convert(result, &memory, &cancel).map_err(sql_worker_error)))
+        })
+        .await
+        .map_err(sql_worker_error)?
+    }
+}
+
+fn sql_worker_error(error: io::Error) -> SqlQueryError {
+    if error.kind() == io::ErrorKind::WouldBlock {
+        SqlQueryError::SnapshotChanged
+    } else if is_capacity_error(&error) {
+        SqlQueryError::Capacity(error.to_string())
+    } else {
+        SqlQueryError::Storage(error)
     }
 }
 
@@ -304,7 +355,7 @@ impl QueryControl {
             return Err(QueryAdmissionError::Busy);
         }
         // No admission queue: only bounded, admitted work can wait for storage
-        // or the narrower native worker gate. The mutex also serializes failure.
+        // or the narrower blocking worker gate. The mutex also serializes failure.
         let permit = Arc::clone(&self.capacity)
             .try_acquire_owned()
             .map_err(|_| QueryAdmissionError::Capacity)?;
@@ -692,7 +743,7 @@ mod tests {
             assert!(token.load(Ordering::Acquire));
             release_tx.send(()).unwrap();
             occupied.await.unwrap();
-            let workers = state.native_query_workers.get().unwrap();
+            let workers = state.blocking_query_workers.get().unwrap();
             let _capacity = workers.acquire().await.unwrap();
             let fresh = state.query_control.start_concurrent().unwrap();
             assert!(!fresh.was_canceled());
@@ -976,7 +1027,7 @@ mod tests {
         });
         let cancel = started_rx.await.unwrap();
         assert!(!cancel());
-        let workers = state.native_query_workers.get().unwrap();
+        let workers = state.blocking_query_workers.get().unwrap();
         assert_eq!(workers.available_permits(), 0);
         assert!(state.storage.try_write().is_ok());
         request.abort();
@@ -1162,7 +1213,7 @@ mod tests {
                 .await
         });
         started_rx.await.unwrap();
-        let workers = state.native_query_workers.get().unwrap();
+        let workers = state.blocking_query_workers.get().unwrap();
         assert_eq!(workers.available_permits(), 0);
         let writer = state.storage.try_write().unwrap();
         let waiting_query = state.query_control.start_concurrent().unwrap();
@@ -1292,3 +1343,5 @@ mod composition_tests;
 mod memory_tests;
 #[cfg(test)]
 mod response_memory_tests;
+#[cfg(test)]
+mod sql_worker_tests;

@@ -109,7 +109,7 @@ impl LogExService for LogExGrpcService {
             .start_concurrent()
             .map(Arc::new)
             .map_err(QueryAdmissionError::into_grpc_status)?;
-        let sql = &request.get_ref().sql;
+        let sql = request.get_ref().sql.clone();
         tracing::debug!(sql = %sql, "gRPC query");
 
         let query_request = request.get_ref();
@@ -124,33 +124,21 @@ impl LogExService for LogExGrpcService {
             .transpose()
             .map_err(|_| Status::invalid_argument("offset is too large"))?
             .unwrap_or(0);
-        // The view owns captured row boundaries and reorg validity. Retaining
-        // the storage guard through SQL execution would stall ingestion.
-        let (snapshot, head_block) = {
-            let storage = self
-                .state
-                .read_storage()
-                .await
-                .map_err(Status::unavailable)?;
-            (
-                logex_query::NativeStorageSnapshot::from_storage(&storage),
-                storage.head_block().unwrap_or(0),
+        let execution = self
+            .state
+            .run_sql_query(
+                &query,
+                sql,
+                SqlQueryPage::new(limit, offset),
+                move |result, memory, cancel| {
+                    protocol::query_response(&result, limit, offset, memory, Some(cancel))
+                },
             )
-        };
-        let cancel = query.cancel_check();
-        let execution = logex_query::execute_sql_page_on_snapshot_with_memory(
-            sql,
-            snapshot,
-            head_block,
-            SqlQueryPage::new(limit, offset),
-            Some(Arc::clone(&cancel)),
-            self.state.query_memory.clone(),
-        );
-        let result = match tokio::select! {
-            biased;
-            reason = self.state.storage_unavailable() => return Err(Status::unavailable(reason)),
-            result = execution => result,
-        } {
+            .await;
+        if let Some(reason) = self.state.storage_failure() {
+            return Err(Status::unavailable(reason));
+        }
+        let protocol = match execution {
             Ok(result) => result,
             Err(error @ SqlQueryError::SnapshotChanged) => {
                 return Err(Status::aborted(error.to_string()));
@@ -158,32 +146,28 @@ impl LogExService for LogExGrpcService {
             Err(SqlQueryError::Capacity(error)) => {
                 return Err(Status::resource_exhausted(error));
             }
+            Err(SqlQueryError::DataFusion(err))
+                if query.was_canceled() || err.to_string().contains("query canceled") =>
+            {
+                return Err(Status::cancelled("query canceled"));
+            }
             Err(SqlQueryError::DataFusion(err)) => {
                 return Err(Status::invalid_argument(format!("query error: {err}")));
             }
             Err(SqlQueryError::LegacySyntax(err)) => {
                 return Err(Status::invalid_argument(format!("query error: {err}")));
             }
+            Err(SqlQueryError::Storage(err))
+                if err.kind() == std::io::ErrorKind::Interrupted || query.was_canceled() =>
+            {
+                return Err(Status::cancelled("query canceled"));
+            }
             Err(SqlQueryError::Storage(err)) => {
                 return Err(Status::internal(format!("execution error: {err}")));
             }
         };
 
-        let protocol = protocol::query_response(
-            &result,
-            limit,
-            offset,
-            &self.state.query_memory,
-            Some(&cancel),
-        );
-        if let Some(reason) = self.state.storage_failure() {
-            return Err(Status::unavailable(reason));
-        }
-        let mut response =
-            Response::new(self.retain_encoding_state(
-                protocol.map_err(protocol::into_status)?,
-                Arc::clone(&query),
-            ));
+        let mut response = Response::new(self.retain_encoding_state(protocol, Arc::clone(&query)));
         response.extensions_mut().insert(query.lease());
         Ok(response)
     }
