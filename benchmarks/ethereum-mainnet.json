@@ -1,0 +1,4485 @@
+{
+  "version": 1,
+  "chain_id": 1,
+  "title": "Ethereum mainnet event-log query campaign",
+  "limits": "All results describe only the stated Ethereum mainnet contract(s), event signature(s) and inclusive block range. No EVM state, native ETH balance, transaction success beyond emitted logs, or cross-chain completion is inferred.",
+  "frozen_upper_block": 26090000,
+  "cache_policy": "No cache flush. Record first trial and repeated warm trials separately.",
+  "comparison_policy": "Dune supplied inspiration only; no verified comparable Dune runtimes are available.",
+  "semantic_sources": [
+    "https://eips.ethereum.org/EIPS/eip-20",
+    "https://eips.ethereum.org/EIPS/eip-721",
+    "https://eips.ethereum.org/EIPS/eip-1155",
+    "https://eips.ethereum.org/EIPS/eip-4626",
+    "https://docs.lido.fi/guides/lido-tokens-integration-guide/",
+    "https://docs.lido.fi/contracts/withdrawal-queue-erc721/",
+    "https://docs.ens.domains/learn/deployments/",
+    "https://etherscan.io/address/vitalik.eth",
+    "https://dune.com/lido/lido-morning-coffee-dashboard"
+  ],
+  "contracts": {
+    "usdc": {
+      "address": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+      "verified_contract": "FiatTokenV2_2",
+      "emitter_verification_url": "https://sourcify.dev/server/v2/contract/1/0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48?fields=abi,compilation,proxyResolution",
+      "abi_verification_url": "https://sourcify.dev/server/v2/contract/1/0x43506849d7c04f9138d1a2050bbf3a0c054402dd?fields=abi,compilation,proxyResolution",
+      "abi_response_sha256": "5186a88451dd72fa5396418bba8a40ba3b87a2e24cb6219603bdfd930e671c4a",
+      "events": {
+        "Transfer": {
+          "signature": "Transfer(address,address,uint256)",
+          "topic0": "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+          "inputs": [
+            {
+              "name": "from",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "to",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "value",
+              "type": "uint256",
+              "indexed": false
+            }
+          ]
+        },
+        "Mint": {
+          "signature": "Mint(address,address,uint256)",
+          "topic0": "0xab8530f87dc9b59234c4623bf917212bb2536d647574c8e7e5da92c2ede0c9f8",
+          "inputs": [
+            {
+              "name": "minter",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "to",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "amount",
+              "type": "uint256",
+              "indexed": false
+            }
+          ]
+        },
+        "Burn": {
+          "signature": "Burn(address,uint256)",
+          "topic0": "0xcc16f5dbb4873280815c1ee09dbd06736cffcc184412cf7a71a0fdb75d397ca5",
+          "inputs": [
+            {
+              "name": "burner",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "amount",
+              "type": "uint256",
+              "indexed": false
+            }
+          ]
+        },
+        "AuthorizationUsed": {
+          "signature": "AuthorizationUsed(address,bytes32)",
+          "topic0": "0x98de503528ee59b575ef0c0a2576a82497bfc029a5685b209e9ec333479b10a5",
+          "inputs": [
+            {
+              "name": "authorizer",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "nonce",
+              "type": "bytes32",
+              "indexed": true
+            }
+          ]
+        },
+        "AuthorizationCanceled": {
+          "signature": "AuthorizationCanceled(address,bytes32)",
+          "topic0": "0x1cdd46ff242716cdaa72d159d339a485b3438398348d68f09d7c8c0a59353d81",
+          "inputs": [
+            {
+              "name": "authorizer",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "nonce",
+              "type": "bytes32",
+              "indexed": true
+            }
+          ]
+        }
+      }
+    },
+    "usdt": {
+      "address": "0xdac17f958d2ee523a2206206994597c13d831ec7",
+      "verified_contract": "TetherToken",
+      "emitter_verification_url": "https://sourcify.dev/server/v2/contract/1/0xdAC17F958D2ee523a2206206994597C13D831ec7?fields=abi,compilation,proxyResolution",
+      "abi_verification_url": "https://sourcify.dev/server/v2/contract/1/0xdAC17F958D2ee523a2206206994597C13D831ec7?fields=abi,compilation,proxyResolution",
+      "abi_response_sha256": "b6ff4c9a033062fcad6648d60d7d227420ceb9f6ac7805112fb3280d558470ef",
+      "events": {
+        "Issue": {
+          "signature": "Issue(uint256)",
+          "topic0": "0xcb8241adb0c3fdb35b70c24ce35c5eb0c17af7431c99f827d44a445ca624176a",
+          "inputs": [
+            {
+              "name": "amount",
+              "type": "uint256",
+              "indexed": false
+            }
+          ]
+        },
+        "Redeem": {
+          "signature": "Redeem(uint256)",
+          "topic0": "0x702d5967f45f6513a38ffc42d6ba9bf230bd40e8f53b16363c7eb4fd2deb9a44",
+          "inputs": [
+            {
+              "name": "amount",
+              "type": "uint256",
+              "indexed": false
+            }
+          ]
+        },
+        "AddedBlackList": {
+          "signature": "AddedBlackList(address)",
+          "topic0": "0x42e160154868087d6bfdc0ca23d96a1c1cfa32f1b72ba9ba27b69b98a0d819dc",
+          "inputs": [
+            {
+              "name": "_user",
+              "type": "address",
+              "indexed": false
+            }
+          ]
+        },
+        "RemovedBlackList": {
+          "signature": "RemovedBlackList(address)",
+          "topic0": "0xd7e9ec6e6ecd65492dce6bf513cd6867560d49544421d0783ddf06e76c24470c",
+          "inputs": [
+            {
+              "name": "_user",
+              "type": "address",
+              "indexed": false
+            }
+          ]
+        },
+        "Transfer": {
+          "signature": "Transfer(address,address,uint256)",
+          "topic0": "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+          "inputs": [
+            {
+              "name": "from",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "to",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "value",
+              "type": "uint256",
+              "indexed": false
+            }
+          ]
+        }
+      }
+    },
+    "dai": {
+      "address": "0x6b175474e89094c44da98b954eedeac495271d0f",
+      "verified_contract": "Dai",
+      "emitter_verification_url": "https://sourcify.dev/server/v2/contract/1/0x6B175474E89094C44Da98b954EedeAC495271d0F?fields=abi,compilation,proxyResolution",
+      "abi_verification_url": "https://sourcify.dev/server/v2/contract/1/0x6B175474E89094C44Da98b954EedeAC495271d0F?fields=abi,compilation,proxyResolution",
+      "abi_response_sha256": "3176eec5d4156aadc6b7aef8e27dbee36bc4bfa5c300b29e0dbc1dd004ee5fa6",
+      "events": {
+        "Transfer": {
+          "signature": "Transfer(address,address,uint256)",
+          "topic0": "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+          "inputs": [
+            {
+              "name": "src",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "dst",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "wad",
+              "type": "uint256",
+              "indexed": false
+            }
+          ]
+        },
+        "Approval": {
+          "signature": "Approval(address,address,uint256)",
+          "topic0": "0x8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b925",
+          "inputs": [
+            {
+              "name": "src",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "guy",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "wad",
+              "type": "uint256",
+              "indexed": false
+            }
+          ]
+        }
+      }
+    },
+    "wbtc": {
+      "address": "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599",
+      "verified_contract": "WBTC",
+      "emitter_verification_url": "https://sourcify.dev/server/v2/contract/1/0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599?fields=abi,compilation,proxyResolution",
+      "abi_verification_url": "https://sourcify.dev/server/v2/contract/1/0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599?fields=abi,compilation,proxyResolution",
+      "abi_response_sha256": "7dc251312baa02ddcaaf1320253bed67241dff8cabbfa79ca2eed0b6f9867aba",
+      "events": {
+        "Burn": {
+          "signature": "Burn(address,uint256)",
+          "topic0": "0xcc16f5dbb4873280815c1ee09dbd06736cffcc184412cf7a71a0fdb75d397ca5",
+          "inputs": [
+            {
+              "name": "burner",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "value",
+              "type": "uint256",
+              "indexed": false
+            }
+          ]
+        },
+        "Mint": {
+          "signature": "Mint(address,uint256)",
+          "topic0": "0x0f6798a560793a54c3bcfe86a93cde1e73087d944c0ea20544137d4121396885",
+          "inputs": [
+            {
+              "name": "to",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "amount",
+              "type": "uint256",
+              "indexed": false
+            }
+          ]
+        }
+      }
+    },
+    "link": {
+      "address": "0x514910771af9ca656af840dff83e8264ecf986ca",
+      "verified_contract": "LinkToken",
+      "emitter_verification_url": "https://sourcify.dev/server/v2/contract/1/0x514910771AF9Ca656af840dff83E8264EcF986CA?fields=abi,compilation,proxyResolution",
+      "abi_verification_url": "https://sourcify.dev/server/v2/contract/1/0x514910771AF9Ca656af840dff83E8264EcF986CA?fields=abi,compilation,proxyResolution",
+      "abi_response_sha256": "478bc19450161d853385d3678fc931c0099f7a8bd79358dcc1c0655ec84d550a",
+      "events": {
+        "Transfer": {
+          "signature": "Transfer(address,address,uint256,bytes)",
+          "topic0": "0xe19260aff97b920c7df27010903aeb9c8d2be5d310a2c67824cf3f15396e4c16",
+          "inputs": [
+            {
+              "name": "from",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "to",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "value",
+              "type": "uint256",
+              "indexed": false
+            },
+            {
+              "name": "data",
+              "type": "bytes",
+              "indexed": false
+            }
+          ]
+        }
+      }
+    },
+    "uni": {
+      "address": "0x1f9840a85d5af5bf1d1762f925bdaddc4201f984",
+      "verified_contract": "Uni",
+      "emitter_verification_url": "https://sourcify.dev/server/v2/contract/1/0x1f9840a85d5aF5bf1D1762F925BDADdC4201F984?fields=abi,compilation,proxyResolution",
+      "abi_verification_url": "https://sourcify.dev/server/v2/contract/1/0x1f9840a85d5aF5bf1D1762F925BDADdC4201F984?fields=abi,compilation,proxyResolution",
+      "abi_response_sha256": "0b6fd8baae6cdc8d94da59fd71c37dea23a7eef20838dcd51e3ab067b1ed55ba",
+      "events": {
+        "DelegateChanged": {
+          "signature": "DelegateChanged(address,address,address)",
+          "topic0": "0x3134e8a2e6d97e929a7e54011ea5485d7d196dd5f0ba4d4ef95803e8e3fc257f",
+          "inputs": [
+            {
+              "name": "delegator",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "fromDelegate",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "toDelegate",
+              "type": "address",
+              "indexed": true
+            }
+          ]
+        },
+        "Transfer": {
+          "signature": "Transfer(address,address,uint256)",
+          "topic0": "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+          "inputs": [
+            {
+              "name": "from",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "to",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "amount",
+              "type": "uint256",
+              "indexed": false
+            }
+          ]
+        }
+      }
+    },
+    "comp": {
+      "address": "0xc00e94cb662c3520282e6f5717214004a7f26888",
+      "verified_contract": "Comp",
+      "emitter_verification_url": "https://sourcify.dev/server/v2/contract/1/0xc00e94Cb662C3520282E6f5717214004A7f26888?fields=abi,compilation,proxyResolution",
+      "abi_verification_url": "https://sourcify.dev/server/v2/contract/1/0xc00e94Cb662C3520282E6f5717214004A7f26888?fields=abi,compilation,proxyResolution",
+      "abi_response_sha256": "3bbf4a65760daf6978e81e455dea556f63057b5380fc98ee67cda34ffe0dd738",
+      "events": {
+        "DelegateChanged": {
+          "signature": "DelegateChanged(address,address,address)",
+          "topic0": "0x3134e8a2e6d97e929a7e54011ea5485d7d196dd5f0ba4d4ef95803e8e3fc257f",
+          "inputs": [
+            {
+              "name": "delegator",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "fromDelegate",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "toDelegate",
+              "type": "address",
+              "indexed": true
+            }
+          ]
+        }
+      }
+    },
+    "ldo": {
+      "address": "0x5a98fcbea516cf06857215779fd812ca3bef1b32",
+      "verified_contract": "MiniMeToken",
+      "emitter_verification_url": "https://sourcify.dev/server/v2/contract/1/0x5A98FcBEA516Cf06857215779Fd812CA3beF1B32?fields=abi,compilation,proxyResolution",
+      "abi_verification_url": "https://sourcify.dev/server/v2/contract/1/0x5A98FcBEA516Cf06857215779Fd812CA3beF1B32?fields=abi,compilation,proxyResolution",
+      "abi_response_sha256": "32016b0296c8d84ffac87f7b870de1d42b1c691118d291bb30c0f442d6daa507",
+      "events": {
+        "Approval": {
+          "signature": "Approval(address,address,uint256)",
+          "topic0": "0x8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b925",
+          "inputs": [
+            {
+              "name": "_owner",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "_spender",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "_amount",
+              "type": "uint256",
+              "indexed": false
+            }
+          ]
+        },
+        "Transfer": {
+          "signature": "Transfer(address,address,uint256)",
+          "topic0": "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+          "inputs": [
+            {
+              "name": "_from",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "_to",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "_amount",
+              "type": "uint256",
+              "indexed": false
+            }
+          ]
+        }
+      }
+    },
+    "aave_token": {
+      "address": "0x7fc66500c84a76ad7e9c93437bfc5ac33e2ddae9",
+      "verified_contract": "AaveTokenV3",
+      "emitter_verification_url": "https://sourcify.dev/server/v2/contract/1/0x7Fc66500c84A76Ad7e9c93437bFc5Ac33E2DDaE9?fields=abi,compilation,proxyResolution",
+      "abi_verification_url": "https://sourcify.dev/server/v2/contract/1/0x5d4aa78b08bc7c530e21bf7447988b1be7991322?fields=abi,compilation,proxyResolution",
+      "abi_response_sha256": "a117ebb8197261e23d92cc68e0478215c2dc543a92c2335320de7b60c6e5c504",
+      "events": {
+        "Transfer": {
+          "signature": "Transfer(address,address,uint256)",
+          "topic0": "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+          "inputs": [
+            {
+              "name": "from",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "to",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "value",
+              "type": "uint256",
+              "indexed": false
+            }
+          ]
+        }
+      }
+    },
+    "weth": {
+      "address": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+      "verified_contract": "WETH9",
+      "emitter_verification_url": "https://sourcify.dev/server/v2/contract/1/0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2?fields=abi,compilation,proxyResolution",
+      "abi_verification_url": "https://sourcify.dev/server/v2/contract/1/0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2?fields=abi,compilation,proxyResolution",
+      "abi_response_sha256": "a66c7740a6e818546399505dd00c60c6d8f2c5412c907d807ceef939ad0b38c8",
+      "events": {
+        "Transfer": {
+          "signature": "Transfer(address,address,uint256)",
+          "topic0": "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+          "inputs": [
+            {
+              "name": "src",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "dst",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "wad",
+              "type": "uint256",
+              "indexed": false
+            }
+          ]
+        },
+        "Deposit": {
+          "signature": "Deposit(address,uint256)",
+          "topic0": "0xe1fffcc4923d04b559f4d29a8bfc6cda04eb5b0d3c460751c2402c5c5cc9109c",
+          "inputs": [
+            {
+              "name": "dst",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "wad",
+              "type": "uint256",
+              "indexed": false
+            }
+          ]
+        },
+        "Withdrawal": {
+          "signature": "Withdrawal(address,uint256)",
+          "topic0": "0x7fcf532c15f0a6db0bd6d0e038bea71d30d808c7d98cb3bf7268a95bf5081b65",
+          "inputs": [
+            {
+              "name": "src",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "wad",
+              "type": "uint256",
+              "indexed": false
+            }
+          ]
+        }
+      }
+    },
+    "steth": {
+      "address": "0xae7ab96520de3a18e5e111b5eaab095312d7fe84",
+      "verified_contract": "Lido",
+      "emitter_verification_url": "https://sourcify.dev/server/v2/contract/1/0xae7ab96520DE3A18E5e111B5EaAb095312D7fE84?fields=abi,compilation,proxyResolution",
+      "abi_verification_url": "https://sourcify.dev/server/v2/contract/1/0x028271E30a695c0527A0C50cA30603feD004cDb0?fields=abi,compilation,proxyResolution",
+      "abi_response_sha256": "07b12e4e060189da990fadc0c98775c51f83d765f05a310c2945e6035870a9bf",
+      "events": {
+        "Submitted": {
+          "signature": "Submitted(address,uint256,address)",
+          "topic0": "0x96a25c8ce0baabc1fdefd93e9ed25d8e092a3332f3aa9a41722b5697231d1d1a",
+          "inputs": [
+            {
+              "name": "sender",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "amount",
+              "type": "uint256",
+              "indexed": false
+            },
+            {
+              "name": "referral",
+              "type": "address",
+              "indexed": false
+            }
+          ]
+        },
+        "ELRewardsReceived": {
+          "signature": "ELRewardsReceived(uint256)",
+          "topic0": "0xd27f9b0c98bdee27044afa149eadcd2047d6399cb6613a45c5b87e6aca76e6b5",
+          "inputs": [
+            {
+              "name": "amount",
+              "type": "uint256",
+              "indexed": false
+            }
+          ]
+        },
+        "WithdrawalsReceived": {
+          "signature": "WithdrawalsReceived(uint256)",
+          "topic0": "0x6e5086f7e1ab04bd826e77faae35b1bcfe31bd144623361a40ea4af51670b1c3",
+          "inputs": [
+            {
+              "name": "amount",
+              "type": "uint256",
+              "indexed": false
+            }
+          ]
+        },
+        "TransferShares": {
+          "signature": "TransferShares(address,address,uint256)",
+          "topic0": "0x9d9c909296d9c674451c0c24f02cb64981eb3b727f99865939192f880a755dcb",
+          "inputs": [
+            {
+              "name": "from",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "to",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "sharesValue",
+              "type": "uint256",
+              "indexed": false
+            }
+          ]
+        },
+        "TokenRebased": {
+          "signature": "TokenRebased(uint256,uint256,uint256,uint256,uint256,uint256,uint256)",
+          "topic0": "0xff08c3ef606d198e316ef5b822193c489965899eb4e3c248cea1a4626c3eda50",
+          "inputs": [
+            {
+              "name": "reportTimestamp",
+              "type": "uint256",
+              "indexed": true
+            },
+            {
+              "name": "timeElapsed",
+              "type": "uint256",
+              "indexed": false
+            },
+            {
+              "name": "preTotalShares",
+              "type": "uint256",
+              "indexed": false
+            },
+            {
+              "name": "preTotalEther",
+              "type": "uint256",
+              "indexed": false
+            },
+            {
+              "name": "postTotalShares",
+              "type": "uint256",
+              "indexed": false
+            },
+            {
+              "name": "postTotalEther",
+              "type": "uint256",
+              "indexed": false
+            },
+            {
+              "name": "sharesMintedAsFees",
+              "type": "uint256",
+              "indexed": false
+            }
+          ]
+        }
+      },
+      "implementation_source": "https://docs.lido.fi/deployed-contracts/"
+    },
+    "lido_queue": {
+      "address": "0x889edc2edab5f40e902b864ad4d7ade8e412f9b1",
+      "verified_contract": "WithdrawalQueueERC721",
+      "emitter_verification_url": "https://sourcify.dev/server/v2/contract/1/0x889edC2eDab5f40e902b864aD4d7AdE8E412F9B1?fields=abi,compilation,proxyResolution",
+      "abi_verification_url": "https://sourcify.dev/server/v2/contract/1/0xe42c659dc09109566720ea8b2de186c2be7d94d9?fields=abi,compilation,proxyResolution",
+      "abi_response_sha256": "dd28c4c711a0dbecfce842705170a599ca3ae78d06457363181e8acd427d34b4",
+      "events": {
+        "WithdrawalRequested": {
+          "signature": "WithdrawalRequested(uint256,address,address,uint256,uint256)",
+          "topic0": "0xf0cb471f23fb74ea44b8252eb1881a2dca546288d9f6e90d1a0e82fe0ed342ab",
+          "inputs": [
+            {
+              "name": "requestId",
+              "type": "uint256",
+              "indexed": true
+            },
+            {
+              "name": "requestor",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "owner",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "amountOfStETH",
+              "type": "uint256",
+              "indexed": false
+            },
+            {
+              "name": "amountOfShares",
+              "type": "uint256",
+              "indexed": false
+            }
+          ]
+        },
+        "WithdrawalClaimed": {
+          "signature": "WithdrawalClaimed(uint256,address,address,uint256)",
+          "topic0": "0x6ad26c5e238e7d002799f9a5db07e81ef14e37386ae03496d7a7ef04713e145b",
+          "inputs": [
+            {
+              "name": "requestId",
+              "type": "uint256",
+              "indexed": true
+            },
+            {
+              "name": "owner",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "receiver",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "amountOfETH",
+              "type": "uint256",
+              "indexed": false
+            }
+          ]
+        },
+        "Transfer": {
+          "signature": "Transfer(address,address,uint256)",
+          "topic0": "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+          "inputs": [
+            {
+              "name": "from",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "to",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "tokenId",
+              "type": "uint256",
+              "indexed": true
+            }
+          ]
+        },
+        "WithdrawalsFinalized": {
+          "signature": "WithdrawalsFinalized(uint256,uint256,uint256,uint256,uint256)",
+          "topic0": "0x197874c72af6a06fb0aa4fab45fd39c7cb61ac0992159872dc3295207da7e9eb",
+          "inputs": [
+            {
+              "name": "from",
+              "type": "uint256",
+              "indexed": true
+            },
+            {
+              "name": "to",
+              "type": "uint256",
+              "indexed": true
+            },
+            {
+              "name": "amountOfETHLocked",
+              "type": "uint256",
+              "indexed": false
+            },
+            {
+              "name": "sharesToBurn",
+              "type": "uint256",
+              "indexed": false
+            },
+            {
+              "name": "timestamp",
+              "type": "uint256",
+              "indexed": false
+            }
+          ]
+        }
+      }
+    },
+    "wsteth": {
+      "address": "0x7f39c581f595b53c5cb19bd0b3f8da6c935e2ca0",
+      "verified_contract": "WstETH",
+      "emitter_verification_url": "https://sourcify.dev/server/v2/contract/1/0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0?fields=abi,compilation,proxyResolution",
+      "abi_verification_url": "https://sourcify.dev/server/v2/contract/1/0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0?fields=abi,compilation,proxyResolution",
+      "abi_response_sha256": "e3183473a169765db8594d28266fc0c773809afa005af3eee85a5f30a0c02c74",
+      "events": {
+        "Transfer": {
+          "signature": "Transfer(address,address,uint256)",
+          "topic0": "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+          "inputs": [
+            {
+              "name": "from",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "to",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "value",
+              "type": "uint256",
+              "indexed": false
+            }
+          ]
+        }
+      }
+    },
+    "bayc": {
+      "address": "0xbc4ca0eda7647a8ab7c2061c2e118a18a936f13d",
+      "verified_contract": "BoredApeYachtClub",
+      "emitter_verification_url": "https://sourcify.dev/server/v2/contract/1/0xBC4CA0EdA7647A8aB7C2061c2E118A18a936f13D?fields=abi,compilation,proxyResolution",
+      "abi_verification_url": "https://sourcify.dev/server/v2/contract/1/0xBC4CA0EdA7647A8aB7C2061c2E118A18a936f13D?fields=abi,compilation,proxyResolution",
+      "abi_response_sha256": "6c55729cde0bb979489a24a1d483ba23cc6ceeadd363bf1968be517f303dbbbb",
+      "events": {
+        "Transfer": {
+          "signature": "Transfer(address,address,uint256)",
+          "topic0": "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+          "inputs": [
+            {
+              "name": "from",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "to",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "tokenId",
+              "type": "uint256",
+              "indexed": true
+            }
+          ]
+        },
+        "ApprovalForAll": {
+          "signature": "ApprovalForAll(address,address,bool)",
+          "topic0": "0x17307eab39ab6107e8899845ad3d59bd9653f200f220920489ca2b5937696c31",
+          "inputs": [
+            {
+              "name": "owner",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "operator",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "approved",
+              "type": "bool",
+              "indexed": false
+            }
+          ]
+        }
+      }
+    },
+    "ens_registrar": {
+      "address": "0x57f1887a8bf19b14fc0df6fd9b2acc9af147ea85",
+      "verified_contract": "BaseRegistrarImplementation",
+      "emitter_verification_url": "https://sourcify.dev/server/v2/contract/1/0x57f1887a8BF19b14fC0dF6Fd9B2acc9Af147eA85?fields=abi,compilation,proxyResolution",
+      "abi_verification_url": "https://sourcify.dev/server/v2/contract/1/0x57f1887a8BF19b14fC0dF6Fd9B2acc9Af147eA85?fields=abi,compilation,proxyResolution",
+      "abi_response_sha256": "72e1db25f88fb7e5ca7acf0ba3fb632535454ab053cc1fe0daa437ce7f4d07fa",
+      "events": {
+        "Transfer": {
+          "signature": "Transfer(address,address,uint256)",
+          "topic0": "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+          "inputs": [
+            {
+              "name": "from",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "to",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "tokenId",
+              "type": "uint256",
+              "indexed": true
+            }
+          ]
+        }
+      }
+    },
+    "ens_controller": {
+      "address": "0x253553366da8546fc250f225fe3d25d0c782303b",
+      "verified_contract": "ETHRegistrarController",
+      "emitter_verification_url": "https://sourcify.dev/server/v2/contract/1/0x253553366Da8546fC250F225fe3d25d0C782303b?fields=abi,compilation,proxyResolution",
+      "abi_verification_url": "https://sourcify.dev/server/v2/contract/1/0x253553366Da8546fC250F225fe3d25d0C782303b?fields=abi,compilation,proxyResolution",
+      "abi_response_sha256": "f69b3d0bcba4d2ca2b3ab4dbfa4d2760c4c8fb8bbe1a78ec7d72be9e69ac0936",
+      "events": {
+        "NameRenewed": {
+          "signature": "NameRenewed(string,bytes32,uint256,uint256)",
+          "topic0": "0x3da24c024582931cfaf8267d8ed24d13a82a8068d5bd337d30ec45cea4e506ae",
+          "inputs": [
+            {
+              "name": "name",
+              "type": "string",
+              "indexed": false
+            },
+            {
+              "name": "label",
+              "type": "bytes32",
+              "indexed": true
+            },
+            {
+              "name": "cost",
+              "type": "uint256",
+              "indexed": false
+            },
+            {
+              "name": "expires",
+              "type": "uint256",
+              "indexed": false
+            }
+          ]
+        },
+        "NameRegistered": {
+          "signature": "NameRegistered(string,bytes32,address,uint256,uint256,uint256)",
+          "topic0": "0x69e37f151eb98a09618ddaa80c8cfaf1ce5996867c489f45b555b412271ebf27",
+          "inputs": [
+            {
+              "name": "name",
+              "type": "string",
+              "indexed": false
+            },
+            {
+              "name": "label",
+              "type": "bytes32",
+              "indexed": true
+            },
+            {
+              "name": "owner",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "baseCost",
+              "type": "uint256",
+              "indexed": false
+            },
+            {
+              "name": "premium",
+              "type": "uint256",
+              "indexed": false
+            },
+            {
+              "name": "expires",
+              "type": "uint256",
+              "indexed": false
+            }
+          ]
+        }
+      }
+    },
+    "ens_wrapper": {
+      "address": "0xd4416b13d2b3a9abae7acd5d6c2bbdbe25686401",
+      "verified_contract": "NameWrapper",
+      "emitter_verification_url": "https://sourcify.dev/server/v2/contract/1/0xD4416b13d2b3a9aBae7AcD5D6C2BbDBE25686401?fields=abi,compilation,proxyResolution",
+      "abi_verification_url": "https://sourcify.dev/server/v2/contract/1/0xD4416b13d2b3a9aBae7AcD5D6C2BbDBE25686401?fields=abi,compilation,proxyResolution",
+      "abi_response_sha256": "bab01c67bc58e1b5ab720b3e6677a7482d9a4c49217b253c204fb5ade317d3c1",
+      "events": {
+        "TransferSingle": {
+          "signature": "TransferSingle(address,address,address,uint256,uint256)",
+          "topic0": "0xc3d58168c5ae7397731d063d5bbf3d657854427343f4c083240f7aacaa2d0f62",
+          "inputs": [
+            {
+              "name": "operator",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "from",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "to",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "id",
+              "type": "uint256",
+              "indexed": false
+            },
+            {
+              "name": "value",
+              "type": "uint256",
+              "indexed": false
+            }
+          ]
+        },
+        "FusesSet": {
+          "signature": "FusesSet(bytes32,uint32)",
+          "topic0": "0x39873f00c80f4f94b7bd1594aebcf650f003545b74824d57ddf4939e3ff3a34b",
+          "inputs": [
+            {
+              "name": "node",
+              "type": "bytes32",
+              "indexed": true
+            },
+            {
+              "name": "fuses",
+              "type": "uint32",
+              "indexed": false
+            }
+          ]
+        },
+        "ExpiryExtended": {
+          "signature": "ExpiryExtended(bytes32,uint64)",
+          "topic0": "0xf675815a0817338f93a7da433f6bd5f5542f1029b11b455191ac96c7f6a9b132",
+          "inputs": [
+            {
+              "name": "node",
+              "type": "bytes32",
+              "indexed": true
+            },
+            {
+              "name": "expiry",
+              "type": "uint64",
+              "indexed": false
+            }
+          ]
+        },
+        "TransferBatch": {
+          "signature": "TransferBatch(address,address,address,uint256[],uint256[])",
+          "topic0": "0x4a39dc06d4c0dbc64b70af90fd698a233a518aa5d07e595d983b8c0526c8f7fb",
+          "inputs": [
+            {
+              "name": "operator",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "from",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "to",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "ids",
+              "type": "uint256[]",
+              "indexed": false
+            },
+            {
+              "name": "values",
+              "type": "uint256[]",
+              "indexed": false
+            }
+          ]
+        }
+      }
+    },
+    "opensea_shared": {
+      "address": "0x495f947276749ce646f68ac8c248420045cb7b5e",
+      "verified_contract": "AssetContractShared",
+      "emitter_verification_url": "https://sourcify.dev/server/v2/contract/1/0x495f947276749Ce646f68AC8c248420045cb7b5e?fields=abi,compilation,proxyResolution",
+      "abi_verification_url": "https://sourcify.dev/server/v2/contract/1/0x495f947276749Ce646f68AC8c248420045cb7b5e?fields=abi,compilation,proxyResolution",
+      "abi_response_sha256": "1027ae48b938e200c9b7039f415896915958ca12a4642e575277771c718352fd",
+      "events": {
+        "TransferSingle": {
+          "signature": "TransferSingle(address,address,address,uint256,uint256)",
+          "topic0": "0xc3d58168c5ae7397731d063d5bbf3d657854427343f4c083240f7aacaa2d0f62",
+          "inputs": [
+            {
+              "name": "_operator",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "_from",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "_to",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "_id",
+              "type": "uint256",
+              "indexed": false
+            },
+            {
+              "name": "_amount",
+              "type": "uint256",
+              "indexed": false
+            }
+          ]
+        },
+        "TransferBatch": {
+          "signature": "TransferBatch(address,address,address,uint256[],uint256[])",
+          "topic0": "0x4a39dc06d4c0dbc64b70af90fd698a233a518aa5d07e595d983b8c0526c8f7fb",
+          "inputs": [
+            {
+              "name": "_operator",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "_from",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "_to",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "_ids",
+              "type": "uint256[]",
+              "indexed": false
+            },
+            {
+              "name": "_amounts",
+              "type": "uint256[]",
+              "indexed": false
+            }
+          ]
+        },
+        "URI": {
+          "signature": "URI(string,uint256)",
+          "topic0": "0x6bb7ff708619ba0610cba295a58592e0451dee2622938c8755667688daf3529b",
+          "inputs": [
+            {
+              "name": "_value",
+              "type": "string",
+              "indexed": false
+            },
+            {
+              "name": "_id",
+              "type": "uint256",
+              "indexed": true
+            }
+          ]
+        }
+      },
+      "mint_semantics_source": "https://sourcify.dev/server/v2/contract/1/0x495f947276749ce646f68ac8c248420045cb7b5e?fields=sources"
+    },
+    "punks": {
+      "address": "0xb47e3cd837ddf8e4c57f05d70ab865de6e193bbb",
+      "verified_contract": "CryptoPunksMarket",
+      "emitter_verification_url": "https://sourcify.dev/server/v2/contract/1/0xb47e3cd837dDF8e4c57F05d70Ab865de6e193BBB?fields=abi,compilation,proxyResolution",
+      "abi_verification_url": "https://sourcify.dev/server/v2/contract/1/0xb47e3cd837dDF8e4c57F05d70Ab865de6e193BBB?fields=abi,compilation,proxyResolution",
+      "abi_response_sha256": "626411a436029e61d6214cc60da6699121725e325b308e03b5d6ddbce25853fe",
+      "events": {
+        "PunkBought": {
+          "signature": "PunkBought(uint256,uint256,address,address)",
+          "topic0": "0x58e5d5a525e3b40bc15abaa38b5882678db1ee68befd2f60bafe3a7fd06db9e3",
+          "inputs": [
+            {
+              "name": "punkIndex",
+              "type": "uint256",
+              "indexed": true
+            },
+            {
+              "name": "value",
+              "type": "uint256",
+              "indexed": false
+            },
+            {
+              "name": "fromAddress",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "toAddress",
+              "type": "address",
+              "indexed": true
+            }
+          ]
+        },
+        "PunkOffered": {
+          "signature": "PunkOffered(uint256,uint256,address)",
+          "topic0": "0x3c7b682d5da98001a9b8cbda6c647d2c63d698a4184fd1d55e2ce7b66f5d21eb",
+          "inputs": [
+            {
+              "name": "punkIndex",
+              "type": "uint256",
+              "indexed": true
+            },
+            {
+              "name": "minValue",
+              "type": "uint256",
+              "indexed": false
+            },
+            {
+              "name": "toAddress",
+              "type": "address",
+              "indexed": true
+            }
+          ]
+        },
+        "PunkBidEntered": {
+          "signature": "PunkBidEntered(uint256,uint256,address)",
+          "topic0": "0x5b859394fabae0c1ba88baffe67e751ab5248d2e879028b8c8d6897b0519f56a",
+          "inputs": [
+            {
+              "name": "punkIndex",
+              "type": "uint256",
+              "indexed": true
+            },
+            {
+              "name": "value",
+              "type": "uint256",
+              "indexed": false
+            },
+            {
+              "name": "fromAddress",
+              "type": "address",
+              "indexed": true
+            }
+          ]
+        },
+        "PunkBidWithdrawn": {
+          "signature": "PunkBidWithdrawn(uint256,uint256,address)",
+          "topic0": "0x6f30e1ee4d81dcc7a8a478577f65d2ed2edb120565960ac45fe7c50551c87932",
+          "inputs": [
+            {
+              "name": "punkIndex",
+              "type": "uint256",
+              "indexed": true
+            },
+            {
+              "name": "value",
+              "type": "uint256",
+              "indexed": false
+            },
+            {
+              "name": "fromAddress",
+              "type": "address",
+              "indexed": true
+            }
+          ]
+        },
+        "PunkTransfer": {
+          "signature": "PunkTransfer(address,address,uint256)",
+          "topic0": "0x05af636b70da6819000c49f85b21fa82081c632069bb626f30932034099107d8",
+          "inputs": [
+            {
+              "name": "from",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "to",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "punkIndex",
+              "type": "uint256",
+              "indexed": false
+            }
+          ]
+        }
+      }
+    },
+    "seaport": {
+      "address": "0x0000000000000068f116a894984e2db1123eb395",
+      "verified_contract": "Seaport",
+      "emitter_verification_url": "https://sourcify.dev/server/v2/contract/1/0x0000000000000068F116a894984e2DB1123eB395?fields=abi,compilation,proxyResolution",
+      "abi_verification_url": "https://sourcify.dev/server/v2/contract/1/0x0000000000000068F116a894984e2DB1123eB395?fields=abi,compilation,proxyResolution",
+      "abi_response_sha256": "95510174cde1fe182d53a9fb5d458f2b62e085589cc7544e16b174edc74a69f4",
+      "events": {
+        "OrderFulfilled": {
+          "signature": "OrderFulfilled(bytes32,address,address,address,(uint8,address,uint256,uint256)[],(uint8,address,uint256,uint256,address)[])",
+          "topic0": "0x9d9af8e38d66c62e2c12f0225249fd9d721c54b83f48d9352c97c6cacdcb6f31",
+          "inputs": [
+            {
+              "name": "orderHash",
+              "type": "bytes32",
+              "indexed": false
+            },
+            {
+              "name": "offerer",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "zone",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "recipient",
+              "type": "address",
+              "indexed": false
+            },
+            {
+              "name": "offer",
+              "type": "(uint8,address,uint256,uint256)[]",
+              "indexed": false
+            },
+            {
+              "name": "consideration",
+              "type": "(uint8,address,uint256,uint256,address)[]",
+              "indexed": false
+            }
+          ]
+        },
+        "OrderCancelled": {
+          "signature": "OrderCancelled(bytes32,address,address)",
+          "topic0": "0x6bacc01dbe442496068f7d234edd811f1a5f833243e0aec824f86ab861f3c90d",
+          "inputs": [
+            {
+              "name": "orderHash",
+              "type": "bytes32",
+              "indexed": false
+            },
+            {
+              "name": "offerer",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "zone",
+              "type": "address",
+              "indexed": true
+            }
+          ]
+        },
+        "CounterIncremented": {
+          "signature": "CounterIncremented(uint256,address)",
+          "topic0": "0x721c20121297512b72821b97f5326877ea8ecf4bb9948fea5bfcb6453074d37f",
+          "inputs": [
+            {
+              "name": "newCounter",
+              "type": "uint256",
+              "indexed": false
+            },
+            {
+              "name": "offerer",
+              "type": "address",
+              "indexed": true
+            }
+          ]
+        }
+      }
+    },
+    "univ2_factory": {
+      "address": "0x5c69bee701ef814a2b6a3edd4b1652cb9cc5aa6f",
+      "verified_contract": "UniswapV2Factory",
+      "emitter_verification_url": "https://sourcify.dev/server/v2/contract/1/0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f?fields=abi,compilation,proxyResolution",
+      "abi_verification_url": "https://sourcify.dev/server/v2/contract/1/0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f?fields=abi,compilation,proxyResolution",
+      "abi_response_sha256": "53e4067fba62ee0e4fb7b58a4768490d519df2a6f30a3a2eb04eed1867f7c38c",
+      "events": {
+        "PairCreated": {
+          "signature": "PairCreated(address,address,address,uint256)",
+          "topic0": "0x0d3648bd0f6ba80134a33ba9275ac585d9d315f0ad8355cddefde31afa28d0e9",
+          "inputs": [
+            {
+              "name": "token0",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "token1",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "pair",
+              "type": "address",
+              "indexed": false
+            },
+            {
+              "name": "",
+              "type": "uint256",
+              "indexed": false
+            }
+          ]
+        }
+      }
+    },
+    "univ3_factory": {
+      "address": "0x1f98431c8ad98523631ae4a59f267346ea31f984",
+      "verified_contract": "UniswapV3Factory",
+      "emitter_verification_url": "https://sourcify.dev/server/v2/contract/1/0x1F98431c8aD98523631AE4a59f267346ea31F984?fields=abi,compilation,proxyResolution",
+      "abi_verification_url": "https://sourcify.dev/server/v2/contract/1/0x1F98431c8aD98523631AE4a59f267346ea31F984?fields=abi,compilation,proxyResolution",
+      "abi_response_sha256": "af170a411b649691eec704ee13a2942f197ed91fb0dae30956c6752d6ffb953f",
+      "events": {
+        "PoolCreated": {
+          "signature": "PoolCreated(address,address,uint24,int24,address)",
+          "topic0": "0x783cca1c0412dd0d695e784568c96da2e9c22ff989357a2e8b1d9b2b4e6b7118",
+          "inputs": [
+            {
+              "name": "token0",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "token1",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "fee",
+              "type": "uint24",
+              "indexed": true
+            },
+            {
+              "name": "tickSpacing",
+              "type": "int24",
+              "indexed": false
+            },
+            {
+              "name": "pool",
+              "type": "address",
+              "indexed": false
+            }
+          ]
+        }
+      }
+    },
+    "univ2_usdc_weth": {
+      "address": "0xb4e16d0168e52d35cacd2c6185b44281ec28c9dc",
+      "verified_contract": "UniswapV2Pair",
+      "emitter_verification_url": "https://sourcify.dev/server/v2/contract/1/0xB4e16d0168e52d35CaCD2c6185b44281Ec28C9Dc?fields=abi,compilation,proxyResolution",
+      "abi_verification_url": "https://sourcify.dev/server/v2/contract/1/0xB4e16d0168e52d35CaCD2c6185b44281Ec28C9Dc?fields=abi,compilation,proxyResolution",
+      "abi_response_sha256": "d1ac737de951992e30fa6f92836862512c88b843af6d146c4937934fac9ba7ec",
+      "events": {
+        "Swap": {
+          "signature": "Swap(address,uint256,uint256,uint256,uint256,address)",
+          "topic0": "0xd78ad95fa46c994b6551d0da85fc275fe613ce37657fb8d5e3d130840159d822",
+          "inputs": [
+            {
+              "name": "sender",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "amount0In",
+              "type": "uint256",
+              "indexed": false
+            },
+            {
+              "name": "amount1In",
+              "type": "uint256",
+              "indexed": false
+            },
+            {
+              "name": "amount0Out",
+              "type": "uint256",
+              "indexed": false
+            },
+            {
+              "name": "amount1Out",
+              "type": "uint256",
+              "indexed": false
+            },
+            {
+              "name": "to",
+              "type": "address",
+              "indexed": true
+            }
+          ]
+        },
+        "Mint": {
+          "signature": "Mint(address,uint256,uint256)",
+          "topic0": "0x4c209b5fc8ad50758f13e2e1088ba56a560dff690a1c6fef26394f4c03821c4f",
+          "inputs": [
+            {
+              "name": "sender",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "amount0",
+              "type": "uint256",
+              "indexed": false
+            },
+            {
+              "name": "amount1",
+              "type": "uint256",
+              "indexed": false
+            }
+          ]
+        },
+        "Burn": {
+          "signature": "Burn(address,uint256,uint256,address)",
+          "topic0": "0xdccd412f0b1252819cb1fd330b93224ca42612892bb3f4f789976e6d81936496",
+          "inputs": [
+            {
+              "name": "sender",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "amount0",
+              "type": "uint256",
+              "indexed": false
+            },
+            {
+              "name": "amount1",
+              "type": "uint256",
+              "indexed": false
+            },
+            {
+              "name": "to",
+              "type": "address",
+              "indexed": true
+            }
+          ]
+        },
+        "Sync": {
+          "signature": "Sync(uint112,uint112)",
+          "topic0": "0x1c411e9a96e071241c2f21f7726b17ae89e3cab4c78be50e062b03a9fffbbad1",
+          "inputs": [
+            {
+              "name": "reserve0",
+              "type": "uint112",
+              "indexed": false
+            },
+            {
+              "name": "reserve1",
+              "type": "uint112",
+              "indexed": false
+            }
+          ]
+        }
+      }
+    },
+    "univ3_usdc_weth": {
+      "address": "0x8ad599c3a0ff1de082011efddc58f1908eb6e6d8",
+      "verified_contract": "UniswapV3Pool",
+      "emitter_verification_url": "https://sourcify.dev/server/v2/contract/1/0x8ad599c3A0ff1De082011EFDDc58f1908eb6e6D8?fields=abi,compilation,proxyResolution",
+      "abi_verification_url": "https://sourcify.dev/server/v2/contract/1/0x8ad599c3A0ff1De082011EFDDc58f1908eb6e6D8?fields=abi,compilation,proxyResolution",
+      "abi_response_sha256": "5da9285e3350fd15a8cb2c69132150d835a8a8d25d1918e08609521c9fbbc690",
+      "events": {
+        "Swap": {
+          "signature": "Swap(address,address,int256,int256,uint160,uint128,int24)",
+          "topic0": "0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67",
+          "inputs": [
+            {
+              "name": "sender",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "recipient",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "amount0",
+              "type": "int256",
+              "indexed": false
+            },
+            {
+              "name": "amount1",
+              "type": "int256",
+              "indexed": false
+            },
+            {
+              "name": "sqrtPriceX96",
+              "type": "uint160",
+              "indexed": false
+            },
+            {
+              "name": "liquidity",
+              "type": "uint128",
+              "indexed": false
+            },
+            {
+              "name": "tick",
+              "type": "int24",
+              "indexed": false
+            }
+          ]
+        },
+        "Mint": {
+          "signature": "Mint(address,address,int24,int24,uint128,uint256,uint256)",
+          "topic0": "0x7a53080ba414158be7ec69b987b5fb7d07dee101fe85488f0853ae16239d0bde",
+          "inputs": [
+            {
+              "name": "sender",
+              "type": "address",
+              "indexed": false
+            },
+            {
+              "name": "owner",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "tickLower",
+              "type": "int24",
+              "indexed": true
+            },
+            {
+              "name": "tickUpper",
+              "type": "int24",
+              "indexed": true
+            },
+            {
+              "name": "amount",
+              "type": "uint128",
+              "indexed": false
+            },
+            {
+              "name": "amount0",
+              "type": "uint256",
+              "indexed": false
+            },
+            {
+              "name": "amount1",
+              "type": "uint256",
+              "indexed": false
+            }
+          ]
+        },
+        "Burn": {
+          "signature": "Burn(address,int24,int24,uint128,uint256,uint256)",
+          "topic0": "0x0c396cd989a39f4459b5fa1aed6a9a8dcdbc45908acfd67e028cd568da98982c",
+          "inputs": [
+            {
+              "name": "owner",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "tickLower",
+              "type": "int24",
+              "indexed": true
+            },
+            {
+              "name": "tickUpper",
+              "type": "int24",
+              "indexed": true
+            },
+            {
+              "name": "amount",
+              "type": "uint128",
+              "indexed": false
+            },
+            {
+              "name": "amount0",
+              "type": "uint256",
+              "indexed": false
+            },
+            {
+              "name": "amount1",
+              "type": "uint256",
+              "indexed": false
+            }
+          ]
+        },
+        "Flash": {
+          "signature": "Flash(address,address,uint256,uint256,uint256,uint256)",
+          "topic0": "0xbdbdb71d7860376ba52b25a5028beea23581364a40522f6bcfb86bb1f2dca633",
+          "inputs": [
+            {
+              "name": "sender",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "recipient",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "amount0",
+              "type": "uint256",
+              "indexed": false
+            },
+            {
+              "name": "amount1",
+              "type": "uint256",
+              "indexed": false
+            },
+            {
+              "name": "paid0",
+              "type": "uint256",
+              "indexed": false
+            },
+            {
+              "name": "paid1",
+              "type": "uint256",
+              "indexed": false
+            }
+          ]
+        }
+      }
+    },
+    "univ3_positions": {
+      "address": "0xc36442b4a4522e871399cd717abdd847ab11fe88",
+      "verified_contract": "NonfungiblePositionManager",
+      "emitter_verification_url": "https://sourcify.dev/server/v2/contract/1/0xC36442b4a4522E871399CD717aBDD847Ab11FE88?fields=abi,compilation,proxyResolution",
+      "abi_verification_url": "https://sourcify.dev/server/v2/contract/1/0xC36442b4a4522E871399CD717aBDD847Ab11FE88?fields=abi,compilation,proxyResolution",
+      "abi_response_sha256": "2639c2863c3cb8c80be7f8896c83e34a0d115c6e37d826a9115033565316a0bb",
+      "events": {
+        "Transfer": {
+          "signature": "Transfer(address,address,uint256)",
+          "topic0": "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+          "inputs": [
+            {
+              "name": "from",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "to",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "tokenId",
+              "type": "uint256",
+              "indexed": true
+            }
+          ]
+        },
+        "Collect": {
+          "signature": "Collect(uint256,address,uint256,uint256)",
+          "topic0": "0x40d0efd1a53d60ecbf40971b9daf7dc90178c3aadc7aab1765632738fa8b8f01",
+          "inputs": [
+            {
+              "name": "tokenId",
+              "type": "uint256",
+              "indexed": true
+            },
+            {
+              "name": "recipient",
+              "type": "address",
+              "indexed": false
+            },
+            {
+              "name": "amount0",
+              "type": "uint256",
+              "indexed": false
+            },
+            {
+              "name": "amount1",
+              "type": "uint256",
+              "indexed": false
+            }
+          ]
+        }
+      }
+    },
+    "balancer_vault": {
+      "address": "0xba12222222228d8ba445958a75a0704d566bf2c8",
+      "verified_contract": "Vault",
+      "emitter_verification_url": "https://sourcify.dev/server/v2/contract/1/0xBA12222222228d8Ba445958a75a0704d566BF2C8?fields=abi,compilation,proxyResolution",
+      "abi_verification_url": "https://sourcify.dev/server/v2/contract/1/0xBA12222222228d8Ba445958a75a0704d566BF2C8?fields=abi,compilation,proxyResolution",
+      "abi_response_sha256": "83b829d7f7467120b1d61b60db1fb6d31da50bac848570e8216d9b1dc86eeaff",
+      "events": {
+        "Swap": {
+          "signature": "Swap(bytes32,address,address,uint256,uint256)",
+          "topic0": "0x2170c741c41531aec20e7c107c24eecfdd15e69c9bb0a8dd37b1840b9e0b207b",
+          "inputs": [
+            {
+              "name": "poolId",
+              "type": "bytes32",
+              "indexed": true
+            },
+            {
+              "name": "tokenIn",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "tokenOut",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "amountIn",
+              "type": "uint256",
+              "indexed": false
+            },
+            {
+              "name": "amountOut",
+              "type": "uint256",
+              "indexed": false
+            }
+          ]
+        },
+        "InternalBalanceChanged": {
+          "signature": "InternalBalanceChanged(address,address,int256)",
+          "topic0": "0x18e1ea4139e68413d7d08aa752e71568e36b2c5bf940893314c2c5b01eaa0c42",
+          "inputs": [
+            {
+              "name": "user",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "token",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "delta",
+              "type": "int256",
+              "indexed": false
+            }
+          ]
+        },
+        "FlashLoan": {
+          "signature": "FlashLoan(address,address,uint256,uint256)",
+          "topic0": "0x0d7d75e01ab95780d3cd1c8ec0dd6c2ce19e3a20427eec8bf53283b6fb8e95f0",
+          "inputs": [
+            {
+              "name": "recipient",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "token",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "amount",
+              "type": "uint256",
+              "indexed": false
+            },
+            {
+              "name": "feeAmount",
+              "type": "uint256",
+              "indexed": false
+            }
+          ]
+        }
+      }
+    },
+    "curve_3pool": {
+      "address": "0xbebc44782c7db0a1a60cb6fe97d0b483032ff1c7",
+      "verified_contract": "Vyper_contract",
+      "emitter_verification_url": "https://sourcify.dev/server/v2/contract/1/0xbEbc44782C7dB0a1A60Cb6fe97d0b483032FF1C7?fields=abi,compilation,proxyResolution",
+      "abi_verification_url": "https://sourcify.dev/server/v2/contract/1/0xbEbc44782C7dB0a1A60Cb6fe97d0b483032FF1C7?fields=abi,compilation,proxyResolution",
+      "abi_response_sha256": "ec4f0d9f69779001d2f650280c068d5f0383fdd1df92ddfae63e6edaade7ba3d",
+      "events": {
+        "TokenExchange": {
+          "signature": "TokenExchange(address,int128,uint256,int128,uint256)",
+          "topic0": "0x8b3e96f2b889fa771c53c981b40daf005f63f637f1869f707052d15a3dd97140",
+          "inputs": [
+            {
+              "name": "buyer",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "sold_id",
+              "type": "int128",
+              "indexed": false
+            },
+            {
+              "name": "tokens_sold",
+              "type": "uint256",
+              "indexed": false
+            },
+            {
+              "name": "bought_id",
+              "type": "int128",
+              "indexed": false
+            },
+            {
+              "name": "tokens_bought",
+              "type": "uint256",
+              "indexed": false
+            }
+          ]
+        },
+        "AddLiquidity": {
+          "signature": "AddLiquidity(address,uint256[3],uint256[3],uint256,uint256)",
+          "topic0": "0x423f6495a08fc652425cf4ed0d1f9e37e571d9b9529b1c1c23cce780b2e7df0d",
+          "inputs": [
+            {
+              "name": "provider",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "token_amounts",
+              "type": "uint256[3]",
+              "indexed": false
+            },
+            {
+              "name": "fees",
+              "type": "uint256[3]",
+              "indexed": false
+            },
+            {
+              "name": "invariant",
+              "type": "uint256",
+              "indexed": false
+            },
+            {
+              "name": "token_supply",
+              "type": "uint256",
+              "indexed": false
+            }
+          ]
+        },
+        "RemoveLiquidity": {
+          "signature": "RemoveLiquidity(address,uint256[3],uint256[3],uint256)",
+          "topic0": "0xa49d4cf02656aebf8c771f5a8585638a2a15ee6c97cf7205d4208ed7c1df252d",
+          "inputs": [
+            {
+              "name": "provider",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "token_amounts",
+              "type": "uint256[3]",
+              "indexed": false
+            },
+            {
+              "name": "fees",
+              "type": "uint256[3]",
+              "indexed": false
+            },
+            {
+              "name": "token_supply",
+              "type": "uint256",
+              "indexed": false
+            }
+          ]
+        },
+        "RemoveLiquidityOne": {
+          "signature": "RemoveLiquidityOne(address,uint256,uint256)",
+          "topic0": "0x9e96dd3b997a2a257eec4df9bb6eaf626e206df5f543bd963682d143300be310",
+          "inputs": [
+            {
+              "name": "provider",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "token_amount",
+              "type": "uint256",
+              "indexed": false
+            },
+            {
+              "name": "coin_amount",
+              "type": "uint256",
+              "indexed": false
+            }
+          ]
+        },
+        "RemoveLiquidityImbalance": {
+          "signature": "RemoveLiquidityImbalance(address,uint256[3],uint256[3],uint256,uint256)",
+          "topic0": "0x173599dbf9c6ca6f7c3b590df07ae98a45d74ff54065505141e7de6c46a624c2",
+          "inputs": [
+            {
+              "name": "provider",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "token_amounts",
+              "type": "uint256[3]",
+              "indexed": false
+            },
+            {
+              "name": "fees",
+              "type": "uint256[3]",
+              "indexed": false
+            },
+            {
+              "name": "invariant",
+              "type": "uint256",
+              "indexed": false
+            },
+            {
+              "name": "token_supply",
+              "type": "uint256",
+              "indexed": false
+            }
+          ]
+        },
+        "RampA": {
+          "signature": "RampA(uint256,uint256,uint256,uint256)",
+          "topic0": "0xa2b71ec6df949300b59aab36b55e189697b750119dd349fcfa8c0f779e83c254",
+          "inputs": [
+            {
+              "name": "old_A",
+              "type": "uint256",
+              "indexed": false
+            },
+            {
+              "name": "new_A",
+              "type": "uint256",
+              "indexed": false
+            },
+            {
+              "name": "initial_time",
+              "type": "uint256",
+              "indexed": false
+            },
+            {
+              "name": "future_time",
+              "type": "uint256",
+              "indexed": false
+            }
+          ]
+        },
+        "StopRampA": {
+          "signature": "StopRampA(uint256,uint256)",
+          "topic0": "0x46e22fb3709ad289f62ce63d469248536dbc78d82b84a3d7e74ad606dc201938",
+          "inputs": [
+            {
+              "name": "A",
+              "type": "uint256",
+              "indexed": false
+            },
+            {
+              "name": "t",
+              "type": "uint256",
+              "indexed": false
+            }
+          ]
+        }
+      }
+    },
+    "sdai": {
+      "address": "0x83f20f44975d03b1b09e64809b757c47f942beea",
+      "verified_contract": "SavingsDai",
+      "emitter_verification_url": "https://sourcify.dev/server/v2/contract/1/0x83F20F44975D03b1b09e64809B757c47f942BEeA?fields=abi,compilation,proxyResolution",
+      "abi_verification_url": "https://sourcify.dev/server/v2/contract/1/0x83F20F44975D03b1b09e64809B757c47f942BEeA?fields=abi,compilation,proxyResolution",
+      "abi_response_sha256": "e722f4c19844fe89815fac8847b1f8b109eee58cd7afc8e91377e38142ea2d07",
+      "events": {
+        "Deposit": {
+          "signature": "Deposit(address,address,uint256,uint256)",
+          "topic0": "0xdcbc1c05240f31ff3ad067ef1ee35ce4997762752e3a095284754544f4c709d7",
+          "inputs": [
+            {
+              "name": "sender",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "owner",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "assets",
+              "type": "uint256",
+              "indexed": false
+            },
+            {
+              "name": "shares",
+              "type": "uint256",
+              "indexed": false
+            }
+          ]
+        },
+        "Withdraw": {
+          "signature": "Withdraw(address,address,address,uint256,uint256)",
+          "topic0": "0xfbde797d201c681b91056529119e0b02407c7bb96a4a2c75c01fc9667232c8db",
+          "inputs": [
+            {
+              "name": "sender",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "receiver",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "owner",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "assets",
+              "type": "uint256",
+              "indexed": false
+            },
+            {
+              "name": "shares",
+              "type": "uint256",
+              "indexed": false
+            }
+          ]
+        },
+        "Transfer": {
+          "signature": "Transfer(address,address,uint256)",
+          "topic0": "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+          "inputs": [
+            {
+              "name": "from",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "to",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "value",
+              "type": "uint256",
+              "indexed": false
+            }
+          ]
+        }
+      }
+    },
+    "susde": {
+      "address": "0x9d39a5de30e57443bff2a8307a4256c8797a3497",
+      "verified_contract": "StakedUSDeV2",
+      "emitter_verification_url": "https://sourcify.dev/server/v2/contract/1/0x9D39A5DE30e57443BfF2A8307A4256c8797A3497?fields=abi,compilation,proxyResolution",
+      "abi_verification_url": "https://sourcify.dev/server/v2/contract/1/0x9D39A5DE30e57443BfF2A8307A4256c8797A3497?fields=abi,compilation,proxyResolution",
+      "abi_response_sha256": "faaaeee2237dfcb62eb95fead3c14428a5efb11c50d30fba7c9fd222c0f69ab1",
+      "events": {
+        "Deposit": {
+          "signature": "Deposit(address,address,uint256,uint256)",
+          "topic0": "0xdcbc1c05240f31ff3ad067ef1ee35ce4997762752e3a095284754544f4c709d7",
+          "inputs": [
+            {
+              "name": "sender",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "owner",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "assets",
+              "type": "uint256",
+              "indexed": false
+            },
+            {
+              "name": "shares",
+              "type": "uint256",
+              "indexed": false
+            }
+          ]
+        },
+        "RewardsReceived": {
+          "signature": "RewardsReceived(uint256)",
+          "topic0": "0xbb28dd7cd6be6f61828ea9158a04c5182c716a946a6d2f31f4864edb87471aa6",
+          "inputs": [
+            {
+              "name": "amount",
+              "type": "uint256",
+              "indexed": false
+            }
+          ]
+        }
+      }
+    },
+    "aave_v3": {
+      "address": "0x87870bca3f3fd6335c3f4ce8392d69350b4fa4e2",
+      "verified_contract": "PoolInstance",
+      "emitter_verification_url": "https://sourcify.dev/server/v2/contract/1/0x87870bca3f3fd6335c3f4ce8392d69350b4fa4e2?fields=abi,compilation,proxyResolution",
+      "abi_verification_url": "https://sourcify.dev/server/v2/contract/1/0x728a138a4823392c2efa55e028d434f526fe03cf?fields=abi,compilation,proxyResolution",
+      "abi_response_sha256": "1bc4940c62f68f7df7cbe6fd7f1956b0ccd4c3c0f6a48ee5db6057c9e1d5d7ac",
+      "events": {
+        "Supply": {
+          "signature": "Supply(address,address,address,uint256,uint16)",
+          "topic0": "0x2b627736bca15cd5381dcf80b0bf11fd197d01a037c52b927a881a10fb73ba61",
+          "inputs": [
+            {
+              "name": "reserve",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "user",
+              "type": "address",
+              "indexed": false
+            },
+            {
+              "name": "onBehalfOf",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "amount",
+              "type": "uint256",
+              "indexed": false
+            },
+            {
+              "name": "referralCode",
+              "type": "uint16",
+              "indexed": true
+            }
+          ]
+        },
+        "Borrow": {
+          "signature": "Borrow(address,address,address,uint256,uint8,uint256,uint16)",
+          "topic0": "0xb3d084820fb1a9decffb176436bd02558d15fac9b0ddfed8c465bc7359d7dce0",
+          "inputs": [
+            {
+              "name": "reserve",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "user",
+              "type": "address",
+              "indexed": false
+            },
+            {
+              "name": "onBehalfOf",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "amount",
+              "type": "uint256",
+              "indexed": false
+            },
+            {
+              "name": "interestRateMode",
+              "type": "uint8",
+              "indexed": false
+            },
+            {
+              "name": "borrowRate",
+              "type": "uint256",
+              "indexed": false
+            },
+            {
+              "name": "referralCode",
+              "type": "uint16",
+              "indexed": true
+            }
+          ]
+        },
+        "Repay": {
+          "signature": "Repay(address,address,address,uint256,bool)",
+          "topic0": "0xa534c8dbe71f871f9f3530e97a74601fea17b426cae02e1c5aee42c96c784051",
+          "inputs": [
+            {
+              "name": "reserve",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "user",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "repayer",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "amount",
+              "type": "uint256",
+              "indexed": false
+            },
+            {
+              "name": "useATokens",
+              "type": "bool",
+              "indexed": false
+            }
+          ]
+        },
+        "LiquidationCall": {
+          "signature": "LiquidationCall(address,address,address,uint256,uint256,address,bool)",
+          "topic0": "0xe413a321e8681d831f4dbccbca790d2952b56f977908e45be37335533e005286",
+          "inputs": [
+            {
+              "name": "collateralAsset",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "debtAsset",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "user",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "debtToCover",
+              "type": "uint256",
+              "indexed": false
+            },
+            {
+              "name": "liquidatedCollateralAmount",
+              "type": "uint256",
+              "indexed": false
+            },
+            {
+              "name": "liquidator",
+              "type": "address",
+              "indexed": false
+            },
+            {
+              "name": "receiveAToken",
+              "type": "bool",
+              "indexed": false
+            }
+          ]
+        },
+        "FlashLoan": {
+          "signature": "FlashLoan(address,address,address,uint256,uint8,uint256,uint16)",
+          "topic0": "0xefefaba5e921573100900a3ad9cf29f222d995fb3b6045797eaea7521bd8d6f0",
+          "inputs": [
+            {
+              "name": "target",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "initiator",
+              "type": "address",
+              "indexed": false
+            },
+            {
+              "name": "asset",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "amount",
+              "type": "uint256",
+              "indexed": false
+            },
+            {
+              "name": "interestRateMode",
+              "type": "uint8",
+              "indexed": false
+            },
+            {
+              "name": "premium",
+              "type": "uint256",
+              "indexed": false
+            },
+            {
+              "name": "referralCode",
+              "type": "uint16",
+              "indexed": true
+            }
+          ]
+        },
+        "ReserveUsedAsCollateralEnabled": {
+          "signature": "ReserveUsedAsCollateralEnabled(address,address)",
+          "topic0": "0x00058a56ea94653cdf4f152d227ace22d4c00ad99e2a43f58cb7d9e3feb295f2",
+          "inputs": [
+            {
+              "name": "reserve",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "user",
+              "type": "address",
+              "indexed": true
+            }
+          ]
+        },
+        "ReserveUsedAsCollateralDisabled": {
+          "signature": "ReserveUsedAsCollateralDisabled(address,address)",
+          "topic0": "0x44c58d81365b66dd4b1a7f36c25aa97b8c71c361ee4937adc1a00000227db5dd",
+          "inputs": [
+            {
+              "name": "reserve",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "user",
+              "type": "address",
+              "indexed": true
+            }
+          ]
+        }
+      }
+    },
+    "compound_cusdc": {
+      "address": "0x39aa39c021dfbae8fac545936693ac917d5e7563",
+      "verified_contract": "CErc20",
+      "emitter_verification_url": "https://sourcify.dev/server/v2/contract/1/0x39AA39c021dfbaE8faC545936693aC917d5E7563?fields=abi,compilation,proxyResolution",
+      "abi_verification_url": "https://sourcify.dev/server/v2/contract/1/0x39AA39c021dfbaE8faC545936693aC917d5E7563?fields=abi,compilation,proxyResolution",
+      "abi_response_sha256": "b05eda6ae00b02e71c579e203f3e827b1f52fc5003f03122fa8865f72590ca1a",
+      "events": {
+        "Mint": {
+          "signature": "Mint(address,uint256,uint256)",
+          "topic0": "0x4c209b5fc8ad50758f13e2e1088ba56a560dff690a1c6fef26394f4c03821c4f",
+          "inputs": [
+            {
+              "name": "minter",
+              "type": "address",
+              "indexed": false
+            },
+            {
+              "name": "mintAmount",
+              "type": "uint256",
+              "indexed": false
+            },
+            {
+              "name": "mintTokens",
+              "type": "uint256",
+              "indexed": false
+            }
+          ]
+        },
+        "Redeem": {
+          "signature": "Redeem(address,uint256,uint256)",
+          "topic0": "0xe5b754fb1abb7f01b499791d0b820ae3b6af3424ac1c59768edb53f4ec31a929",
+          "inputs": [
+            {
+              "name": "redeemer",
+              "type": "address",
+              "indexed": false
+            },
+            {
+              "name": "redeemAmount",
+              "type": "uint256",
+              "indexed": false
+            },
+            {
+              "name": "redeemTokens",
+              "type": "uint256",
+              "indexed": false
+            }
+          ]
+        },
+        "Borrow": {
+          "signature": "Borrow(address,uint256,uint256,uint256)",
+          "topic0": "0x13ed6866d4e1ee6da46f845c46d7e54120883d75c5ea9a2dacc1c4ca8984ab80",
+          "inputs": [
+            {
+              "name": "borrower",
+              "type": "address",
+              "indexed": false
+            },
+            {
+              "name": "borrowAmount",
+              "type": "uint256",
+              "indexed": false
+            },
+            {
+              "name": "accountBorrows",
+              "type": "uint256",
+              "indexed": false
+            },
+            {
+              "name": "totalBorrows",
+              "type": "uint256",
+              "indexed": false
+            }
+          ]
+        },
+        "RepayBorrow": {
+          "signature": "RepayBorrow(address,address,uint256,uint256,uint256)",
+          "topic0": "0x1a2a22cb034d26d1854bdc6666a5b91fe25efbbb5dcad3b0355478d6f5c362a1",
+          "inputs": [
+            {
+              "name": "payer",
+              "type": "address",
+              "indexed": false
+            },
+            {
+              "name": "borrower",
+              "type": "address",
+              "indexed": false
+            },
+            {
+              "name": "repayAmount",
+              "type": "uint256",
+              "indexed": false
+            },
+            {
+              "name": "accountBorrows",
+              "type": "uint256",
+              "indexed": false
+            },
+            {
+              "name": "totalBorrows",
+              "type": "uint256",
+              "indexed": false
+            }
+          ]
+        },
+        "AccrueInterest": {
+          "signature": "AccrueInterest(uint256,uint256,uint256)",
+          "topic0": "0x875352fb3fadeb8c0be7cbbe8ff761b308fa7033470cd0287f02f3436fd76cb9",
+          "inputs": [
+            {
+              "name": "interestAccumulated",
+              "type": "uint256",
+              "indexed": false
+            },
+            {
+              "name": "borrowIndex",
+              "type": "uint256",
+              "indexed": false
+            },
+            {
+              "name": "totalBorrows",
+              "type": "uint256",
+              "indexed": false
+            }
+          ]
+        }
+      }
+    },
+    "compound_comet": {
+      "address": "0xc3d688b66703497daa19211eedff47f25384cdc3",
+      "verified_contract": "CometWithExtendedAssetList",
+      "emitter_verification_url": "https://sourcify.dev/server/v2/contract/1/0xc3d688B66703497DAA19211EEdff47f25384cdc3?fields=abi,compilation,proxyResolution",
+      "abi_verification_url": "https://sourcify.dev/server/v2/contract/1/0x63e749153baf1838f63ca22c275370bd2b1ceb15?fields=abi,compilation,proxyResolution",
+      "abi_response_sha256": "f68bd93a4c62cced4b7c2663d31ea68a092563277ed43b0a5516f6c8a4d9c290",
+      "events": {
+        "Supply": {
+          "signature": "Supply(address,address,uint256)",
+          "topic0": "0xd1cf3d156d5f8f0d50f6c122ed609cec09d35c9b9fb3fff6ea0959134dae424e",
+          "inputs": [
+            {
+              "name": "from",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "dst",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "amount",
+              "type": "uint256",
+              "indexed": false
+            }
+          ]
+        },
+        "Withdraw": {
+          "signature": "Withdraw(address,address,uint256)",
+          "topic0": "0x9b1bfa7fa9ee420a16e124f794c35ac9f90472acc99140eb2f6447c714cad8eb",
+          "inputs": [
+            {
+              "name": "src",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "to",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "amount",
+              "type": "uint256",
+              "indexed": false
+            }
+          ]
+        },
+        "SupplyCollateral": {
+          "signature": "SupplyCollateral(address,address,address,uint256)",
+          "topic0": "0xfa56f7b24f17183d81894d3ac2ee654e3c26388d17a28dbd9549b8114304e1f4",
+          "inputs": [
+            {
+              "name": "from",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "dst",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "asset",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "amount",
+              "type": "uint256",
+              "indexed": false
+            }
+          ]
+        },
+        "AbsorbDebt": {
+          "signature": "AbsorbDebt(address,address,uint256,uint256)",
+          "topic0": "0x1547a878dc89ad3c367b6338b4be6a65a5dd74fb77ae044da1e8747ef1f4f62f",
+          "inputs": [
+            {
+              "name": "absorber",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "borrower",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "basePaidOut",
+              "type": "uint256",
+              "indexed": false
+            },
+            {
+              "name": "usdValue",
+              "type": "uint256",
+              "indexed": false
+            }
+          ]
+        },
+        "BuyCollateral": {
+          "signature": "BuyCollateral(address,address,uint256,uint256)",
+          "topic0": "0xf891b2a411b0e66a5f0a6ff1368670fefa287a13f541eb633a386a1a9cc7046b",
+          "inputs": [
+            {
+              "name": "buyer",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "asset",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "baseAmount",
+              "type": "uint256",
+              "indexed": false
+            },
+            {
+              "name": "collateralAmount",
+              "type": "uint256",
+              "indexed": false
+            }
+          ]
+        }
+      }
+    },
+    "compound_governor": {
+      "address": "0xc0da02939e1441f497fd74f78ce7decb17b66529",
+      "verified_contract": "GovernorBravoDelegator",
+      "emitter_verification_url": "https://sourcify.dev/server/v2/contract/1/0xc0Da02939E1441F497fd74F78cE7Decb17B66529?fields=abi,compilation,proxyResolution",
+      "abi_verification_url": "https://sourcify.dev/server/v2/contract/1/0xc0Da02939E1441F497fd74F78cE7Decb17B66529?fields=abi,compilation,proxyResolution",
+      "abi_response_sha256": "a13588ec407d19da6f7a26af0ae4c99c706c013371677ceb5566e5a3b4771314",
+      "events": {
+        "VoteCast": {
+          "signature": "VoteCast(address,uint256,uint8,uint256,string)",
+          "topic0": "0xb8e138887d0aa13bab447e82de9d5c1777041ecd21ca36ba824ff1e6c07ddda4",
+          "inputs": [
+            {
+              "name": "voter",
+              "type": "address",
+              "indexed": true
+            },
+            {
+              "name": "proposalId",
+              "type": "uint256",
+              "indexed": false
+            },
+            {
+              "name": "support",
+              "type": "uint8",
+              "indexed": false
+            },
+            {
+              "name": "votes",
+              "type": "uint256",
+              "indexed": false
+            },
+            {
+              "name": "reason",
+              "type": "string",
+              "indexed": false
+            }
+          ]
+        },
+        "ProposalQueued": {
+          "signature": "ProposalQueued(uint256,uint256)",
+          "topic0": "0x9a2e42fd6722813d69113e7d0079d3d940171428df7373df9c7f7617cfda2892",
+          "inputs": [
+            {
+              "name": "id",
+              "type": "uint256",
+              "indexed": false
+            },
+            {
+              "name": "eta",
+              "type": "uint256",
+              "indexed": false
+            }
+          ]
+        },
+        "ProposalExecuted": {
+          "signature": "ProposalExecuted(uint256)",
+          "topic0": "0x712ae1383f79ac853f8d882153778e0260ef8f03b504e2866e0593e04d2b291f",
+          "inputs": [
+            {
+              "name": "id",
+              "type": "uint256",
+              "indexed": false
+            }
+          ]
+        }
+      }
+    },
+    "arbitrum_inbox": {
+      "address": "0x4dbd4fc535ac27206064b68ffcf827b0a60bab3f",
+      "verified_contract": "Inbox",
+      "emitter_verification_url": "https://sourcify.dev/server/v2/contract/1/0x4Dbd4fc535Ac27206064B68FfCf827b0A60BAB3f?fields=abi,compilation,proxyResolution",
+      "abi_verification_url": "https://sourcify.dev/server/v2/contract/1/0x7c058ad1d0ee415f7e7f30e62db1bcf568470a10?fields=abi,compilation,proxyResolution",
+      "abi_response_sha256": "971f873a6776d6e22eba0b4e689f448ddc042e08d0d68a32269f90330659af71",
+      "events": {
+        "InboxMessageDelivered": {
+          "signature": "InboxMessageDelivered(uint256,bytes)",
+          "topic0": "0xff64905f73a67fb594e0f940a8075a860db489ad991e032f48c81123eb52d60b",
+          "inputs": [
+            {
+              "name": "messageNum",
+              "type": "uint256",
+              "indexed": true
+            },
+            {
+              "name": "data",
+              "type": "bytes",
+              "indexed": false
+            }
+          ]
+        },
+        "InboxMessageDeliveredFromOrigin": {
+          "signature": "InboxMessageDeliveredFromOrigin(uint256)",
+          "topic0": "0xab532385be8f1005a4b6ba8fa20a2245facb346134ac739fe9a5198dc1580b9c",
+          "inputs": [
+            {
+              "name": "messageNum",
+              "type": "uint256",
+              "indexed": true
+            }
+          ]
+        }
+      }
+    },
+    "ens_current_controller": {
+      "address": "0x59e16fccd424cc24e280be16e11bcd56fb0ce547",
+      "verified_contract": "ETHRegistrarController",
+      "emitter_verification_url": "https://sourcify.dev/server/v2/contract/1/0x59e16fccd424cc24e280be16e11bcd56fb0ce547?fields=abi,compilation,proxyResolution",
+      "abi_verification_url": "https://sourcify.dev/server/v2/contract/1/0x59e16fccd424cc24e280be16e11bcd56fb0ce547?fields=abi,compilation,proxyResolution",
+      "abi_response_sha256": "beffb3d308956ed981cee30792772da63696d453cde77a45aecaa96697595e13",
+      "events": {
+        "NameRegistered": {
+          "signature": "NameRegistered(string,bytes32,address,uint256,uint256,uint256,bytes32)",
+          "topic0": "0xc2240194853531f1ae318dcef227de79c6ad0fd9d1b0e4fe08568415be2e08a5",
+          "inputs": [
+            {
+              "name": "label",
+              "type": "string",
+              "indexed": false,
+              "internalType": "string"
+            },
+            {
+              "name": "labelhash",
+              "type": "bytes32",
+              "indexed": true,
+              "internalType": "bytes32"
+            },
+            {
+              "name": "owner",
+              "type": "address",
+              "indexed": true,
+              "internalType": "address"
+            },
+            {
+              "name": "baseCost",
+              "type": "uint256",
+              "indexed": false,
+              "internalType": "uint256"
+            },
+            {
+              "name": "premium",
+              "type": "uint256",
+              "indexed": false,
+              "internalType": "uint256"
+            },
+            {
+              "name": "expires",
+              "type": "uint256",
+              "indexed": false,
+              "internalType": "uint256"
+            },
+            {
+              "name": "referrer",
+              "type": "bytes32",
+              "indexed": false,
+              "internalType": "bytes32"
+            }
+          ]
+        }
+      }
+    }
+  },
+  "cases": [
+    {
+      "id": "usdc_daily_transfers",
+      "contracts": [
+        "usdc"
+      ],
+      "purpose": "How many USDC transfer events occur in each UTC day?",
+      "interpretation": "Counts emitted events, not necessarily unique users or transactions.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "SELECT CAST(timestamp / 86400 AS BIGINT) AS utc_day, COUNT(*) AS transfers FROM logs WHERE address='0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'Transfer(address,address,uint256)' AND data_len=32 AND topic3 IS NULL GROUP BY utc_day ORDER BY utc_day",
+      "reference": "sqlite",
+      "verification_from_block": 26089873,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "usdc_distinct_participants",
+      "contracts": [
+        "usdc"
+      ],
+      "purpose": "How many distinct sender and receiver addresses participate in USDC transfers?",
+      "interpretation": "Addresses include contracts and zero address; these are not human-user counts.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "SELECT COUNT(DISTINCT topic1) AS senders, COUNT(DISTINCT topic2) AS receivers FROM logs WHERE address='0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'Transfer(address,address,uint256)'",
+      "reference": "sqlite",
+      "verification_from_block": 26089873,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "usdc_busy_routes",
+      "contracts": [
+        "usdc"
+      ],
+      "purpose": "Which sender-to-receiver routes emit the most USDC transfers?",
+      "interpretation": "Counts emitted events, not necessarily unique users or transactions.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "SELECT topic1 AS sender, topic2 AS receiver, COUNT(*) AS transfers FROM logs WHERE address='0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'Transfer(address,address,uint256)' GROUP BY topic1, topic2 ORDER BY transfers DESC, sender, receiver LIMIT 20",
+      "reference": "sqlite",
+      "verification_from_block": 26089873,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "usdc_issued_units",
+      "contracts": [
+        "usdc"
+      ],
+      "purpose": "How many base units does USDC issue through Mint events?",
+      "interpretation": "Exact integer total in the contract event's base units; not USD or a state balance.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "SELECT SUM(data) AS total_units FROM logs WHERE address='0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'Mint(address,address,uint256)' AND data_len=32",
+      "reference": "exact_sum",
+      "verification_from_block": 26089873,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "usdc_redeemed_units",
+      "contracts": [
+        "usdc"
+      ],
+      "purpose": "How many base units does USDC destroy through Burn events?",
+      "interpretation": "Exact integer total in the contract event's base units; not USD or a state balance.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "SELECT SUM(data) AS total_units FROM logs WHERE address='0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'Burn(address,uint256)' AND data_len=32",
+      "reference": "exact_sum",
+      "verification_from_block": 26089873,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "usdc_authorization_activity",
+      "contracts": [
+        "usdc"
+      ],
+      "purpose": "How many signed transfer authorizations were used or canceled?",
+      "interpretation": "Authorization lifecycle events; cancellation is not a token transfer.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "SELECT topic0 AS event, COUNT(*) AS actions, COUNT(DISTINCT topic1) AS authorizers FROM logs WHERE address='0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48' AND block_number BETWEEN 26080000 AND 26090000 AND topic0 IN (event'AuthorizationUsed(address,bytes32)',event'AuthorizationCanceled(address,bytes32)') GROUP BY topic0 ORDER BY topic0",
+      "reference": "sqlite",
+      "verification_from_block": 26089873,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "usdt_treasury_issue",
+      "contracts": [
+        "usdt"
+      ],
+      "purpose": "How much USDT was issued to its treasury?",
+      "interpretation": "Exact integer total in the contract event's base units; not USD or a state balance.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "SELECT SUM(data) AS total_units FROM logs WHERE address='0xdac17f958d2ee523a2206206994597c13d831ec7' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'Issue(uint256)' AND data_len=32",
+      "reference": "exact_sum",
+      "verification_from_block": 26089873,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "usdt_treasury_redeem",
+      "contracts": [
+        "usdt"
+      ],
+      "purpose": "How much USDT was redeemed by its treasury?",
+      "interpretation": "Exact integer total in the contract event's base units; not USD or a state balance.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "SELECT SUM(data) AS total_units FROM logs WHERE address='0xdac17f958d2ee523a2206206994597c13d831ec7' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'Redeem(uint256)' AND data_len=32",
+      "reference": "exact_sum",
+      "verification_from_block": 26089873,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "usdt_blacklist_changes",
+      "contracts": [
+        "usdt"
+      ],
+      "purpose": "Which accounts had USDT blacklist status changes?",
+      "interpretation": "The address is a non-indexed ABI word. History of actions, not all currently blacklisted accounts.",
+      "from_block": 25000000,
+      "to_block": 26090000,
+      "sql": "SELECT block_number, log_index, topic0 AS action, data AS account_word FROM logs WHERE address='0xdac17f958d2ee523a2206206994597c13d831ec7' AND block_number BETWEEN 25000000 AND 26090000 AND topic0 IN (event'AddedBlackList(address)',event'RemovedBlackList(address)') ORDER BY block_number, log_index LIMIT 100",
+      "reference": "sqlite",
+      "verification_from_block": 26089873,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "usdt_zero_value_transfers",
+      "contracts": [
+        "usdt"
+      ],
+      "purpose": "How many zero-value USDT transfers were emitted?",
+      "interpretation": "Zero transfers can be valid; a count alone does not classify malicious activity.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "SELECT COUNT(*) AS transfers FROM logs WHERE address='0xdac17f958d2ee523a2206206994597c13d831ec7' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'Transfer(address,address,uint256)' AND data='0x0000000000000000000000000000000000000000000000000000000000000000'",
+      "reference": "sqlite",
+      "verification_from_block": 26089873,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "dai_net_mint_burn",
+      "contracts": [
+        "dai"
+      ],
+      "purpose": "What is the net DAI issuance represented by mint and burn Transfer events?",
+      "interpretation": "Zero-address mint minus zero-address burn, in DAI base units; supply inference depends on complete contract semantics.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "SELECT SUM(CASE WHEN topic1=address'0x0000000000000000000000000000000000000000' THEN data ELSE 0 END)-SUM(CASE WHEN topic2=address'0x0000000000000000000000000000000000000000' THEN data ELSE 0 END) AS total_units FROM logs WHERE address='0x6b175474e89094c44da98b954eedeac495271d0f' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'Transfer(address,address,uint256)' AND data_len=32",
+      "reference": "signed_sum",
+      "verification_from_block": 26089873,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "dai_approval_revocations",
+      "contracts": [
+        "dai"
+      ],
+      "purpose": "Which spenders receive the most explicit DAI approval revocations?",
+      "interpretation": "Explicit zero Approval events; transfers may consume allowances without an Approval event.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "SELECT topic2 AS spender, COUNT(*) AS revocations FROM logs WHERE address='0x6b175474e89094c44da98b954eedeac495271d0f' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'Approval(address,address,uint256)' AND data='0x0000000000000000000000000000000000000000000000000000000000000000' GROUP BY topic2 ORDER BY revocations DESC, spender LIMIT 20",
+      "reference": "sqlite",
+      "verification_from_block": 26089873,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "wbtc_burners",
+      "contracts": [
+        "wbtc"
+      ],
+      "purpose": "Which WBTC redeemers burn the greatest token amount?",
+      "interpretation": "Exact base-unit totals grouped by emitting event burner; not proof of Bitcoin settlement.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "SELECT topic1 AS redeemer, SUM(data) AS total_units FROM logs WHERE address='0x2260fac5e5542a773aa44fbcfedf7c193bc2c599' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'Burn(address,uint256)' AND data_len=32 GROUP BY topic1 ORDER BY total_units DESC, redeemer LIMIT 20",
+      "reference": "exact_group_sum",
+      "verification_from_block": 26089873,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "wbtc_largest_mints",
+      "contracts": [
+        "wbtc"
+      ],
+      "purpose": "What are the largest individual WBTC mint events?",
+      "interpretation": "Fixed-width unsigned ABI words sort numerically as hexadecimal strings; eight token decimals.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "SELECT topic1 AS receiver, data AS amount_hex, block_number, log_index FROM logs WHERE address='0x2260fac5e5542a773aa44fbcfedf7c193bc2c599' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'Mint(address,uint256)' AND data_len=32 ORDER BY amount_hex DESC, block_number, log_index LIMIT 20",
+      "reference": "sqlite",
+      "verification_from_block": 26089873,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "link_transfer_payloads",
+      "contracts": [
+        "link"
+      ],
+      "purpose": "How large are the callback payloads in LINK ERC677 transfer-and-call events?",
+      "interpretation": "This LINK event overload is Transfer(address,address,uint256,bytes), with indexed addresses and dynamic callback data. It is distinct from ordinary three-argument ERC20 Transfer; payload size is not a token quantity.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "SELECT data_len, COUNT(topic1) AS sender_fields, COUNT(topic2) AS receiver_fields, COUNT(topic3) AS extra_topics, COUNT(*) AS events FROM logs WHERE address='0x514910771af9ca656af840dff83e8264ecf986ca' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'Transfer(address,address,uint256,bytes)' GROUP BY data_len ORDER BY data_len",
+      "reference": "sqlite",
+      "verification_from_block": 26089873,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "uni_delegation_destinations",
+      "contracts": [
+        "uni"
+      ],
+      "purpose": "Which delegates gain the most UNI delegation changes?",
+      "interpretation": "Delegation changes, not final delegated voting power.",
+      "from_block": 25000000,
+      "to_block": 26090000,
+      "sql": "SELECT topic3 AS delegate, COUNT(*) AS changes FROM logs WHERE address='0x1f9840a85d5af5bf1d1762f925bdaddc4201f984' AND block_number BETWEEN 25000000 AND 26090000 AND topic0=event'DelegateChanged(address,address,address)' GROUP BY topic3 ORDER BY changes DESC, delegate LIMIT 20",
+      "reference": "sqlite",
+      "verification_from_block": 26089873,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "comp_changed_delegators",
+      "contracts": [
+        "comp"
+      ],
+      "purpose": "Which COMP holders redelegate repeatedly in the observation range?",
+      "interpretation": "Counts emitted events, not necessarily unique users or transactions.",
+      "from_block": 25000000,
+      "to_block": 26090000,
+      "sql": "SELECT topic1 AS delegator, COUNT(*) AS changes FROM logs WHERE address='0xc00e94cb662c3520282e6f5717214004a7f26888' AND block_number BETWEEN 25000000 AND 26090000 AND topic0=event'DelegateChanged(address,address,address)' GROUP BY topic1 HAVING COUNT(*)>1 ORDER BY changes DESC, delegator LIMIT 20",
+      "reference": "sqlite",
+      "verification_from_block": 26089873,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "ldo_approval_spender_breadth",
+      "contracts": [
+        "ldo"
+      ],
+      "purpose": "Which LDO spenders receive approvals from the most distinct owners?",
+      "interpretation": "Approval-event owner breadth, not active allowance exposure.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "SELECT topic2 AS spender, COUNT(DISTINCT topic1) AS owners FROM logs WHERE address='0x5a98fcbea516cf06857215779fd812ca3bef1b32' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'Approval(address,address,uint256)' GROUP BY topic2 ORDER BY owners DESC, spender LIMIT 20",
+      "reference": "sqlite",
+      "verification_from_block": 26080000,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "aave_token_transfer_bursts",
+      "contracts": [
+        "aave_token"
+      ],
+      "purpose": "Which Ethereum blocks contain the most AAVE token transfers?",
+      "interpretation": "Counts emitted events, not necessarily unique users or transactions.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "SELECT block_number, COUNT(*) AS transfers FROM logs WHERE address='0x7fc66500c84a76ad7e9c93437bfc5ac33e2ddae9' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'Transfer(address,address,uint256)' GROUP BY block_number ORDER BY transfers DESC, block_number LIMIT 20",
+      "reference": "sqlite",
+      "verification_from_block": 26089873,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "vitalik_usdc_net_flow",
+      "contracts": [
+        "usdc"
+      ],
+      "purpose": "What is the net USDC event flow of the public vitalik.eth address through the frozen block?",
+      "interpretation": "Exact received minus sent base units, including self-transfer cancellation. Event-derived flow is not an eth_call balance proof.",
+      "from_block": 0,
+      "to_block": 26090000,
+      "sql": "SELECT SUM(CASE WHEN topic2=address'0xd8da6bf26964af9d7eed9e03e53415d37aa96045' THEN data ELSE 0 END)-SUM(CASE WHEN topic1=address'0xd8da6bf26964af9d7eed9e03e53415d37aa96045' THEN data ELSE 0 END) AS net_units FROM logs WHERE address='0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48' AND block_number BETWEEN 0 AND 26090000 AND topic0=event'Transfer(address,address,uint256)' AND (topic1=address'0xd8da6bf26964af9d7eed9e03e53415d37aa96045' OR topic2=address'0xd8da6bf26964af9d7eed9e03e53415d37aa96045') AND data_len=32",
+      "reference": "signed_sum",
+      "verification_from_block": 26089873,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "vitalik_weth_complete_flow",
+      "contracts": [
+        "weth"
+      ],
+      "purpose": "What WETH balance change is explained by Vitalik transfers, deposits and withdrawals?",
+      "interpretation": "WETH9 wrap/unwrap events must supplement Transfer; no native ETH balance is inferred.",
+      "from_block": 0,
+      "to_block": 26090000,
+      "sql": "SELECT SUM(CASE WHEN topic0=event'Transfer(address,address,uint256)' AND topic2=address'0xd8da6bf26964af9d7eed9e03e53415d37aa96045' THEN data WHEN topic0=event'Deposit(address,uint256)' AND topic1=address'0xd8da6bf26964af9d7eed9e03e53415d37aa96045' THEN data ELSE 0 END)-SUM(CASE WHEN topic0=event'Transfer(address,address,uint256)' AND topic1=address'0xd8da6bf26964af9d7eed9e03e53415d37aa96045' THEN data WHEN topic0=event'Withdrawal(address,uint256)' AND topic1=address'0xd8da6bf26964af9d7eed9e03e53415d37aa96045' THEN data ELSE 0 END) AS net_units FROM logs WHERE address='0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2' AND block_number BETWEEN 0 AND 26090000 AND topic0 IN (event'Transfer(address,address,uint256)',event'Deposit(address,uint256)',event'Withdrawal(address,uint256)') AND (topic1=address'0xd8da6bf26964af9d7eed9e03e53415d37aa96045' OR topic2=address'0xd8da6bf26964af9d7eed9e03e53415d37aa96045') AND data_len=32",
+      "reference": "signed_sum",
+      "verification_from_block": 26089873,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "vitalik_token_activity",
+      "contracts": [
+        "usdc",
+        "usdt",
+        "dai",
+        "link",
+        "uni",
+        "ldo"
+      ],
+      "purpose": "Which tracked fungible tokens has Vitalik sent or received, and when?",
+      "interpretation": "Activity across six named contracts; not a complete wallet portfolio or wealth estimate.",
+      "from_block": 0,
+      "to_block": 26090000,
+      "sql": "SELECT address, COUNT(*) AS transfers, MIN(block_number) AS first_block, MAX(block_number) AS last_block FROM logs WHERE address IN ('0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48','0xdac17f958d2ee523a2206206994597c13d831ec7','0x6b175474e89094c44da98b954eedeac495271d0f','0x514910771af9ca656af840dff83e8264ecf986ca','0x1f9840a85d5af5bf1d1762f925bdaddc4201f984','0x5a98fcbea516cf06857215779fd812ca3bef1b32') AND block_number BETWEEN 0 AND 26090000 AND topic0=event'Transfer(address,address,uint256)' AND (topic1=address'0xd8da6bf26964af9d7eed9e03e53415d37aa96045' OR topic2=address'0xd8da6bf26964af9d7eed9e03e53415d37aa96045') AND data_len=32 GROUP BY address ORDER BY transfers DESC, address",
+      "reference": "sqlite",
+      "verification_from_block": 26089873,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "usdc_self_transfer_volume",
+      "contracts": [
+        "usdc"
+      ],
+      "purpose": "How much USDC volume comes from self-transfers?",
+      "interpretation": "Gross units moved in self-transfers; contributes zero net flow and should not inflate economic volume.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "SELECT SUM(data) AS total_units FROM logs WHERE address='0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'Transfer(address,address,uint256)' AND data_len=32 AND topic1=topic2",
+      "reference": "exact_sum",
+      "verification_from_block": 26089873,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "weth_wrapped_units",
+      "contracts": [
+        "weth"
+      ],
+      "purpose": "How much ETH-denominated WETH9 wrapping is recorded?",
+      "interpretation": "Exact integer total in the contract event's base units; not USD or a state balance.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "SELECT SUM(data) AS total_units FROM logs WHERE address='0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'Deposit(address,uint256)' AND data_len=32",
+      "reference": "exact_sum",
+      "verification_from_block": 26089873,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "weth_unwrapped_units",
+      "contracts": [
+        "weth"
+      ],
+      "purpose": "How much WETH9 unwrapping is recorded?",
+      "interpretation": "Exact integer total in the contract event's base units; not USD or a state balance.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "SELECT SUM(data) AS total_units FROM logs WHERE address='0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'Withdrawal(address,uint256)' AND data_len=32",
+      "reference": "exact_sum",
+      "verification_from_block": 26089873,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "weth_net_wrapping",
+      "contracts": [
+        "weth"
+      ],
+      "purpose": "Does wrapping exceed unwrapping in the block range?",
+      "interpretation": "Exact Deposit minus Withdrawal wei; excludes transfer volume.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "SELECT SUM(CASE WHEN topic0=event'Deposit(address,uint256)' THEN data ELSE 0 END)-SUM(CASE WHEN topic0=event'Withdrawal(address,uint256)' THEN data ELSE 0 END) AS net_units FROM logs WHERE address='0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2' AND block_number BETWEEN 26080000 AND 26090000 AND topic0 IN (event'Deposit(address,uint256)',event'Withdrawal(address,uint256)') AND data_len=32",
+      "reference": "signed_sum",
+      "verification_from_block": 26089873,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "weth_unique_depositors",
+      "contracts": [
+        "weth"
+      ],
+      "purpose": "How many distinct addresses wrap ETH into WETH9?",
+      "interpretation": "Counts emitted events, not necessarily unique users or transactions.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "SELECT COUNT(DISTINCT topic1) AS depositors FROM logs WHERE address='0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'Deposit(address,uint256)'",
+      "reference": "sqlite",
+      "verification_from_block": 26089873,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "weth_depositor_volume",
+      "contracts": [
+        "weth"
+      ],
+      "purpose": "Which addresses account for the most WETH wrapping volume?",
+      "interpretation": "Exact wrapped wei per depositor address; a contract depositor is not necessarily the economic owner.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "SELECT topic1 AS depositor, SUM(data) AS total_units FROM logs WHERE address='0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'Deposit(address,uint256)' AND data_len=32 GROUP BY topic1 ORDER BY total_units DESC, depositor LIMIT 20",
+      "reference": "exact_group_sum",
+      "verification_from_block": 26089873,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "weth_same_transaction_round_trips",
+      "contracts": [
+        "weth"
+      ],
+      "purpose": "Which transactions both wrap and unwrap WETH9?",
+      "interpretation": "Joins transaction identities; does not assert equal amounts or identify the economic owner.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "WITH a AS (SELECT tx_hash, COUNT(*) AS wraps FROM logs WHERE address='0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'Deposit(address,uint256)' GROUP BY tx_hash), b AS (SELECT tx_hash, COUNT(*) AS unwraps FROM logs WHERE address='0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'Withdrawal(address,uint256)' GROUP BY tx_hash) SELECT a.tx_hash, wraps, unwraps FROM a JOIN b ON a.tx_hash=b.tx_hash ORDER BY a.tx_hash LIMIT 100",
+      "reference": "sqlite",
+      "verification_from_block": 26089873,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "weth_hourly_activity_running_total",
+      "contracts": [
+        "weth"
+      ],
+      "purpose": "How does cumulative WETH wrapping activity build up hour by hour?",
+      "interpretation": "Counts wrapping actions; cumulative only from the chosen range start.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "WITH h AS (SELECT CAST(timestamp/3600 AS BIGINT) AS hour, COUNT(*) AS wraps FROM logs WHERE address='0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'Deposit(address,uint256)' GROUP BY hour) SELECT hour, wraps, SUM(wraps) OVER (ORDER BY hour ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS cumulative_wraps FROM h ORDER BY hour",
+      "reference": "sqlite",
+      "verification_from_block": 26089873,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "lido_staking_submissions",
+      "contracts": [
+        "steth"
+      ],
+      "purpose": "How many direct Lido staking submissions and distinct submitters are recorded?",
+      "interpretation": "Counts emitted events, not necessarily unique users or transactions.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "SELECT COUNT(*) AS submissions, COUNT(DISTINCT topic1) AS submitters FROM logs WHERE address='0xae7ab96520de3a18e5e111b5eaab095312d7fe84' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'Submitted(address,uint256,address)'",
+      "reference": "sqlite",
+      "verification_from_block": 26080000,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "lido_repeat_submitters",
+      "contracts": [
+        "steth"
+      ],
+      "purpose": "Which addresses repeatedly submit stake to Lido?",
+      "interpretation": "Counts emitted events, not necessarily unique users or transactions.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "SELECT topic1 AS submitter, COUNT(*) AS submissions FROM logs WHERE address='0xae7ab96520de3a18e5e111b5eaab095312d7fe84' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'Submitted(address,uint256,address)' GROUP BY topic1 HAVING COUNT(*)>1 ORDER BY submissions DESC, submitter LIMIT 20",
+      "reference": "sqlite",
+      "verification_from_block": 26080000,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "lido_execution_rewards",
+      "contracts": [
+        "steth"
+      ],
+      "purpose": "How much execution-layer reward ETH does Lido report receiving?",
+      "interpretation": "Exact integer total in the contract event's base units; not USD or a state balance.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "SELECT SUM(data) AS total_units FROM logs WHERE address='0xae7ab96520de3a18e5e111b5eaab095312d7fe84' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'ELRewardsReceived(uint256)' AND data_len=32",
+      "reference": "exact_sum",
+      "verification_from_block": 26080000,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "lido_consensus_withdrawals",
+      "contracts": [
+        "steth"
+      ],
+      "purpose": "How much consensus-layer withdrawal ETH does Lido report receiving?",
+      "interpretation": "Exact integer total in the contract event's base units; not USD or a state balance.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "SELECT SUM(data) AS total_units FROM logs WHERE address='0xae7ab96520de3a18e5e111b5eaab095312d7fe84' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'WithdrawalsReceived(uint256)' AND data_len=32",
+      "reference": "exact_sum",
+      "verification_from_block": 26080000,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "lido_transferred_shares",
+      "contracts": [
+        "steth"
+      ],
+      "purpose": "How many stETH shares move through TransferShares events?",
+      "interpretation": "Shares are not rebasing stETH units. Gross transfer volume may include repeated movement of the same shares.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "SELECT SUM(data) AS total_units FROM logs WHERE address='0xae7ab96520de3a18e5e111b5eaab095312d7fe84' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'TransferShares(address,address,uint256)' AND data_len=32",
+      "reference": "exact_sum",
+      "verification_from_block": 26080000,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "lido_latest_rebase_totals",
+      "contracts": [
+        "steth"
+      ],
+      "purpose": "What share and pooled-ether totals does the most recent Lido rebase report?",
+      "interpretation": "ABI words remain exact hexadecimal integers. Rebase totals must not be replaced with Transfer-net estimates.",
+      "from_block": 25000000,
+      "to_block": 26090000,
+      "sql": "SELECT topic1 AS report_timestamp_hex, SUBSTR(data,195,64) AS post_shares_hex, SUBSTR(data,259,64) AS post_ether_hex, SUBSTR(data,323,64) AS fee_shares_hex, block_number FROM logs WHERE address='0xae7ab96520de3a18e5e111b5eaab095312d7fe84' AND block_number BETWEEN 25000000 AND 26090000 AND topic0=event'TokenRebased(uint256,uint256,uint256,uint256,uint256,uint256,uint256)' ORDER BY block_number DESC, log_index DESC LIMIT 1",
+      "reference": "sqlite",
+      "verification_from_block": 26089873,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "lido_rebase_cadence",
+      "contracts": [
+        "steth"
+      ],
+      "purpose": "How long elapses between consecutive Lido rebase event blocks?",
+      "interpretation": "Elapsed Ethereum block timestamps, not the exact oracle computation interval. First row has no preceding sample.",
+      "from_block": 25000000,
+      "to_block": 26090000,
+      "sql": "SELECT block_number, timestamp, timestamp-LAG(timestamp) OVER (ORDER BY block_number, log_index) AS seconds_since_previous FROM logs WHERE address='0xae7ab96520de3a18e5e111b5eaab095312d7fe84' AND block_number BETWEEN 25000000 AND 26090000 AND topic0=event'TokenRebased(uint256,uint256,uint256,uint256,uint256,uint256,uint256)' ORDER BY block_number, log_index",
+      "reference": "sqlite",
+      "verification_from_block": 26089873,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "lido_requests_without_observed_claim",
+      "contracts": [
+        "lido_queue"
+      ],
+      "purpose": "Which newly observed Lido withdrawal requests lack a claim in the same range?",
+      "interpretation": "Only this request cohort and range; a request may be claimed after the upper block.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "WITH r AS (SELECT topic1 AS id, topic3 AS owner FROM logs WHERE address='0x889edc2edab5f40e902b864ad4d7ade8e412f9b1' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'WithdrawalRequested(uint256,address,address,uint256,uint256)'), c AS (SELECT topic1 AS id FROM logs WHERE address='0x889edc2edab5f40e902b864ad4d7ade8e412f9b1' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'WithdrawalClaimed(uint256,address,address,uint256)') SELECT r.id, r.owner FROM r LEFT JOIN c ON r.id=c.id WHERE c.id IS NULL ORDER BY r.id LIMIT 100",
+      "reference": "sqlite",
+      "verification_from_block": 26080000,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "lido_request_to_claim_latency",
+      "contracts": [
+        "lido_queue"
+      ],
+      "purpose": "How long do requests take to be claimed when both lifecycle events are observed?",
+      "interpretation": "Exact request-ID join; excludes requests created before the range, unclaimed requests, and finalization-to-claim separation.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "WITH r AS (SELECT topic1 AS id, timestamp AS requested FROM logs WHERE address='0x889edc2edab5f40e902b864ad4d7ade8e412f9b1' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'WithdrawalRequested(uint256,address,address,uint256,uint256)'), c AS (SELECT topic1 AS id, timestamp AS claimed FROM logs WHERE address='0x889edc2edab5f40e902b864ad4d7ade8e412f9b1' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'WithdrawalClaimed(uint256,address,address,uint256)') SELECT r.id, claimed-requested AS seconds_to_claim FROM r JOIN c ON r.id=c.id ORDER BY seconds_to_claim DESC, r.id LIMIT 100",
+      "reference": "sqlite",
+      "verification_from_block": 26080000,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "lido_claim_nft_secondary_transfers",
+      "contracts": [
+        "lido_queue"
+      ],
+      "purpose": "How often are Lido withdrawal-claim NFTs transferred between nonzero owners?",
+      "interpretation": "Transfer of withdrawal rights, not a new staking request or ETH withdrawal.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "SELECT COUNT(*) AS ownership_changes, COUNT(DISTINCT topic3) AS requests FROM logs WHERE address='0x889edc2edab5f40e902b864ad4d7ade8e412f9b1' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'Transfer(address,address,uint256)' AND topic1<>address'0x0000000000000000000000000000000000000000' AND topic2<>address'0x0000000000000000000000000000000000000000'",
+      "reference": "sqlite",
+      "verification_from_block": 26080000,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "lido_claimed_eth",
+      "contracts": [
+        "lido_queue"
+      ],
+      "purpose": "How much ETH do completed Lido claim events report?",
+      "interpretation": "Exact integer total in the contract event's base units; not USD or a state balance.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "SELECT SUM(data) AS total_units FROM logs WHERE address='0x889edc2edab5f40e902b864ad4d7ade8e412f9b1' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'WithdrawalClaimed(uint256,address,address,uint256)' AND data_len=32",
+      "reference": "exact_sum",
+      "verification_from_block": 26080000,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "lido_finalization_ranges",
+      "contracts": [
+        "lido_queue"
+      ],
+      "purpose": "Which request-ID intervals are finalized together by Lido?",
+      "interpretation": "Protocol finalization interval is (from,to]; finalization makes requests claimable, not already claimed.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "SELECT topic1 AS from_id_hex, topic2 AS to_id_hex, SUBSTR(data,3,64) AS locked_eth_hex, block_number FROM logs WHERE address='0x889edc2edab5f40e902b864ad4d7ade8e412f9b1' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'WithdrawalsFinalized(uint256,uint256,uint256,uint256,uint256)' ORDER BY block_number, log_index LIMIT 100",
+      "reference": "sqlite",
+      "verification_from_block": 26080000,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "wsteth_minted_units",
+      "contracts": [
+        "wsteth"
+      ],
+      "purpose": "How many non-rebasing wstETH units are minted?",
+      "interpretation": "Wrapped token units, not the same number of ETH or stETH units.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "SELECT SUM(data) AS total_units FROM logs WHERE address='0x7f39c581f595b53c5cb19bd0b3f8da6c935e2ca0' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'Transfer(address,address,uint256)' AND data_len=32 AND topic1=address'0x0000000000000000000000000000000000000000'",
+      "reference": "exact_sum",
+      "verification_from_block": 26089873,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "wsteth_burned_units",
+      "contracts": [
+        "wsteth"
+      ],
+      "purpose": "How many wstETH units are burned during unwrapping?",
+      "interpretation": "Exact integer total in the contract event's base units; not USD or a state balance.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "SELECT SUM(data) AS total_units FROM logs WHERE address='0x7f39c581f595b53c5cb19bd0b3f8da6c935e2ca0' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'Transfer(address,address,uint256)' AND data_len=32 AND topic2=address'0x0000000000000000000000000000000000000000'",
+      "reference": "exact_sum",
+      "verification_from_block": 26089873,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "bayc_daily_ownership_changes",
+      "contracts": [
+        "bayc"
+      ],
+      "purpose": "How many BAYC ownership-transfer events occur per UTC day?",
+      "interpretation": "Ownership transfers include gifts and custody movements; these are not necessarily sales.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "SELECT CAST(timestamp/86400 AS BIGINT) AS utc_day, COUNT(*) AS transfers FROM logs WHERE address='0xbc4ca0eda7647a8ab7c2061c2e118a18a936f13d' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'Transfer(address,address,uint256)' AND data_len=0 AND topic3 IS NOT NULL GROUP BY utc_day ORDER BY utc_day",
+      "reference": "sqlite",
+      "verification_from_block": 26080000,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "bayc_latest_observed_owner",
+      "contracts": [
+        "bayc"
+      ],
+      "purpose": "Who receives each BAYC token in its last observed transfer?",
+      "interpretation": "Last owner for tokens active in this bounded range; not an enumeration of all current holders.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "WITH t AS (SELECT topic3 AS token_id, topic2 AS owner, ROW_NUMBER() OVER (PARTITION BY topic3 ORDER BY block_number DESC, log_index DESC) AS n FROM logs WHERE address='0xbc4ca0eda7647a8ab7c2061c2e118a18a936f13d' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'Transfer(address,address,uint256)') SELECT token_id, owner FROM t WHERE n=1 ORDER BY token_id LIMIT 100",
+      "reference": "sqlite",
+      "verification_from_block": 26080000,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "bayc_full_history_holder_counts",
+      "contracts": [
+        "bayc"
+      ],
+      "purpose": "How many BAYC tokens are assigned to each last recorded owner through the frozen block?",
+      "interpretation": "Whole-contract Transfer history; BAYC issuance is represented by mint Transfer events. Contract-specific semantics, not a generic ERC721 constructor assumption.",
+      "from_block": 0,
+      "to_block": 26090000,
+      "sql": "WITH t AS (SELECT topic3 AS token_id, topic2 AS owner, ROW_NUMBER() OVER (PARTITION BY topic3 ORDER BY block_number DESC, log_index DESC) AS n FROM logs WHERE address='0xbc4ca0eda7647a8ab7c2061c2e118a18a936f13d' AND block_number BETWEEN 0 AND 26090000 AND topic0=event'Transfer(address,address,uint256)') SELECT owner, COUNT(*) AS tokens FROM t WHERE n=1 AND owner<>address'0x0000000000000000000000000000000000000000' GROUP BY owner ORDER BY tokens DESC, owner LIMIT 20",
+      "reference": "sqlite",
+      "verification_from_block": 26089873,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "bayc_self_transfers",
+      "contracts": [
+        "bayc"
+      ],
+      "purpose": "How many BAYC Transfer events leave the owner unchanged?",
+      "interpretation": "Counts emitted events, not necessarily unique users or transactions.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "SELECT COUNT(*) AS self_transfers FROM logs WHERE address='0xbc4ca0eda7647a8ab7c2061c2e118a18a936f13d' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'Transfer(address,address,uint256)' AND topic1=topic2",
+      "reference": "sqlite",
+      "verification_from_block": 26080000,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "bayc_operator_approvals",
+      "contracts": [
+        "bayc"
+      ],
+      "purpose": "Which BAYC operators receive the most approval or revocation events?",
+      "interpretation": "Approval history; last event per owner/operator is needed to infer approval at the upper block.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "SELECT topic2 AS operator, data AS approved_word, COUNT(*) AS changes FROM logs WHERE address='0xbc4ca0eda7647a8ab7c2061c2e118a18a936f13d' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'ApprovalForAll(address,address,bool)' GROUP BY topic2, data ORDER BY changes DESC, operator, approved_word LIMIT 20",
+      "reference": "sqlite",
+      "verification_from_block": 26080000,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "bayc_repeatedly_moved_tokens",
+      "contracts": [
+        "bayc"
+      ],
+      "purpose": "Which BAYC tokens change hands more than once in the range?",
+      "interpretation": "Counts emitted events, not necessarily unique users or transactions.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "SELECT topic3 AS token_id, COUNT(*) AS transfers FROM logs WHERE address='0xbc4ca0eda7647a8ab7c2061c2e118a18a936f13d' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'Transfer(address,address,uint256)' GROUP BY topic3 HAVING COUNT(*)>1 ORDER BY transfers DESC, token_id LIMIT 20",
+      "reference": "sqlite",
+      "verification_from_block": 26080000,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "ens_registration_nft_mints",
+      "contracts": [
+        "ens_registrar"
+      ],
+      "purpose": "How many .eth registration NFTs are minted, including re-registrations?",
+      "interpretation": "Namehash-label token IDs are distinct from readable names; repeated registration of a label is possible.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "SELECT COUNT(*) AS mints, COUNT(DISTINCT topic3) AS labels FROM logs WHERE address='0x57f1887a8bf19b14fc0df6fd9b2acc9af147ea85' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'Transfer(address,address,uint256)' AND topic1=address'0x0000000000000000000000000000000000000000'",
+      "reference": "sqlite",
+      "verification_from_block": 26080000,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "ens_renewal_activity",
+      "contracts": [
+        "ens_controller"
+      ],
+      "purpose": "Which .eth labels are renewed most often through this registrar controller?",
+      "interpretation": "This controller only; ENS may have additional or successor controllers.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "SELECT topic1 AS label_hash, COUNT(*) AS renewals FROM logs WHERE address='0x253553366da8546fc250f225fe3d25d0c782303b' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'NameRenewed(string,bytes32,uint256,uint256)' GROUP BY topic1 ORDER BY renewals DESC, label_hash LIMIT 20",
+      "reference": "sqlite",
+      "verification_from_block": 26080000,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "ens_registrations_by_owner",
+      "contracts": [
+        "ens_current_controller"
+      ],
+      "purpose": "Which owners register the most .eth names through this controller?",
+      "interpretation": "Current Ethereum registrar controller; owner is topic2. Prior controllers and renewals are separate cases.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "SELECT topic2 AS owner, COUNT(*) AS registrations FROM logs WHERE address='0x59e16fccd424cc24e280be16e11bcd56fb0ce547' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'NameRegistered(string,bytes32,address,uint256,uint256,uint256,bytes32)' GROUP BY topic2 ORDER BY registrations DESC, owner LIMIT 20",
+      "reference": "sqlite",
+      "verification_from_block": 26080000,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "ens_wrapper_name_mints",
+      "contracts": [
+        "ens_wrapper"
+      ],
+      "purpose": "How many wrapped-name ERC1155 mint events occur?",
+      "interpretation": "ERC1155 sender is topic2, unlike ERC20/ERC721; this is wrapper issuance, not necessarily a fresh .eth registration.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "SELECT COUNT(*) AS mints FROM logs WHERE address='0xd4416b13d2b3a9abae7acd5d6c2bbdbe25686401' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'TransferSingle(address,address,address,uint256,uint256)' AND topic2=address'0x0000000000000000000000000000000000000000'",
+      "reference": "sqlite",
+      "verification_from_block": 26080000,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "ens_latest_fuse_changes",
+      "contracts": [
+        "ens_wrapper"
+      ],
+      "purpose": "What is the latest observed fuse-setting event for each wrapped name?",
+      "interpretation": "Latest event in the range; fuse meanings follow NameWrapper contract semantics.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "WITH f AS (SELECT topic1 AS node, data AS fuses_hex, ROW_NUMBER() OVER (PARTITION BY topic1 ORDER BY block_number DESC, log_index DESC) AS n FROM logs WHERE address='0xd4416b13d2b3a9abae7acd5d6c2bbdbe25686401' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'FusesSet(bytes32,uint32)') SELECT node, fuses_hex FROM f WHERE n=1 ORDER BY node LIMIT 100",
+      "reference": "sqlite",
+      "verification_from_block": 26080000,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "ens_extended_expiries",
+      "contracts": [
+        "ens_wrapper"
+      ],
+      "purpose": "Which wrapped names receive the longest expiry timestamps?",
+      "interpretation": "Exact ABI uint64 expiry in a 32-byte word; not human-readable dates or proof names remain controlled.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "SELECT topic1 AS node, data AS expiry_hex, block_number FROM logs WHERE address='0xd4416b13d2b3a9abae7acd5d6c2bbdbe25686401' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'ExpiryExtended(bytes32,uint64)' AND data_len=32 ORDER BY expiry_hex DESC, block_number, log_index LIMIT 20",
+      "reference": "sqlite",
+      "verification_from_block": 26080000,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "ens_wrapper_batch_operators",
+      "contracts": [
+        "ens_wrapper"
+      ],
+      "purpose": "Which operators move wrapped names in batches?",
+      "interpretation": "Counts emitted events, not necessarily unique users or transactions.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "SELECT topic1 AS operator, COUNT(*) AS batches FROM logs WHERE address='0xd4416b13d2b3a9abae7acd5d6c2bbdbe25686401' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'TransferBatch(address,address,address,uint256[],uint256[])' GROUP BY topic1 ORDER BY batches DESC, operator LIMIT 20",
+      "reference": "sqlite",
+      "verification_from_block": 26080000,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "erc1155_active_token_ids",
+      "contracts": [
+        "opensea_shared"
+      ],
+      "purpose": "Which OpenSea shared-storefront token IDs appear most often in single-item transfers?",
+      "interpretation": "TransferSingle subset only; ERC1155 balances must also include TransferBatch.",
+      "from_block": 14000000,
+      "to_block": 14010000,
+      "sql": "SELECT SUBSTR(data,3,64) AS token_id_hex, COUNT(*) AS transfers FROM logs WHERE address='0x495f947276749ce646f68ac8c248420045cb7b5e' AND block_number BETWEEN 14000000 AND 14010000 AND topic0=event'TransferSingle(address,address,address,uint256,uint256)' AND data_len=64 GROUP BY token_id_hex ORDER BY transfers DESC, token_id_hex LIMIT 20",
+      "reference": "sqlite",
+      "verification_from_block": 14000000,
+      "verification_to_block": 14010000
+    },
+    {
+      "id": "erc1155_creator_origin_ids",
+      "contracts": [
+        "opensea_shared"
+      ],
+      "purpose": "How many shared-storefront token IDs move from the creator encoded in their ID?",
+      "interpretation": "The deployed lazy-minting contract emits the encoded creator as origin. This detects creator-origin events, including lazy mints and ordinary creator transfers; logs do not distinguish those two cases. Zero-address events alone do not enumerate this contract's mints.",
+      "from_block": 14000000,
+      "to_block": 14010000,
+      "sql": "SELECT COUNT(DISTINCT SUBSTR(data,3,64)) AS token_ids FROM logs WHERE address='0x495f947276749ce646f68ac8c248420045cb7b5e' AND block_number BETWEEN 14000000 AND 14010000 AND topic0=event'TransferSingle(address,address,address,uint256,uint256)' AND topic2=('0x000000000000000000000000' || SUBSTR(data,3,40)) AND data_len=64",
+      "reference": "sqlite",
+      "verification_from_block": 14000000,
+      "verification_to_block": 14010000
+    },
+    {
+      "id": "erc1155_largest_single_transfers",
+      "contracts": [
+        "opensea_shared"
+      ],
+      "purpose": "What are the largest ERC1155 single-transfer quantities?",
+      "interpretation": "Quantity is the second ABI word; the first is a token ID, not an amount.",
+      "from_block": 14000000,
+      "to_block": 14010000,
+      "sql": "SELECT SUBSTR(data,3,64) AS token_id_hex, SUBSTR(data,67,64) AS quantity_hex, tx_hash, log_index FROM logs WHERE address='0x495f947276749ce646f68ac8c248420045cb7b5e' AND block_number BETWEEN 14000000 AND 14010000 AND topic0=event'TransferSingle(address,address,address,uint256,uint256)' AND data_len=64 ORDER BY quantity_hex DESC, tx_hash, log_index LIMIT 20",
+      "reference": "sqlite",
+      "verification_from_block": 14000000,
+      "verification_to_block": 14010000
+    },
+    {
+      "id": "erc1155_operator_breadth",
+      "contracts": [
+        "opensea_shared"
+      ],
+      "purpose": "Which ERC1155 operators act for the most distinct senders across single and batch transfers?",
+      "interpretation": "Counts emitted events, not necessarily unique users or transactions.",
+      "from_block": 14000000,
+      "to_block": 14010000,
+      "sql": "SELECT topic1 AS operator, COUNT(DISTINCT topic2) AS senders FROM logs WHERE address='0x495f947276749ce646f68ac8c248420045cb7b5e' AND block_number BETWEEN 14000000 AND 14010000 AND topic0 IN (event'TransferSingle(address,address,address,uint256,uint256)',event'TransferBatch(address,address,address,uint256[],uint256[])') GROUP BY topic1 ORDER BY senders DESC, operator LIMIT 20",
+      "reference": "sqlite",
+      "verification_from_block": 14000000,
+      "verification_to_block": 14010000
+    },
+    {
+      "id": "erc1155_batch_payload_histogram",
+      "contracts": [
+        "opensea_shared"
+      ],
+      "purpose": "How are shared-storefront batch transfers distributed by encoded payload size?",
+      "interpretation": "Payload-size histogram; quantities and IDs require ABI array decoding.",
+      "from_block": 14000000,
+      "to_block": 14010000,
+      "sql": "SELECT data_len, COUNT(*) AS batches FROM logs WHERE address='0x495f947276749ce646f68ac8c248420045cb7b5e' AND block_number BETWEEN 14000000 AND 14010000 AND topic0=event'TransferBatch(address,address,address,uint256[],uint256[])' GROUP BY data_len ORDER BY data_len",
+      "reference": "sqlite",
+      "verification_from_block": 14000000,
+      "verification_to_block": 14010000
+    },
+    {
+      "id": "erc1155_batch_item_count",
+      "contracts": [
+        "opensea_shared"
+      ],
+      "purpose": "How many item entries are carried by canonical ERC1155 batch-transfer encodings?",
+      "interpretation": "For canonical two equal-length uint256 arrays, bytes=128+64*N. The independent ABI reference must verify both offsets and both array lengths; entries are not summed token quantities.",
+      "from_block": 14000000,
+      "to_block": 14010000,
+      "sql": "SELECT SUM(CAST((data_len-128)/64 AS BIGINT)) AS item_entries FROM logs WHERE address='0x495f947276749ce646f68ac8c248420045cb7b5e' AND block_number BETWEEN 14000000 AND 14010000 AND topic0=event'TransferBatch(address,address,address,uint256[],uint256[])' AND data_len>=128 AND (data_len-128)%64=0 AND SUBSTR(data,3,64)='0000000000000000000000000000000000000000000000000000000000000040'",
+      "reference": "erc1155_batch_items",
+      "verification_from_block": 14000000,
+      "verification_to_block": 14010000
+    },
+    {
+      "id": "erc1155_metadata_updates",
+      "contracts": [
+        "opensea_shared"
+      ],
+      "purpose": "Which shared-storefront token IDs receive metadata URI updates?",
+      "interpretation": "URI bytes are emitted metadata references; no off-chain content is fetched or trusted.",
+      "from_block": 14000000,
+      "to_block": 14010000,
+      "sql": "SELECT topic1 AS token_id_hex, COUNT(*) AS updates FROM logs WHERE address='0x495f947276749ce646f68ac8c248420045cb7b5e' AND block_number BETWEEN 14000000 AND 14010000 AND topic0=event'URI(string,uint256)' GROUP BY topic1 ORDER BY updates DESC, token_id_hex LIMIT 20",
+      "reference": "sqlite",
+      "verification_from_block": 14000000,
+      "verification_to_block": 14010000
+    },
+    {
+      "id": "punks_recorded_sale_value",
+      "contracts": [
+        "punks"
+      ],
+      "purpose": "How much ETH-denominated value is reported by CryptoPunks sale events?",
+      "interpretation": "PunkBought value sums include zero-value sales and do not establish economic volume or native ETH account balances.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "SELECT SUM(data) AS total_units FROM logs WHERE address='0xb47e3cd837ddf8e4c57f05d70ab865de6e193bbb' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'PunkBought(uint256,uint256,address,address)' AND data_len=32",
+      "reference": "exact_sum",
+      "verification_from_block": 26080000,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "punks_largest_asks",
+      "contracts": [
+        "punks"
+      ],
+      "purpose": "What are the largest recorded CryptoPunks asking prices?",
+      "interpretation": "Historical offers may be canceled or filled; not a live order book.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "SELECT topic1 AS punk_id, data AS min_price_hex, topic2 AS restricted_buyer FROM logs WHERE address='0xb47e3cd837ddf8e4c57f05d70ab865de6e193bbb' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'PunkOffered(uint256,uint256,address)' AND data_len=32 ORDER BY min_price_hex DESC, block_number, log_index LIMIT 20",
+      "reference": "sqlite",
+      "verification_from_block": 26080000,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "punks_bid_deposit_minus_withdrawal",
+      "contracts": [
+        "punks"
+      ],
+      "purpose": "What is the net value of CryptoPunks bid-entry and bid-withdrawal events?",
+      "interpretation": "Bid event flow only; accepted bids and earlier escrow mean this is not the current escrow liability.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "SELECT SUM(CASE WHEN topic0=event'PunkBidEntered(uint256,uint256,address)' THEN data ELSE 0 END)-SUM(CASE WHEN topic0=event'PunkBidWithdrawn(uint256,uint256,address)' THEN data ELSE 0 END) AS net_units FROM logs WHERE address='0xb47e3cd837ddf8e4c57f05d70ab865de6e193bbb' AND block_number BETWEEN 26080000 AND 26090000 AND topic0 IN (event'PunkBidEntered(uint256,uint256,address)',event'PunkBidWithdrawn(uint256,uint256,address)') AND data_len=32",
+      "reference": "signed_sum",
+      "verification_from_block": 26080000,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "punks_direct_transfer_recipients",
+      "contracts": [
+        "punks"
+      ],
+      "purpose": "Which addresses receive the most direct CryptoPunks transfers?",
+      "interpretation": "PunkTransfer is a bespoke event; do not use an ERC721 topic3 token-ID assumption.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "SELECT topic2 AS recipient, COUNT(*) AS transfers FROM logs WHERE address='0xb47e3cd837ddf8e4c57f05d70ab865de6e193bbb' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'PunkTransfer(address,address,uint256)' GROUP BY topic2 ORDER BY transfers DESC, recipient LIMIT 20",
+      "reference": "sqlite",
+      "verification_from_block": 26080000,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "seaport_active_offerers",
+      "contracts": [
+        "seaport"
+      ],
+      "purpose": "Which Seaport offerers have the most fulfilled orders?",
+      "interpretation": "Orders can bundle multiple items and currencies; order count is not NFT count or sales volume.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "SELECT topic1 AS offerer, COUNT(*) AS fills FROM logs WHERE address='0x0000000000000068f116a894984e2db1123eb395' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'OrderFulfilled(bytes32,address,address,address,(uint8,address,uint256,uint256)[],(uint8,address,uint256,uint256,address)[])' GROUP BY topic1 ORDER BY fills DESC, offerer LIMIT 20",
+      "reference": "sqlite",
+      "verification_from_block": 26089873,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "seaport_multi_order_transactions",
+      "contracts": [
+        "seaport"
+      ],
+      "purpose": "Which transactions fulfill multiple Seaport orders?",
+      "interpretation": "Counts emitted events, not necessarily unique users or transactions.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "SELECT tx_hash, COUNT(*) AS fills FROM logs WHERE address='0x0000000000000068f116a894984e2db1123eb395' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'OrderFulfilled(bytes32,address,address,address,(uint8,address,uint256,uint256)[],(uint8,address,uint256,uint256,address)[])' GROUP BY tx_hash HAVING COUNT(*)>1 ORDER BY fills DESC, tx_hash LIMIT 20",
+      "reference": "sqlite",
+      "verification_from_block": 26089873,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "seaport_cancellations_by_zone",
+      "contracts": [
+        "seaport"
+      ],
+      "purpose": "Which Seaport zones see the most explicit order cancellations?",
+      "interpretation": "Counts emitted events, not necessarily unique users or transactions.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "SELECT topic2 AS zone, COUNT(*) AS cancellations FROM logs WHERE address='0x0000000000000068f116a894984e2db1123eb395' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'OrderCancelled(bytes32,address,address)' GROUP BY topic2 ORDER BY cancellations DESC, zone LIMIT 20",
+      "reference": "sqlite",
+      "verification_from_block": 26089873,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "seaport_counter_invalidations",
+      "contracts": [
+        "seaport"
+      ],
+      "purpose": "How many offerers invalidate their old Seaport order counters?",
+      "interpretation": "Counter changes can invalidate many signed orders; the event does not enumerate those off-chain orders.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "SELECT COUNT(*) AS counter_changes, COUNT(DISTINCT topic1) AS offerers FROM logs WHERE address='0x0000000000000068f116a894984e2db1123eb395' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'CounterIncremented(uint256,address)'",
+      "reference": "sqlite",
+      "verification_from_block": 26089873,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "uniswap_v2_new_pairs",
+      "contracts": [
+        "univ2_factory"
+      ],
+      "purpose": "Which token pairs are created by the Uniswap V2 factory?",
+      "interpretation": "Counts emitted events, not necessarily unique users or transactions.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "SELECT topic1 AS token0, topic2 AS token1, SUBSTR(data,3,64) AS pair_address_word, block_number FROM logs WHERE address='0x5c69bee701ef814a2b6a3edd4b1652cb9cc5aa6f' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'PairCreated(address,address,address,uint256)' ORDER BY block_number, log_index LIMIT 100",
+      "reference": "sqlite",
+      "verification_from_block": 26080000,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "uniswap_v3_new_pool_fee_tiers",
+      "contracts": [
+        "univ3_factory"
+      ],
+      "purpose": "Which fee tiers account for newly created Uniswap V3 pools?",
+      "interpretation": "Fee tier is an indexed uint24; the emitting factory is Ethereum mainnet only.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "SELECT topic3 AS fee_hex, COUNT(*) AS pools FROM logs WHERE address='0x1f98431c8ad98523631ae4a59f267346ea31f984' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'PoolCreated(address,address,uint24,int24,address)' GROUP BY topic3 ORDER BY pools DESC, fee_hex",
+      "reference": "sqlite",
+      "verification_from_block": 26080000,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "uniswap_v2_swap_directions",
+      "contracts": [
+        "univ2_usdc_weth"
+      ],
+      "purpose": "How many USDC/WETH V2 swaps input token0, token1, or both?",
+      "interpretation": "Classifies raw input words; does not assume every event is a simple one-sided spot swap.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "SELECT CASE WHEN SUBSTR(data,3,64)<>'0000000000000000000000000000000000000000000000000000000000000000' AND SUBSTR(data,67,64)<>'0000000000000000000000000000000000000000000000000000000000000000' THEN 'both' WHEN SUBSTR(data,3,64)<>'0000000000000000000000000000000000000000000000000000000000000000' THEN 'token0' ELSE 'token1_or_zero' END AS direction, COUNT(*) AS swaps FROM logs WHERE address='0xb4e16d0168e52d35cacd2c6185b44281ec28c9dc' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'Swap(address,uint256,uint256,uint256,uint256,address)' GROUP BY direction ORDER BY direction",
+      "reference": "sqlite",
+      "verification_from_block": 26080000,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "uniswap_v2_liquidity_action_mix",
+      "contracts": [
+        "univ2_usdc_weth"
+      ],
+      "purpose": "How does liquidity-addition activity compare with liquidity-removal activity?",
+      "interpretation": "Senders can be routers; counts do not measure liquidity amounts.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "SELECT topic0 AS action, COUNT(*) AS events, COUNT(DISTINCT topic1) AS senders FROM logs WHERE address='0xb4e16d0168e52d35cacd2c6185b44281ec28c9dc' AND block_number BETWEEN 26080000 AND 26090000 AND topic0 IN (event'Mint(address,uint256,uint256)',event'Burn(address,uint256,uint256,address)') GROUP BY topic0 ORDER BY topic0",
+      "reference": "sqlite",
+      "verification_from_block": 26080000,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "uniswap_v2_latest_reserves",
+      "contracts": [
+        "univ2_usdc_weth"
+      ],
+      "purpose": "What are the last reserves recorded by this V2 pool?",
+      "interpretation": "Exact uint112 reserve words from the last Sync event; token decimals differ.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "SELECT SUBSTR(data,3,64) AS reserve0_hex, SUBSTR(data,67,64) AS reserve1_hex, block_number FROM logs WHERE address='0xb4e16d0168e52d35cacd2c6185b44281ec28c9dc' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'Sync(uint112,uint112)' ORDER BY block_number DESC, log_index DESC LIMIT 1",
+      "reference": "sqlite",
+      "verification_from_block": 26080000,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "uniswap_v2_swap_interarrival",
+      "contracts": [
+        "univ2_usdc_weth"
+      ],
+      "purpose": "What are the largest time gaps between swaps in this pool?",
+      "interpretation": "Block timestamp gaps; multiple swaps in one block have zero seconds.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "WITH s AS (SELECT block_number, log_index, timestamp-LAG(timestamp) OVER (ORDER BY block_number, log_index) AS gap_seconds FROM logs WHERE address='0xb4e16d0168e52d35cacd2c6185b44281ec28c9dc' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'Swap(address,uint256,uint256,uint256,uint256,address)') SELECT block_number, log_index, gap_seconds FROM s WHERE gap_seconds IS NOT NULL ORDER BY gap_seconds DESC, block_number, log_index LIMIT 20",
+      "reference": "sqlite",
+      "verification_from_block": 26080000,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "uniswap_v3_swap_recipients",
+      "contracts": [
+        "univ3_usdc_weth"
+      ],
+      "purpose": "Which recipients receive the most V3 pool swap events?",
+      "interpretation": "Recipients often routers or contracts, not individual traders.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "SELECT topic2 AS recipient, COUNT(*) AS swaps FROM logs WHERE address='0x8ad599c3a0ff1de082011efddc58f1908eb6e6d8' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'Swap(address,address,int256,int256,uint160,uint128,int24)' GROUP BY topic2 ORDER BY swaps DESC, recipient LIMIT 20",
+      "reference": "sqlite",
+      "verification_from_block": 26080000,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "uniswap_v3_largest_token0_inputs",
+      "contracts": [
+        "univ3_usdc_weth"
+      ],
+      "purpose": "What are the largest positive token0 deltas recorded by this V3 pool?",
+      "interpretation": "V3 amounts are signed int256: a leading hexadecimal digit below 8 identifies nonnegative values. Negative words must not be ranked as huge unsigned amounts.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "SELECT SUBSTR(data,3,64) AS amount0_hex, tx_hash, log_index FROM logs WHERE address='0x8ad599c3a0ff1de082011efddc58f1908eb6e6d8' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'Swap(address,address,int256,int256,uint160,uint128,int24)' AND SUBSTR(data,3,1)<'8' ORDER BY amount0_hex DESC, tx_hash, log_index LIMIT 20",
+      "reference": "sqlite",
+      "verification_from_block": 26080000,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "uniswap_v3_liquidity_ranges",
+      "contracts": [
+        "univ3_usdc_weth"
+      ],
+      "purpose": "Which tick ranges receive the most V3 liquidity additions?",
+      "interpretation": "Signed int24 ticks are preserved as exact sign-extended ABI words; count is not liquidity value.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "SELECT topic2 AS lower_tick_twos_complement, topic3 AS upper_tick_twos_complement, COUNT(*) AS additions FROM logs WHERE address='0x8ad599c3a0ff1de082011efddc58f1908eb6e6d8' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'Mint(address,address,int24,int24,uint128,uint256,uint256)' GROUP BY topic2, topic3 ORDER BY additions DESC, lower_tick_twos_complement, upper_tick_twos_complement LIMIT 20",
+      "reference": "sqlite",
+      "verification_from_block": 26080000,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "uniswap_v3_position_churn",
+      "contracts": [
+        "univ3_usdc_weth"
+      ],
+      "purpose": "Which owner/tick-range positions both add and remove liquidity in this range?",
+      "interpretation": "Composite identity is owner plus tick interval; omitting tick bounds would join unrelated positions.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "WITH m AS (SELECT DISTINCT topic1 AS owner, topic2 AS lo, topic3 AS hi FROM logs WHERE address='0x8ad599c3a0ff1de082011efddc58f1908eb6e6d8' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'Mint(address,address,int24,int24,uint128,uint256,uint256)'), b AS (SELECT DISTINCT topic1 AS owner, topic2 AS lo, topic3 AS hi FROM logs WHERE address='0x8ad599c3a0ff1de082011efddc58f1908eb6e6d8' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'Burn(address,int24,int24,uint128,uint256,uint256)') SELECT m.owner, m.lo, m.hi FROM m JOIN b ON m.owner=b.owner AND m.lo=b.lo AND m.hi=b.hi ORDER BY m.owner, m.lo, m.hi LIMIT 100",
+      "reference": "sqlite",
+      "verification_from_block": 26080000,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "uniswap_v3_flash_recipients",
+      "contracts": [
+        "univ3_usdc_weth"
+      ],
+      "purpose": "Who receives V3 flash-loan events from this pool?",
+      "interpretation": "Counts emitted events, not necessarily unique users or transactions.",
+      "from_block": 25000000,
+      "to_block": 26090000,
+      "sql": "SELECT topic2 AS recipient, COUNT(*) AS loans FROM logs WHERE address='0x8ad599c3a0ff1de082011efddc58f1908eb6e6d8' AND block_number BETWEEN 25000000 AND 26090000 AND topic0=event'Flash(address,address,uint256,uint256,uint256,uint256)' GROUP BY topic2 ORDER BY loans DESC, recipient LIMIT 20",
+      "reference": "sqlite",
+      "verification_from_block": 26089873,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "uniswap_position_nft_mints",
+      "contracts": [
+        "univ3_positions"
+      ],
+      "purpose": "How many Uniswap V3 position NFTs are created and who receives them?",
+      "interpretation": "A minted position NFT is not necessarily funded with nonzero liquidity.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "SELECT topic2 AS owner, COUNT(*) AS positions FROM logs WHERE address='0xc36442b4a4522e871399cd717abdd847ab11fe88' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'Transfer(address,address,uint256)' AND topic1=address'0x0000000000000000000000000000000000000000' GROUP BY topic2 ORDER BY positions DESC, owner LIMIT 20",
+      "reference": "sqlite",
+      "verification_from_block": 26080000,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "uniswap_position_fee_collections",
+      "contracts": [
+        "univ3_positions"
+      ],
+      "purpose": "Which Uniswap V3 position NFTs have the most collection events?",
+      "interpretation": "Collect can include withdrawn principal as well as fees; do not label all collected amounts fee revenue.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "SELECT topic1 AS token_id, COUNT(*) AS collections FROM logs WHERE address='0xc36442b4a4522e871399cd717abdd847ab11fe88' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'Collect(uint256,address,uint256,uint256)' GROUP BY topic1 ORDER BY collections DESC, token_id LIMIT 20",
+      "reference": "sqlite",
+      "verification_from_block": 26080000,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "balancer_pool_swap_activity",
+      "contracts": [
+        "balancer_vault"
+      ],
+      "purpose": "Which Balancer pool IDs route the most vault swaps?",
+      "interpretation": "Counts emitted events, not necessarily unique users or transactions.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "SELECT topic1 AS pool_id, COUNT(*) AS swaps FROM logs WHERE address='0xba12222222228d8ba445958a75a0704d566bf2c8' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'Swap(bytes32,address,address,uint256,uint256)' GROUP BY topic1 ORDER BY swaps DESC, pool_id LIMIT 20",
+      "reference": "sqlite",
+      "verification_from_block": 26080000,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "balancer_asset_routes",
+      "contracts": [
+        "balancer_vault"
+      ],
+      "purpose": "Which ordered token-in/token-out routes are most active in Balancer?",
+      "interpretation": "Counts emitted events, not necessarily unique users or transactions.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "SELECT topic2 AS token_in, topic3 AS token_out, COUNT(*) AS swaps FROM logs WHERE address='0xba12222222228d8ba445958a75a0704d566bf2c8' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'Swap(bytes32,address,address,uint256,uint256)' GROUP BY topic2, topic3 ORDER BY swaps DESC, token_in, token_out LIMIT 20",
+      "reference": "sqlite",
+      "verification_from_block": 26080000,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "balancer_internal_balance_changes",
+      "contracts": [
+        "balancer_vault"
+      ],
+      "purpose": "What signed internal-balance deltas does the Balancer vault emit?",
+      "interpretation": "Signed int256 two's-complement words; internal vault accounting, not token wallet balances.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "SELECT topic1 AS account, topic2 AS token, data AS signed_delta_hex, block_number, log_index FROM logs WHERE address='0xba12222222228d8ba445958a75a0704d566bf2c8' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'InternalBalanceChanged(address,address,int256)' ORDER BY block_number DESC, log_index DESC LIMIT 100",
+      "reference": "sqlite",
+      "verification_from_block": 26080000,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "balancer_flash_assets",
+      "contracts": [
+        "balancer_vault"
+      ],
+      "purpose": "Which assets are borrowed in Balancer flash loans?",
+      "interpretation": "Counts emitted events, not necessarily unique users or transactions.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "SELECT topic2 AS token, COUNT(*) AS loans, COUNT(DISTINCT topic1) AS recipients FROM logs WHERE address='0xba12222222228d8ba445958a75a0704d566bf2c8' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'FlashLoan(address,address,uint256,uint256)' GROUP BY topic2 ORDER BY loans DESC, token LIMIT 20",
+      "reference": "sqlite",
+      "verification_from_block": 26080000,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "curve_3pool_swap_routes",
+      "contracts": [
+        "curve_3pool"
+      ],
+      "purpose": "Which coin-index routes are traded most often in Curve 3pool?",
+      "interpretation": "Coin indices are local to this pool, not Ethereum addresses; counts do not mix token amounts.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "SELECT SUBSTR(data,3,64) AS sold_id_hex, SUBSTR(data,131,64) AS bought_id_hex, COUNT(*) AS swaps FROM logs WHERE address='0xbebc44782c7db0a1a60cb6fe97d0b483032ff1c7' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'TokenExchange(address,int128,uint256,int128,uint256)' GROUP BY sold_id_hex, bought_id_hex ORDER BY swaps DESC, sold_id_hex, bought_id_hex",
+      "reference": "sqlite",
+      "verification_from_block": 26080000,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "curve_liquidity_exit_modes",
+      "contracts": [
+        "curve_3pool"
+      ],
+      "purpose": "How often are balanced, single-coin and imbalanced Curve liquidity exits used?",
+      "interpretation": "Counts emitted events, not necessarily unique users or transactions.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "SELECT topic0 AS operation, COUNT(*) AS events FROM logs WHERE address='0xbebc44782c7db0a1a60cb6fe97d0b483032ff1c7' AND block_number BETWEEN 26080000 AND 26090000 AND topic0 IN (event'AddLiquidity(address,uint256[3],uint256[3],uint256,uint256)',event'RemoveLiquidity(address,uint256[3],uint256[3],uint256)',event'RemoveLiquidityOne(address,uint256,uint256)',event'RemoveLiquidityImbalance(address,uint256[3],uint256[3],uint256,uint256)') GROUP BY topic0 ORDER BY topic0",
+      "reference": "sqlite",
+      "verification_from_block": 26080000,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "curve_amplification_changes",
+      "contracts": [
+        "curve_3pool"
+      ],
+      "purpose": "When does Curve 3pool change or stop ramping its amplification parameter?",
+      "interpretation": "Counts emitted events, not necessarily unique users or transactions.",
+      "from_block": 0,
+      "to_block": 26090000,
+      "sql": "SELECT block_number, log_index, topic0 AS operation, data FROM logs WHERE address='0xbebc44782c7db0a1a60cb6fe97d0b483032ff1c7' AND block_number BETWEEN 0 AND 26090000 AND topic0 IN (event'RampA(uint256,uint256,uint256,uint256)',event'StopRampA(uint256,uint256)') ORDER BY block_number DESC, log_index DESC LIMIT 20",
+      "reference": "sqlite",
+      "verification_from_block": 26089873,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "sdai_vault_action_mix",
+      "contracts": [
+        "sdai"
+      ],
+      "purpose": "How many savings-DAI deposits and withdrawals occur?",
+      "interpretation": "ERC4626 assets and shares have separate amounts; action counts do not imply current vault yield.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "SELECT topic0 AS action, COUNT(*) AS actions FROM logs WHERE address='0x83f20f44975d03b1b09e64809b757c47f942beea' AND block_number BETWEEN 26080000 AND 26090000 AND topic0 IN (event'Deposit(address,address,uint256,uint256)',event'Withdraw(address,address,address,uint256,uint256)') GROUP BY topic0 ORDER BY topic0",
+      "reference": "sqlite",
+      "verification_from_block": 26080000,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "sdai_largest_asset_deposits",
+      "contracts": [
+        "sdai"
+      ],
+      "purpose": "What are the largest savings-DAI deposits and how many shares were issued?",
+      "interpretation": "Exact assets and shares ABI words; their ratio may vary over time.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "SELECT SUBSTR(data,3,64) AS assets_hex, SUBSTR(data,67,64) AS shares_hex, topic2 AS owner, block_number, log_index FROM logs WHERE address='0x83f20f44975d03b1b09e64809b757c47f942beea' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'Deposit(address,address,uint256,uint256)' ORDER BY assets_hex DESC, block_number, log_index LIMIT 20",
+      "reference": "sqlite",
+      "verification_from_block": 26080000,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "susde_deposit_receivers",
+      "contracts": [
+        "susde"
+      ],
+      "purpose": "Which sUSDe vault owners receive deposits from the most distinct callers?",
+      "interpretation": "Counts emitted events, not necessarily unique users or transactions.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "SELECT topic2 AS owner, COUNT(DISTINCT topic1) AS callers FROM logs WHERE address='0x9d39a5de30e57443bff2a8307a4256c8797a3497' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'Deposit(address,address,uint256,uint256)' GROUP BY topic2 ORDER BY callers DESC, owner LIMIT 20",
+      "reference": "sqlite",
+      "verification_from_block": 26080000,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "susde_rewards_received",
+      "contracts": [
+        "susde"
+      ],
+      "purpose": "How much reward value does the sUSDe contract report receiving?",
+      "interpretation": "Reward event units are underlying USDe; not immediately claimable yield or a share price.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "SELECT SUM(data) AS total_units FROM logs WHERE address='0x9d39a5de30e57443bff2a8307a4256c8797a3497' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'RewardsReceived(uint256)' AND data_len=32",
+      "reference": "exact_sum",
+      "verification_from_block": 26080000,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "sdai_deposit_mint_reconciliation",
+      "contracts": [
+        "sdai"
+      ],
+      "purpose": "Do savings-DAI deposit transactions also contain matching owner share-mint events?",
+      "interpretation": "Existence check by transaction and owner; not an amount equality assertion and handles multiple events in one transaction.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "WITH d AS (SELECT tx_hash, topic2 AS owner FROM logs WHERE address='0x83f20f44975d03b1b09e64809b757c47f942beea' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'Deposit(address,address,uint256,uint256)'), m AS (SELECT tx_hash, topic2 AS owner FROM logs WHERE address='0x83f20f44975d03b1b09e64809b757c47f942beea' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'Transfer(address,address,uint256)' AND topic1=address'0x0000000000000000000000000000000000000000') SELECT COUNT(*) AS deposits_without_mint FROM d WHERE NOT EXISTS (SELECT 1 FROM m WHERE m.tx_hash=d.tx_hash AND m.owner=d.owner)",
+      "reference": "sqlite",
+      "verification_from_block": 26080000,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "aave_supply_by_reserve",
+      "contracts": [
+        "aave_v3"
+      ],
+      "purpose": "Which Aave V3 reserves receive the most supply actions?",
+      "interpretation": "Counts emitted events, not necessarily unique users or transactions.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "SELECT topic1 AS reserve, COUNT(*) AS supplies, COUNT(DISTINCT topic2) AS beneficiaries FROM logs WHERE address='0x87870bca3f3fd6335c3f4ce8392d69350b4fa4e2' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'Supply(address,address,address,uint256,uint16)' GROUP BY topic1 ORDER BY supplies DESC, reserve LIMIT 20",
+      "reference": "sqlite",
+      "verification_from_block": 26080000,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "aave_borrow_rate_modes",
+      "contracts": [
+        "aave_v3"
+      ],
+      "purpose": "How is Aave borrowing distributed by reserve and interest-rate mode?",
+      "interpretation": "Borrow event mode is data word 2 because user is a non-indexed field; not current debt balances.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "SELECT topic1 AS reserve, SUBSTR(data,131,64) AS rate_mode_hex, COUNT(*) AS borrows FROM logs WHERE address='0x87870bca3f3fd6335c3f4ce8392d69350b4fa4e2' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'Borrow(address,address,address,uint256,uint8,uint256,uint16)' GROUP BY topic1, rate_mode_hex ORDER BY borrows DESC, reserve, rate_mode_hex LIMIT 20",
+      "reference": "sqlite",
+      "verification_from_block": 26080000,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "aave_repay_with_atokens",
+      "contracts": [
+        "aave_v3"
+      ],
+      "purpose": "How many Aave repayments use aTokens rather than underlying tokens?",
+      "interpretation": "Counts emitted events, not necessarily unique users or transactions.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "SELECT SUBSTR(data,67,64) AS use_atokens_hex, COUNT(*) AS repayments FROM logs WHERE address='0x87870bca3f3fd6335c3f4ce8392d69350b4fa4e2' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'Repay(address,address,address,uint256,bool)' GROUP BY use_atokens_hex ORDER BY use_atokens_hex",
+      "reference": "sqlite",
+      "verification_from_block": 26080000,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "aave_liquidation_asset_pairs",
+      "contracts": [
+        "aave_v3"
+      ],
+      "purpose": "Which collateral/debt pairs are liquidated most often on Aave?",
+      "interpretation": "Counts emitted events, not necessarily unique users or transactions.",
+      "from_block": 25000000,
+      "to_block": 26090000,
+      "sql": "SELECT topic1 AS collateral, topic2 AS debt, COUNT(*) AS liquidations, COUNT(DISTINCT topic3) AS borrowers FROM logs WHERE address='0x87870bca3f3fd6335c3f4ce8392d69350b4fa4e2' AND block_number BETWEEN 25000000 AND 26090000 AND topic0=event'LiquidationCall(address,address,address,uint256,uint256,address,bool)' GROUP BY topic1, topic2 ORDER BY liquidations DESC, collateral, debt LIMIT 20",
+      "reference": "sqlite",
+      "verification_from_block": 26089873,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "aave_flash_loan_premiums",
+      "contracts": [
+        "aave_v3"
+      ],
+      "purpose": "What are the three largest Aave flash-loan premiums for each asset?",
+      "interpretation": "Exact premium word by asset; different token units must not be summed or ranked against each other.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "WITH p AS (SELECT topic2 AS asset, SUBSTR(data,195,64) AS premium_hex, tx_hash, log_index, ROW_NUMBER() OVER (PARTITION BY topic2 ORDER BY SUBSTR(data,195,64) DESC, tx_hash, log_index) AS rank FROM logs WHERE address='0x87870bca3f3fd6335c3f4ce8392d69350b4fa4e2' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'FlashLoan(address,address,address,uint256,uint8,uint256,uint16)') SELECT asset, premium_hex, tx_hash FROM p WHERE rank<=3 ORDER BY asset, rank",
+      "reference": "sqlite",
+      "verification_from_block": 26080000,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "aave_collateral_toggle_activity",
+      "contracts": [
+        "aave_v3"
+      ],
+      "purpose": "Which reserves have collateral-use settings toggled most often?",
+      "interpretation": "Counts emitted events, not necessarily unique users or transactions.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "SELECT topic1 AS reserve, topic0 AS action, COUNT(*) AS changes FROM logs WHERE address='0x87870bca3f3fd6335c3f4ce8392d69350b4fa4e2' AND block_number BETWEEN 26080000 AND 26090000 AND topic0 IN (event'ReserveUsedAsCollateralEnabled(address,address)',event'ReserveUsedAsCollateralDisabled(address,address)') GROUP BY topic1, topic0 ORDER BY changes DESC, reserve, action LIMIT 20",
+      "reference": "sqlite",
+      "verification_from_block": 26080000,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "compound_v2_mint_redeem_participants",
+      "contracts": [
+        "compound_cusdc"
+      ],
+      "purpose": "Who actively supplies or redeems the legacy Compound USDC market?",
+      "interpretation": "The account is non-indexed in these Compound V2 events. Historical active-market window is intentional.",
+      "from_block": 14000000,
+      "to_block": 14010000,
+      "sql": "SELECT SUBSTR(data,3,64) AS account_word, topic0 AS action, COUNT(*) AS actions FROM logs WHERE address='0x39aa39c021dfbae8fac545936693ac917d5e7563' AND block_number BETWEEN 14000000 AND 14010000 AND topic0 IN (event'Mint(address,uint256,uint256)',event'Redeem(address,uint256,uint256)') GROUP BY account_word, topic0 ORDER BY actions DESC, account_word, action LIMIT 20",
+      "reference": "sqlite",
+      "verification_from_block": 14000000,
+      "verification_to_block": 14010000
+    },
+    {
+      "id": "compound_v2_borrow_repay_cohort",
+      "contracts": [
+        "compound_cusdc"
+      ],
+      "purpose": "Which borrowers both borrow and receive repayments in the active-market window?",
+      "interpretation": "RepayBorrow payer and borrower are different fields; third-party repayments count for the borrower.",
+      "from_block": 14000000,
+      "to_block": 14010000,
+      "sql": "WITH b AS (SELECT DISTINCT SUBSTR(data,3,64) AS borrower FROM logs WHERE address='0x39aa39c021dfbae8fac545936693ac917d5e7563' AND block_number BETWEEN 14000000 AND 14010000 AND topic0=event'Borrow(address,uint256,uint256,uint256)'), r AS (SELECT DISTINCT SUBSTR(data,67,64) AS borrower FROM logs WHERE address='0x39aa39c021dfbae8fac545936693ac917d5e7563' AND block_number BETWEEN 14000000 AND 14010000 AND topic0=event'RepayBorrow(address,address,uint256,uint256,uint256)') SELECT b.borrower FROM b JOIN r ON b.borrower=r.borrower ORDER BY b.borrower LIMIT 100",
+      "reference": "sqlite",
+      "verification_from_block": 14000000,
+      "verification_to_block": 14010000
+    },
+    {
+      "id": "compound_v2_latest_accrual",
+      "contracts": [
+        "compound_cusdc"
+      ],
+      "purpose": "What borrow index and total debt did the last Compound V2 accrual event report?",
+      "interpretation": "Event-reported snapshot at accrual, not continuously accrued present state.",
+      "from_block": 14000000,
+      "to_block": 14010000,
+      "sql": "SELECT SUBSTR(data,67,64) AS borrow_index_hex, SUBSTR(data,131,64) AS total_borrows_hex, block_number FROM logs WHERE address='0x39aa39c021dfbae8fac545936693ac917d5e7563' AND block_number BETWEEN 14000000 AND 14010000 AND topic0=event'AccrueInterest(uint256,uint256,uint256)' ORDER BY block_number DESC, log_index DESC LIMIT 1",
+      "reference": "sqlite",
+      "verification_from_block": 14000000,
+      "verification_to_block": 14010000
+    },
+    {
+      "id": "compound_v3_base_cash_flow",
+      "contracts": [
+        "compound_comet"
+      ],
+      "purpose": "What is Compound V3 USDC supply minus withdrawal event flow?",
+      "interpretation": "Base-token cash flow; supply may repay debt and withdraw may create debt, so this is not a deposit-balance change.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "SELECT SUM(CASE WHEN topic0=event'Supply(address,address,uint256)' THEN data ELSE 0 END)-SUM(CASE WHEN topic0=event'Withdraw(address,address,uint256)' THEN data ELSE 0 END) AS net_units FROM logs WHERE address='0xc3d688b66703497daa19211eedff47f25384cdc3' AND block_number BETWEEN 26080000 AND 26090000 AND topic0 IN (event'Supply(address,address,uint256)',event'Withdraw(address,address,uint256)') AND data_len=32",
+      "reference": "signed_sum",
+      "verification_from_block": 26080000,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "compound_v3_collateral_supplied",
+      "contracts": [
+        "compound_comet"
+      ],
+      "purpose": "How much collateral is supplied to Compound V3, separately by asset?",
+      "interpretation": "Exact per-asset native units; sorting raw units is not an economic value ranking.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "SELECT topic3 AS asset, SUM(data) AS total_units FROM logs WHERE address='0xc3d688b66703497daa19211eedff47f25384cdc3' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'SupplyCollateral(address,address,address,uint256)' AND data_len=32 GROUP BY topic3 ORDER BY total_units DESC, asset LIMIT 20",
+      "reference": "exact_group_sum",
+      "verification_from_block": 26080000,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "compound_v3_absorbed_borrowers",
+      "contracts": [
+        "compound_comet"
+      ],
+      "purpose": "Which borrowers have debt absorbed by Compound V3?",
+      "interpretation": "Counts emitted events, not necessarily unique users or transactions.",
+      "from_block": 25000000,
+      "to_block": 26090000,
+      "sql": "SELECT topic2 AS borrower, COUNT(*) AS absorptions FROM logs WHERE address='0xc3d688b66703497daa19211eedff47f25384cdc3' AND block_number BETWEEN 25000000 AND 26090000 AND topic0=event'AbsorbDebt(address,address,uint256,uint256)' GROUP BY topic2 ORDER BY absorptions DESC, borrower LIMIT 20",
+      "reference": "sqlite",
+      "verification_from_block": 26089873,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "compound_v3_collateral_buyers",
+      "contracts": [
+        "compound_comet"
+      ],
+      "purpose": "Who buys seized collateral from Compound V3, and which assets?",
+      "interpretation": "Counts emitted events, not necessarily unique users or transactions.",
+      "from_block": 25000000,
+      "to_block": 26090000,
+      "sql": "SELECT topic1 AS buyer, topic2 AS asset, COUNT(*) AS purchases FROM logs WHERE address='0xc3d688b66703497daa19211eedff47f25384cdc3' AND block_number BETWEEN 25000000 AND 26090000 AND topic0=event'BuyCollateral(address,address,uint256,uint256)' GROUP BY topic1, topic2 ORDER BY purchases DESC, buyer, asset LIMIT 20",
+      "reference": "sqlite",
+      "verification_from_block": 26089873,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "compound_governance_vote_choices",
+      "contracts": [
+        "compound_governor"
+      ],
+      "purpose": "How many Compound governance vote events choose each option for each proposal?",
+      "interpretation": "Counts vote events, not token voting weight; support encoding comes from Governor Bravo.",
+      "from_block": 20000000,
+      "to_block": 26090000,
+      "sql": "SELECT SUBSTR(data,3,64) AS proposal_hex, SUBSTR(data,67,64) AS support_hex, COUNT(*) AS voters FROM logs WHERE address='0xc0da02939e1441f497fd74f78ce7decb17b66529' AND block_number BETWEEN 20000000 AND 26090000 AND topic0=event'VoteCast(address,uint256,uint8,uint256,string)' GROUP BY proposal_hex, support_hex ORDER BY proposal_hex, support_hex",
+      "reference": "sqlite",
+      "verification_from_block": 20000000,
+      "verification_to_block": 20100000
+    },
+    {
+      "id": "compound_governance_repeat_voters",
+      "contracts": [
+        "compound_governor"
+      ],
+      "purpose": "Which voters participate in the largest number of Compound proposals?",
+      "interpretation": "Counts emitted events, not necessarily unique users or transactions.",
+      "from_block": 20000000,
+      "to_block": 26090000,
+      "sql": "SELECT topic1 AS voter, COUNT(DISTINCT SUBSTR(data,3,64)) AS proposals FROM logs WHERE address='0xc0da02939e1441f497fd74f78ce7decb17b66529' AND block_number BETWEEN 20000000 AND 26090000 AND topic0=event'VoteCast(address,uint256,uint8,uint256,string)' GROUP BY topic1 ORDER BY proposals DESC, voter LIMIT 20",
+      "reference": "sqlite",
+      "verification_from_block": 20000000,
+      "verification_to_block": 20100000
+    },
+    {
+      "id": "compound_queued_without_execution",
+      "contracts": [
+        "compound_governor"
+      ],
+      "purpose": "Which queued Compound proposals have no execution event in the observed range?",
+      "interpretation": "Includes canceled or still-pending proposals; not a claim that the queue is executable.",
+      "from_block": 20000000,
+      "to_block": 26090000,
+      "sql": "WITH q AS (SELECT SUBSTR(data,3,64) AS id FROM logs WHERE address='0xc0da02939e1441f497fd74f78ce7decb17b66529' AND block_number BETWEEN 20000000 AND 26090000 AND topic0=event'ProposalQueued(uint256,uint256)'), e AS (SELECT SUBSTR(data,3,64) AS id FROM logs WHERE address='0xc0da02939e1441f497fd74f78ce7decb17b66529' AND block_number BETWEEN 20000000 AND 26090000 AND topic0=event'ProposalExecuted(uint256)') SELECT q.id FROM q LEFT JOIN e ON q.id=e.id WHERE e.id IS NULL ORDER BY q.id",
+      "reference": "sqlite",
+      "verification_from_block": 20000000,
+      "verification_to_block": 20100000
+    },
+    {
+      "id": "compound_queue_execution_latency",
+      "contracts": [
+        "compound_governor"
+      ],
+      "purpose": "How long elapses between queueing and execution of Compound proposals?",
+      "interpretation": "Only proposals with both events in range; elapsed block timestamps include timelock and executor delay.",
+      "from_block": 20000000,
+      "to_block": 26090000,
+      "sql": "WITH q AS (SELECT SUBSTR(data,3,64) AS id, timestamp AS queued FROM logs WHERE address='0xc0da02939e1441f497fd74f78ce7decb17b66529' AND block_number BETWEEN 20000000 AND 26090000 AND topic0=event'ProposalQueued(uint256,uint256)'), e AS (SELECT SUBSTR(data,3,64) AS id, timestamp AS executed FROM logs WHERE address='0xc0da02939e1441f497fd74f78ce7decb17b66529' AND block_number BETWEEN 20000000 AND 26090000 AND topic0=event'ProposalExecuted(uint256)') SELECT q.id, executed-queued AS seconds_in_queue FROM q JOIN e ON q.id=e.id ORDER BY seconds_in_queue DESC, q.id",
+      "reference": "sqlite",
+      "verification_from_block": 20000000,
+      "verification_to_block": 20100000
+    },
+    {
+      "id": "arbitrum_l1_inbox_messages",
+      "contracts": [
+        "arbitrum_inbox"
+      ],
+      "purpose": "How many Arbitrum inbox messages are emitted on Ethereum per UTC hour?",
+      "interpretation": "Ethereum L1 inbox ingress only; no assertion about L2 execution, finality or balances.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "SELECT CAST(timestamp/3600 AS BIGINT) AS hour, COUNT(*) AS messages FROM logs WHERE address='0x4dbd4fc535ac27206064b68ffcf827b0a60bab3f' AND block_number BETWEEN 26080000 AND 26090000 AND topic0 IN (event'InboxMessageDelivered(uint256,bytes)',event'InboxMessageDeliveredFromOrigin(uint256)') GROUP BY hour ORDER BY hour",
+      "reference": "sqlite",
+      "verification_from_block": 26080000,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "arbitrum_l1_message_payload_sizes",
+      "contracts": [
+        "arbitrum_inbox"
+      ],
+      "purpose": "What encoded payload sizes are used by Ethereum-to-Arbitrum inbox messages?",
+      "interpretation": "ABI-encoded event bytes, including offset/length/padding; not exact application payload bytes or calldata gas.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "SELECT data_len, COUNT(*) AS messages FROM logs WHERE address='0x4dbd4fc535ac27206064b68ffcf827b0a60bab3f' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'InboxMessageDelivered(uint256,bytes)' GROUP BY data_len ORDER BY data_len",
+      "reference": "sqlite",
+      "verification_from_block": 26080000,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "arbitrum_l1_delivery_variants",
+      "contracts": [
+        "arbitrum_inbox"
+      ],
+      "purpose": "How often are inbox messages delivered with event payloads versus from-origin delivery?",
+      "interpretation": "From-origin events omit payload bytes; logs alone cannot reconstruct those transaction-input messages.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "SELECT topic0 AS delivery_variant, COUNT(*) AS messages FROM logs WHERE address='0x4dbd4fc535ac27206064b68ffcf827b0a60bab3f' AND block_number BETWEEN 26080000 AND 26090000 AND topic0 IN (event'InboxMessageDelivered(uint256,bytes)',event'InboxMessageDeliveredFromOrigin(uint256)') GROUP BY topic0 ORDER BY topic0",
+      "reference": "sqlite",
+      "verification_from_block": 26080000,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "weth_wrap_and_uniswap_swap_transactions",
+      "contracts": [
+        "weth",
+        "univ3_usdc_weth"
+      ],
+      "purpose": "Which transactions both wrap ETH and swap in the selected Uniswap V3 pool?",
+      "interpretation": "Co-occurrence in one transaction does not prove those exact wrapped funds supplied the swap.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "WITH w AS (SELECT DISTINCT tx_hash FROM logs WHERE address='0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'Deposit(address,uint256)'), s AS (SELECT DISTINCT tx_hash FROM logs WHERE address='0x8ad599c3a0ff1de082011efddc58f1908eb6e6d8' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'Swap(address,address,int256,int256,uint160,uint128,int24)') SELECT w.tx_hash FROM w JOIN s ON w.tx_hash=s.tx_hash ORDER BY w.tx_hash LIMIT 100",
+      "reference": "sqlite",
+      "verification_from_block": 26089873,
+      "verification_to_block": 26090000
+    },
+    {
+      "id": "stablecoin_active_addresses_union",
+      "contracts": [
+        "usdc",
+        "dai"
+      ],
+      "purpose": "How many distinct addresses send either USDC or DAI during the range?",
+      "interpretation": "UNION removes overlap; includes contract and zero addresses, not a unique-human metric.",
+      "from_block": 26080000,
+      "to_block": 26090000,
+      "sql": "SELECT COUNT(*) AS senders FROM (SELECT topic1 FROM logs WHERE address='0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'Transfer(address,address,uint256)' UNION SELECT topic1 FROM logs WHERE address='0x6b175474e89094c44da98b954eedeac495271d0f' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'Transfer(address,address,uint256)') AS u",
+      "reference": "sqlite",
+      "verification_from_block": 26089873,
+      "verification_to_block": 26090000
+    }
+  ]
+}

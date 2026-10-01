@@ -19,6 +19,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Verify vendored crates
         run: python3 tools/verify_datafusion_vendor.py
+      - name: Validate mainnet query catalog
+        run: python3 tools/live_query_benchmark.py benchmarks/ethereum-mainnet.json --check-catalog
       - uses: dtolnay/rust-toolchain@7c8d7d138f5c09cef361f8214cf96882cd029cdb
         with:
           toolchain: nightly-2026-08-24
