@@ -15,7 +15,9 @@
     "https://docs.lido.fi/contracts/withdrawal-queue-erc721/",
     "https://docs.ens.domains/learn/deployments/",
     "https://etherscan.io/address/vitalik.eth",
-    "https://dune.com/lido/lido-morning-coffee-dashboard"
+    "https://dune.com/lido/lido-morning-coffee-dashboard",
+    "https://github.com/compound-finance/compound-protocol/blob/master/contracts/Governance/Comp.sol",
+    "https://github.com/Uniswap/v3-core/blob/main/contracts/UniswapV3Pool.sol"
   ],
   "contracts": {
     "usdc": {
@@ -3037,8 +3039,8 @@
       "contracts": [
         "comp"
       ],
-      "purpose": "Which COMP holders redelegate repeatedly in the observation range?",
-      "interpretation": "Counts emitted events, not necessarily unique users or transactions.",
+      "purpose": "Which COMP delegator addresses emit repeated delegation changes in the observation range?",
+      "interpretation": "Counts DelegateChanged events per delegator, including repeated calls; it does not prove a positive COMP balance or a change to a different delegate.",
       "from_block": 25000000,
       "to_block": 26090000,
       "sql": "SELECT topic1 AS delegator, COUNT(*) AS changes FROM logs WHERE address='0xc00e94cb662c3520282e6f5717214004a7f26888' AND block_number BETWEEN 25000000 AND 26090000 AND topic0=event'DelegateChanged(address,address,address)' GROUP BY topic1 HAVING COUNT(*)>1 ORDER BY changes DESC, delegator LIMIT 20",
@@ -3183,7 +3185,7 @@
         "weth"
       ],
       "purpose": "How many distinct addresses wrap ETH into WETH9?",
-      "interpretation": "Counts emitted events, not necessarily unique users or transactions.",
+      "interpretation": "Counts distinct Deposit recipient addresses, which may be contracts or shared accounts; addresses are not unique people.",
       "from_block": 26080000,
       "to_block": 26090000,
       "sql": "SELECT COUNT(DISTINCT topic1) AS depositors FROM logs WHERE address='0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'Deposit(address,uint256)'",
@@ -3239,7 +3241,7 @@
         "steth"
       ],
       "purpose": "How many direct Lido staking submissions and distinct submitters are recorded?",
-      "interpretation": "Counts emitted events, not necessarily unique users or transactions.",
+      "interpretation": "Counts Submitted events and distinct sender addresses separately; one transaction or person can generate several submissions.",
       "from_block": 26080000,
       "to_block": 26090000,
       "sql": "SELECT COUNT(*) AS submissions, COUNT(DISTINCT topic1) AS submitters FROM logs WHERE address='0xae7ab96520de3a18e5e111b5eaab095312d7fe84' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'Submitted(address,uint256,address)'",
@@ -3504,8 +3506,8 @@
       "contracts": [
         "bayc"
       ],
-      "purpose": "Which BAYC tokens change hands more than once in the range?",
-      "interpretation": "Counts emitted events, not necessarily unique users or transactions.",
+      "purpose": "Which BAYC tokens emit more than one Transfer event in the range?",
+      "interpretation": "Counts Transfer events per token, including mint and self-transfer events; repeated events do not necessarily mean distinct owners or sales.",
       "from_block": 26080000,
       "to_block": 26090000,
       "sql": "SELECT topic3 AS token_id, COUNT(*) AS transfers FROM logs WHERE address='0xbc4ca0eda7647a8ab7c2061c2e118a18a936f13d' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'Transfer(address,address,uint256)' GROUP BY topic3 HAVING COUNT(*)>1 ORDER BY transfers DESC, token_id LIMIT 20",
@@ -3603,7 +3605,7 @@
         "ens_wrapper"
       ],
       "purpose": "Which operators move wrapped names in batches?",
-      "interpretation": "Counts emitted events, not necessarily unique users or transactions.",
+      "interpretation": "Counts TransferBatch events per operator, not names, token quantities, unique transactions or people.",
       "from_block": 26080000,
       "to_block": 26090000,
       "sql": "SELECT topic1 AS operator, COUNT(*) AS batches FROM logs WHERE address='0xd4416b13d2b3a9abae7acd5d6c2bbdbe25686401' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'TransferBatch(address,address,address,uint256[],uint256[])' GROUP BY topic1 ORDER BY batches DESC, operator LIMIT 20",
@@ -3659,7 +3661,7 @@
         "opensea_shared"
       ],
       "purpose": "Which ERC1155 operators act for the most distinct senders across single and batch transfers?",
-      "interpretation": "Counts emitted events, not necessarily unique users or transactions.",
+      "interpretation": "Counts distinct source addresses per operator across both transfer event types; one batch does not count once per item, and an address is not necessarily a person.",
       "from_block": 14000000,
       "to_block": 14010000,
       "sql": "SELECT topic1 AS operator, COUNT(DISTINCT topic2) AS senders FROM logs WHERE address='0x495f947276749ce646f68ac8c248420045cb7b5e' AND block_number BETWEEN 14000000 AND 14010000 AND topic0 IN (event'TransferSingle(address,address,address,uint256,uint256)',event'TransferBatch(address,address,address,uint256[],uint256[])') GROUP BY topic1 ORDER BY senders DESC, operator LIMIT 20",
@@ -3827,7 +3829,7 @@
         "univ2_factory"
       ],
       "purpose": "Which token pairs are created by the Uniswap V2 factory?",
-      "interpretation": "Counts emitted events, not necessarily unique users or transactions.",
+      "interpretation": "Lists PairCreated events and exact ABI address words; pool creation does not establish liquidity, trading activity or token legitimacy.",
       "from_block": 26080000,
       "to_block": 26090000,
       "sql": "SELECT topic1 AS token0, topic2 AS token1, SUBSTR(data,3,64) AS pair_address_word, block_number FROM logs WHERE address='0x5c69bee701ef814a2b6a3edd4b1652cb9cc5aa6f' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'PairCreated(address,address,address,uint256)' ORDER BY block_number, log_index LIMIT 100",
@@ -3924,7 +3926,7 @@
       "contracts": [
         "univ3_usdc_weth"
       ],
-      "purpose": "What are the largest positive token0 deltas recorded by this V3 pool?",
+      "purpose": "What are the largest nonnegative token0 deltas recorded by this V3 pool?",
       "interpretation": "V3 amounts are signed int256: a leading hexadecimal digit below 8 identifies nonnegative values. Negative words must not be ranked as huge unsigned amounts.",
       "from_block": 26080000,
       "to_block": 26090000,
@@ -3967,7 +3969,7 @@
         "univ3_usdc_weth"
       ],
       "purpose": "Who receives V3 flash-loan events from this pool?",
-      "interpretation": "Counts emitted events, not necessarily unique users or transactions.",
+      "interpretation": "Counts Flash events per recipient address, not borrowed amounts or unique people; zero-amount flash calls can also emit events.",
       "from_block": 25000000,
       "to_block": 26090000,
       "sql": "SELECT topic2 AS recipient, COUNT(*) AS loans FROM logs WHERE address='0x8ad599c3a0ff1de082011efddc58f1908eb6e6d8' AND block_number BETWEEN 25000000 AND 26090000 AND topic0=event'Flash(address,address,uint256,uint256,uint256,uint256)' GROUP BY topic2 ORDER BY loans DESC, recipient LIMIT 20",
@@ -4051,7 +4053,7 @@
         "balancer_vault"
       ],
       "purpose": "Which assets are borrowed in Balancer flash loans?",
-      "interpretation": "Counts emitted events, not necessarily unique users or transactions.",
+      "interpretation": "Counts FlashLoan events and distinct recipient addresses separately for each asset; multi-asset loans may emit several events in one transaction.",
       "from_block": 26080000,
       "to_block": 26090000,
       "sql": "SELECT topic2 AS token, COUNT(*) AS loans, COUNT(DISTINCT topic1) AS recipients FROM logs WHERE address='0xba12222222228d8ba445958a75a0704d566bf2c8' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'FlashLoan(address,address,uint256,uint256)' GROUP BY topic2 ORDER BY loans DESC, token LIMIT 20",
@@ -4078,8 +4080,8 @@
       "contracts": [
         "curve_3pool"
       ],
-      "purpose": "How often are balanced, single-coin and imbalanced Curve liquidity exits used?",
-      "interpretation": "Counts emitted events, not necessarily unique users or transactions.",
+      "purpose": "How often does Curve add liquidity or use each withdrawal mode?",
+      "interpretation": "Groups AddLiquidity and all three removal-event signatures. Counts actions, not LP-token amounts, unique transactions or users.",
       "from_block": 26080000,
       "to_block": 26090000,
       "sql": "SELECT topic0 AS operation, COUNT(*) AS events FROM logs WHERE address='0xbebc44782c7db0a1a60cb6fe97d0b483032ff1c7' AND block_number BETWEEN 26080000 AND 26090000 AND topic0 IN (event'AddLiquidity(address,uint256[3],uint256[3],uint256,uint256)',event'RemoveLiquidity(address,uint256[3],uint256[3],uint256)',event'RemoveLiquidityOne(address,uint256,uint256)',event'RemoveLiquidityImbalance(address,uint256[3],uint256[3],uint256,uint256)') GROUP BY topic0 ORDER BY topic0",
@@ -4093,7 +4095,7 @@
         "curve_3pool"
       ],
       "purpose": "When does Curve 3pool change or stop ramping its amplification parameter?",
-      "interpretation": "Counts emitted events, not necessarily unique users or transactions.",
+      "interpretation": "Lists the latest emitted RampA/StopRampA records and their exact ABI payloads; a ramp announcement does not itself describe the parameter at every later block.",
       "from_block": 0,
       "to_block": 26090000,
       "sql": "SELECT block_number, log_index, topic0 AS operation, data FROM logs WHERE address='0xbebc44782c7db0a1a60cb6fe97d0b483032ff1c7' AND block_number BETWEEN 0 AND 26090000 AND topic0 IN (event'RampA(uint256,uint256,uint256,uint256)',event'StopRampA(uint256,uint256)') ORDER BY block_number DESC, log_index DESC LIMIT 20",
@@ -4135,7 +4137,7 @@
         "susde"
       ],
       "purpose": "Which sUSDe vault owners receive deposits from the most distinct callers?",
-      "interpretation": "Counts emitted events, not necessarily unique users or transactions.",
+      "interpretation": "Counts distinct Deposit sender addresses per owner; callers may be routers or other contracts, so this is not a count of people.",
       "from_block": 26080000,
       "to_block": 26090000,
       "sql": "SELECT topic2 AS owner, COUNT(DISTINCT topic1) AS callers FROM logs WHERE address='0x9d39a5de30e57443bff2a8307a4256c8797a3497' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'Deposit(address,address,uint256,uint256)' GROUP BY topic2 ORDER BY callers DESC, owner LIMIT 20",
@@ -4177,7 +4179,7 @@
         "aave_v3"
       ],
       "purpose": "Which Aave V3 reserves receive the most supply actions?",
-      "interpretation": "Counts emitted events, not necessarily unique users or transactions.",
+      "interpretation": "Counts Supply events and distinct on-behalf-of beneficiary addresses per reserve. Event counts do not measure supplied amounts or current deposits.",
       "from_block": 26080000,
       "to_block": 26090000,
       "sql": "SELECT topic1 AS reserve, COUNT(*) AS supplies, COUNT(DISTINCT topic2) AS beneficiaries FROM logs WHERE address='0x87870bca3f3fd6335c3f4ce8392d69350b4fa4e2' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'Supply(address,address,address,uint256,uint16)' GROUP BY topic1 ORDER BY supplies DESC, reserve LIMIT 20",
@@ -4219,7 +4221,7 @@
         "aave_v3"
       ],
       "purpose": "Which collateral/debt pairs are liquidated most often on Aave?",
-      "interpretation": "Counts emitted events, not necessarily unique users or transactions.",
+      "interpretation": "Counts LiquidationCall events and distinct borrower addresses per collateral/debt pair; one borrower may have several liquidations.",
       "from_block": 25000000,
       "to_block": 26090000,
       "sql": "SELECT topic1 AS collateral, topic2 AS debt, COUNT(*) AS liquidations, COUNT(DISTINCT topic3) AS borrowers FROM logs WHERE address='0x87870bca3f3fd6335c3f4ce8392d69350b4fa4e2' AND block_number BETWEEN 25000000 AND 26090000 AND topic0=event'LiquidationCall(address,address,address,uint256,uint256,address,bool)' GROUP BY topic1, topic2 ORDER BY liquidations DESC, collateral, debt LIMIT 20",
@@ -4373,7 +4375,7 @@
         "compound_governor"
       ],
       "purpose": "Which voters participate in the largest number of Compound proposals?",
-      "interpretation": "Counts emitted events, not necessarily unique users or transactions.",
+      "interpretation": "Counts distinct proposal IDs appearing in VoteCast events per voter address; it does not measure voting weight or unique people.",
       "from_block": 20000000,
       "to_block": 26090000,
       "sql": "SELECT topic1 AS voter, COUNT(DISTINCT SUBSTR(data,3,64)) AS proposals FROM logs WHERE address='0xc0da02939e1441f497fd74f78ce7decb17b66529' AND block_number BETWEEN 20000000 AND 26090000 AND topic0=event'VoteCast(address,uint256,uint8,uint256,string)' GROUP BY topic1 ORDER BY proposals DESC, voter LIMIT 20",
