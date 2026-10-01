@@ -50,7 +50,8 @@ struct HistoricalWriteBuffer {
 }
 
 impl HistoricalExtractedChunk {
-    fn merge(&mut self, mut other: Self) {
+    fn merge(&mut self, mut other: Self) -> Result<()> {
+        ensure_historical_chunk_follows(&self.lowest_header, &other)?;
         self.rows.append(&mut other.rows);
         self.row_count = self.row_count.saturating_add(other.row_count);
         self.block_count = self.block_count.saturating_add(other.block_count);
@@ -58,7 +59,24 @@ impl HistoricalExtractedChunk {
             self.lowest_header = other.lowest_header;
         }
         self.extraction_elapsed += other.extraction_elapsed;
+        Ok(())
     }
+}
+
+fn ensure_historical_chunk_follows(child: &Header, chunk: &HistoricalExtractedChunk) -> Result<()> {
+    eyre::ensure!(
+        chunk.block_count > 0
+            && chunk
+                .lowest_header
+                .number()
+                .checked_add(chunk.block_count as u64)
+                == Some(child.number()),
+        "historical chunk does not extend persisted or buffered floor: floor={}, lowest={}, blocks={}",
+        child.number(),
+        chunk.lowest_header.number(),
+        chunk.block_count,
+    );
+    Ok(())
 }
 
 impl HistoricalWriteBuffer {
@@ -72,7 +90,8 @@ impl HistoricalWriteBuffer {
         }
     }
 
-    fn push(&mut self, chunk: HistoricalExtractedChunk) {
+    fn push(&mut self, chunk: HistoricalExtractedChunk) -> Result<()> {
+        ensure_historical_chunk_follows(&self.lowest_header, &chunk)?;
         self.row_count = self.row_count.saturating_add(chunk.row_count);
         self.block_count = self.block_count.saturating_add(chunk.block_count);
         if chunk.lowest_header.number() < self.lowest_header.number() {
@@ -80,6 +99,7 @@ impl HistoricalWriteBuffer {
         }
         self.extraction_elapsed += chunk.extraction_elapsed;
         self.chunks.push(chunk);
+        Ok(())
     }
 
     fn is_ready(&self) -> bool {
@@ -125,6 +145,9 @@ impl HistoricalBatchWriter {
     }
 
     pub(super) async fn push_chunk(&mut self, chunk: HistoricalExtractedChunk) -> Result<()> {
+        if let Some(child) = &self.lowest_header {
+            ensure_historical_chunk_follows(child, &chunk)?;
+        }
         self.block_count = self.block_count.saturating_add(chunk.block_count as u64);
         self.row_count = self.row_count.saturating_add(chunk.row_count);
         self.extraction_elapsed += chunk.extraction_elapsed;
@@ -137,7 +160,7 @@ impl HistoricalBatchWriter {
         }
 
         match self.write_buffer.as_mut() {
-            Some(buffer) => buffer.push(chunk),
+            Some(buffer) => buffer.push(chunk)?,
             None => self.write_buffer = Some(HistoricalWriteBuffer::new(chunk)),
         }
 
@@ -331,7 +354,7 @@ pub(super) async fn extract_validated_historical_blocks(
             .map_err(|error| eyre::eyre!("historical extraction worker failed: {error}"))??;
 
         match write_buffer.as_mut() {
-            Some(buffer) => buffer.merge(extracted),
+            Some(buffer) => buffer.merge(extracted)?,
             None => write_buffer = Some(extracted),
         }
 
@@ -358,7 +381,7 @@ pub(super) async fn write_extracted_historical_batch(
     extracted: HistoricalExtractedBatch,
 ) -> Result<HistoricalIngestOutcome> {
     let mut writer = HistoricalBatchWriter::new(storage);
-    let write_chunks = coalesce_historical_write_chunks(extracted.chunks);
+    let write_chunks = coalesce_historical_write_chunks(extracted.chunks)?;
     for chunk in write_chunks {
         writer.push_chunk(chunk).await?;
     }
@@ -439,6 +462,12 @@ async fn write_extracted_historical_chunk(
         move || -> Result<HistoricalChunkWriteOutcome> {
             let write_started = std::time::Instant::now();
             let mut storage = storage.blocking_write();
+            // A sequence number is only scheduler ordering. The persisted
+            // historical floor must be the immediate child of this complete
+            // validated chunk, including blocks that emitted no logs.
+            if let Some(current) = storage.historical_floor_header() {
+                ensure_historical_chunk_follows(current, &extracted)?;
+            }
             storage
                 .ingest_historical_batch(&extracted.rows, &extracted.lowest_header)
                 .map_err(|e| eyre::eyre!("historical storage ingestion error: {e}"))?;
@@ -455,20 +484,20 @@ async fn write_extracted_historical_chunk(
 
 fn coalesce_historical_write_chunks(
     chunks: Vec<HistoricalExtractedChunk>,
-) -> Vec<HistoricalExtractedChunk> {
+) -> Result<Vec<HistoricalExtractedChunk>> {
     coalesce_historical_write_chunks_with_row_limit(chunks, historical_write_chunk_row_limit())
 }
 
 fn coalesce_historical_write_chunks_with_row_limit(
     chunks: Vec<HistoricalExtractedChunk>,
     row_limit: u64,
-) -> Vec<HistoricalExtractedChunk> {
+) -> Result<Vec<HistoricalExtractedChunk>> {
     let mut write_chunks = Vec::new();
     let mut write_buffer: Option<HistoricalExtractedChunk> = None;
 
     for chunk in chunks {
         match write_buffer.as_mut() {
-            Some(buffer) => buffer.merge(chunk),
+            Some(buffer) => buffer.merge(chunk)?,
             None => write_buffer = Some(chunk),
         }
 
@@ -488,7 +517,7 @@ fn coalesce_historical_write_chunks_with_row_limit(
         write_chunks.push(buffer);
     }
 
-    write_chunks
+    Ok(write_chunks)
 }
 
 fn historical_write_chunk_is_ready(buffer: &HistoricalExtractedChunk) -> bool {
@@ -605,7 +634,8 @@ mod tests {
             .collect();
 
         let write_chunks =
-            coalesce_historical_write_chunks_with_row_limit(chunks, HISTORICAL_WRITE_CHUNK_ROWS);
+            coalesce_historical_write_chunks_with_row_limit(chunks, HISTORICAL_WRITE_CHUNK_ROWS)
+                .unwrap();
 
         assert_eq!(write_chunks.len(), 1);
         assert_eq!(write_chunks[0].block_count, HISTORICAL_WRITE_CHUNK_BLOCKS);
@@ -617,7 +647,8 @@ mod tests {
         let chunks = vec![extracted_chunk(300, 700), extracted_chunk(300, 400)];
 
         let write_chunks =
-            coalesce_historical_write_chunks_with_row_limit(chunks, HISTORICAL_WRITE_CHUNK_ROWS);
+            coalesce_historical_write_chunks_with_row_limit(chunks, HISTORICAL_WRITE_CHUNK_ROWS)
+                .unwrap();
 
         assert_eq!(write_chunks.len(), 1);
         assert_eq!(write_chunks[0].block_count, 600);
@@ -633,13 +664,76 @@ mod tests {
         ];
 
         let write_chunks =
-            coalesce_historical_write_chunks_with_row_limit(chunks, HISTORICAL_WRITE_CHUNK_ROWS);
+            coalesce_historical_write_chunks_with_row_limit(chunks, HISTORICAL_WRITE_CHUNK_ROWS)
+                .unwrap();
 
         assert_eq!(write_chunks.len(), 2);
         assert_eq!(write_chunks[0].block_count, 256);
         assert_eq!(write_chunks[0].row_count, 550_000);
         assert_eq!(write_chunks[0].lowest_header.number(), 772);
         assert_eq!(write_chunks[1].block_count, 128);
+    }
+
+    #[test]
+    fn historical_write_coalescing_rejects_gaps_and_overlaps() {
+        for lowest in [769, 775] {
+            let chunks = vec![extracted_chunk(128, 900), extracted_chunk(128, lowest)];
+            assert!(coalesce_historical_write_chunks(chunks).is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn historical_write_guard_preserves_floor_on_gap_or_overlap() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut manager = PartitionManager::open(logex_storage::PartitionManagerConfig {
+            data_dir: directory.path().to_owned(),
+            ..Default::default()
+        })
+        .unwrap();
+        manager
+            .ingest_historical_batch(
+                &[],
+                &Header {
+                    number: 100,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let storage = Arc::new(RwLock::new(manager));
+        for blocks in [80, 95] {
+            let error =
+                write_extracted_historical_chunk(Arc::clone(&storage), extracted_chunk(blocks, 10))
+                    .await
+                    .err()
+                    .expect("a discontinuous chunk must not publish");
+            assert!(
+                error
+                    .to_string()
+                    .contains("does not extend persisted or buffered floor")
+            );
+            assert_eq!(
+                storage
+                    .read()
+                    .await
+                    .historical_floor()
+                    .unwrap()
+                    .block_number,
+                100
+            );
+            assert_eq!(storage.read().await.total_rows(), 0);
+        }
+        write_extracted_historical_chunk(Arc::clone(&storage), extracted_chunk(90, 10))
+            .await
+            .unwrap();
+        assert_eq!(
+            storage
+                .read()
+                .await
+                .historical_floor()
+                .unwrap()
+                .block_number,
+            10
+        );
     }
 
     #[test]

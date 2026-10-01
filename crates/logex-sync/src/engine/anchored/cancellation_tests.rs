@@ -355,6 +355,11 @@ async fn generation_reset_during_write(rejected: bool) {
     // New-generation preparation must be consumable after the old write settles.
     let mut next = prepared(false);
     next.lowest_block = 0;
+    next.highest_block = 99;
+    next.block_count = 100;
+    next.requested_headers = 100;
+    next.planned_return_blocks = 100;
+    next.extracted.chunks[0].block_count = 100;
     next.extracted.chunks[0].lowest_header.number = 0;
     engine.historical_prepare_completed.insert(
         0,

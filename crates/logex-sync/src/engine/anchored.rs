@@ -335,8 +335,8 @@ async fn validate_and_extract_historical_blocks_streaming(
     >,
 > {
     let jobs = build_historical_validation_jobs(headers, hashes, blocks)?;
-    let block_count = jobs.len();
-    let task_count = historical_validation_task_count(block_count);
+    let expected_blocks = jobs.len();
+    let task_count = historical_validation_task_count(expected_blocks);
     let chunk_ranges = historical_validation_work_ranges(
         jobs.iter().map(historical_validation_job_work),
         task_count,
@@ -407,6 +407,10 @@ async fn validate_and_extract_historical_blocks_streaming(
         }
     }
 
+    eyre::ensure!(
+        block_count == expected_blocks && pending_chunks.is_empty(),
+        "historical extraction did not retain every validated block"
+    );
     Ok(Ok((
         super::ingest::HistoricalExtractedBatch {
             chunks: extracted_chunks,
@@ -1752,7 +1756,11 @@ fn prepared_historical_batch_row_count(prepared: &PreparedHistoricalBatch) -> u6
 }
 
 fn prepared_historical_batch_can_coalesce(prepared: &PreparedHistoricalBatch) -> bool {
-    prepared.residual_batch.is_none() && prepared.block_count > 0
+    prepared.residual_batch.is_none()
+        && prepared.block_count > 0
+        && prepared.block_count == prepared.planned_return_blocks
+        && prepared.highest_block.checked_sub(prepared.lowest_block)
+            == Some(prepared.block_count as u64 - 1)
 }
 
 fn merge_prepared_historical_batch(
@@ -3858,7 +3866,9 @@ impl SyncEngine {
                     break;
                 }
             };
-            if !prepared_historical_batch_can_coalesce(&next_prepared) {
+            if !prepared_historical_batch_can_coalesce(&next_prepared)
+                || next_prepared.highest_block.checked_add(1) != Some(prepared.lowest_block)
+            {
                 self.historical_prepare_completed.insert(
                     next_sequence,
                     HistoricalCompletedPrepare {
@@ -5149,14 +5159,16 @@ impl SyncEngine {
 
         match self.peers.complete_bodies_and_receipts_request(outcome) {
             Ok(Some(completion))
-                if !completion.blocks.is_empty() && completion.blocks.len() <= headers.len() =>
+                if !completion.blocks.is_empty()
+                    && headers.len() == hashes.len()
+                    && completion.blocks.len() <= headers.len() =>
             {
                 let consumed_blocks = completion.blocks.len();
-                let planned_return_blocks = completion
-                    .planned_return_blocks
-                    .min(headers.len())
-                    .min(hashes.len())
-                    .max(consumed_blocks);
+                // This header range was frozen before scheduling its successor.
+                // Payload completion reports only the received prefix; using
+                // that shorter length here would silently skip the suffix when
+                // an already prepared lookahead batch is written next.
+                let planned_return_blocks = headers.len();
                 let residual_header_batch = historical_residual_header_batch(
                     header_peer,
                     &headers,
@@ -5181,22 +5193,7 @@ impl SyncEngine {
                         "historical body/receipt pipeline completed partial prefix; residual gap will be filled before queued lookahead"
                     );
                 }
-                let batch_planned_return_blocks = if residual_blocks > 0 {
-                    planned_return_blocks
-                } else {
-                    consumed_blocks
-                };
-                let next_child_header = if residual_blocks > 0 {
-                    planned_return_blocks
-                        .checked_sub(1)
-                        .and_then(|index| headers.get(index))
-                        .cloned()
-                } else {
-                    consumed_blocks
-                        .checked_sub(1)
-                        .and_then(|index| headers.get(index))
-                        .cloned()
-                };
+                let next_child_header = headers.last().cloned();
                 Ok(Some((
                     sequence,
                     HistoricalFetchedBatch {
@@ -5204,7 +5201,7 @@ impl SyncEngine {
                         headers,
                         hashes,
                         blocks: completion.blocks,
-                        planned_return_blocks: batch_planned_return_blocks,
+                        planned_return_blocks,
                         required_block,
                         header_elapsed,
                         body_receipt_elapsed,
@@ -5354,20 +5351,21 @@ impl SyncEngine {
             )
             .await?;
 
-        Ok(body_receipt_plan.map(|body_receipt_plan| {
+        Ok(body_receipt_plan.and_then(|body_receipt_plan| {
             let body_receipt_plan = body_receipt_plan
                 .with_peer_rotation_offset(self.historical_fetch_next_sequence as usize);
-            let planned_next_child_header = body_receipt_plan
-                .planned_prefix_blocks()
-                .min(header_batch.headers.len())
-                .checked_sub(1)
-                .and_then(|index| header_batch.headers.get(index))
-                .cloned();
-            HistoricalFetchPlan {
-                header_batch,
-                planned_next_child_header,
-                body_receipt_plan,
-            }
+            let planned_prefix = body_receipt_plan.planned_prefix_blocks();
+            // Freeze both the header range and payload return limit, including
+            // single-page plans. Lookahead starts immediately after this range;
+            // accepting extra blocks would overlap that queued successor.
+            Self::cap_historical_fetch_plan_to_prefix(
+                HistoricalFetchPlan {
+                    header_batch,
+                    planned_next_child_header: None,
+                    body_receipt_plan,
+                },
+                planned_prefix,
+            )
         }))
     }
 
@@ -5461,16 +5459,10 @@ impl SyncEngine {
                 break;
             };
 
-            let planned_prefix = plan
-                .body_receipt_plan
-                .planned_prefix_blocks()
-                .min(segment_header_count);
+            let planned_prefix = plan.header_batch.headers.len().min(segment_header_count);
             if planned_prefix == 0 {
                 break;
             }
-            let Some(plan) = Self::cap_historical_fetch_plan_to_prefix(plan, planned_prefix) else {
-                break;
-            };
             offset = offset.saturating_add(planned_prefix);
             plans.push(plan);
         }
@@ -5876,6 +5868,29 @@ impl SyncEngine {
             }
         };
         let mut prepared = prepared;
+        let persisted_floor = self.storage.read().await.historical_floor();
+        if prepared.block_count == 0
+            || prepared.highest_block.checked_sub(prepared.lowest_block)
+                != Some(prepared.block_count as u64 - 1)
+            || persisted_floor.is_some_and(|floor| {
+                prepared.highest_block.checked_add(1) != Some(floor.block_number)
+            })
+        {
+            // A retry can plan a different prefix while later sequences have
+            // already prepared against the old boundary. Refill from committed
+            // storage instead of treating that queue order as chain coverage.
+            tracing::warn!(
+                sequence,
+                persisted_floor = persisted_floor.map(|floor| floor.block_number),
+                highest_block = prepared.highest_block,
+                lowest_block = prepared.lowest_block,
+                blocks = prepared.block_count,
+                "discarding discontinuous historical preparation; refilling from persisted floor"
+            );
+            self.reset_historical_fetch_pipeline();
+            self.refresh_historical_status().await;
+            return Ok(false);
+        }
         let (coalesced_batches, coalesced_next_child_header) =
             self.coalesce_ready_historical_prepares(sequence, &mut prepared, next_child_header);
         if self.advance_historical_fetch_position_after_ordered_write(
