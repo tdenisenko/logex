@@ -2983,12 +2983,12 @@
       ],
       "purpose": "Which WBTC redeemers burn the greatest token amount?",
       "interpretation": "Exact base-unit totals grouped by emitting event burner; not proof of Bitcoin settlement.",
-      "from_block": 26080000,
-      "to_block": 26090000,
-      "sql": "SELECT topic1 AS redeemer, SUM(data) AS total_units FROM logs WHERE address='0x2260fac5e5542a773aa44fbcfedf7c193bc2c599' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'Burn(address,uint256)' AND data_len=32 GROUP BY topic1 ORDER BY total_units DESC, redeemer LIMIT 20",
+      "from_block": 12000000,
+      "to_block": 12010000,
+      "sql": "SELECT topic1 AS redeemer, SUM(data) AS total_units FROM logs WHERE address='0x2260fac5e5542a773aa44fbcfedf7c193bc2c599' AND block_number BETWEEN 12000000 AND 12010000 AND topic0=event'Burn(address,uint256)' AND data_len=32 GROUP BY topic1 ORDER BY total_units DESC, redeemer LIMIT 20",
       "reference": "exact_group_sum",
-      "verification_from_block": 26089873,
-      "verification_to_block": 26090000
+      "verification_from_block": 12000000,
+      "verification_to_block": 12010000
     },
     {
       "id": "wbtc_largest_mints",
@@ -2997,12 +2997,12 @@
       ],
       "purpose": "What are the largest individual WBTC mint events?",
       "interpretation": "Fixed-width unsigned ABI words sort numerically as hexadecimal strings; eight token decimals.",
-      "from_block": 26080000,
-      "to_block": 26090000,
-      "sql": "SELECT topic1 AS receiver, data AS amount_hex, block_number, log_index FROM logs WHERE address='0x2260fac5e5542a773aa44fbcfedf7c193bc2c599' AND block_number BETWEEN 26080000 AND 26090000 AND topic0=event'Mint(address,uint256)' AND data_len=32 ORDER BY amount_hex DESC, block_number, log_index LIMIT 20",
+      "from_block": 12000000,
+      "to_block": 12010000,
+      "sql": "SELECT topic1 AS receiver, data AS amount_hex, block_number, log_index FROM logs WHERE address='0x2260fac5e5542a773aa44fbcfedf7c193bc2c599' AND block_number BETWEEN 12000000 AND 12010000 AND topic0=event'Mint(address,uint256)' AND data_len=32 ORDER BY amount_hex DESC, block_number, log_index LIMIT 20",
       "reference": "sqlite",
-      "verification_from_block": 26089873,
-      "verification_to_block": 26090000
+      "verification_from_block": 12000000,
+      "verification_to_block": 12010000
     },
     {
       "id": "link_transfer_payloads",
