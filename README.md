@@ -209,7 +209,13 @@ or decimal conversion remains synchronous.
 
 Sums with grouping, conditional inputs or residual expressions also charge their
 candidate unions, selected row IDs, stored-column inputs and final Boolean/integer
-expression arrays. Each partition uses one captured reader and lazy source caches:
+expression arrays. Exact `SUM(data)` supports one group key: `address` or any of
+`topic0` through `topic3`. Missing topics form a SQL NULL group. Group and aggregate
+output names can be used in multi-column `ORDER BY`, including explicit
+`NULLS FIRST`/`NULLS LAST`; aggregate ordering compares exact integers, not their
+decimal strings. This applies to the supported native exact-SUM expression family,
+not arbitrary coercion of hexadecimal strings in the general SQL engine.
+Each partition uses one captured reader and lazy source caches:
 fixed columns retain one bounded raw window or decoded page, and payload pages
 are reused across selections. Raw variable data retains its validated source;
 bundled nullable columns retain a decoded bitmap. Conditional inputs are read and
