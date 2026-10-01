@@ -1020,6 +1020,19 @@ fn refine_candidate_ids_with_values<T>(
     Ok(())
 }
 
+fn first_selective_topic(filter: &NativeLogFilter) -> Option<usize> {
+    // With no index candidates, an exact indexed argument commonly rejects a
+    // segment before we need its emitter/signature columns (wallet history is
+    // the motivating case). This is an ordering heuristic only: every remaining
+    // predicate is still checked. Zero is common in mint/burn events, and a block
+    // hash already supplies a narrow lookup, so retain the usual order for those.
+    if filter.block_hash.is_some() {
+        return None;
+    }
+    (1..filter.topics.len())
+        .find(|&index| single_topic(&filter.topics[index]).is_some_and(|value| value != [0; 32]))
+}
+
 fn refine_candidate_ids_from_columns(
     reader: &SegmentReader,
     filter: &NativeLogFilter,
@@ -1041,6 +1054,27 @@ fn refine_candidate_ids_from_columns(
         }};
     }
 
+    macro_rules! refine_topic {
+        ($index:expr) => {{
+            let index = $index;
+            let constraint = &filter.topics[index];
+            refine!(
+                reader.read_nullable_b256_with_memory(&format!("topic{index}"), row_ids.as_deref()),
+                |topic| {
+                    (index >= filter.min_topic_count || topic.is_some())
+                        && topic_matches_constraint(*topic, constraint)
+                }
+            );
+        }};
+    }
+    let early_topic = row_ids
+        .is_none()
+        .then(|| first_selective_topic(filter))
+        .flatten();
+    if let Some(index) = early_topic {
+        refine_topic!(index);
+    }
+
     if !filter.addresses.is_empty() {
         refine!(
             reader.read_address_with_memory(row_ids.as_deref()),
@@ -1054,17 +1088,12 @@ fn refine_candidate_ids_from_columns(
         );
     }
     for (index, constraint) in filter.topics.iter().enumerate() {
-        if index >= filter.min_topic_count && matches!(constraint, TopicConstraint::Any) {
+        if early_topic == Some(index)
+            || (index >= filter.min_topic_count && matches!(constraint, TopicConstraint::Any))
+        {
             continue;
         }
-        let column = format!("topic{index}");
-        refine!(
-            reader.read_nullable_b256_with_memory(&column, row_ids.as_deref()),
-            |topic| {
-                (index >= filter.min_topic_count || topic.is_some())
-                    && topic_matches_constraint(*topic, constraint)
-            }
-        );
+        refine_topic!(index);
     }
     if filter.from_block.is_some() || filter.to_block.is_some() {
         refine!(
@@ -1858,6 +1887,34 @@ fn refine_candidate_bitmap_from_columns(
     row_count: u64,
     mut result: Option<RoaringBitmap>,
 ) -> std::io::Result<Option<RoaringBitmap>> {
+    macro_rules! refine_topic {
+        ($index:expr) => {{
+            let index = $index;
+            let constraint = &filter.topics[index];
+            let row_ids = row_ids_from_bitmap(result.as_ref());
+            let values = reader.read_nullable_b256(&format!("topic{index}"), row_ids.as_deref())?;
+            result = Some(bitmap_from_values(
+                row_ids.as_deref(),
+                row_count,
+                values,
+                |topic| {
+                    (index >= filter.min_topic_count || topic.is_some())
+                        && topic_matches_constraint(*topic, constraint)
+                },
+            ));
+            if result.as_ref().is_some_and(RoaringBitmap::is_empty) {
+                return Ok(result);
+            }
+        }};
+    }
+    let early_topic = result
+        .is_none()
+        .then(|| first_selective_topic(filter))
+        .flatten();
+    if let Some(index) = early_topic {
+        refine_topic!(index);
+    }
+
     if !filter.addresses.is_empty() {
         let row_ids = row_ids_from_bitmap(result.as_ref());
         let values = reader.read_address(row_ids.as_deref())?;
@@ -1887,23 +1944,12 @@ fn refine_candidate_bitmap_from_columns(
     }
 
     for (index, constraint) in filter.topics.iter().enumerate() {
-        if index >= filter.min_topic_count && matches!(constraint, TopicConstraint::Any) {
+        if early_topic == Some(index)
+            || (index >= filter.min_topic_count && matches!(constraint, TopicConstraint::Any))
+        {
             continue;
         }
-        let row_ids = row_ids_from_bitmap(result.as_ref());
-        let values = reader.read_nullable_b256(&format!("topic{index}"), row_ids.as_deref())?;
-        result = Some(bitmap_from_values(
-            row_ids.as_deref(),
-            row_count,
-            values,
-            |topic| {
-                (index >= filter.min_topic_count || topic.is_some())
-                    && topic_matches_constraint(*topic, constraint)
-            },
-        ));
-        if result.as_ref().is_some_and(RoaringBitmap::is_empty) {
-            return Ok(result);
-        }
+        refine_topic!(index);
     }
 
     if filter.from_block.is_some() || filter.to_block.is_some() {
@@ -2131,6 +2177,77 @@ mod tests {
                 source: Source::Receipt,
             },
         ]
+    }
+
+    #[test]
+    fn exact_topic_exclusion_avoids_unneeded_emitter_reads() {
+        #[derive(serde::Deserialize)]
+        struct Fixture {
+            rows: Vec<LogRow>,
+        }
+        let rows = serde_json::from_str::<Fixture>(include_str!(
+            "../tests/fixtures/mainnet-exact-sums.json"
+        ))
+        .unwrap()
+        .rows;
+        let absent = B256::repeat_byte(0xff);
+        for index in 1..4 {
+            let present = rows
+                .iter()
+                .find_map(|row| [row.topic0, row.topic1, row.topic2, row.topic3][index])
+                .unwrap();
+            assert!(rows.iter().all(|row| {
+                [row.topic0, row.topic1, row.topic2, row.topic3][index] != Some(absent)
+            }));
+            for (value, indexed) in [(absent, false), (present, false), (absent, true)] {
+                let dir = tempfile::tempdir().unwrap();
+                write_legacy_source(dir.path(), &rows);
+                let memory = QueryMemoryBudget::new(QueryMemoryLimit::new(1024 * 1024).unwrap());
+                let reader = SegmentReader::open_projected_with_memory(
+                    dir.path(),
+                    &["address", "topic0", "topic1", "topic2", "topic3"],
+                    memory.clone(),
+                )
+                .unwrap();
+                // A read trap proves the rejected segment never touches the
+                // emitter payload. A surviving candidate must still reject the
+                // damaged source, and existing index candidates retain order.
+                fs::OpenOptions::new()
+                    .write(true)
+                    .open(dir.path().join("address.col"))
+                    .unwrap()
+                    .set_len(0)
+                    .unwrap();
+                assert!(reader.read_address(None).is_err());
+                let filter = NativeLogFilter::new()
+                    .with_addresses(vec![rows[0].address])
+                    .with_topic(index, TopicConstraint::One(value));
+                let seed = indexed.then(|| (0..rows.len() as u32).collect::<RoaringBitmap>());
+                let plain =
+                    refine_candidate_bitmap_from_columns(&reader, &filter, rows.len() as u64, seed);
+                let mut ids =
+                    indexed.then(|| query_row_id_range(rows.len() as u64, &memory).unwrap());
+                let accounted = refine_candidate_ids_from_columns(
+                    &reader,
+                    &filter,
+                    rows.len() as u64,
+                    &memory,
+                    None,
+                    &mut ids,
+                );
+                if value == absent && !indexed {
+                    assert!(plain.unwrap().unwrap().is_empty());
+                    accounted.unwrap();
+                    assert!(ids.as_ref().unwrap().is_empty());
+                } else {
+                    assert!(plain.is_err());
+                    assert!(accounted.is_err());
+                }
+                drop(ids);
+                drop(reader);
+                assert_eq!(memory.used(), 0);
+            }
+        }
     }
 
     #[test]
