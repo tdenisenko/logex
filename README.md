@@ -881,11 +881,22 @@ return an error instead of a partial or misleading result.
   exhausted.
 - Storage grows with logs, not with Ethereum state. LogEx still needs enough
   disk for the full compressed log history and indexes.
-- The dashboard's current storage-used value is logical file content size.
-  Filesystem allocation also includes block rounding and directory storage,
-  which can be substantial on ExFAT with large allocation units. Free-space
-  headroom uses filesystem availability. The dashboard currently labels binary
-  units as GB/MB even though it divides by 1024; interpret those values as GiB/MiB.
+- The dashboard shows **Allocated on disk** (files plus directories) and the
+  logical file content size separately, using binary units KiB/MiB/GiB/TiB.
+  `/status.storage_used_bytes` retains its logical-file-length meaning, including
+  indexes and metadata. `storage_file_allocated_bytes` and
+  `storage_directory_allocated_bytes` measure filesystem-reported allocation;
+  `storage_allocated_bytes` is their sum. Aliases and hard links are counted once
+  by file identity on Unix, including across cached sealed segments. Segment
+  symlinks include their targets. Unknown allocation is null, with an explicit
+  logical-size fallback in the dashboard. Measurements refresh asynchronously
+  about once a minute; they are not an atomic snapshot of a growing dataset.
+- Allocation includes file rounding and directory storage, which can be
+  substantial on ExFAT with large allocation units. Sparse files can allocate
+  less than their logical length. Shared/cloned blocks, compression and filesystem
+  metadata mean these figures are not an exclusive physical-disk usage measure.
+  Free-space headroom remains filesystem availability on the writable path;
+  other data on the same volume also consumes that space.
 - Blocks per second is not enough to judge sync speed. Older blocks have few
   logs; modern blocks are dense. Watch log-rate, CPU, disk headroom, peer count,
   and historical ETA together.

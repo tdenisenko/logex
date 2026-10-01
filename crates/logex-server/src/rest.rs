@@ -435,6 +435,9 @@ pub async fn handle_status(State(state): State<Arc<AppState>>) -> Response {
             "stored_rows": total_rows,
         },
         "storage_used_bytes": storage_metrics.storage_used_bytes,
+        "storage_allocated_bytes": storage_metrics.storage_allocated_bytes,
+        "storage_file_allocated_bytes": storage_metrics.storage_file_allocated_bytes,
+        "storage_directory_allocated_bytes": storage_metrics.storage_directory_allocated_bytes,
         "disk_free_bytes": storage_metrics.disk_free_bytes,
         "storage_headroom_bytes": storage_metrics.disk_free_bytes,
         "storage_write_free_bytes": storage_metrics.storage_write_free_bytes,
@@ -2323,6 +2326,14 @@ mod tests {
             500
         );
         assert!(status["storage_used_bytes"].as_u64().unwrap_or(0) > 0);
+        #[cfg(unix)]
+        assert_eq!(
+            status["storage_allocated_bytes"].as_u64().unwrap(),
+            status["storage_file_allocated_bytes"].as_u64().unwrap()
+                + status["storage_directory_allocated_bytes"]
+                    .as_u64()
+                    .unwrap()
+        );
         assert!(status["disk_free_bytes"].as_u64().unwrap_or(0) > 0);
         assert_eq!(status["storage_headroom_bytes"], status["disk_free_bytes"]);
         assert!(status["storage_write_free_bytes"].as_u64().unwrap_or(0) > 0);

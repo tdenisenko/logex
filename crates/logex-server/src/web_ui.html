@@ -1132,7 +1132,7 @@
         <div class="mini"><span class="k">Serving peers</span><span class="v" id="executionPeers">--</span></div>
         <div class="mini"><span class="k">Consensus Layer</span><span class="v" id="consensusStatus">--</span><span class="note" id="consensusDetail">Checkpoint to latest block.</span></div>
         <div class="mini"><span class="k">Log block range</span><span class="v" id="logRange">--</span><span class="note" id="logRangeDetail">Verified local logs available for queries.</span></div>
-        <div class="mini"><span class="k">Storage used</span><span class="v" id="storageUsed">--</span><span class="note" id="storageDetail"></span></div>
+        <div class="mini"><span class="k" id="storageLabel">Allocated on disk</span><span class="v" id="storageUsed">--</span><span class="note" id="storageDetail"></span></div>
         <div class="mini"><span class="k">Disk free</span><span class="v" id="diskFree">--</span><span class="note" id="rawBacklogSummary"></span></div>
       </div>
     </div>
@@ -1211,7 +1211,9 @@
           <div class="debug-item"><span class="k">Consensus Layer detail</span><span class="v" id="debugConsensusDetail">--</span></div>
           <div class="debug-item"><span class="k">Consensus head freshness</span><span class="v" id="debugConsensusFreshness">--</span></div>
           <div class="debug-item"><span class="k">Log query range</span><span class="v" id="debugLogRange">--</span></div>
-          <div class="debug-item"><span class="k">LogEx storage used</span><span class="v" id="debugStorageUsed">--</span></div>
+          <div class="debug-item"><span class="k">LogEx file contents</span><span class="v" id="debugStorageUsed">--</span></div>
+          <div class="debug-item"><span class="k">Allocated files</span><span class="v" id="debugStorageFiles">--</span></div>
+          <div class="debug-item"><span class="k">Allocated directories</span><span class="v" id="debugStorageDirectories">--</span></div>
           <div class="debug-item"><span class="k">CPU utilization</span><span class="v" id="debugCpu">--</span></div>
           <div class="debug-item"><span class="k">Data directory</span><span class="v" id="debugStorageWritePath">--</span></div>
           <div class="debug-item"><span class="k">Raw segments pending first compression</span><span class="v" id="debugRawBacklog">--</span></div>
@@ -1673,13 +1675,26 @@ function fmtBlocks(value) {
 function fmtBytes(value) {
   var number = numberOrNull(value);
   if (number === null) return '--';
-  var units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  var units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
   var index = 0;
   while (number >= 1024 && index < units.length - 1) {
     number /= 1024;
     index += 1;
   }
   return fmtDecimal(number, number >= 10 || index === 0 ? 0 : 1) + ' ' + units[index];
+}
+
+function updateStorageUsage(data) {
+  var allocated = numberOrNull(data.storage_allocated_bytes);
+  var logical = numberOrNull(data.storage_used_bytes);
+  setText('storageLabel', allocated === null ? 'File contents' : 'Allocated on disk');
+  setText('storageUsed', fmtBytes(allocated === null ? logical : allocated));
+  setText('storageDetail', allocated === null
+    ? 'Disk allocation unavailable.'
+    : fmtBytes(logical) + ' file contents; includes file rounding and directory space.');
+  setText('debugStorageUsed', fmtBytes(logical));
+  setText('debugStorageFiles', fmtBytes(data.storage_file_allocated_bytes));
+  setText('debugStorageDirectories', fmtBytes(data.storage_directory_allocated_bytes));
 }
 
 function fmtMbpsFromBytesPerSec(value) {
@@ -3322,8 +3337,7 @@ function updateStatus(data) {
   var diskFree = data.disk_free_bytes;
   var rawSegmentBacklog = numberOrNull(data.raw_log_segment_backlog);
   var profileRewriteBacklog = numberOrNull(data.storage_profile_rewrite_backlog);
-  setText('storageUsed', fmtBytes(data.storage_used_bytes));
-  setText('storageDetail', '');
+  updateStorageUsage(data);
   setText('diskFree', fmtBytes(diskFree));
   setText('rawBacklogSummary', '');
 
@@ -3416,7 +3430,6 @@ function updateStatus(data) {
       : 'Stale; ' + fmt(consensusHeadLagSlots) + ' slots behind; recovery ' +
         (consensusNetwork.head_recovery_active ? 'active' : 'waiting')));
   setText('debugLogRange', queryFrom == null ? '--' : blockRange(queryFrom, queryTo));
-  setText('debugStorageUsed', fmtBytes(data.storage_used_bytes));
   setText('debugStorageWritePath', data.storage_write_path);
   var cpuDetail = '';
   if (rawCpu != null && cpuCores != null) {
