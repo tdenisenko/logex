@@ -1052,7 +1052,7 @@ struct NativeDataSumQuery {
     selection: Option<SqlAstExpr>,
     having: Option<NativeAggregateHaving>,
     sql_limit: Option<usize>,
-    order: Option<NativeAggregateOrder>,
+    order: Vec<NativeAggregateOrder>,
 }
 
 struct NativeCountQuery {
@@ -1091,6 +1091,23 @@ enum NativeDataSumProjection {
 enum NativeDataSumGroupBy {
     None,
     Address,
+    Topic0,
+    Topic1,
+    Topic2,
+    Topic3,
+}
+
+impl NativeDataSumGroupBy {
+    fn column(self) -> Option<&'static str> {
+        match self {
+            Self::None => None,
+            Self::Address => Some("address"),
+            Self::Topic0 => Some("topic0"),
+            Self::Topic1 => Some("topic1"),
+            Self::Topic2 => Some("topic2"),
+            Self::Topic3 => Some("topic3"),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -1105,6 +1122,7 @@ struct NativeAggregateHaving {
 struct NativeAggregateOrder {
     projection_index: usize,
     descending: bool,
+    nulls_first: bool,
 }
 
 #[derive(Clone)]
@@ -1639,6 +1657,7 @@ fn native_sum_size_overflow() -> std::io::Error {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum NativeGroupKey {
     Address([u8; 20]),
+    Topic([u8; 32]),
 }
 
 struct NativeDataSumPartitionScan<'a> {
@@ -2432,9 +2451,14 @@ fn native_data_sum_group_by(group_by: &GroupByExpr) -> Option<NativeDataSumGroup
     }
     match exprs.as_slice() {
         [] => Some(NativeDataSumGroupBy::None),
-        [expr] if sql_identifier(expr).is_some_and(|column| column == "address") => {
-            Some(NativeDataSumGroupBy::Address)
-        }
+        [expr] => match sql_identifier(expr)?.as_str() {
+            "address" => Some(NativeDataSumGroupBy::Address),
+            "topic0" => Some(NativeDataSumGroupBy::Topic0),
+            "topic1" => Some(NativeDataSumGroupBy::Topic1),
+            "topic2" => Some(NativeDataSumGroupBy::Topic2),
+            "topic3" => Some(NativeDataSumGroupBy::Topic3),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -2490,15 +2514,7 @@ fn native_data_sum_group_projection(
     expr: &SqlAstExpr,
     group_by: NativeDataSumGroupBy,
 ) -> Option<NativeDataSumGroupBy> {
-    match group_by {
-        NativeDataSumGroupBy::None => None,
-        NativeDataSumGroupBy::Address
-            if sql_identifier(expr).is_some_and(|column| column == "address") =>
-        {
-            Some(NativeDataSumGroupBy::Address)
-        }
-        NativeDataSumGroupBy::Address => None,
-    }
+    (sql_identifier(expr)?.as_str() == group_by.column()?).then_some(group_by)
 }
 
 fn native_data_sum_having(
@@ -2540,28 +2556,41 @@ fn native_data_sum_order(
     order_by: Option<&datafusion::sql::sqlparser::ast::OrderBy>,
     group_by: NativeDataSumGroupBy,
     projections: &[NativeDataSumProjection],
-) -> Option<Option<NativeAggregateOrder>> {
+) -> Option<Vec<NativeAggregateOrder>> {
     let Some(order_by) = order_by else {
-        return Some(None);
+        return Some(Vec::new());
     };
-    if group_by == NativeDataSumGroupBy::None {
+    if group_by == NativeDataSumGroupBy::None || order_by.interpolate.is_some() {
         return None;
     }
     let OrderByKind::Expressions(expressions) = &order_by.kind else {
         return None;
     };
-    let [expression] = expressions.as_slice() else {
-        return None;
-    };
-    if expression.options.nulls_first.is_some() || expression.with_fill.is_some() {
-        return None;
-    }
-    let order_column = sql_unqualified_identifier(&expression.expr)?;
-    let projection_index = native_aggregate_projection_index(projections, &order_column)?;
-    Some(Some(NativeAggregateOrder {
-        projection_index,
-        descending: !expression.options.asc.unwrap_or(true),
-    }))
+    expressions
+        .iter()
+        .map(|expression| {
+            if expression.with_fill.is_some() {
+                return None;
+            }
+            let order_column = sql_unqualified_identifier(&expression.expr)?;
+            let projection_index = projections.iter().position(|projection| match projection {
+                NativeDataSumProjection::GroupColumn { output_column, .. } => {
+                    *output_column == order_column
+                }
+                NativeDataSumProjection::Aggregate(projection) => {
+                    projection.output_column == order_column
+                }
+            })?;
+            let descending = !expression.options.asc.unwrap_or(true);
+            Some(NativeAggregateOrder {
+                projection_index,
+                descending,
+                // Match DataFusion's default NULLS MAX ordering, while an
+                // explicit placement remains independent of direction.
+                nulls_first: expression.options.nulls_first.unwrap_or(descending),
+            })
+        })
+        .collect()
 }
 
 fn native_aggregate_projection_index(
@@ -3237,7 +3266,7 @@ fn scan_native_data_sum_partition(
         .chain(scan.cases.columns.iter())
         .map(String::as_str)
         .chain(std::iter::once("data"))
-        .chain((scan.group_by == NativeDataSumGroupBy::Address).then_some("address"))
+        .chain(scan.group_by.column())
     {
         if column == "topics" {
             for topic in ["topic0", "topic1", "topic2", "topic3"] {
@@ -3342,20 +3371,18 @@ fn scan_native_data_sum_partition(
         let values = source
             .read_var_bytes("data", selected_row_ids)
             .map_err(map_native_query_io_error)?;
-        let addresses = match scan.group_by {
-            NativeDataSumGroupBy::None => None,
-            NativeDataSumGroupBy::Address => Some(
-                source
-                    .read_address(selected_row_ids)
-                    .map_err(map_native_query_io_error)?,
-            ),
-        };
+        let row_keys = read_native_sum_group_keys(
+            &mut source,
+            selected_row_ids,
+            scan.group_by,
+            scan.memory,
+            scan.cancel_check,
+        )?;
         add_native_sum_batch(
             &mut groups,
-            scan.group_by,
             scan.sum_inputs,
             &values,
-            addresses.as_deref(),
+            row_keys.as_deref(),
             &typed_cases,
             scan.cancel_check,
         )?;
@@ -3375,48 +3402,65 @@ fn scan_native_data_sum_partition(
     Ok((groups, total_scanned))
 }
 
-#[allow(clippy::too_many_arguments)]
+fn read_native_sum_group_keys(
+    source: &mut PreparedSegmentSelection<'_>,
+    row_ids: &[u32],
+    group_by: NativeDataSumGroupBy,
+    memory: &QueryMemoryBudget,
+    cancel_check: Option<&QueryCancelCheck>,
+) -> Result<Option<QueryBuffer<Option<NativeGroupKey>>>, SqlQueryError> {
+    let Some(column) = group_by.column() else {
+        return Ok(None);
+    };
+    let mut keys =
+        QueryBuffer::try_with_capacity(row_ids.len(), Some(memory), "native SUM batch group keys")
+            .map_err(map_native_query_io_error)?;
+    let mut operations = 0;
+    if group_by == NativeDataSumGroupBy::Address {
+        let values = source
+            .read_address(row_ids)
+            .map_err(map_native_query_io_error)?;
+        for value in values.iter() {
+            check_native_sum_canceled_periodically(cancel_check, &mut operations)
+                .map_err(map_native_query_io_error)?;
+            keys.try_push(Some(NativeGroupKey::Address(value.into_array())))
+                .map_err(map_native_query_io_error)?;
+        }
+    } else {
+        let values = source
+            .read_nullable_b256(column, row_ids)
+            .map_err(map_native_query_io_error)?;
+        for value in values.iter() {
+            check_native_sum_canceled_periodically(cancel_check, &mut operations)
+                .map_err(map_native_query_io_error)?;
+            keys.try_push(value.map(|value| NativeGroupKey::Topic(value.0)))
+                .map_err(map_native_query_io_error)?;
+        }
+    }
+    Ok(Some(keys))
+}
+
 fn add_native_sum_batch(
     groups: &mut NativeDataSumGroups,
-    group_by: NativeDataSumGroupBy,
     sum_inputs: &[PreparedRowValueExpr],
     values: &QueryBuffer<alloy_primitives::Bytes>,
-    addresses: Option<&[Address]>,
+    row_keys: Option<&[Option<NativeGroupKey>]>,
     cases: &[&Int64Array],
     cancel_check: Option<&QueryCancelCheck>,
 ) -> Result<(), SqlQueryError> {
-    if addresses.is_some_and(|addresses| addresses.len() != values.len()) {
+    if row_keys.is_some_and(|keys| keys.len() != values.len()) {
         return Err(SqlQueryError::DataFusion(DataFusionError::Internal(
-            "native SUM address source has the wrong row count".to_owned(),
+            "native SUM group source has the wrong row count".to_owned(),
         )));
     }
-    let row_keys = match group_by {
-        NativeDataSumGroupBy::None => None,
-        NativeDataSumGroupBy::Address => {
-            let mut row_keys = QueryBuffer::try_with_capacity(
-                values.len(),
-                Some(&groups.budget),
-                "native SUM batch group keys",
-            )
-            .map_err(map_native_query_io_error)?;
-            for row_index in 0..values.len() {
-                let mut bytes = [0u8; 20];
-                bytes.copy_from_slice(addresses.unwrap()[row_index].as_slice());
-                row_keys
-                    .try_push(Some(NativeGroupKey::Address(bytes)))
-                    .map_err(map_native_query_io_error)?;
-            }
-            Some(row_keys)
-        }
-    };
-    let touched_capacity = row_keys.as_ref().map_or(1, |keys| keys.len());
+    let touched_capacity = row_keys.map_or(1, |keys| keys.len());
     let mut unique_keys = QueryBuffer::try_with_capacity(
         touched_capacity,
         Some(&groups.budget),
         "native SUM touched groups",
     )
     .map_err(map_native_query_io_error)?;
-    if let Some(row_keys) = &row_keys {
+    if let Some(row_keys) = row_keys {
         unique_keys
             .try_extend_from_slice(row_keys)
             .map_err(map_native_query_io_error)?;
@@ -3451,7 +3495,7 @@ fn add_native_sum_batch(
         .map_err(map_native_query_io_error)?;
     let mut plan_operations = 0usize;
     for (row_index, data) in values.iter().enumerate() {
-        let row_key = row_keys.as_ref().and_then(|keys| keys[row_index]);
+        let row_key = row_keys.and_then(|keys| keys[row_index]);
         let key_index = unique_keys.binary_search(&row_key).map_err(|_| {
             SqlQueryError::DataFusion(DataFusionError::Internal(
                 "native SUM touched group is missing".to_owned(),
@@ -3482,7 +3526,7 @@ fn add_native_sum_batch(
     for (row_index, data) in values.iter().enumerate() {
         check_native_sum_canceled_periodically(cancel_check, &mut mutation_operations)
             .map_err(map_native_query_io_error)?;
-        let row_key = row_keys.as_ref().and_then(|keys| keys[row_index]);
+        let row_key = row_keys.and_then(|keys| keys[row_index]);
         let ordinal = groups.allocations.groups[&row_key];
         let start = ordinal * groups.allocations.sum_count;
         for (sum_index, expr) in sum_inputs.iter().enumerate() {
@@ -3692,26 +3736,29 @@ impl NativeDataSumResultRows {
         query: &NativeDataSumQuery,
         cancel_check: Option<&QueryCancelCheck>,
     ) -> Result<(), SqlQueryError> {
-        let Some(order) = query.order else {
+        if query.order.is_empty() {
             return Ok(());
-        };
+        }
         check_query_canceled(cancel_check)?;
         self.rows.sort_unstable_by(|left, right| {
-            let ordering = compare_optional_bigint(
-                left.values
-                    .get(order.projection_index)
-                    .and_then(|v| v.as_ref()),
-                right
-                    .values
-                    .get(order.projection_index)
-                    .and_then(|v| v.as_ref()),
-            );
-            let ordering = if order.descending {
-                ordering.reverse()
-            } else {
-                ordering
-            };
-            ordering.then_with(|| left.original_position.cmp(&right.original_position))
+            for order in &query.order {
+                let ordering = match &query.projections[order.projection_index] {
+                    NativeDataSumProjection::GroupColumn { .. } => compare_native_sum_order(
+                        left.group_key.as_ref(),
+                        right.group_key.as_ref(),
+                        order,
+                    ),
+                    NativeDataSumProjection::Aggregate(_) => compare_native_sum_order(
+                        left.values[order.projection_index].as_ref(),
+                        right.values[order.projection_index].as_ref(),
+                        order,
+                    ),
+                };
+                if ordering != CmpOrdering::Equal {
+                    return ordering;
+                }
+            }
+            left.original_position.cmp(&right.original_position)
         });
         check_query_canceled(cancel_check)?;
         Ok(())
@@ -3929,11 +3976,8 @@ fn materialize_native_data_sum_rows(
                     column,
                 } => {
                     plan.add_string_capacity(output_column.len())?;
-                    if matches!(
-                        (column, row.group_key),
-                        (NativeDataSumGroupBy::Address, Some(_))
-                    ) {
-                        plan.add_prefixed_hex_string(20)?;
+                    if let Some(key) = native_sum_group_bytes(*column, row.group_key.as_ref())? {
+                        plan.add_prefixed_hex_string(key.len())?;
                     }
                 }
                 NativeDataSumProjection::Aggregate(projection) => {
@@ -3960,16 +4004,9 @@ fn materialize_native_data_sum_rows(
                     column,
                     output_column,
                 } => {
-                    let value = match (column, source.group_key) {
-                        (NativeDataSumGroupBy::Address, Some(NativeGroupKey::Address(address))) => {
-                            Value::String(allocate_json_prefixed_hex(&address, &mut batch)?)
-                        }
-                        (NativeDataSumGroupBy::None, None) => Value::Null,
-                        _ => {
-                            return Err(SqlQueryError::DataFusion(DataFusionError::Internal(
-                                "native SUM group key does not match its projection".to_owned(),
-                            )));
-                        }
+                    let value = match native_sum_group_bytes(*column, source.group_key.as_ref())? {
+                        Some(key) => Value::String(allocate_json_prefixed_hex(key, &mut batch)?),
+                        None => Value::Null,
                     };
                     (output_column, value)
                 }
@@ -4012,11 +4049,43 @@ fn bigint_decimal_bound(value: &BigInt) -> DataFusionResult<usize> {
     })
 }
 
-fn compare_optional_bigint(left: Option<&BigInt>, right: Option<&BigInt>) -> CmpOrdering {
+fn native_sum_group_bytes(
+    column: NativeDataSumGroupBy,
+    key: Option<&NativeGroupKey>,
+) -> Result<Option<&[u8]>, SqlQueryError> {
+    match (column, key) {
+        (NativeDataSumGroupBy::Address, Some(NativeGroupKey::Address(address))) => {
+            Ok(Some(address))
+        }
+        (
+            NativeDataSumGroupBy::Topic0
+            | NativeDataSumGroupBy::Topic1
+            | NativeDataSumGroupBy::Topic2
+            | NativeDataSumGroupBy::Topic3,
+            Some(NativeGroupKey::Topic(topic)),
+        ) => Ok(Some(topic)),
+        (_, None) => Ok(None),
+        _ => Err(SqlQueryError::DataFusion(DataFusionError::Internal(
+            "native SUM group key does not match its projection".to_owned(),
+        ))),
+    }
+}
+
+fn compare_native_sum_order<T: Ord>(
+    left: Option<&T>,
+    right: Option<&T>,
+    order: &NativeAggregateOrder,
+) -> CmpOrdering {
     match (left, right) {
-        (Some(left), Some(right)) => left.cmp(right),
-        // DataFusion's default null ordering treats NULL as the maximum value:
-        // ASC puts it last, and reversing this comparison for DESC puts it first.
+        (Some(left), Some(right)) => {
+            if order.descending {
+                right.cmp(left)
+            } else {
+                left.cmp(right)
+            }
+        }
+        (None, Some(_)) if order.nulls_first => CmpOrdering::Less,
+        (Some(_), None) if order.nulls_first => CmpOrdering::Greater,
         (Some(_), None) => CmpOrdering::Less,
         (None, Some(_)) => CmpOrdering::Greater,
         (None, None) => CmpOrdering::Equal,
@@ -8630,7 +8699,7 @@ mod tests {
                 .any(|sum| matches!(sum, NativeRowValueExpr::Case { .. })),
             "fixture must exercise native CASE evaluation"
         );
-        assert!(query.order.is_some(), "fixture must use native ordering");
+        assert!(!query.order.is_empty(), "fixture must use native ordering");
     }
 
     #[test]
@@ -8733,16 +8802,8 @@ mod tests {
         let sums = vec![PreparedRowValueExpr::Data; 4];
         let calls = std::sync::atomic::AtomicUsize::new(0);
         let cancel: QueryCancelCheck = Arc::new(move || calls.fetch_add(1, Ordering::Relaxed) >= 2);
-        let error = add_native_sum_batch(
-            &mut groups,
-            NativeDataSumGroupBy::None,
-            &sums,
-            &values,
-            None,
-            &[],
-            Some(&cancel),
-        )
-        .unwrap_err();
+        let error = add_native_sum_batch(&mut groups, &sums, &values, None, &[], Some(&cancel))
+            .unwrap_err();
         assert!(
             matches!(error, SqlQueryError::DataFusion(DataFusionError::Execution(ref message)) if message == "query canceled"),
             "{error}"
