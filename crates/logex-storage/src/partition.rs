@@ -94,6 +94,15 @@ impl PartitionManager {
         self.inner.read_view_token()
     }
 
+    /// Capture all physical row prefixes for independent maintenance auditing.
+    /// Perform the scan after releasing the caller's storage selection lock.
+    pub fn primary_audit_snapshot(
+        &self,
+        limits: crate::native::PrimaryAuditLimits,
+    ) -> std::io::Result<crate::native::PrimaryAuditSnapshot> {
+        self.inner.primary_audit_snapshot(limits)
+    }
+
     /// Ingest immutable historical rows using compacted dense segments and sparse staging.
     /// Caller row order is preserved; block and timestamp bounds cover every row.
     pub fn write_historical_batch(&mut self, rows: &[LogRow]) -> std::io::Result<()> {

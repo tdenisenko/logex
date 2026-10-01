@@ -1414,9 +1414,11 @@ impl SegmentReader {
         Ok(())
     }
 
-    /// Screen a locked offline inspection before row IDs, retained raw buffers,
-    /// or data payloads are materialized. These caller-supplied allowances are
-    /// not query limits or a total RSS bound. Decoded bytes include page framing.
+    /// Screen a read-only maintenance capture before row IDs, retained raw
+    /// buffers, or payloads are materialized. Callers retain directory ownership
+    /// and, for a live audit, check read-view validity around the scan. These
+    /// allowances are not query limits or an RSS bound; decoded bytes include
+    /// page framing.
     pub(crate) fn inspection_preflight(
         &mut self,
         max_retained_artifact_bytes: u64,
