@@ -1,7 +1,7 @@
 # Mainnet query regression rows
 
 `mainnet-exact-sums.json` contains 64 unmodified Ethereum mainnet event projections
-selected from WETH Deposit/Withdrawal, USDC mint/burn Transfer and Compound V3
+selected from WETH Deposit/Withdrawal, USDC Mint/Burn and Compound V3
 SupplyCollateral captures. It includes original block/transaction hashes and log
 indices. Non-timestamp fields were compared with `eth_getLogs`; timestamps came
 from LogEx's stored block metadata. `source: Receipt` is assigned from the verified
@@ -23,3 +23,9 @@ The scan-planning tests reuse these same rows to check exact address/topic
 disjunctions, cumulative UNION candidate counts, and cleanup after bounded
 parallel selection encounters capacity limits or cancellation. No further
 benchmark rows are generated.
+
+`mainnet-transfer-filters.json` adds two unchanged LINK/UNI Transfer events from
+the full-range wallet capture, with their original RPC/SQL capture hashes. The
+bloom regressions combine them with the rows above to check multiple emitters,
+event alternatives and conservative fallback for events absent from the index
+format. Protocol-specific Mint/Burn events are not standard Transfer events.
