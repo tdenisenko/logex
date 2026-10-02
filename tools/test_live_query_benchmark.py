@@ -139,6 +139,21 @@ class CaptureOwnershipTests(unittest.TestCase):
                 prepare_captures(self.client, self.root, dict(self.identity, **{field: value}))
         self.assertEqual((captures / "deployment.json").read_bytes(), before)
 
+    def test_new_identity_check_time_does_not_change_deployment_ownership(self):
+        observed = dict(self.identity, identity_matches=True, volume_matches=True,
+                        checked_utc="2026-10-01T01:00:00+00:00")
+        captures = prepare_captures(self.client, self.root, observed)
+        owner = captures / "deployment.json"
+        before = owner.read_bytes()
+        later = dict(observed, checked_utc="2026-10-01T02:00:00+00:00")
+        self.assertEqual(prepare_captures(self.client, self.root, later), captures)
+        self.assertEqual(owner.read_bytes(), before)
+        self.assertNotIn("checked_utc", json.loads(before)["identity"])
+        self.assertEqual(observed["checked_utc"], "2026-10-01T01:00:00+00:00")
+        # Only the observation timestamp is transient. A changed launch is not.
+        with self.assertRaisesRegex(ValueError, "another deployment"):
+            prepare_captures(self.client, self.root, dict(later, started_utc=later["checked_utc"]))
+
     def test_legacy_capture_is_preserved_and_never_adopted(self):
         captures = self.root / "captures"
         captures.mkdir()

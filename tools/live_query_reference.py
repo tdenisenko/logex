@@ -30,7 +30,10 @@ def prepare_captures(client, root, identity):
         raise ValueError("reference capture directory must not be a symlink")
     captures.mkdir(exist_ok=True, mode=0o700)
     owner = captures / "deployment.json"
-    expected = {"version": 1, "identity": identity}
+    # Each guarded check adds a fresh observation time. All deployment fields
+    # stay bound, but that timestamp must not prevent a same-process resume.
+    stable_identity = {key: value for key, value in identity.items() if key != "checked_utc"}
+    expected = {"version": 1, "identity": stable_identity}
     if owner.is_symlink():
         raise ValueError("reference capture identity must not be a symlink")
     if owner.exists():
