@@ -193,6 +193,21 @@ impl PrimaryAuditSnapshot {
         Ok(())
     }
 
+    /// Check writable filesystem headroom in the captured, owned data namespace.
+    /// This is a point-in-time resource check, not a space reservation. Callers
+    /// must still bound their artifacts and handle I/O failures without changing
+    /// primary data. As with the snapshot itself, the caller must keep the
+    /// captured process cwd pinned when storage uses a relative root.
+    pub fn check_available_space(&self, required_free_bytes: u64) -> io::Result<()> {
+        self.validate()?;
+        let result = crate::native::repair::publication::check_headroom(
+            self.paths.root(),
+            required_free_bytes,
+        );
+        self.validate()?;
+        result
+    }
+
     fn check(&self, cancelled: &dyn Fn() -> bool) -> io::Result<()> {
         self.validate()?;
         if cancelled() {

@@ -453,3 +453,19 @@ fn failed_callback_after_reorg_is_reported_as_invalidated_view() {
         .unwrap_err();
     assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
 }
+
+#[test]
+fn headroom_checks_preserve_storage_and_reject_stale_source() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = NativeStorage::open(config(dir.path())).unwrap();
+    let snapshot = storage.primary_audit_snapshot(limits()).unwrap();
+    let before = tree(dir.path());
+    snapshot.check_available_space(0).unwrap();
+    assert!(snapshot.check_available_space(u64::MAX).is_err());
+    assert_eq!(tree(dir.path()), before);
+    drop(storage);
+    assert_eq!(
+        snapshot.check_available_space(0).unwrap_err().kind(),
+        io::ErrorKind::WouldBlock
+    );
+}

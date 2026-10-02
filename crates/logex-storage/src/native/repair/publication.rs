@@ -785,7 +785,7 @@ pub(in crate::native) fn check_headroom(path: &Path, required: u64) -> io::Resul
     let available = u128::from(status.f_bavail) * u128::from(status.f_frsize);
     if status.f_flag & libc::ST_RDONLY != 0 || available < u128::from(required) {
         return Err(io::Error::other(format!(
-            "repair needs {required} free bytes on writable storage; {available} available"
+            "maintenance needs {required} free bytes on writable storage; {available} available"
         )));
     }
     Ok(())
@@ -794,7 +794,7 @@ pub(in crate::native) fn check_headroom(path: &Path, required: u64) -> io::Resul
 pub(in crate::native) fn check_headroom(_: &Path, _: u64) -> io::Result<()> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
-        "repair headroom checks require macOS or Linux",
+        "maintenance headroom checks require macOS or Linux",
     ))
 }
 
