@@ -22,6 +22,7 @@ pub struct ReceiptComparisonReport {
     pub range: AuditRange,
     pub anchor: ExecutionAnchor,
     pub blocks: u64,
+    /// Blocks whose complete receipts emit no events; they may contain transactions.
     pub empty_blocks: u64,
     pub events: u64,
     pub source_prefix_fingerprint: B256,
@@ -91,13 +92,51 @@ impl<'a> ReceiptComparison<'a> {
     }
 
     fn compare_rows(&mut self, header: &Header, rows: &[LogRow]) -> io::Result<()> {
+        self.consume(header, rows.len() as u64, |run| {
+            let offset = usize::try_from(run.first_log).map_err(io::Error::other)?;
+            let end = usize::try_from(run.end_log()?).map_err(io::Error::other)?;
+            let selected = rows.get(offset..end).ok_or_else(|| invalid(format!(
+                "extra physical events at audit block {}: physical end {end}, receipt events {}", header.number, rows.len())))?;
+            let mut digest = run_hasher();
+            for (index, row) in selected.iter().enumerate() {
+                if row.block_number != header.number || row.block_hash != run.block_hash
+                    || row.timestamp != header.timestamp || row.log_index as usize != offset + index {
+                    return Err(invalid("receipt-derived audit row is not in canonical block order"));
+                }
+                hash_row(&mut digest, row)?;
+            }
+            if digest.finalize().as_bytes() != run.digest.as_slice() {
+                return Err(invalid(format!("audit event fields differ at block {}, log indices {}..{}, segment {}, physical row {}", header.number, offset, end, run.segment, run.first_physical_row)));
+            }
+            Ok(())
+        })
+    }
+
+    /// Used only by the private journal replay after full frame validation and
+    /// an exhaustive new manifest matching the original selected namespaces and
+    /// occurrence digest. This reuses prior local verified evidence, not a new
+    /// receipt verification or a portable proof. Never accept a raw peer here.
+    pub(super) fn restore_compared_block(
+        &mut self,
+        header: &Header,
+        events: u64,
+    ) -> io::Result<()> {
+        self.consume(header, events, |_| Ok(()))
+    }
+
+    fn consume(
+        &mut self,
+        header: &Header,
+        events: u64,
+        mut verify: impl FnMut(EventRun) -> io::Result<()>,
+    ) -> io::Result<()> {
         if self.failed {
             return Err(invalid("receipt comparison is terminal after failure"));
         }
         self.failed = true;
         self.manifest.validate()?;
-        let result = self.compare_inner(header, rows);
-        // Do not misclassify a changed view as established primary corruption.
+        let result = self.consume_inner(header, events, &mut verify);
+        // A raced view change has precedence over a possible data mismatch.
         self.manifest.validate()?;
         if result.is_ok() {
             self.failed = false;
@@ -105,7 +144,12 @@ impl<'a> ReceiptComparison<'a> {
         result
     }
 
-    fn compare_inner(&mut self, header: &Header, rows: &[LogRow]) -> io::Result<()> {
+    fn consume_inner(
+        &mut self,
+        header: &Header,
+        events: u64,
+        verify: &mut impl FnMut(EventRun) -> io::Result<()>,
+    ) -> io::Result<()> {
         let hash = header.hash_slow();
         if self.next_block != Some(header.number)
             || hash != self.next_hash
@@ -121,44 +165,29 @@ impl<'a> ReceiptComparison<'a> {
                 "audit contains an unconsumed earlier physical block",
             ));
         }
-        let mut offset = 0usize;
+        let mut offset = 0u64;
         while let Some(run) = self.pending.filter(|run| run.block == header.number) {
-            if run.block_hash != hash || u64::from(run.first_log) != offset as u64 {
+            if run.block_hash != hash || u64::from(run.first_log) != offset {
                 return Err(invalid(format!(
                     "audit physical identity mismatch at block {}, segment {}, row {}",
                     header.number, run.segment, run.first_physical_row
                 )));
             }
-            let end = usize::try_from(run.end_log()?).map_err(io::Error::other)?;
-            let selected = rows.get(offset..end).ok_or_else(|| invalid(format!(
-                "extra physical events at audit block {}: physical end {end}, receipt events {}", header.number, rows.len())))?;
-            let mut digest = run_hasher();
-            for (index, row) in selected.iter().enumerate() {
-                if row.block_number != header.number
-                    || row.block_hash != hash
-                    || row.timestamp != header.timestamp
-                    || row.log_index as usize != offset + index
-                {
-                    return Err(invalid(
-                        "receipt-derived audit row is not in canonical block order",
-                    ));
-                }
-                hash_row(&mut digest, row)?;
-            }
-            if digest.finalize().as_bytes() != run.digest.as_slice() {
+            let end = run.end_log()?;
+            if end > events {
                 return Err(invalid(format!(
-                    "audit event fields differ at block {}, log indices {}..{}, segment {}, physical row {}",
-                    header.number, offset, end, run.segment, run.first_physical_row
+                    "extra physical events at audit block {}: end {end}, receipt events {events}",
+                    header.number
                 )));
             }
+            verify(run)?;
             offset = end;
             self.pending = self.reader.next_run()?;
         }
-        if offset != rows.len() {
+        if offset != events {
             return Err(invalid(format!(
-                "missing physical events at audit block {}: found {offset}, receipt events {}",
-                header.number,
-                rows.len()
+                "missing physical events at audit block {}: found {offset}, receipt events {events}",
+                header.number
             )));
         }
         self.blocks = self
@@ -167,9 +196,9 @@ impl<'a> ReceiptComparison<'a> {
             .ok_or_else(|| invalid("audit block count overflow"))?;
         self.events = self
             .events
-            .checked_add(rows.len() as u64)
+            .checked_add(events)
             .ok_or_else(|| invalid("audit event count overflow"))?;
-        if rows.is_empty() {
+        if events == 0 {
             self.empty_blocks += 1;
         }
         self.next_hash = header.parent_hash;

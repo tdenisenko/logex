@@ -1,6 +1,6 @@
 use std::{
     cmp::{Ordering, Reverse},
-    collections::BinaryHeap,
+    collections::{BTreeSet, BinaryHeap},
     fs::{self, File, OpenOptions},
     io::{self, BufReader, BufWriter, Read, Write},
     path::{Path, PathBuf},
@@ -58,6 +58,9 @@ pub struct AuditManifestSummary {
     pub version: u32,
     pub range: AuditRange,
     pub source_prefix_fingerprint: B256,
+    /// Selected segment namespaces, stable across tail appends and local index
+    /// builds. Resume additionally requires identical selected occurrence bytes.
+    pub selected_namespace_fingerprint: B256,
     pub physical_rows: u64,
     pub canonical_rows: u64,
     pub selected_rows: u64,
@@ -597,6 +600,7 @@ impl AuditManifest {
         let mut physical = 0u64;
         let mut canonical = 0u64;
         let mut selected = 0u64;
+        let mut selected_segments = BTreeSet::new();
         let source_report = source.scan(cancelled, |batch| {
             for item in batch.rows() {
                 check_cancelled(cancelled)?;
@@ -616,6 +620,7 @@ impl AuditManifest {
                 selected = selected
                     .checked_add(1)
                     .ok_or_else(|| invalid("audit selected count overflow"))?;
+                selected_segments.insert(item.segment_id);
                 if pending
                     .as_ref()
                     .is_some_and(|run| !run.can_append(item.segment_id, row))
@@ -646,10 +651,37 @@ impl AuditManifest {
         }
         source.validate()?;
         check_cancelled(cancelled)?;
+        let mut namespaces = blake3::Hasher::new();
+        namespaces.update(b"logex.history-audit.selected-namespaces.v1\0");
+        namespaces.update(&(selected_segments.len() as u64).to_le_bytes());
+        let mut bound = 0usize;
+        // Scan reports follow captured catalog order. Sort identities so a
+        // representation-only catalog reordering does not change this binding.
+        let mut identities = source_report
+            .segments
+            .iter()
+            .filter(|s| selected_segments.contains(&s.segment_id))
+            .collect::<Vec<_>>();
+        identities.sort_unstable_by_key(|s| s.segment_id);
+        for segment in identities {
+            namespaces.update(&segment.segment_id.to_le_bytes());
+            namespaces.update(
+                &segment
+                    .source_namespace
+                    .ok_or_else(|| invalid("selected audit segment lacks source namespace"))?,
+            );
+            bound += 1;
+        }
+        if bound != selected_segments.len() {
+            return Err(invalid(
+                "selected audit segment is missing from scan report",
+            ));
+        }
         let summary = AuditManifestSummary {
             version: 1,
             range,
             source_prefix_fingerprint: source_report.source_prefix_fingerprint,
+            selected_namespace_fingerprint: B256::from(*namespaces.finalize().as_bytes()),
             physical_rows: physical,
             canonical_rows: canonical,
             selected_rows: selected,

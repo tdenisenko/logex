@@ -6,12 +6,12 @@ use reth_ethereum_primitives::BlockBody as EthereumBody;
 use std::collections::BTreeMap;
 
 #[derive(Default)]
-pub(super) struct Scripted {
+pub(crate) struct Scripted {
     headers: BTreeMap<B256, Header>,
     payloads: BTreeMap<B256, (EthereumBody, Vec<ReceiptWithBloom<LogexReceipt>>)>,
-    pub(super) header_calls: Vec<(B256, u64)>,
-    pub(super) body_calls: Vec<u64>,
-    pub(super) receipt_calls: Vec<u64>,
+    pub(crate) header_calls: Vec<(B256, u64)>,
+    pub(crate) body_calls: Vec<u64>,
+    pub(crate) receipt_calls: Vec<u64>,
     partial: bool,
     empty_headers: bool,
     overlong_headers: bool,
@@ -93,11 +93,11 @@ impl RepairSource for Scripted {
     }
 }
 
-pub(super) fn fixture() -> (Scripted, Vec<Header>) {
+pub(crate) fn fixture() -> (Scripted, Vec<Header>) {
     fixture_with_logs(&[2])
 }
 
-pub(super) fn fixture_with_logs(logged_blocks: &[u64]) -> (Scripted, Vec<Header>) {
+pub(crate) fn fixture_with_logs(logged_blocks: &[u64]) -> (Scripted, Vec<Header>) {
     let mut source = Scripted::default();
     let mut headers: Vec<Header> = Vec::new();
     for index in 0..4 {
@@ -159,7 +159,7 @@ pub(super) fn fixture_with_logs(logged_blocks: &[u64]) -> (Scripted, Vec<Header>
     }
     (source, headers)
 }
-pub(super) fn anchor(header: &Header) -> ExecutionAnchor {
+pub(crate) fn anchor(header: &Header) -> ExecutionAnchor {
     ExecutionAnchor {
         beacon_root: B256::repeat_byte(1),
         beacon_slot: 10,
@@ -168,7 +168,7 @@ pub(super) fn anchor(header: &Header) -> ExecutionAnchor {
         receipts_root: header.receipts_root,
     }
 }
-pub(super) fn limits() -> RepairFetchLimits {
+pub(crate) fn limits() -> RepairFetchLimits {
     RepairFetchLimits {
         header_page_size: 2,
         max_headers: 8,

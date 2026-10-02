@@ -234,6 +234,30 @@ pub struct RepairFetcher {
 }
 
 impl RepairFetcher {
+    /// Only the sealed audit journal continuation can skip previously compared
+    /// payloads. Ordinary offline repair always starts from its original anchor.
+    pub(crate) fn resume_audit(
+        prefix: crate::history_audit::AuditedContinuation,
+        limits: RepairFetchLimits,
+        cancellation: CancellationToken,
+    ) -> Result<Self> {
+        let range = RepairRange {
+            start: prefix.range().from,
+            end: prefix.range().through,
+        };
+        let mut cursor = Self::new(range, prefix.anchor(), limits, cancellation)?;
+        let header = prefix.last_header();
+        ensure_repair!(
+            (range.start..=range.end).contains(&header.number)
+                && range.end - header.number + 1 == prefix.blocks(),
+            InvalidInput,
+            "audit continuation does not cover its recorded prefix"
+        );
+        cursor.delivered = prefix.blocks();
+        cursor.child = Some(header.clone());
+        Ok(cursor)
+    }
+
     pub fn new(
         range: RepairRange,
         anchor: ExecutionAnchor,
@@ -601,4 +625,4 @@ pub use reconstruction::{
 };
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

@@ -5,10 +5,13 @@
 //! All results remain provisional while the captured storage view can change.
 
 mod comparison;
+mod journal;
 mod manifest;
 mod network;
 
 pub use comparison::{ReceiptComparison, ReceiptComparisonReport};
+pub(crate) use journal::AuditedContinuation;
+pub use journal::{AuditJobIdentity, AuditJournalLimits, AuditSession};
 pub use manifest::{AuditManifest, AuditManifestLimits, AuditManifestSummary, AuditRange};
 
 pub use network::{AuditNetworkClient, AuditNetworkService};
