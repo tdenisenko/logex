@@ -1,5 +1,5 @@
 use crate::builder::validate_source_rows;
-use std::io::{self, Read, Seek, SeekFrom};
+use std::io::{self, Read};
 use std::path::Path;
 
 use alloy_primitives::{Address, B256, keccak256};
@@ -10,11 +10,9 @@ use crate::index_file::{IndexFile, write_index_file};
 
 const TRANSFER_MAGIC: &[u8; 8] = b"LXTRBF1\0";
 const ERC20_EVENTS_MAGIC: &[u8; 8] = b"LXE2BF1\0";
-const HEADER_LEN: u64 = 8 + 8 + 4;
-const MIN_FILTER_BYTES: usize = 256 * 1024;
-const MAX_FILTER_BYTES: usize = 2 * 1024 * 1024;
-const MAX_FILTER_BITS: u64 = (MAX_FILTER_BYTES as u64) * 8;
-const HASH_ROUNDS: u64 = 4;
+use crate::bloom::{HASH_ROUNDS, HEADER_LEN, filter_bytes, open_bloom, read_key};
+#[cfg(test)]
+use crate::bloom::{MAX_FILTER_BITS, MAX_FILTER_BYTES, MIN_FILTER_BYTES};
 
 pub const ERC20_EVENTS_BLOOM_FILE: &str = "erc20_events.bloom";
 pub const TRANSFER_BLOOM_FILE: &str = "erc20_transfer.bloom";
@@ -236,22 +234,12 @@ impl Erc20EventBloomReader {
         })?;
 
         let (h1, h2) = erc20_event_key_hashes(topic0, address, topic_index, topic);
-        for round in 0..HASH_ROUNDS {
-            let bit = h1.wrapping_add(round.wrapping_mul(h2)) & self.bit_mask;
-            let byte_offset = HEADER_LEN + bit / 8;
-            self.reader.seek(SeekFrom::Start(byte_offset))?;
-            let mut byte = [0u8; 1];
-            self.reader.read_exact(&mut byte)?;
-            if byte[0] & (1u8 << (bit % 8)) == 0 {
-                return Ok(false);
-            }
-        }
-        Ok(true)
+        read_key(&mut self.reader, self.bit_mask, (h1, h2))
     }
 }
 
 /// Legacy per-segment presence filter for ERC20 Transfer
-/// sender/receiver keys. New syncs build `erc20_events.bloom`; this reader is
+/// sender/receiver keys. New syncs build `events.bloom`; this reader is
 /// kept for integrity-protected Transfer indexes. Raw legacy bloom files must be
 /// rebuilt because they cannot detect changes to presence bits.
 #[derive(Debug, Clone)]
@@ -383,63 +371,8 @@ impl TransferBloomReader {
         })?;
 
         let (h1, h2) = transfer_key_hashes(address, topic_index, topic);
-        for round in 0..HASH_ROUNDS {
-            let bit = h1.wrapping_add(round.wrapping_mul(h2)) & self.bit_mask;
-            let byte_offset = HEADER_LEN + bit / 8;
-            self.reader.seek(SeekFrom::Start(byte_offset))?;
-            let mut byte = [0u8; 1];
-            self.reader.read_exact(&mut byte)?;
-            if byte[0] & (1u8 << (bit % 8)) == 0 {
-                return Ok(false);
-            }
-        }
-        Ok(true)
+        read_key(&mut self.reader, self.bit_mask, (h1, h2))
     }
-}
-
-pub(crate) fn encoded_logical_size_for_rows(rows: u64) -> io::Result<u64> {
-    let rows = usize::try_from(rows).map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "bloom row count exceeds address space",
-        )
-    })?;
-    HEADER_LEN
-        .checked_add(filter_bytes(rows) as u64)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "bloom size bound overflow"))
-}
-
-// Two indexed topic positions per source row need at most two insertions.
-// Keep at least 128 bits per insertion through 65,536 rows, then retain the
-// previous 2 MiB ceiling. Clamp before multiplication and power-of-two rounding.
-fn filter_bytes(row_count: usize) -> usize {
-    (row_count.min(MAX_FILTER_BYTES / 32) * 32)
-        .next_power_of_two()
-        .max(MIN_FILTER_BYTES)
-}
-
-fn open_bloom(mut reader: IndexFile, expected_magic: &[u8; 8]) -> io::Result<(IndexFile, u64)> {
-    if !reader.is_protected() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "legacy bloom has no integrity checks; rebuild derived indexes",
-        ));
-    }
-    let mut header = [0; HEADER_LEN as usize];
-    reader.read_exact(&mut header)?;
-    let bit_len = u64::from_le_bytes(header[8..16].try_into().unwrap());
-    if &header[..8] != expected_magic
-        || !bit_len.is_power_of_two()
-        || !(MIN_FILTER_BYTES as u64 * 8..=MAX_FILTER_BITS).contains(&bit_len)
-        || header[16..20] != (HASH_ROUNDS as u32).to_le_bytes()
-        || reader.logical_len() != HEADER_LEN + bit_len / 8
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "invalid bloom file geometry",
-        ));
-    }
-    Ok((reader, bit_len - 1))
 }
 
 fn transfer_key_hashes(address: &Address, topic_index: u8, topic: &B256) -> (u64, u64) {

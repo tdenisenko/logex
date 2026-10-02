@@ -6,6 +6,7 @@ use logex_storage::{IndexBuildCheckpoint, IndexReadCheckpoint, SegmentReader};
 
 use crate::btree::BTreeIndex;
 use crate::composite::CompositeIndexBuilder;
+use crate::event_bloom::{EVENT_BLOOM_FILE, EventBloom};
 use crate::index_file::IndexFile;
 use crate::transfer_bloom::{ERC20_EVENTS_BLOOM_FILE, Erc20EventBloom};
 
@@ -13,6 +14,9 @@ use crate::transfer_bloom::{ERC20_EVENTS_BLOOM_FILE, Erc20EventBloom};
 pub enum IndexBuildProfile {
     All,
     LogQuery,
+    /// Compact presence and indexed-argument filters for every event type.
+    Events,
+    /// Compatibility profile for existing Transfer/Approval-only consumers.
     Erc20Transfer,
 }
 
@@ -75,8 +79,8 @@ impl IndexBuilder {
         // publication marker, including its envelope, independently of profile.
         let mut total = 4096u64;
         for name in Self::required_index_files(profile) {
-            let logical = if *name == ERC20_EVENTS_BLOOM_FILE {
-                crate::transfer_bloom::encoded_logical_size_for_rows(row_count)?
+            let logical = if matches!(*name, EVENT_BLOOM_FILE | ERC20_EVENTS_BLOOM_FILE) {
+                crate::bloom::encoded_logical_size_for_rows(row_count)?
             } else {
                 let key_size = match *name {
                     "address.bptree" => 20,
@@ -291,7 +295,12 @@ impl IndexBuilder {
         let checkpoint = Self::begin_publication(partition_dir)?;
         let index_dir = partition_dir.join("indexes");
         Self::build_indexes_unpublished(partition_dir, &index_dir, profile)?;
-        Self::publish_at(partition_dir, &index_dir, checkpoint)
+        Self::publish_at(
+            partition_dir,
+            &index_dir,
+            checkpoint,
+            profile != IndexBuildProfile::Erc20Transfer,
+        )
     }
 
     /// Build a fresh index tree without copying or modifying primary columns.
@@ -304,7 +313,12 @@ impl IndexBuilder {
     ) -> io::Result<()> {
         let checkpoint = IndexBuildCheckpoint::begin_fresh_at(source_dir, index_dir)?;
         Self::build_indexes_unpublished(source_dir, index_dir, profile)?;
-        Self::publish_at(source_dir, index_dir, checkpoint)
+        Self::publish_at(
+            source_dir,
+            index_dir,
+            checkpoint,
+            profile != IndexBuildProfile::Erc20Transfer,
+        )
     }
 
     fn build_indexes_unpublished(
@@ -316,12 +330,15 @@ impl IndexBuilder {
             IndexBuildProfile::All => {
                 Self::build_primary_indexes_unpublished(partition_dir, index_dir)?;
                 CompositeIndexBuilder::build_log_query_indexes(partition_dir, index_dir)?;
-                Erc20EventBloom::build(partition_dir, index_dir)?;
+                EventBloom::build(partition_dir, index_dir)?;
             }
             IndexBuildProfile::LogQuery => {
                 Self::build_log_query_primary_indexes_unpublished(partition_dir, index_dir)?;
                 CompositeIndexBuilder::build_log_query_indexes(partition_dir, index_dir)?;
-                Erc20EventBloom::build(partition_dir, index_dir)?;
+                EventBloom::build(partition_dir, index_dir)?;
+            }
+            IndexBuildProfile::Events => {
+                EventBloom::build(partition_dir, index_dir)?;
             }
             IndexBuildProfile::Erc20Transfer => {
                 Erc20EventBloom::build(partition_dir, index_dir)?;
@@ -348,12 +365,20 @@ impl IndexBuilder {
                 Self::build_missing_primary_indexes(partition_dir, &index_dir, false)?;
                 Self::build_missing_log_query_composites(partition_dir, &index_dir)?;
             }
+            IndexBuildProfile::Events => {
+                Self::build_missing_event_indexes(partition_dir, &index_dir)?;
+            }
             IndexBuildProfile::Erc20Transfer => {
                 Self::build_missing_erc20_transfer_indexes(partition_dir, &index_dir)?;
             }
         }
 
-        Self::publish(partition_dir, checkpoint)?;
+        Self::publish_at(
+            partition_dir,
+            &index_dir,
+            checkpoint,
+            profile != IndexBuildProfile::Erc20Transfer,
+        )?;
         Ok(())
     }
 
@@ -364,7 +389,7 @@ impl IndexBuilder {
         for name in Self::required_index_files(IndexBuildProfile::All)
             .iter()
             .copied()
-            .chain([crate::TRANSFER_BLOOM_FILE])
+            .chain([ERC20_EVENTS_BLOOM_FILE, crate::TRANSFER_BLOOM_FILE])
         {
             let path = partition_dir.join("indexes").join(name);
             let reusable = if !checkpoint.can_reuse_existing() {
@@ -399,24 +424,46 @@ impl IndexBuilder {
     }
 
     fn publish(partition_dir: &Path, checkpoint: IndexBuildCheckpoint) -> std::io::Result<()> {
-        Self::publish_at(partition_dir, &partition_dir.join("indexes"), checkpoint)
+        Self::publish_at(
+            partition_dir,
+            &partition_dir.join("indexes"),
+            checkpoint,
+            false,
+        )
     }
 
     fn publish_at(
         source_dir: &Path,
         index_dir: &Path,
         mut checkpoint: IndexBuildCheckpoint,
+        retire_legacy_filters: bool,
     ) -> std::io::Result<()> {
+        let mut general_verified = false;
         for name in Self::required_index_files(IndexBuildProfile::All)
             .iter()
             .copied()
-            .chain([crate::TRANSFER_BLOOM_FILE])
+            .chain([ERC20_EVENTS_BLOOM_FILE, crate::TRANSFER_BLOOM_FILE])
         {
             let path = index_dir.join(name);
+            if retire_legacy_filters
+                && general_verified
+                && matches!(name, ERC20_EVENTS_BLOOM_FILE | crate::TRANSFER_BLOOM_FILE)
+            {
+                // The verified general filter supersedes both old key scopes.
+                // Hold the exclusive checkpoint guard while removing derived
+                // files; failed publication still leaves primary scans usable.
+                match fs::remove_file(&path) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error),
+                }
+                continue;
+            }
             match IndexFile::protected_file_id(&path) {
                 Ok(file_id) => {
                     crate::verification::verify_artifact(source_dir, &path, name, file_id)?;
                     checkpoint.register_artifact(name, file_id)?;
+                    general_verified |= name == EVENT_BLOOM_FILE;
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => return Err(error),
@@ -438,7 +485,7 @@ impl IndexBuilder {
                 "topic0_topic1.bptree",
                 "address_topic0_topic1.bptree",
                 "address_topic0_topic2.bptree",
-                ERC20_EVENTS_BLOOM_FILE,
+                EVENT_BLOOM_FILE,
             ],
             IndexBuildProfile::LogQuery => &[
                 "block_number.bptree",
@@ -448,8 +495,9 @@ impl IndexBuilder {
                 "topic0_topic1.bptree",
                 "address_topic0_topic1.bptree",
                 "address_topic0_topic2.bptree",
-                ERC20_EVENTS_BLOOM_FILE,
+                EVENT_BLOOM_FILE,
             ],
+            IndexBuildProfile::Events => &[EVENT_BLOOM_FILE],
             IndexBuildProfile::Erc20Transfer => &[ERC20_EVENTS_BLOOM_FILE],
         }
     }
@@ -519,7 +567,14 @@ impl IndexBuilder {
         if !index_dir.join("address_topic0_topic2.bptree").is_file() {
             CompositeIndexBuilder::build_address_topic0_topic2(partition_dir, index_dir)?;
         }
-        Self::build_missing_erc20_transfer_indexes(partition_dir, index_dir)
+        Self::build_missing_event_indexes(partition_dir, index_dir)
+    }
+
+    fn build_missing_event_indexes(partition_dir: &Path, index_dir: &Path) -> io::Result<()> {
+        if !index_dir.join(EVENT_BLOOM_FILE).is_file() {
+            EventBloom::build(partition_dir, index_dir)?;
+        }
+        Ok(())
     }
 
     fn build_missing_erc20_transfer_indexes(
@@ -771,7 +826,8 @@ mod tests {
                 .write_to_file(&stage.join(name))
                 .unwrap();
             BTreeIndexReader::open(&stage.join(name)).unwrap();
-            let error = IndexBuilder::publish_at(source.path(), &stage, checkpoint).unwrap_err();
+            let error =
+                IndexBuilder::publish_at(source.path(), &stage, checkpoint, false).unwrap_err();
             assert!(
                 error.to_string().contains("omits required source row"),
                 "{name}: {error}"
@@ -845,13 +901,20 @@ mod tests {
         rows[1].topic0 = Some(crate::approval_topic0());
         rows[1].topic2 = Some(B256::repeat_byte(8));
         ColumnFile::write_batch(source.path(), &rows).unwrap();
-        for name in [ERC20_EVENTS_BLOOM_FILE, crate::TRANSFER_BLOOM_FILE] {
+        for name in [
+            EVENT_BLOOM_FILE,
+            ERC20_EVENTS_BLOOM_FILE,
+            crate::TRANSFER_BLOOM_FILE,
+        ] {
             for fill in [0, 255] {
                 let parent = TempDir::new().unwrap();
                 let stage = parent.path().join("stage");
                 let checkpoint =
                     IndexBuildCheckpoint::begin_fresh_at(source.path(), &stage).unwrap();
-                if name == ERC20_EVENTS_BLOOM_FILE {
+                if name == EVENT_BLOOM_FILE {
+                    Erc20EventBloom::build(source.path(), &stage).unwrap();
+                    EventBloom::build(source.path(), &stage).unwrap();
+                } else if name == ERC20_EVENTS_BLOOM_FILE {
                     crate::Erc20EventBloom::build(source.path(), &stage).unwrap();
                 } else {
                     crate::TransferBloom::build(source.path(), &stage).unwrap();
@@ -868,7 +931,12 @@ mod tests {
                     writer.write_all(&payload)
                 })
                 .unwrap();
-                let result = IndexBuilder::publish_at(source.path(), &stage, checkpoint);
+                let result = IndexBuilder::publish_at(
+                    source.path(),
+                    &stage,
+                    checkpoint,
+                    name == EVENT_BLOOM_FILE,
+                );
                 if fill == 0 {
                     assert!(
                         result
@@ -877,12 +945,61 @@ mod tests {
                             .contains("bloom omits source row")
                     );
                     assert!(!stage.join("index-checkpoint").exists());
+                    if name == EVENT_BLOOM_FILE {
+                        assert!(stage.join(ERC20_EVENTS_BLOOM_FILE).is_file());
+                    }
                 } else {
                     result.unwrap();
                     assert!(stage.join("index-checkpoint").is_file());
+                    if name == EVENT_BLOOM_FILE {
+                        assert!(!stage.join(ERC20_EVENTS_BLOOM_FILE).exists());
+                    }
                 }
             }
         }
+    }
+
+    #[test]
+    fn general_filter_upgrade_preserves_primary_and_retires_legacy_filters() {
+        let dir = TempDir::new().unwrap();
+        let mut rows = make_test_rows();
+        rows[0].topic0 = Some(crate::transfer_topic0());
+        rows[0].topic1 = Some(B256::ZERO);
+        ColumnFile::write_batch(dir.path(), &rows).unwrap();
+        IndexBuilder::build_indexes(dir.path(), IndexBuildProfile::Erc20Transfer).unwrap();
+        let primary = |path: &Path| {
+            verification_tree(path)
+                .into_iter()
+                .filter(|(name, _)| !name.as_os_str().is_empty() && !name.starts_with("indexes"))
+                .collect::<VerificationTree>()
+        };
+        let before = primary(dir.path());
+        assert!(IndexBuilder::indexes_missing(dir.path(), IndexBuildProfile::Events).unwrap());
+        assert!(
+            !IndexBuilder::indexes_missing(dir.path(), IndexBuildProfile::Erc20Transfer).unwrap()
+        );
+        IndexBuilder::build_missing_indexes(dir.path(), IndexBuildProfile::Events).unwrap();
+        IndexBuilder::verify_indexes(dir.path(), IndexBuildProfile::Events).unwrap();
+        assert!(!IndexBuilder::indexes_missing(dir.path(), IndexBuildProfile::Events).unwrap());
+        assert!(
+            !dir.path()
+                .join("indexes")
+                .join(ERC20_EVENTS_BLOOM_FILE)
+                .exists()
+        );
+        assert_eq!(primary(dir.path()), before);
+        let reader = SegmentReader::open(dir.path()).unwrap();
+        let checkpoint = IndexReadCheckpoint::open(dir.path(), &reader)
+            .unwrap()
+            .unwrap();
+        assert!(checkpoint.artifact_id(EVENT_BLOOM_FILE).is_some());
+        assert!(checkpoint.artifact_id(ERC20_EVENTS_BLOOM_FILE).is_none());
+        drop(checkpoint);
+        let published = verification_tree(dir.path());
+        IndexBuilder::build_missing_indexes(dir.path(), IndexBuildProfile::Events).unwrap();
+        // A subsequent build retains the exact existing filter identity/bytes.
+        let name = Path::new("indexes").join(EVENT_BLOOM_FILE);
+        assert_eq!(published[&name], verification_tree(dir.path())[&name]);
     }
 
     #[test]
@@ -952,6 +1069,7 @@ mod tests {
         for (index, profile) in [
             IndexBuildProfile::All,
             IndexBuildProfile::LogQuery,
+            IndexBuildProfile::Events,
             IndexBuildProfile::Erc20Transfer,
         ]
         .into_iter()
@@ -1056,7 +1174,7 @@ mod tests {
             for profile in [
                 IndexBuildProfile::All,
                 IndexBuildProfile::LogQuery,
-                IndexBuildProfile::Erc20Transfer,
+                IndexBuildProfile::Events,
             ] {
                 let dir = TempDir::new().unwrap();
                 ColumnFile::write_batch(dir.path(), &rows).unwrap();
@@ -1090,6 +1208,7 @@ mod tests {
         for profile in [
             IndexBuildProfile::All,
             IndexBuildProfile::LogQuery,
+            IndexBuildProfile::Events,
             IndexBuildProfile::Erc20Transfer,
         ] {
             let mut previous = 0;
@@ -1122,12 +1241,12 @@ mod tests {
         let query =
             IndexBuilder::estimate_fresh_index_bytes(96, IndexBuildProfile::LogQuery).unwrap();
         let bloom =
-            IndexBuilder::estimate_fresh_index_bytes(96, IndexBuildProfile::Erc20Transfer).unwrap();
+            IndexBuilder::estimate_fresh_index_bytes(96, IndexBuildProfile::Events).unwrap();
         assert!(all > query && query > bloom);
         let logical = 20u64 + 262144;
         let expected_empty_bloom = 4096 + 48 + logical + 8 * logical.div_ceil(4096);
         assert_eq!(
-            IndexBuilder::estimate_fresh_index_bytes(0, IndexBuildProfile::Erc20Transfer).unwrap(),
+            IndexBuilder::estimate_fresh_index_bytes(0, IndexBuildProfile::Events).unwrap(),
             expected_empty_bloom
         );
         assert!(crate::btree::row_partitioned_logical_size_bound(u64::MAX, 84).is_err());
@@ -1140,7 +1259,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         ColumnFile::write_batch(dir.path(), &make_test_rows()).unwrap();
         IndexBuilder::build_all_indexes(dir.path()).unwrap();
-        for profile in [IndexBuildProfile::Erc20Transfer, IndexBuildProfile::All] {
+        for profile in [IndexBuildProfile::Events, IndexBuildProfile::All] {
             let lengths: Vec<_> = IndexBuilder::required_index_files(profile)
                 .iter()
                 .map(|name| {
@@ -1253,7 +1372,7 @@ mod tests {
         for profile in [
             IndexBuildProfile::All,
             IndexBuildProfile::LogQuery,
-            IndexBuildProfile::Erc20Transfer,
+            IndexBuildProfile::Events,
         ] {
             IndexBuilder::verify_indexes(dir.path(), profile).unwrap();
         }
@@ -1349,7 +1468,7 @@ mod tests {
             for profile in [
                 IndexBuildProfile::All,
                 IndexBuildProfile::LogQuery,
-                IndexBuildProfile::Erc20Transfer,
+                IndexBuildProfile::Events,
             ] {
                 assert_eq!(
                     IndexBuilder::indexes_missing(dir.path(), profile)
@@ -1377,7 +1496,7 @@ mod tests {
         for profile in [
             IndexBuildProfile::All,
             IndexBuildProfile::LogQuery,
-            IndexBuildProfile::Erc20Transfer,
+            IndexBuildProfile::Events,
         ] {
             let dir = TempDir::new().unwrap();
             let rows = make_test_rows();
@@ -1433,7 +1552,7 @@ mod tests {
 
         let profile_dir = TempDir::new().unwrap();
         ColumnFile::write_batch(profile_dir.path(), &rows).unwrap();
-        IndexBuilder::build_indexes(profile_dir.path(), IndexBuildProfile::Erc20Transfer).unwrap();
+        IndexBuilder::build_indexes(profile_dir.path(), IndexBuildProfile::Events).unwrap();
         let profile_indexes = profile_dir.path().join("indexes");
         let mut unregistered = BTreeIndex::new(20);
         unregistered.insert(Address::repeat_byte(0x44).as_slice(), 0);
@@ -1463,7 +1582,7 @@ mod tests {
         for profile in [
             IndexBuildProfile::All,
             IndexBuildProfile::LogQuery,
-            IndexBuildProfile::Erc20Transfer,
+            IndexBuildProfile::Events,
         ] {
             for different_rows in [2, 4] {
                 let dir = TempDir::new().unwrap();

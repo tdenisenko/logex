@@ -5,8 +5,9 @@ use alloy_primitives::{Address, B256};
 use roaring::RoaringBitmap;
 
 use logex_index::{
-    BTreeIndexReader, CompositeQuery, ERC20_EVENTS_BLOOM_FILE, Erc20EventBloomReader, QueryBitmap,
-    TRANSFER_BLOOM_FILE, TransferBloomReader, is_common_erc20_event_topic0, transfer_topic0,
+    BTreeIndexReader, CompositeQuery, ERC20_EVENTS_BLOOM_FILE, EVENT_BLOOM_FILE,
+    Erc20EventBloomReader, EventBloomReader, QueryBitmap, TRANSFER_BLOOM_FILE, TransferBloomReader,
+    is_common_erc20_event_topic0, transfer_topic0,
 };
 use logex_storage::native::{LogOrder, NativeLogFilter, ReadViewToken, TopicConstraint};
 use logex_storage::{IndexReadCheckpoint, PartitionManager, SegmentReader};
@@ -657,7 +658,7 @@ pub(crate) fn candidate_row_ids_for_filters_on_reader_with_memory(
         None
     };
     let bloom_exclusions = match checkpoint.as_ref() {
-        Some(checkpoint) => erc20_event_bloom_exclusions_with_memory(
+        Some(checkpoint) => event_bloom_exclusions_with_memory(
             &dir.join("indexes"),
             checkpoint,
             filters,
@@ -1201,7 +1202,7 @@ pub(crate) fn candidate_row_ids_for_reader(
     };
     if let Some(checkpoint) = checkpoint.as_ref()
         && !event_bloom_prechecked
-        && erc20_event_bloom_excludes(&dir.join("indexes"), checkpoint, filter)?
+        && event_bloom_excludes(&dir.join("indexes"), checkpoint, filter)?
     {
         return Ok(Vec::new());
     }
@@ -1759,24 +1760,63 @@ fn build_index_candidate_set(
     Ok(result)
 }
 
-fn erc20_event_bloom_excludes(
+enum PublishedEventBloom {
+    General(EventBloomReader),
+    Common(Erc20EventBloomReader),
+    Transfer(TransferBloomReader),
+}
+
+impl PublishedEventBloom {
+    fn open(
+        index_dir: &Path,
+        checkpoint: &IndexReadCheckpoint,
+        memory: Option<&QueryMemoryBudget>,
+    ) -> io::Result<Option<Self>> {
+        if let Some(id) = checkpoint.artifact_id(EVENT_BLOOM_FILE) {
+            let path = index_dir.join(EVENT_BLOOM_FILE);
+            let reader = match memory {
+                Some(memory) => EventBloomReader::open_bound_with_memory(&path, id, memory)?,
+                None => EventBloomReader::open_bound(&path, id)?,
+            };
+            return Ok(Some(Self::General(reader)));
+        }
+        if let Some(id) = checkpoint.artifact_id(ERC20_EVENTS_BLOOM_FILE) {
+            let path = index_dir.join(ERC20_EVENTS_BLOOM_FILE);
+            let reader = match memory {
+                Some(memory) => Erc20EventBloomReader::open_bound_with_memory(&path, id, memory)?,
+                None => Erc20EventBloomReader::open_bound(&path, id)?,
+            };
+            return Ok(Some(Self::Common(reader)));
+        }
+        if let Some(id) = checkpoint.artifact_id(TRANSFER_BLOOM_FILE) {
+            let path = index_dir.join(TRANSFER_BLOOM_FILE);
+            let reader = match memory {
+                Some(memory) => TransferBloomReader::open_bound_with_memory(&path, id, memory)?,
+                None => TransferBloomReader::open_bound(&path, id)?,
+            };
+            return Ok(Some(Self::Transfer(reader)));
+        }
+        Ok(None)
+    }
+
+    fn excludes(&mut self, filter: &NativeLogFilter) -> io::Result<bool> {
+        match self {
+            Self::General(reader) => general_event_bloom_reader_excludes(reader, filter),
+            Self::Common(reader) => erc20_event_bloom_reader_excludes(reader, filter),
+            Self::Transfer(reader) => legacy_transfer_bloom_reader_excludes(reader, filter),
+        }
+    }
+}
+
+fn event_bloom_excludes(
     index_dir: &Path,
     checkpoint: &IndexReadCheckpoint,
     filter: &NativeLogFilter,
 ) -> io::Result<bool> {
-    let common_bloom_path = index_dir.join(ERC20_EVENTS_BLOOM_FILE);
-    if let Some(file_id) = checkpoint.artifact_id(ERC20_EVENTS_BLOOM_FILE) {
-        let mut reader = Erc20EventBloomReader::open_bound(&common_bloom_path, file_id)?;
-        return erc20_event_bloom_reader_excludes(&mut reader, filter);
+    match PublishedEventBloom::open(index_dir, checkpoint, None)? {
+        Some(mut bloom) => bloom.excludes(filter),
+        None => Ok(false),
     }
-
-    let legacy_transfer_bloom_path = index_dir.join(TRANSFER_BLOOM_FILE);
-    if let Some(file_id) = checkpoint.artifact_id(TRANSFER_BLOOM_FILE) {
-        let mut reader = TransferBloomReader::open_bound(&legacy_transfer_bloom_path, file_id)?;
-        return legacy_transfer_bloom_reader_excludes(&mut reader, filter);
-    }
-
-    Ok(false)
 }
 
 #[derive(Debug)]
@@ -1799,59 +1839,49 @@ impl AccountedBloomExclusions {
     }
 }
 
-fn erc20_event_bloom_exclusions_with_memory(
+fn event_bloom_exclusions_with_memory(
     index_dir: &Path,
     checkpoint: &IndexReadCheckpoint,
     filters: &[NativeLogFilter],
     memory: &QueryMemoryBudget,
     cancel: Option<&crate::QueryCancelCheck>,
 ) -> io::Result<AccountedBloomExclusions> {
-    let common_bloom_path = index_dir.join(ERC20_EVENTS_BLOOM_FILE);
-    if let Some(file_id) = checkpoint.artifact_id(ERC20_EVENTS_BLOOM_FILE) {
-        let mut reader =
-            Erc20EventBloomReader::open_bound_with_memory(&common_bloom_path, file_id, memory)?;
-        if let [filter] = filters {
-            check_candidate_canceled(cancel)?;
-            return erc20_event_bloom_reader_excludes(&mut reader, filter)
-                .map(AccountedBloomExclusions::Single);
-        }
-        let mut exclusions =
-            QueryBuffer::try_with_capacity(filters.len(), Some(memory), "event bloom exclusions")?;
-        for filter in filters {
-            check_candidate_canceled(cancel)?;
-            exclusions.try_push(u8::from(erc20_event_bloom_reader_excludes(
-                &mut reader,
-                filter,
-            )?))?;
-        }
-        return Ok(AccountedBloomExclusions::Multiple(exclusions));
+    let Some(mut reader) = PublishedEventBloom::open(index_dir, checkpoint, Some(memory))? else {
+        return Ok(AccountedBloomExclusions::None);
+    };
+    if let [filter] = filters {
+        check_candidate_canceled(cancel)?;
+        return reader
+            .excludes(filter)
+            .map(AccountedBloomExclusions::Single);
     }
-
-    let legacy_transfer_bloom_path = index_dir.join(TRANSFER_BLOOM_FILE);
-    if let Some(file_id) = checkpoint.artifact_id(TRANSFER_BLOOM_FILE) {
-        let mut reader = TransferBloomReader::open_bound_with_memory(
-            &legacy_transfer_bloom_path,
-            file_id,
-            memory,
-        )?;
-        if let [filter] = filters {
-            check_candidate_canceled(cancel)?;
-            return legacy_transfer_bloom_reader_excludes(&mut reader, filter)
-                .map(AccountedBloomExclusions::Single);
-        }
-        let mut exclusions =
-            QueryBuffer::try_with_capacity(filters.len(), Some(memory), "event bloom exclusions")?;
-        for filter in filters {
-            check_candidate_canceled(cancel)?;
-            exclusions.try_push(u8::from(legacy_transfer_bloom_reader_excludes(
-                &mut reader,
-                filter,
-            )?))?;
-        }
-        return Ok(AccountedBloomExclusions::Multiple(exclusions));
+    let mut exclusions =
+        QueryBuffer::try_with_capacity(filters.len(), Some(memory), "event bloom exclusions")?;
+    for filter in filters {
+        check_candidate_canceled(cancel)?;
+        exclusions.try_push(u8::from(reader.excludes(filter)?))?;
     }
+    Ok(AccountedBloomExclusions::Multiple(exclusions))
+}
 
-    Ok(AccountedBloomExclusions::None)
+fn general_event_bloom_reader_excludes(
+    reader: &mut EventBloomReader,
+    filter: &NativeLogFilter,
+) -> io::Result<bool> {
+    // Prefer selective argument keys; signature-only queries also skip absent
+    // emitter/event pairs. Every present candidate still gets exact refinement.
+    event_bloom_excludes_keys(
+        filter,
+        |_| true,
+        &[1, 2, 3, 0],
+        |event, address, index, topic| {
+            if index == 0 {
+                reader.may_contain_event(event, address)
+            } else {
+                reader.may_contain_topic(event, address, index, topic)
+            }
+        },
+    )
 }
 
 fn erc20_event_bloom_reader_excludes(
@@ -1861,6 +1891,7 @@ fn erc20_event_bloom_reader_excludes(
     event_bloom_excludes_keys(
         filter,
         is_common_erc20_event_topic0,
+        &[1, 2],
         |event, address, index, topic| reader.may_contain(event, address, index, topic),
     )
 }
@@ -1872,6 +1903,7 @@ fn legacy_transfer_bloom_reader_excludes(
     event_bloom_excludes_keys(
         filter,
         |event| *event == transfer_topic0(),
+        &[1, 2],
         |_, address, index, topic| reader.may_contain(address, index, topic),
     )
 }
@@ -1881,6 +1913,7 @@ const MAX_EVENT_BLOOM_PROBES: usize = 256;
 fn event_bloom_excludes_keys(
     filter: &NativeLogFilter,
     supported: impl Fn(&B256) -> bool,
+    positions: &[usize],
     mut may_contain: impl FnMut(&B256, &Address, usize, &B256) -> io::Result<bool>,
 ) -> io::Result<bool> {
     let Some(events) = topic_values(&filter.topics[0]) else {
@@ -1892,8 +1925,13 @@ fn event_bloom_excludes_keys(
     // Bound cross-products from large IN lists. Falling back to the normal
     // column scan is conservative and keeps each filter's probe work bounded.
     let mut remaining = MAX_EVENT_BLOOM_PROBES;
-    for index in [1usize, 2usize] {
-        let Some(topics) = topic_values(&filter.topics[index]) else {
+    for &index in positions {
+        let values = if index == 0 {
+            Some(std::slice::from_ref(&B256::ZERO))
+        } else {
+            topic_values(&filter.topics[index])
+        };
+        let Some(topics) = values else {
             continue;
         };
         let mut any_present = false;
@@ -2905,6 +2943,7 @@ mod tests {
         IndexBuilder::build_all_indexes(dir.path()).unwrap();
         let indexes = dir.path().join("indexes");
         logex_index::TransferBloom::build(dir.path(), &indexes).unwrap();
+        logex_index::Erc20EventBloom::build(dir.path(), &indexes).unwrap();
         let mut current =
             Erc20EventBloomReader::open(&indexes.join(ERC20_EVENTS_BLOOM_FILE)).unwrap();
         let mut legacy = TransferBloomReader::open(&indexes.join(TRANSFER_BLOOM_FILE)).unwrap();
@@ -2939,6 +2978,213 @@ mod tests {
     }
 
     #[test]
+    fn general_event_filters_match_exact_scans_and_accounted_unions() {
+        let dir = tempfile::tempdir().unwrap();
+        let prototype = make_test_rows()[0].clone();
+        let events = [
+            alloy_primitives::keccak256(b"Deposit(address,uint256)"),
+            alloy_primitives::keccak256(b"Withdrawal(address,uint256)"),
+            transfer_topic0(),
+            alloy_primitives::keccak256(
+                b"TransferBatch(address,address,address,uint256[],uint256[])",
+            ),
+        ];
+        let mut rows = Vec::new();
+        for (i, event) in events.into_iter().enumerate() {
+            rows.push(LogRow {
+                address: Address::repeat_byte(i as u8),
+                topic0: Some(event),
+                topic1: Some(B256::repeat_byte(i as u8)),
+                topic2: (i >= 2).then_some(B256::repeat_byte(22)),
+                topic3: (i >= 2).then_some(B256::repeat_byte(33)),
+                log_index: i as u32,
+                ..prototype.clone()
+            });
+        }
+        rows.push(LogRow {
+            topic0: Some(B256::ZERO),
+            topic1: None,
+            topic2: None,
+            topic3: None,
+            ..prototype.clone()
+        });
+        rows.push(LogRow {
+            topic0: None,
+            topic1: None,
+            topic2: None,
+            topic3: None,
+            ..prototype
+        });
+        write_legacy_source(dir.path(), &rows);
+        let mut filters = Vec::new();
+        for row in &rows {
+            let event = row
+                .topic0
+                .map_or(TopicConstraint::Any, TopicConstraint::One);
+            let base = NativeLogFilter::new()
+                .with_addresses(vec![row.address])
+                .with_topic(0, event);
+            filters.push(base.clone());
+            for (index, topic) in [row.topic1, row.topic2, row.topic3].into_iter().enumerate() {
+                filters.push(base.clone().with_topic(
+                    index + 1,
+                    topic.map_or(TopicConstraint::Any, TopicConstraint::One),
+                ));
+                filters.push(
+                    base.clone()
+                        .with_topic(index + 1, TopicConstraint::One(B256::repeat_byte(254))),
+                );
+            }
+        }
+        filters.push(
+            NativeLogFilter::new()
+                .with_addresses(vec![rows[0].address, rows[2].address])
+                .with_topic(0, TopicConstraint::AnyOf(vec![events[0], events[2]]))
+                .with_topic(
+                    3,
+                    TopicConstraint::AnyOf(vec![B256::ZERO, B256::repeat_byte(33)]),
+                ),
+        );
+        filters.push(NativeLogFilter::new().with_topic(1, TopicConstraint::One(B256::ZERO)));
+        filters.push(NativeLogFilter::new());
+        // Both the old fallback and upgraded general filter must preserve every
+        // exact result; the general profile additionally skips all event kinds.
+        for profile in [IndexBuildProfile::Erc20Transfer, IndexBuildProfile::Events] {
+            IndexBuilder::build_missing_indexes(dir.path(), profile).unwrap();
+            for filter in &filters {
+                let expected = full_scan_row_ids(dir.path(), filter);
+                assert_eq!(
+                    candidate_row_ids(dir.path(), filter, true, rows.len() as u64).unwrap(),
+                    expected
+                );
+                let memory = QueryMemoryBudget::new(QueryMemoryLimit::new(1024 * 1024).unwrap());
+                let selected = candidate_row_ids_for_filters_with_memory(
+                    dir.path(),
+                    std::slice::from_ref(filter),
+                    true,
+                    rows.len() as u64,
+                    &memory,
+                    None,
+                )
+                .unwrap();
+                assert_eq!(&*selected, expected);
+                drop(selected);
+                assert_eq!(memory.used(), 0);
+            }
+        }
+        let memory = QueryMemoryBudget::new(QueryMemoryLimit::new(1024 * 1024).unwrap());
+        let union = candidate_row_ids_for_filters_with_memory(
+            dir.path(),
+            &filters,
+            true,
+            rows.len() as u64,
+            &memory,
+            None,
+        )
+        .unwrap();
+        assert_eq!(&*union, &[0, 1, 2, 3, 4, 5]);
+        drop(union);
+        assert_eq!(memory.used(), 0);
+        let mut bloom =
+            EventBloomReader::open(&dir.path().join("indexes").join(EVENT_BLOOM_FILE)).unwrap();
+        let absent = NativeLogFilter::new()
+            .with_addresses(vec![rows[0].address])
+            .with_topic(0, TopicConstraint::One(events[1]));
+        assert!(general_event_bloom_reader_excludes(&mut bloom, &absent).unwrap());
+        let third = NativeLogFilter::new()
+            .with_addresses(vec![rows[2].address])
+            .with_topic(0, TopicConstraint::One(events[2]))
+            .with_topic(3, TopicConstraint::One(B256::ZERO));
+        assert!(general_event_bloom_reader_excludes(&mut bloom, &third).unwrap());
+    }
+
+    #[test]
+    fn general_event_filter_mainnet_rows_preserve_every_membership() {
+        #[derive(serde::Deserialize)]
+        struct Fixture {
+            rows: Vec<LogRow>,
+        }
+        let rows = serde_json::from_str::<Fixture>(include_str!(
+            "../tests/fixtures/mainnet-exact-sums.json"
+        ))
+        .unwrap()
+        .rows;
+        let dir = tempfile::tempdir().unwrap();
+        write_legacy_source(dir.path(), &rows);
+        IndexBuilder::build_indexes(dir.path(), IndexBuildProfile::Events).unwrap();
+        for row in &rows {
+            let mut filter = NativeLogFilter::new()
+                .with_addresses(vec![row.address])
+                .with_topic(0, TopicConstraint::One(row.topic0.unwrap()));
+            for (index, topic) in [row.topic1, row.topic2, row.topic3].into_iter().enumerate() {
+                if let Some(topic) = topic {
+                    filter.topics[index + 1] = TopicConstraint::One(topic);
+                }
+            }
+            let expected = full_scan_row_ids(dir.path(), &filter);
+            assert!(!expected.is_empty());
+            assert_eq!(
+                candidate_row_ids(dir.path(), &filter, true, rows.len() as u64).unwrap(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn general_event_presence_probes_preserve_large_alternatives() {
+        let mut filter = NativeLogFilter::new()
+            .with_addresses(vec![Address::ZERO])
+            .with_topic(
+                0,
+                TopicConstraint::AnyOf(vec![B256::ZERO; MAX_EVENT_BLOOM_PROBES + 1]),
+            );
+        let mut probes = 0;
+        assert!(
+            !event_bloom_excludes_keys(
+                &filter,
+                |_| true,
+                &[1, 2, 3, 0],
+                |_, _, index, _| {
+                    assert_eq!(index, 0);
+                    probes += 1;
+                    Ok(false)
+                }
+            )
+            .unwrap()
+        );
+        assert_eq!(probes, MAX_EVENT_BLOOM_PROBES);
+        filter.topics[0] = TopicConstraint::AnyOf(vec![B256::ZERO; MAX_EVENT_BLOOM_PROBES]);
+        assert!(
+            event_bloom_excludes_keys(&filter, |_| true, &[1, 2, 3, 0], |_, _, _, _| Ok(false))
+                .unwrap()
+        );
+        // A single possible emitter/event combination keeps the segment.
+        probes = 0;
+        assert!(
+            !event_bloom_excludes_keys(
+                &filter,
+                |_| true,
+                &[1, 2, 3, 0],
+                |_, _, _, _| {
+                    probes += 1;
+                    Ok(probes == MAX_EVENT_BLOOM_PROBES)
+                }
+            )
+            .unwrap()
+        );
+        filter.topics[0] = TopicConstraint::Any;
+        assert!(
+            !event_bloom_excludes_keys(
+                &filter,
+                |_| true,
+                &[1, 2, 3, 0],
+                |_, _, _, _| panic!("unrestricted event")
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
     fn event_bloom_probe_budget_falls_back_and_read_errors_propagate() {
         let mut filter = NativeLogFilter::new()
             .with_addresses(vec![Address::ZERO])
@@ -2949,40 +3195,56 @@ mod tests {
             );
         let mut probes = 0;
         assert!(
-            !event_bloom_excludes_keys(&filter, is_common_erc20_event_topic0, |_, _, _, _| {
-                probes += 1;
-                Ok(false)
-            })
+            !event_bloom_excludes_keys(
+                &filter,
+                is_common_erc20_event_topic0,
+                &[1, 2],
+                |_, _, _, _| {
+                    probes += 1;
+                    Ok(false)
+                }
+            )
             .unwrap()
         );
         assert_eq!(probes, MAX_EVENT_BLOOM_PROBES);
         filter.topics[1] = TopicConstraint::AnyOf(vec![B256::ZERO; MAX_EVENT_BLOOM_PROBES]);
         assert!(
-            event_bloom_excludes_keys(&filter, is_common_erc20_event_topic0, |_, _, _, _| Ok(
-                false
-            ))
+            event_bloom_excludes_keys(
+                &filter,
+                is_common_erc20_event_topic0,
+                &[1, 2],
+                |_, _, _, _| Ok(false)
+            )
             .unwrap()
         );
-        let error =
-            event_bloom_excludes_keys(&filter, is_common_erc20_event_topic0, |_, _, _, _| {
-                Err(io::Error::new(io::ErrorKind::InvalidData, "invalid bloom"))
-            })
-            .unwrap_err();
+        let error = event_bloom_excludes_keys(
+            &filter,
+            is_common_erc20_event_topic0,
+            &[1, 2],
+            |_, _, _, _| Err(io::Error::new(io::ErrorKind::InvalidData, "invalid bloom")),
+        )
+        .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         // No emitter or unrestricted event must decline without any probes.
         filter.addresses.clear();
         assert!(
-            !event_bloom_excludes_keys(&filter, is_common_erc20_event_topic0, |_, _, _, _| panic!(
-                "unrestricted emitter"
-            ))
+            !event_bloom_excludes_keys(
+                &filter,
+                is_common_erc20_event_topic0,
+                &[1, 2],
+                |_, _, _, _| panic!("unrestricted emitter")
+            )
             .unwrap()
         );
         filter.addresses.push(Address::ZERO);
         filter.topics[0] = TopicConstraint::Any;
         assert!(
-            !event_bloom_excludes_keys(&filter, is_common_erc20_event_topic0, |_, _, _, _| panic!(
-                "unrestricted event"
-            ))
+            !event_bloom_excludes_keys(
+                &filter,
+                is_common_erc20_event_topic0,
+                &[1, 2],
+                |_, _, _, _| panic!("unrestricted event")
+            )
             .unwrap()
         );
     }
@@ -2998,12 +3260,11 @@ mod tests {
         let checkpoint = IndexReadCheckpoint::open(dir.path(), &reader)
             .unwrap()
             .unwrap();
-        let file_id = checkpoint.artifact_id(ERC20_EVENTS_BLOOM_FILE).unwrap();
-        let bloom_path = dir.path().join("indexes").join(ERC20_EVENTS_BLOOM_FILE);
+        let file_id = checkpoint.artifact_id(EVENT_BLOOM_FILE).unwrap();
+        let bloom_path = dir.path().join("indexes").join(EVENT_BLOOM_FILE);
 
         let probe = QueryMemoryBudget::new(QueryMemoryLimit::new(1024 * 1024).unwrap());
-        let bloom =
-            Erc20EventBloomReader::open_bound_with_memory(&bloom_path, file_id, &probe).unwrap();
+        let bloom = EventBloomReader::open_bound_with_memory(&bloom_path, file_id, &probe).unwrap();
         let exact_limit = usize::try_from(probe.used()).unwrap();
         drop(bloom);
         assert_eq!(probe.used(), 0);
@@ -3012,7 +3273,7 @@ mod tests {
         let filter =
             NativeLogFilter::new().with_topic(0, TopicConstraint::One(B256::repeat_byte(0xee)));
         assert!(matches!(
-            erc20_event_bloom_exclusions_with_memory(
+            event_bloom_exclusions_with_memory(
                 &dir.path().join("indexes"),
                 &checkpoint,
                 std::slice::from_ref(&filter),
@@ -3322,8 +3583,8 @@ mod tests {
         IndexBuilder::build_all_indexes(&target).unwrap();
 
         fs::copy(
-            source.join("indexes").join(ERC20_EVENTS_BLOOM_FILE),
-            target.join("indexes").join(ERC20_EVENTS_BLOOM_FILE),
+            source.join("indexes").join(EVENT_BLOOM_FILE),
+            target.join("indexes").join(EVENT_BLOOM_FILE),
         )
         .unwrap();
         let filter = NativeLogFilter::new()
@@ -3337,7 +3598,7 @@ mod tests {
             .unwrap();
         let memory = QueryMemoryBudget::new(QueryMemoryLimit::new(1024 * 1024).unwrap());
         assert_eq!(
-            erc20_event_bloom_exclusions_with_memory(
+            event_bloom_exclusions_with_memory(
                 &target.join("indexes"),
                 &checkpoint,
                 std::slice::from_ref(&filter),
@@ -3353,7 +3614,7 @@ mod tests {
         assert_indexed_result_matches_scan_or_errors(
             &target,
             &filter,
-            "a complete ERC-20 bloom from another source",
+            "a complete general event bloom from another source",
         );
     }
 

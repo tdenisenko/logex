@@ -220,10 +220,23 @@ General SQL preserves exact address/topic membership filters expressed as `IN`
 or same-column equality disjunctions. Mixed address/topic disjunctions (such as
 sender or recipient) can also narrow candidates, while SQL retains the complete
 predicate. Expansion is limited to 32 branches; a hint that would exceed the
-bound remains a SQL residual instead of losing alternatives. Existing event
-blooms support multiple emitters and Transfer/Approval alternatives, checking
-every allowed combination before excluding a segment. Probes are bounded and
-unsupported events fall back to column selection; no index rebuild is needed.
+bound remains a SQL residual instead of losing alternatives. Compact event
+filters support exact emitter/first-topic presence and every indexed argument
+position, including WETH Deposit/Withdrawal, NFT token IDs and arbitrary protocol
+events. Multiple emitters and event/value alternatives are checked completely
+before exclusion, within a fixed probe budget. Possible matches receive exact
+column checks. Missing indexes, unconstrained emitters/events and exhausted probe
+budgets fall back to column selection; older Transfer/Approval filters retain
+only their original scope. Corrupt published indexes fail the query.
+
+Each general filter has at most 2 MiB of bits (plus integrity framing), replacing
+the previous common-event filter in new default index builds. Before publication,
+every source presence/argument membership is verified, including noncanonical
+rows later masked by queries. The source checkpoint and protected file identity
+bind each filter to its segment; append/stale indexes are not reused. Upgrades
+rebuild derived filters from local primary data with CPU and disk I/O, without
+another Ethereum download or a primary storage-format change. Existing verified
+primary data is preserved.
 Scans without a pushed limit select up to
 eight independent partitions concurrently under the shared memory budget;
 limited scans select sequentially so they can stop at the required prefix.
@@ -573,7 +586,7 @@ Global options:
 | --- | --- | --- |
 | `--sealed` | false | Include sealed historical segments. |
 | `--hot` | implied when `--sealed` is absent | Include the active hot segment. When neither `--hot` nor `--sealed` is set, hot is implied. |
-| `--profile <PROFILE>` | `all` | Index profile to build. Values: `all`, `log-query`, `erc20-transfer`. |
+| `--profile <PROFILE>` | `all` | Index profile to build. Values: `all`, `log-query`, `events`, `erc20-transfer` (compatibility). |
 | `--missing-only` | false | Skip segments that already have every index required by the selected profile. |
 | `--limit <N>` | none | Maximum number of matching segments to index. |
 | `--jobs <N>` | `1` | Concurrent segment index builds, capped by available CPUs and matching segment count. |
@@ -595,13 +608,14 @@ Command samples:
 ```bash
 ./target/release/logex --data-dir ./logex-data info
 ./target/release/logex --data-dir ./recent-only --checkpoint-sync-url https://mainnet.checkpoint.sigp.io sync --disable-historical-sync
-./target/release/logex --data-dir ./logex-data build-indexes --sealed --missing-only --profile erc20-transfer --jobs 4
+./target/release/logex --data-dir ./logex-data build-indexes --sealed --missing-only --profile events --jobs 4
 ./target/release/logex --data-dir ./logex-data build-indexes --sealed --from-block 12000000 --to-block 25100000
 ./target/release/logex --data-dir ./logex-data compact --limit 20
 ```
 
-Normal historical sync already writes compacted sealed segments and continuously
-builds the current query index profile. `build-indexes` handles interrupted
+Normal historical sync writes compacted sealed segments. Background indexing
+builds compact general event filters after historical sync completes; it remains
+deferred while history is incomplete to prioritize ingestion. `build-indexes` handles interrupted
 indexing and changed index profiles. `compact` handles older representations or
 changed compression profiles.
 
