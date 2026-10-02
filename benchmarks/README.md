@@ -8,8 +8,11 @@ responses, profiles and research downloads belong outside this repository.
 
 ## Running measurements
 
-Use Python 3.11 or newer. Keep one workload active at a time on a fully synced
-LogEx client. Choose an output directory outside the checkout and a private TOML
+Use Python 3.11 or newer. Keep one workload active at a time. The complete query
+range must be inside verified coverage and at or below the finalized head;
+bounded queries can run while older history is still syncing. A full-history
+query whose lower bound is zero still requires verified genesis coverage.
+Choose an output directory outside the checkout and a private TOML
 configuration containing `dashboard_password`; do not put credentials in command
 arguments or the catalog.
 
@@ -41,6 +44,9 @@ completed query. Socket timeout does not prove server execution stopped. Stop an
 investigate transport, admission or health failures before submitting more work.
 Unknown startup metrics, including a temporarily null free-space value, defer
 the workload until the health snapshot is complete.
+`--verification-range` explicitly uses the catalog's smaller correctness range.
+Its saved case bounds match the rewritten SQL; the original catalog remains in
+`inputs.json`. Such a result is not a full-range timing or a full-history balance.
 The global cancellation endpoint is deliberately not used because it cannot
 identify which caller owns the active query.
 

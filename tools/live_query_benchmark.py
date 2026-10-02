@@ -156,7 +156,27 @@ class Client:
             stream.write(data)
 
 
-def healthy(response, required_to=0):
+def measurement_case(case, verification_range=False):
+    """Keep the recorded bounds identical to the SQL actually measured."""
+    if not verification_range:
+        return dict(case)
+    low, high = case["verification_from_block"], case["verification_to_block"]
+    return dict(case, from_block=low, to_block=high, sql=re.sub(
+        r"block_number BETWEEN \d+ AND \d+",
+        f"block_number BETWEEN {low} AND {high}", case["sql"], flags=re.IGNORECASE,
+    ))
+
+
+def healthy(response, required_to=0, *, required_from=0):
+    """Require verified finalized coverage of the complete inclusive query range.
+
+    Callers without an explicit lower bound retain the conservative genesis
+    requirement. A recent query can run during history sync, but neither a
+    stored-row floor nor the current head alone proves its range is complete.
+    """
+    if (type(required_from) is not int or type(required_to) is not int
+            or not 0 <= required_from <= required_to):
+        return False
     if response.get("http_status") != 200:
         return False
     s = response.get("body")
@@ -170,7 +190,7 @@ def healthy(response, required_to=0):
     # return null. Unknown or malformed values must defer the workload rather
     # than crash its observer or silently count as a healthy zero.
     for value, minimum, maximum in (
-        (coverage.get("verified_from_block"), 0, 0),
+        (coverage.get("verified_from_block"), 0, required_from),
         (coverage.get("verified_to_block"), required_to, None),
         (finalized.get("block_number"), required_to, None),
         (s.get("connected_peers"), 1, None),
@@ -228,12 +248,7 @@ def main():
         if unknown:
             parser.error("unknown case IDs: " + ", ".join(sorted(unknown)))
         cases = [c for c in cases if c["id"] in args.case]
-    if args.verification_range:
-        cases = [dict(c, sql=re.sub(
-            r"block_number BETWEEN \d+ AND \d+",
-            f"block_number BETWEEN {c['verification_from_block']} AND {c['verification_to_block']}",
-            c["sql"], flags=re.IGNORECASE,
-        )) for c in cases]
+    cases = [measurement_case(c, args.verification_range) for c in cases]
     password = os.environ.get("LOGEX_BENCH_PASSWORD", "")
     if args.credentials_config:
         if args.credentials_config.stat().st_mode & 0o077:
@@ -257,7 +272,7 @@ def main():
     for case in cases:
         for repetition in range(args.repeat):
             before = client.fetch("/status")
-            if not healthy(before, case["to_block"]):
+            if not healthy(before, case["to_block"], required_from=case["from_block"]):
                 client.save(run / (case["id"] + f"-{repetition}.health-stop.json"), before)
                 raise SystemExit("live health guard stopped the workload")
             result = client.fetch("/query", {"sql": case["sql"]})
@@ -275,7 +290,8 @@ def main():
                   "status": result.get("http_status"), "seconds": result["elapsed_seconds"],
                   "rows": body.get("row_count"), "scanned": body.get("total_scanned"),
                   "error": body.get("error", result.get("error")), "file": str(target)}), flush=True)
-            if not healthy(after, case["to_block"]) or result.get("http_status") not in (200, 400):
+            if (not healthy(after, case["to_block"], required_from=case["from_block"])
+                    or result.get("http_status") not in (200, 400)):
                 raise SystemExit("workload stopped after transport/admission/health limit")
     client.save(run / "complete.json", {"completed_utc": utc(), "cases": len(cases),
                 "repetitions": args.repeat, "failed_requests": failures})

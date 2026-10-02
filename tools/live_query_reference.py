@@ -42,7 +42,7 @@ def capture(client, root, addresses, low, high):
         sql_rows = saved["sql"]["body"]["rows"]
         rpc_rows = saved["rpc"]["body"]["result"]
     else:
-        if not healthy(client.fetch("/status"), high):
+        if not healthy(client.fetch("/status"), high, required_from=low):
             raise RuntimeError("health guard stopped reference capture")
         rpc = client.fetch("/", {"jsonrpc": "2.0", "id": 1, "method": "eth_getLogs",
               "params": [{"address": addresses, "fromBlock": hex(low), "toBlock": hex(high), "limit": 2000}]})
@@ -61,7 +61,7 @@ def capture(client, root, addresses, low, high):
         if len(sql_rows) >= 2000:
             raise RuntimeError("SQL projection reaches capture bound but RPC did not")
         after = client.fetch("/status")
-        if not healthy(after, high):
+        if not healthy(after, high, required_from=low):
             raise RuntimeError("health guard stopped reference capture after projection")
         saved = {"observed_utc": utc(), "addresses": addresses, "range": [low, high],
                  "projection_sql": query, "rpc": rpc, "sql": sql, "after": after}
@@ -230,7 +230,7 @@ def main():
         check = {"id": case["id"], "range": [low, high], "input_rows": len(rows), "sql": sql}
         try:
             expected = reference(db, case, substitute(sql, cat))
-            if not healthy(client.fetch("/status"), high):
+            if not healthy(client.fetch("/status"), high, required_from=low):
                 raise RuntimeError("health guard stopped reference query")
             result = client.fetch("/query", {"sql": sql})
             after = client.fetch("/status")
@@ -238,7 +238,8 @@ def main():
             actual = result.get("body", {}).get("rows")
             check["matches"] = actual == expected
             check["expected_sha256"] = hashlib.sha256(canonical(expected)).hexdigest()
-            if not healthy(after, high) or result.get("http_status") not in (200, 400):
+            if (not healthy(after, high, required_from=low)
+                    or result.get("http_status") not in (200, 400)):
                 client.save(output / (case["id"] + ".json"), check)
                 raise SystemExit("reference workload stopped after transport/admission/health limit")
         except RuntimeError as error:
