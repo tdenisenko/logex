@@ -889,6 +889,40 @@ impl PeerManager {
         }))
     }
 
+    /// Snapshot one bounded, hash-addressed maintenance request without peer
+    /// discovery waits. The returned plan owns its network waits; the live loop
+    /// must retain completion accounting and cancellation ownership.
+    pub(crate) fn prepare_audit_headers(
+        &mut self,
+        start: B256,
+        count: u64,
+        attempts: usize,
+    ) -> Result<Option<ReverseHeaderPagesRequestPlan>> {
+        if !(1..=1024).contains(&count) || !(1..=4).contains(&attempts) {
+            bail!("audit header request exceeds its bounded allowance");
+        }
+        self.drain_events_now();
+        let mut ids = self.peer_ids_for_requests(None);
+        self.filter_paused_request_peers(&mut ids, PeerRequestKind::Headers);
+        self.sort_peer_ids_by_request_performance(&mut ids, PeerRequestKind::Headers);
+        ids.truncate(attempts);
+        let candidates = ids
+            .into_iter()
+            .filter_map(|id| self.peers.get(&id).map(|peer| (id, peer.sender.clone())))
+            .collect::<Vec<_>>();
+        if candidates.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(ReverseHeaderPagesRequestPlan {
+            pages: vec![HeaderPageRequestPlan {
+                page_index: 0,
+                request: HeadersRequest::falling(BlockHashOrNumber::Hash(start), count),
+                candidates,
+            }],
+            parallel_candidates: 1,
+        }))
+    }
+
     pub(crate) fn complete_reverse_header_pages_request(
         &mut self,
         mut outcome: ReverseHeaderPagesRequestOutcome,
@@ -1318,12 +1352,65 @@ impl PeerManager {
         if blocks.is_empty() {
             return Ok(None);
         }
-        let hashes = receipt_request_hashes(&blocks);
-        let receipt_gas_used: Vec<_> = blocks.iter().map(ReceiptRequestContext::gas_used).collect();
-
-        let mut body_peer_ids = self
+        let body_peer_ids = self
             .peer_ids_for_block_requests(Some(required_block), preferred_peers)
             .await;
+        let receipt_peer_ids = self
+            .peer_ids_for_receipt_requests(required_block, preferred_peers)
+            .await;
+        self.prepare_body_receipt_candidates(
+            blocks,
+            rows_per_block,
+            body_peer_ids,
+            receipt_peer_ids,
+            excluded_peers,
+        )
+    }
+
+    /// One bounded maintenance batch. Cached peers only: no discovery or network
+    /// future is awaited while the live engine prepares this request.
+    pub(crate) fn prepare_audit_payloads(
+        &mut self,
+        blocks: Vec<ReceiptRequestContext>,
+        required_block: u64,
+        attempts: usize,
+    ) -> Result<Option<BodyReceiptRequestPlan>> {
+        if blocks.is_empty() || blocks.len() > 32 || !(1..=4).contains(&attempts) {
+            bail!("audit payload request exceeds its bounded allowance");
+        }
+        self.drain_events_now();
+        let bodies = self.peer_ids_for_requests(Some(required_block));
+        let receipts = bodies
+            .iter()
+            .copied()
+            .filter(|id| !self.peer_receipts_quarantined(*id))
+            .collect();
+        let Some(mut plan) =
+            self.prepare_body_receipt_candidates(blocks, None, bodies, receipts, &[])?
+        else {
+            return Ok(None);
+        };
+        plan.body_peer_ids.truncate(attempts);
+        plan.receipt_peer_ids.truncate(attempts);
+        plan.peers
+            .retain(|id, _| plan.body_peer_ids.contains(id) || plan.receipt_peer_ids.contains(id));
+        plan.max_in_flight = 1;
+        plan.body_max_in_flight = 1;
+        plan.receipt_max_in_flight = 1;
+        plan.priority = BodyReceiptRequestPriority::Lookahead;
+        Ok(Some(plan))
+    }
+
+    fn prepare_body_receipt_candidates(
+        &mut self,
+        blocks: Vec<ReceiptRequestContext>,
+        rows_per_block: Option<f64>,
+        mut body_peer_ids: Vec<PeerId>,
+        mut receipt_peer_ids: Vec<PeerId>,
+        excluded_peers: &[PeerId],
+    ) -> Result<Option<BodyReceiptRequestPlan>> {
+        let hashes = receipt_request_hashes(&blocks);
+        let receipt_gas_used: Vec<_> = blocks.iter().map(ReceiptRequestContext::gas_used).collect();
         body_peer_ids.retain(|peer_id| !excluded_peers.contains(peer_id));
         self.filter_paused_request_peers(&mut body_peer_ids, PeerRequestKind::Bodies);
         retain_idle_body_receipt_candidate_pool_if_enough(
@@ -1342,9 +1429,6 @@ impl PeerManager {
             return Ok(None);
         }
 
-        let mut receipt_peer_ids = self
-            .peer_ids_for_receipt_requests(required_block, preferred_peers)
-            .await;
         receipt_peer_ids.retain(|peer_id| !excluded_peers.contains(peer_id));
         self.filter_paused_request_peers(&mut receipt_peer_ids, PeerRequestKind::Receipts);
         retain_idle_body_receipt_candidate_pool_if_enough(
