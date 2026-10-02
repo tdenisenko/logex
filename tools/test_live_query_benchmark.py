@@ -1,10 +1,13 @@
-"""Readiness-guard controls; these do not generate query benchmark data."""
+"""Readiness and capture-ownership controls; no query benchmark data is generated."""
 import copy
+import json
 from pathlib import Path
 import re
+import tempfile
 import unittest
 
-from live_query_benchmark import healthy, load_catalog, measurement_case
+from live_query_benchmark import Client, healthy, load_catalog, measurement_case
+from live_query_reference import prepare_captures
 
 
 class ReadinessTests(unittest.TestCase):
@@ -101,6 +104,73 @@ class MeasurementRangeTests(unittest.TestCase):
                 self.assertTrue(ranges)
                 self.assertTrue(all((int(low), int(high)) == expected for low, high in ranges))
         self.assertEqual(catalog, original)
+
+
+class CaptureOwnershipTests(unittest.TestCase):
+    """Cache metadata controls only; no Ethereum records or query results generated."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.client = Client("http://127.0.0.1", "", "logex", 1, 1)
+        self.identity = {
+            "pid": 1, "started_utc": "2026-10-01T00:00:00+00:00",
+            "source_commit": "a" * 40, "binary_sha256": "b" * 64,
+            "data_identity": [1, 2],
+        }
+
+    def test_first_capture_binds_identity_and_same_deployment_can_resume(self):
+        captures = prepare_captures(self.client, self.root, self.identity)
+        owner = captures / "deployment.json"
+        before = owner.read_bytes()
+        self.assertEqual(json.loads(before), {"version": 1, "identity": self.identity})
+        self.assertEqual(owner.stat().st_mode & 0o077, 0)
+        self.assertEqual(prepare_captures(self.client, self.root, dict(self.identity)), captures)
+        self.assertEqual(owner.read_bytes(), before)
+
+    def test_changed_dataset_binary_or_process_cannot_reuse_captures(self):
+        captures = prepare_captures(self.client, self.root, self.identity)
+        before = (captures / "deployment.json").read_bytes()
+        for field, value in (("data_identity", [1, 3]), ("binary_sha256", "c" * 64),
+                             ("source_commit", "d" * 40), ("pid", 2),
+                             ("started_utc", "2026-10-02T00:00:00+00:00")):
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, "another deployment"):
+                prepare_captures(self.client, self.root, dict(self.identity, **{field: value}))
+        self.assertEqual((captures / "deployment.json").read_bytes(), before)
+
+    def test_legacy_capture_is_preserved_and_never_adopted(self):
+        captures = self.root / "captures"
+        captures.mkdir()
+        legacy = captures / "legacy.json"
+        legacy.write_bytes(b"preserved old capture")
+        with self.assertRaisesRegex(ValueError, "no deployment identity"):
+            prepare_captures(self.client, self.root, self.identity)
+        self.assertEqual(legacy.read_bytes(), b"preserved old capture")
+        self.assertFalse((captures / "deployment.json").exists())
+
+    def test_malformed_or_incomplete_identity_is_rejected_without_rewriting(self):
+        captures = prepare_captures(self.client, self.root, self.identity)
+        owner = captures / "deployment.json"
+        for raw in (b"", b"null", b"{}", b'{"version": 1}'):
+            owner.write_bytes(raw)
+            with self.subTest(raw=raw), self.assertRaises(ValueError):
+                prepare_captures(self.client, self.root, self.identity)
+            self.assertEqual(owner.read_bytes(), raw)
+
+    def test_symlinked_cache_or_identity_is_rejected(self):
+        target = self.root / "target"
+        target.mkdir()
+        captures = self.root / "captures"
+        captures.symlink_to(target, target_is_directory=True)
+        with self.assertRaisesRegex(ValueError, "directory must not be a symlink"):
+            prepare_captures(self.client, self.root, self.identity)
+        captures.unlink()
+        captures.mkdir()
+        (captures / "deployment.json").symlink_to(target / "missing.json")
+        with self.assertRaisesRegex(ValueError, "identity must not be a symlink"):
+            prepare_captures(self.client, self.root, self.identity)
+        self.assertFalse((target / "missing.json").exists())
 
 
 if __name__ == "__main__":

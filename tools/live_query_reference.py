@@ -23,6 +23,28 @@ COLUMNS = ["block_number", "block_hash", "timestamp", "tx_hash", "tx_index",
 NUMERIC = {"block_number", "timestamp", "tx_index", "log_index", "data_len"}
 
 
+def prepare_captures(client, root, identity):
+    """Bind reusable inputs to one verified deployment before loading any rows."""
+    captures = root / "captures"
+    if captures.is_symlink():
+        raise ValueError("reference capture directory must not be a symlink")
+    captures.mkdir(exist_ok=True, mode=0o700)
+    owner = captures / "deployment.json"
+    expected = {"version": 1, "identity": identity}
+    if owner.is_symlink():
+        raise ValueError("reference capture identity must not be a symlink")
+    if owner.exists():
+        if json.loads(owner.read_text()) != expected:
+            raise ValueError("reference captures belong to another deployment; use a new output directory")
+    else:
+        # Never adopt legacy captures just because their addresses and block
+        # ranges match. A replacement dataset can correct omitted/duplicate rows.
+        if any(captures.iterdir()):
+            raise ValueError("reference captures have no deployment identity; use a new output directory")
+        client.save(owner, expected)
+    return captures
+
+
 def checked(response, key):
     if response.get("http_status") != 200 or "error" in response.get("body", {}):
         raise RuntimeError("reference capture failed: " + str(response.get("http_status")))
@@ -198,7 +220,10 @@ def main():
     client = Client(args.url, secret, "logex", 30, 8 * 1024**2)
     identity = verify_identity(args.ssh_host, args.remote_root, args.expected_identity)
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
-    captures = root / "captures"; captures.mkdir(exist_ok=True, mode=0o700)
+    try:
+        captures = prepare_captures(client, root, identity)
+    except (OSError, ValueError) as error:
+        p.error(str(error))
     output = root / utc().replace(":", "").replace("+", "_")
     output.mkdir(mode=0o700)
     report = {"started_utc": utc(), "identity": identity,
