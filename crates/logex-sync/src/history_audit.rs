@@ -14,4 +14,4 @@ pub(crate) use journal::AuditedContinuation;
 pub use journal::{AuditJobIdentity, AuditJournalLimits, AuditSession};
 pub use manifest::{AuditManifest, AuditManifestLimits, AuditManifestSummary, AuditRange};
 
-pub use network::{AuditNetworkClient, AuditNetworkService};
+pub use network::{AuditNetworkClient, AuditNetworkMetrics, AuditNetworkService};

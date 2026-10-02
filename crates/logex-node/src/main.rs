@@ -49,6 +49,30 @@ fn main() {
             std::process::exit(1);
         }
     };
+    // Resolve the explicit file before volume supervision pins process cwd.
+    // The runtime receives parsed budgets, never a path resolved on another mount.
+    let history_audit = match &cli.command {
+        Command::Sync {
+            history_audit_plan: Some(path),
+            history_audit_resume,
+            repair_corrupt_segments,
+            ..
+        } => {
+            if *repair_corrupt_segments {
+                eprintln!("Error: finish startup repair before requesting a one-time audit");
+                std::process::exit(1);
+            }
+            Some(
+                runtime::audit::Invocation::read(path, *history_audit_resume).unwrap_or_else(
+                    |error| {
+                        eprintln!("Error: invalid explicit history audit plan: {error}");
+                        std::process::exit(1);
+                    },
+                ),
+            )
+        }
+        _ => None,
+    };
     drop(matches);
     let log_level = normalize_info_log_filter(cli.log_level);
 
@@ -67,6 +91,7 @@ fn main() {
     let mut checkpoint = cli.checkpoint;
     let checkpoint_sync_url = cli.checkpoint_sync_url;
     let is_repair = matches!(cli.command, Command::Repair { .. });
+    let audit_control = matches!(cli.command, Command::CancelHistoryAudit { .. });
     let dry_run = matches!(cli.command, Command::Repair { dry_run: true, .. });
     if is_repair && (checkpoint.is_some() || checkpoint_sync_url.is_some()) {
         eprintln!(
@@ -112,14 +137,14 @@ fn main() {
     .and_then(|configured| {
         configured
             .map(|(mount, uuid)| {
-                let volume = if is_repair {
-                    // Repair requires an existing dataset. Even writable
-                    // repair must never initialize a missing directory.
+                let volume = if is_repair || audit_control {
+                    // Maintenance/control requires an existing dataset and must
+                    // never initialize a missing directory.
                     volume::ExpectedVolume::prepare_read_only(&mount, &uuid, &data_dir)
                 } else {
                     volume::ExpectedVolume::prepare(&mount, &uuid, &data_dir, &mut checkpoint)
                 }?;
-                if is_repair && !dry_run {
+                if (is_repair && !dry_run) || audit_control {
                     volume.check()?;
                 }
                 Ok::<_, std::io::Error>(std::sync::Arc::new(volume))
@@ -165,9 +190,18 @@ fn main() {
     };
 
     match cli.command {
+        Command::CancelHistoryAudit { request_id } => {
+            if let Err(error) = runtime::audit::cancel_request(&pm_config.data_dir, request_id) {
+                eprintln!("Error: cannot cancel history audit: {error}");
+                std::process::exit(1);
+            }
+            println!("Cancellation recorded for history audit {request_id}.");
+        }
         Command::Sync {
             query_max_concurrent: _,
             query_memory_bytes: _,
+            history_audit_plan: _,
+            history_audit_resume: _,
             http_host,
             http_port,
             grpc_host,
@@ -196,6 +230,7 @@ fn main() {
                 .or_else(|| Some(DEFAULT_CHECKPOINT_SYNC_URL.to_owned()));
             let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
             let shutdown = rt.block_on(runtime::run_sync(runtime::RunSyncOptions {
+                history_audit,
                 query_memory: query_memory.expect("sync memory limit was validated"),
                 query_concurrency: query_concurrency
                     .expect("sync admission was validated before startup"),

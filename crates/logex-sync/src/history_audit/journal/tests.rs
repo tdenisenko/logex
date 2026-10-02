@@ -108,10 +108,13 @@ async fn durable_resume_refetches_only_uncheckpointed_suffix_and_preserves_origi
     let mut s = new(scratch.path(), &m, anchor);
     let job = s.directory().to_owned();
     s.compare(&blocks[0]).unwrap();
+    assert_eq!(s.checkpointed_blocks(), 0);
     assert!(s.continuation().is_err());
     s.compare(&blocks[1]).unwrap();
     assert_eq!(s.compared_blocks(), 2);
     s.compare(&blocks[2]).unwrap();
+    assert_eq!(s.compared_blocks(), 3);
+    assert_eq!(s.checkpointed_blocks(), 2);
     drop(s); // Third block is intentionally not checkpointed.
     let mut s = resume(&job, &m, anchor).unwrap();
     assert_eq!(s.compared_blocks(), 2);

@@ -419,6 +419,12 @@ impl<'a> AuditSession<'a> {
         }
     }
 
+    /// Number of blocks in successfully published journal chunks. In-memory
+    /// comparisons and a failed checkpoint's pending suffix are excluded.
+    pub fn checkpointed_blocks(&self) -> u64 {
+        self.blocks - self.pending.len() as u64
+    }
+
     pub fn compare(&mut self, block: &VerifiedRepairBlock) -> io::Result<()> {
         if self.failed {
             return Err(invalid("audit session is terminal after failure"));

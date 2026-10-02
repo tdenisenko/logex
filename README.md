@@ -685,6 +685,11 @@ completeness: an independent history auditor must still compare the physical
 rows against complete consensus-authenticated blocks and receipts, including
 empty blocks and duplicate identities across segments.
 
+An explicit one-time historical receipt audit and bounded fetch-cost pilot are
+available through `sync --history-audit-plan`. They are disabled by default and
+never start on ordinary restarts. See [the audit operator guide](docs/history-audit.md)
+for plans, cost limits, checkpointed resume, local cancellation and evidence limits.
+
 To roll back, use the matching older binary with a preserved pre-upgrade data
 directory or backup. Do not change version fields to bypass compatibility checks;
 no downgrade migration is provided.

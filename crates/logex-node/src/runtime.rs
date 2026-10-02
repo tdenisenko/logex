@@ -32,6 +32,7 @@ use reth_ethereum_forks::Head;
 use crate::background::{join_task, run_background_indexer};
 use crate::checkpoint::{RECENT_CHECKPOINT_MAX_FINALIZED_EPOCH_LAG, resolve_checkpoint};
 
+pub(crate) mod audit;
 mod cleanup;
 pub(crate) mod repair;
 mod services;
@@ -142,6 +143,7 @@ impl LocalP2pAddressCandidates {
 }
 
 pub struct RunSyncOptions<'a> {
+    pub history_audit: Option<audit::Invocation>,
     pub query_concurrency: logex_server::QueryConcurrencyLimit,
     pub query_memory: logex_types::QueryMemoryLimit,
     pub pm_config: PartitionManagerConfig,
@@ -177,6 +179,7 @@ pub async fn run_sync(options: RunSyncOptions<'_>) -> cleanup::RuntimeShutdown {
     let shutdown_signal = wait_for_shutdown_signal();
     tokio::pin!(shutdown_signal);
     let RunSyncOptions {
+        history_audit,
         query_concurrency,
         query_memory,
         pm_config,
@@ -696,9 +699,34 @@ pub async fn run_sync(options: RunSyncOptions<'_>) -> cleanup::RuntimeShutdown {
         Arc::clone(&state.storage),
         state.subscriptions.clone(),
         Arc::clone(&state.sync_status),
-        consensus,
+        Arc::clone(&consensus),
         shutdown_rx.clone(),
     );
+
+    let audit_handle = history_audit.and_then(|invocation| {
+        match logex_sync::history_audit::AuditNetworkService::channel(
+            invocation.network_batch_blocks(),
+        ) {
+            Ok((client, service)) => match engine.attach_audit_network(service) {
+                Ok(()) => Some(audit::spawn(
+                    invocation,
+                    data_dir.clone(),
+                    Arc::clone(&state),
+                    Arc::clone(&consensus),
+                    client,
+                    shutdown_rx.clone(),
+                )),
+                Err(error) => {
+                    tracing::error!(%error, "cannot attach explicit history audit");
+                    None
+                }
+            },
+            Err(error) => {
+                tracing::error!(%error, "cannot prepare explicit history audit network");
+                None
+            }
+        }
+    });
 
     let mut shutdown_guard = None;
     let mut engine_exit_code = supervision::SyncSupervisor {
@@ -762,6 +790,9 @@ pub async fn run_sync(options: RunSyncOptions<'_>) -> cleanup::RuntimeShutdown {
         ("background indexer", index_handle),
     ];
     tasks.push(("consensus network", consensus_network_handle));
+    if let Some(handle) = audit_handle {
+        tasks.push(("one-time history audit", handle));
+    }
     // These workers are already stopping independently. Await them together so
     // their cleanup windows do not multiply with the number of services.
     for result in futures_util::future::join_all(

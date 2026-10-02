@@ -5,6 +5,7 @@ use alloy_consensus::Header;
 use alloy_primitives::B256;
 use eyre::{Result, bail, eyre};
 use reth_network_peers::PeerId;
+use serde::Serialize;
 use tokio::sync::{Notify, mpsc, oneshot};
 use tokio::task::JoinHandle;
 
@@ -27,6 +28,28 @@ pub struct AuditNetworkClient {
     headers: VecDeque<Header>,
     payloads: VecDeque<(B256, SourcedBodyReceipts)>,
     receipt: Option<(B256, SourcedReceiptSet)>,
+    metrics: AuditNetworkMetrics,
+}
+
+/// Normalized returned prefixes, not billed wire traffic. These omit transport,
+/// request framing, discarded retry responses and out-of-order residuals. Receipt
+/// blooms may have been reconstructed by the protocol decoder.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct AuditNetworkMetrics {
+    pub header_handoffs: u64,
+    pub payload_handoffs: u64,
+    pub delivered_headers: u64,
+    pub delivered_payload_blocks: u64,
+    pub delivered_header_rlp_bytes: u64,
+    pub delivered_body_rlp_bytes: u64,
+    pub delivered_receipt_rlp_bytes: u64,
+}
+
+fn add_count(counter: &mut u64, amount: usize) -> Result<()> {
+    *counter = counter
+        .checked_add(u64::try_from(amount)?)
+        .ok_or_else(|| eyre!("audit network counter overflow"))?;
+    Ok(())
 }
 
 /// Owned by SyncEngine. Preparing/polling this service never waits for discovery
@@ -99,6 +122,7 @@ impl AuditNetworkService {
                 headers: VecDeque::new(),
                 payloads: VecDeque::new(),
                 receipt: None,
+                metrics: AuditNetworkMetrics::default(),
             },
             Self {
                 rx,
@@ -254,6 +278,10 @@ impl AuditNetworkService {
 }
 
 impl AuditNetworkClient {
+    pub fn metrics(&self) -> AuditNetworkMetrics {
+        self.metrics
+    }
+
     async fn request(
         &mut self,
         kind: RequestKind,
@@ -264,6 +292,7 @@ impl AuditNetworkClient {
             bail!("invalid audit network request budget");
         }
         let _wake_on_cancel = WakeOnDrop(Arc::clone(&self.wake));
+        let header_request = matches!(&kind, RequestKind::Headers { .. });
         let (tx, rx) = oneshot::channel();
         let result = tokio::time::timeout(timeout, async {
             self.tx
@@ -274,6 +303,14 @@ impl AuditNetworkClient {
                 })
                 .await
                 .map_err(|_| eyre!("audit network service unavailable"))?;
+            add_count(
+                if header_request {
+                    &mut self.metrics.header_handoffs
+                } else {
+                    &mut self.metrics.payload_handoffs
+                },
+                1,
+            )?;
             self.wake.notify_one();
             rx.await
                 .map_err(|_| eyre!("audit network request owner ended"))?
@@ -314,6 +351,17 @@ impl RepairSource for AuditNetworkClient {
         };
         if headers.len() as u64 > count {
             bail!("audit network header response overflow");
+        }
+        self.metrics.delivered_headers = self
+            .metrics
+            .delivered_headers
+            .checked_add(headers.len() as u64)
+            .ok_or_else(|| eyre!("audit header counter overflow"))?;
+        for header in &headers {
+            add_count(
+                &mut self.metrics.delivered_header_rlp_bytes,
+                alloy_rlp::Encodable::length(header),
+            )?;
         }
         self.headers.extend(headers.iter().cloned());
         Ok((peer, headers))
@@ -360,6 +408,17 @@ impl RepairSource for AuditNetworkClient {
             };
             if payloads.is_empty() || payloads.len() > hashes.len() {
                 bail!("audit payload response is empty or oversized");
+            }
+            add_count(&mut self.metrics.delivered_payload_blocks, payloads.len())?;
+            for (body, receipts) in &payloads {
+                add_count(
+                    &mut self.metrics.delivered_body_rlp_bytes,
+                    alloy_rlp::Encodable::length(&body.1),
+                )?;
+                add_count(
+                    &mut self.metrics.delivered_receipt_rlp_bytes,
+                    alloy_rlp::Encodable::length(&receipts.1),
+                )?;
             }
             self.payloads.extend(hashes.into_iter().zip(payloads));
         }

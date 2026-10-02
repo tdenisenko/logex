@@ -332,6 +332,11 @@ fn positive_usize(value: &str) -> Result<usize, String> {
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
+    /// Cancel one explicit audit invocation while leaving normal sync running.
+    CancelHistoryAudit {
+        /// Stable request ID from the audit JSON plan.
+        request_id: alloy_primitives::B256,
+    },
     /// Start the node: sync blocks from the P2P network and serve queries.
     #[command(after_help = "Examples:
   logex sync
@@ -342,6 +347,15 @@ Security:
   HTTP binds to 127.0.0.1 by default. Public HTTP requires --dashboard-password.
   gRPC binds to 127.0.0.1 by default. Public gRPC requires --allow-public-grpc.")]
     Sync {
+        /// Explicit one-time audit or fetch-cost pilot, using a bounded JSON plan.
+        /// This option is never enabled by the normal config file or startup.
+        #[arg(long, value_name = "JSON_PLAN")]
+        history_audit_plan: Option<PathBuf>,
+
+        /// Resume this plan's existing frozen audit job instead of creating one.
+        #[arg(long, requires = "history_audit_plan")]
+        history_audit_resume: bool,
+
         /// Shared maximum admitted SQL and native queries across REST, JSON-RPC and gRPC.
         /// Excess requests fail immediately; this is not a query memory budget.
         #[arg(long, default_value = "8")]
@@ -713,6 +727,37 @@ mod tests {
     use clap::{CommandFactory, Parser};
 
     use super::{Cli, Command};
+
+    #[test]
+    fn history_audit_requires_explicit_cli_activation() {
+        let cli = Cli::try_parse_from(["logex", "sync"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Sync {
+                history_audit_plan: None,
+                history_audit_resume: false,
+                ..
+            }
+        ));
+        assert!(Cli::try_parse_from(["logex", "sync", "--history-audit-resume"]).is_err());
+        let cli = Cli::try_parse_from([
+            "logex",
+            "sync",
+            "--history-audit-plan",
+            "plan.json",
+            "--history-audit-resume",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Sync {
+                history_audit_plan: Some(_),
+                history_audit_resume: true,
+                ..
+            }
+        ));
+        assert!(Cli::try_parse_from(["logex", "cancel-history-audit", "invalid-id"]).is_err());
+    }
 
     #[test]
     fn repair_and_sync_share_positive_maintenance_limits() {

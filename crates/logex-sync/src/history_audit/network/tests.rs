@@ -158,6 +158,23 @@ async fn maintenance_waits_for_admission_then_fetches_every_empty_block_in_bound
         [2, 2, 2],
         "paired prefetch amortizes every empty block without skipping it"
     );
+    let metrics = client.metrics();
+    assert_eq!(
+        metrics.header_handoffs, 3,
+        "includes the cancelled queued handoff"
+    );
+    assert_eq!(metrics.payload_handoffs, 2);
+    assert_eq!(metrics.delivered_headers, 4);
+    assert_eq!(metrics.delivered_payload_blocks, 4);
+    assert_eq!(
+        metrics.delivered_header_rlp_bytes,
+        chain
+            .iter()
+            .map(|h| alloy_rlp::Encodable::length(h) as u64)
+            .sum::<u64>()
+    );
+    assert!(metrics.delivered_body_rlp_bytes > 0);
+    assert!(metrics.delivered_receipt_rlp_bytes > 0);
     service.shutdown(&mut peers).await;
     let stats = peers.execution_network_status();
     assert_eq!(
