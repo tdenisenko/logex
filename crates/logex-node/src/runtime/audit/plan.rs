@@ -69,6 +69,8 @@ pub(super) struct FetchLimits {
     pub event_data_bytes: usize,
     pub request_timeout_secs: u64,
     pub attempts: usize,
+    pub max_transient_retries: u32,
+    pub retry_delay_secs: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -136,7 +138,10 @@ impl Plan {
             && self.fetch.events_per_block > 0
             && self.fetch.event_data_bytes > 0
             && (1..=60).contains(&self.fetch.request_timeout_secs)
-            && (1..=4).contains(&self.fetch.attempts);
+            && (1..=4).contains(&self.fetch.attempts)
+            && self.fetch.max_transient_retries <= 32
+            && (1..=60).contains(&self.fetch.retry_delay_secs)
+            && (!matches!(self.scope, Scope::Pilot) || self.fetch.max_transient_retries == 0);
         if !valid {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,

@@ -383,3 +383,65 @@ async fn journal_symlinks_are_rejected_without_reading_or_replacing_their_target
     assert!(resume(&job, &m, anchor).is_err());
     assert_eq!(fs::read(outside).unwrap(), raw);
 }
+
+#[tokio::test]
+async fn unavailable_fetch_retries_only_unfinished_blocks_without_source_rescan() {
+    let (_dir, scratch, _storage, manifest, mut source, _blocks, anchor) = data().await;
+    let mut session = new(scratch.path(), &manifest, anchor);
+    let mut fetch = session
+        .fetcher(fixture::limits(), CancellationToken::new())
+        .unwrap();
+    let RepairFetchStep::Block(first) = fetch.next_block(&mut source).await.unwrap() else {
+        panic!("missing block")
+    };
+    session.compare(&first).unwrap();
+    assert_eq!(session.checkpointed_blocks(), 0);
+    source.body_error = true;
+    let error = fetch.next_block(&mut source).await.unwrap_err();
+    source.body_error = false;
+    let calls = source.body_calls.len();
+    let mut retry = session
+        .retry_unavailable(error, fixture::limits(), CancellationToken::new())
+        .unwrap();
+    assert_eq!(session.checkpointed_blocks(), 1);
+    assert_eq!(
+        source.body_calls.len(),
+        calls,
+        "retry creation cannot fetch or rescan"
+    );
+    while let RepairFetchStep::Block(block) = retry.next_block(&mut source).await.unwrap() {
+        session.compare(&block).unwrap();
+    }
+    assert_eq!(
+        source.body_calls[calls..],
+        [
+            anchor.block_number - 1,
+            anchor.block_number - 2,
+            anchor.block_number - 3
+        ]
+    );
+    assert_eq!(session.finish().unwrap().blocks, 4);
+}
+
+#[tokio::test]
+async fn invalid_payload_fetch_is_never_retried_as_unavailability() {
+    let (_dir, scratch, _storage, manifest, mut source, _blocks, anchor) = data().await;
+    let mut session = new(scratch.path(), &manifest, anchor);
+    let mut fetch = session
+        .fetcher(fixture::limits(), CancellationToken::new())
+        .unwrap();
+    let initial_calls = source.body_calls.len();
+    source.wrong_body = true;
+    let error = fetch.next_block(&mut source).await.unwrap_err();
+    assert_eq!(
+        error.downcast_ref::<RepairFetchError>().unwrap().kind,
+        RepairFetchErrorKind::InvalidData
+    );
+    assert!(
+        session
+            .retry_unavailable(error, fixture::limits(), CancellationToken::new())
+            .is_err()
+    );
+    assert_eq!(session.checkpointed_blocks(), 0);
+    assert_eq!(source.body_calls.len(), initial_calls + 1);
+}

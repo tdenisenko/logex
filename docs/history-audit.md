@@ -66,7 +66,9 @@ identifier, e.g. the output of `openssl rand -hex 32` prefixed with `0x`):
     "events_per_block": 1000000,
     "event_data_bytes": 67108864,
     "request_timeout_secs": 30,
-    "attempts": 2
+    "attempts": 2,
+    "max_transient_retries": 0,
+    "retry_delay_secs": 5
   }
 }
 ```
@@ -103,6 +105,15 @@ sequence. Scratch limits count merge input and output together. The source is
 held through comparison and rechecked with the finalized consensus anchor before
 publishing a successful result. Appends and equivalent compaction are allowed;
 canonical changes or closing storage invalidate the captured view.
+
+For a full comparison, `fetch.max_transient_retries` can allow up to 32
+recoveries from exhausted unavailable-peer requests within this invocation.
+Each recovery checkpoints complete comparisons and retries only the next
+unfinished block against the same manifest and anchor; it does not restart the
+client or rescan storage. `retry_delay_secs` is 1–60 seconds, bounded by the overall
+deadline. Counts and individual failures are reported. Invalid proofs, mismatched
+events, local failures and cancellation are not retried. A pilot must set this
+allowance to zero, so its payload trial is not silently repeated.
 
 The journal records complete authenticated headers and compared event counts in
 ordered, checksummed, immutable chunks. Its checksums are private local evidence,

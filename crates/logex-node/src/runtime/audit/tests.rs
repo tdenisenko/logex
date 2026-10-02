@@ -10,7 +10,7 @@ fn plan() -> plan::Plan {
         "source":{"segments":10,"total_rows":100,"segment_rows":100,"retained_segment_bytes":1048576,"decoded_segment_bytes":1048576},
         "manifest":{"sort_records":8,"merge_fan_in":2,"scratch_bytes":1048576,"runs":100},
         "journal":{"max_bytes":1048576,"max_chunks":100,"checkpoint_blocks":2},
-        "fetch":{"header_page":4,"headers":100,"transactions_per_block":100,"encoded_body_bytes":1048576,"events_per_block":100,"event_data_bytes":1048576,"request_timeout_secs":1,"attempts":1}
+        "fetch":{"header_page":4,"headers":100,"transactions_per_block":100,"encoded_body_bytes":1048576,"events_per_block":100,"event_data_bytes":1048576,"request_timeout_secs":1,"attempts":1,"max_transient_retries":2,"retry_delay_secs":1}
     })).unwrap()
 }
 fn descriptor(p: &plan::Plan) -> Descriptor {
@@ -61,6 +61,8 @@ fn explicit_plan_rejects_unknown_fields_oversize_and_invalid_limits() {
         ("/deadline_secs", serde_json::json!(604801)),
         ("/network_batch_blocks", serde_json::json!(33)),
         ("/minimum_free_bytes", serde_json::json!(0)),
+        ("/fetch/max_transient_retries", serde_json::json!(33)),
+        ("/fetch/retry_delay_secs", serde_json::json!(0)),
         ("/manifest/merge_fan_in", serde_json::json!(1)),
         ("/journal/checkpoint_blocks", serde_json::json!(1025)),
         ("/fetch/request_timeout_secs", serde_json::json!(61)),
@@ -304,4 +306,46 @@ async fn shutdown_or_local_cancel_joins_waiting_audit_without_stopping_storage()
                 .exists()
         );
     }
+}
+
+#[test]
+fn local_cancellation_interrupts_a_long_retry_delay() {
+    let temp = tempfile::tempdir().unwrap();
+    let owner = state(temp.path());
+    let p = plan();
+    let source = owner
+        .storage
+        .blocking_read()
+        .primary_audit_snapshot(p.source_limits())
+        .unwrap();
+    let control = Control {
+        cancellation: CancellationToken::new(),
+        deadline: Instant::now() + Duration::from_secs(30),
+        source,
+        minimum_free_bytes: 1,
+        cancel_path: cancel_path(temp.path(), p.request_id),
+        request_id: p.request_id,
+        last_space: Cell::new(Instant::now()),
+        calls: Cell::new(0),
+        resource_error: RefCell::new(None),
+    };
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    let root = temp.path().to_owned();
+    let signal = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(30));
+        cancel_request(&root, p.request_id).unwrap();
+    });
+    let started = Instant::now();
+    let result = control.retry_pause(runtime.handle(), Duration::from_secs(20));
+    signal.join().unwrap();
+    assert_eq!(result.unwrap_err().kind(), io::ErrorKind::Interrupted);
+    assert!(
+        started.elapsed() < Duration::from_secs(15),
+        "local cancellation waited for the whole retry delay"
+    );
+    assert_eq!(owner.storage.blocking_read().total_rows(), 0);
 }

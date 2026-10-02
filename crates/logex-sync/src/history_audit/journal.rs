@@ -7,7 +7,10 @@
 use super::{
     AuditManifest, AuditManifestSummary, AuditRange, ReceiptComparison, ReceiptComparisonReport,
 };
-use crate::repair::{RepairFetchLimits, RepairFetcher, RepairRange, VerifiedRepairBlock};
+use crate::repair::{
+    RepairFetchError, RepairFetchErrorKind, RepairFetchLimits, RepairFetcher, RepairRange,
+    VerifiedRepairBlock,
+};
 use alloy_consensus::Header;
 use alloy_primitives::B256;
 use alloy_rlp::{Decodable, Encodable};
@@ -417,6 +420,26 @@ impl<'a> AuditSession<'a> {
                 cancellation,
             ),
         }
+    }
+
+    /// Rebuild only an unavailable fetch cursor after preserving all complete
+    /// comparisons. Keeps the current manifest and original authenticated anchor.
+    /// The operator must separately bound retry count, delay and overall deadline.
+    /// Invalid proofs, cancellation, deadlines and local failures are not retried.
+    pub fn retry_unavailable(
+        &mut self,
+        error: eyre::Report,
+        limits: RepairFetchLimits,
+        cancellation: CancellationToken,
+    ) -> eyre::Result<RepairFetcher> {
+        if !error
+            .downcast_ref::<RepairFetchError>()
+            .is_some_and(|cause| cause.kind == RepairFetchErrorKind::Unavailable)
+        {
+            return Err(error);
+        }
+        self.checkpoint()?;
+        self.fetcher(limits, cancellation)
     }
 
     /// Number of blocks in successfully published journal chunks. In-memory

@@ -18,10 +18,10 @@ pub(crate) struct Scripted {
     pub(super) pending_headers: bool,
     pending_body: bool,
     pending_receipts: bool,
-    wrong_body: bool,
+    pub(crate) wrong_body: bool,
     wrong_receipts: bool,
     missing_body: bool,
-    body_error: bool,
+    pub(crate) body_error: bool,
 }
 impl RepairSource for Scripted {
     async fn headers(

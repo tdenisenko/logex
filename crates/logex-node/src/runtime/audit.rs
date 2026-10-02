@@ -8,7 +8,7 @@ use logex_sync::{
     history_audit::{
         AuditManifest, AuditNetworkClient, AuditNetworkMetrics, AuditRange, AuditSession,
     },
-    repair::{RepairFetchStep, RepairFetcher, RepairRange},
+    repair::{RepairFetchError, RepairFetchErrorKind, RepairFetchStep, RepairFetcher, RepairRange},
 };
 use logex_types::{ExecutionAnchor, WeakSubjectivityCheckpoint};
 use reth_chainspec::{EthChainSpec, MAINNET};
@@ -50,6 +50,13 @@ struct Descriptor {
 }
 
 #[derive(Serialize)]
+struct TransientFailure {
+    unix_ms: u64,
+    next_block: Option<u64>,
+    error: String,
+}
+
+#[derive(Serialize)]
 struct Report {
     request_id: B256,
     phase: &'static str,
@@ -62,6 +69,8 @@ struct Report {
     /// Durable journal prefix, excluding any in-memory comparisons. No pilot journal.
     checkpointed_blocks: Option<u64>,
     events: u64,
+    transient_retries: u32,
+    transient_failures: Vec<TransientFailure>,
     next_block: Option<u64>,
     network: AuditNetworkMetrics,
     node_payload_bytes_before: Option<u64>,
@@ -113,16 +122,23 @@ pub(super) fn spawn(
         });
         let result = tokio::select! {
             biased;
-            result=&mut worker=>result,
-            _=async {while !*shutdown.borrow_and_update(){if shutdown.changed().await.is_err(){break;}}}=>{cancellation.cancel();worker.await}
+            result = &mut worker => result,
+            _ = async {
+                while !*shutdown.borrow_and_update() {
+                    if shutdown.changed().await.is_err() { break; }
+                }
+            } => {
+                cancellation.cancel();
+                worker.await
+            }
         };
         match result {
             Ok(Ok(())) => {}
             Ok(Err(error)) => {
-                tracing::warn!(%error,"one-time history audit stopped")
+                tracing::warn!(%error, "one-time history audit stopped")
             }
             Err(error) => {
-                tracing::error!(%error,"one-time history audit worker failed")
+                tracing::error!(%error, "one-time history audit worker failed")
             }
         }
     })
@@ -173,6 +189,26 @@ impl Control {
         }
         Ok(())
     }
+    fn retry_pause(&self, runtime: &tokio::runtime::Handle, delay: Duration) -> io::Result<()> {
+        let until = Instant::now()
+            .checked_add(delay)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "retry delay overflow"))?
+            .min(self.deadline);
+        loop {
+            self.check()?;
+            let remaining = until.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Ok(());
+            }
+            runtime.block_on(async {
+                tokio::select! {
+                    _ = self.cancellation.cancelled() => {},
+                    _ = tokio::time::sleep(remaining.min(Duration::from_secs(5))) => {},
+                }
+            });
+        }
+    }
+
     fn cancelled(&self) -> bool {
         if self.cancellation.is_cancelled() {
             return true;
@@ -235,6 +271,8 @@ fn run(
         compared_or_validated_blocks: 0,
         checkpointed_blocks: None,
         events: 0,
+        transient_retries: 0,
+        transient_failures: Vec::new(),
         next_block: None,
         network: client.metrics(),
         node_payload_bytes_before: node_bytes(&state),
@@ -454,7 +492,12 @@ fn prepare(
                 }
             }
         }
-        runtime.block_on(async {tokio::select!{_ = cancel.cancelled()=>{},_ = tokio::time::sleep(Duration::from_millis(500))=>{}}});
+        runtime.block_on(async {
+            tokio::select! {
+                _ = cancel.cancelled() => {},
+                _ = tokio::time::sleep(Duration::from_millis(500)) => {},
+            }
+        });
     }
 }
 
@@ -595,8 +638,43 @@ impl Work<'_> {
                 && session.compared_blocks() - report.restored_blocks < plan.new_blocks
             {
                 control.check()?;
-                let RepairFetchStep::Block(block) = runtime.block_on(fetcher.next_block(client))?
-                else {
+                let step = match runtime.block_on(fetcher.next_block(client)) {
+                    Ok(step) => step,
+                    Err(error) => {
+                        control.check()?;
+                        if report.transient_retries >= plan.fetch.max_transient_retries
+                            || !error
+                                .downcast_ref::<RepairFetchError>()
+                                .is_some_and(|cause| {
+                                    cause.kind == RepairFetchErrorKind::Unavailable
+                                })
+                        {
+                            return Err(error);
+                        }
+                        let failure = TransientFailure {
+                            unix_ms: now_ms()?,
+                            next_block: session.next_block_number(),
+                            error: format!("{error:#}").chars().take(2048).collect(),
+                        };
+                        fetcher = session.retry_unavailable(
+                            error,
+                            plan.fetch_limits(tokio::time::Instant::from_std(control.deadline)),
+                            control.cancellation.clone(),
+                        )?;
+                        report.transient_retries += 1;
+                        report.transient_failures.push(failure);
+                        report.checkpointed_blocks = Some(session.checkpointed_blocks());
+                        report.phase = "waiting_to_retry_unavailable_peer";
+                        progress(root, report, client, state, started)?;
+                        control.retry_pause(
+                            runtime,
+                            Duration::from_secs(plan.fetch.retry_delay_secs),
+                        )?;
+                        report.phase = "comparing_complete_receipts";
+                        continue;
+                    }
+                };
+                let RepairFetchStep::Block(block) = step else {
                     eyre::bail!("audit fetch ended before physical comparison");
                 };
                 session.compare(&block)?;
