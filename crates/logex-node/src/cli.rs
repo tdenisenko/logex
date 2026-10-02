@@ -421,15 +421,15 @@ Security:
         /// with outbound reachability, then a locally owned public IPv6 address
         /// with outbound reachability, and otherwise runs outbound-only without
         /// advertising a public address. Accepted explicit values include:
-        /// none, publicip, netif, extip:<ip>, extaddr:<domain>. On public
-        /// servers, extip:<ip> is usually the most deterministic choice.
+        /// `none`, `publicip`, `netif`, `extip:<ip>`, `extaddr:<domain>`. On public
+        /// servers, `extip:<ip>` is usually the most deterministic choice.
         #[arg(long, default_value = "any")]
         nat: String,
 
         /// Local IP address used by execution and consensus P2P listeners.
         ///
         /// By default, LogEx uses automatic address-family selection. Use "::"
-        /// with --nat extip:<ipv6> to select IPv6; LogEx narrows the listener
+        /// with `--nat extip:<ipv6>` to select IPv6; LogEx narrows the listener
         /// to the concrete local public IPv6 address when it can verify that
         /// address locally.
         #[arg(long, value_name = "IP")]
@@ -440,7 +440,7 @@ Security:
         /// Accepts enode:// records with IP literals or DNS names, or signed
         /// enr: records. May be repeated or comma-separated. IPv6 enodes must
         /// use the standard bracketed form, for example
-        /// enode://<pubkey>@[2001:db8::1]:30303?discport=30303.
+        /// `enode://<pubkey>@[2001:db8::1]:30303?discport=30303`.
         #[arg(
             long = "execution-bootnode",
             value_name = "ENODE_OR_ENR",
