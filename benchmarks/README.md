@@ -67,6 +67,10 @@ come from the plain LogEx projection because its RPC log format omits them; this
 is independent query evaluation, not an independent consensus/storage audit.
 Completed checks are saved individually so an interrupted capture retains prior
 results. Each run also preserves its catalog, helper sources and source hashes.
+Reusable captures are bound to the verified deployment identity, including its
+binary, process and dataset. Use a new output directory after a replacement or
+upgrade. A legacy cache without this identity is rejected and left untouched;
+do not copy its captures into a new cache or invent an identity for old inputs.
 
 Correctness ranges are explicit and can be smaller than performance ranges.
 A matching empty result checks empty-input behavior only. It does not validate a
