@@ -250,7 +250,7 @@ pub async fn run_background_indexer(
                 &storage,
                 BACKGROUND_SEALED_INDEX_SEGMENT_LIMIT,
                 query_indexes_missing,
-                |path| IndexBuilder::build_missing_indexes(path, IndexBuildProfile::Erc20Transfer),
+                |path| IndexBuilder::build_missing_indexes(path, IndexBuildProfile::Events),
             )
         });
         match join_background_worker("sealed query index", worker).await? {
@@ -627,7 +627,7 @@ fn rebuild_hot_query_indexes(path: &Path, rebuild_for_rows: bool) -> io::Result<
 }
 
 fn query_indexes_missing(path: &Path) -> Option<bool> {
-    match IndexBuilder::indexes_missing(path, IndexBuildProfile::Erc20Transfer) {
+    match IndexBuilder::indexes_missing(path, IndexBuildProfile::Events) {
         Ok(missing) => Some(missing),
         Err(error) if error.kind() == io::ErrorKind::Unsupported => {
             tracing::debug!(path = %path.display(), %error, "source is not eligible for indexes");
@@ -824,7 +824,7 @@ mod tests {
                     storage.try_write().is_ok(),
                     "index build holds storage lock"
                 );
-                IndexBuilder::build_missing_indexes(path, IndexBuildProfile::Erc20Transfer)
+                IndexBuilder::build_missing_indexes(path, IndexBuildProfile::Events)
             },
         )
         .unwrap();
@@ -1094,12 +1094,12 @@ mod tests {
         std::fs::create_dir_all(&indexes).unwrap();
         assert_eq!(query_indexes_missing(tmp.path()), Some(true));
 
-        for file_name in IndexBuilder::required_index_files(IndexBuildProfile::Erc20Transfer) {
+        for file_name in IndexBuilder::required_index_files(IndexBuildProfile::Events) {
             std::fs::write(indexes.join(file_name), []).unwrap();
         }
         assert_eq!(query_indexes_missing(tmp.path()), Some(true));
         logex_storage::ColumnFile::write_batch(tmp.path(), &[]).unwrap();
-        IndexBuilder::build_indexes(tmp.path(), IndexBuildProfile::Erc20Transfer).unwrap();
+        IndexBuilder::build_indexes(tmp.path(), IndexBuildProfile::Events).unwrap();
         assert_eq!(query_indexes_missing(tmp.path()), Some(false));
     }
 

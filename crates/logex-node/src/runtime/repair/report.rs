@@ -117,6 +117,7 @@ pub(super) fn assessment_report(report: &RepairAssessmentReport) -> Value {
                 "index_profile": match index_profile {
                     IndexBuildProfile::All => "all",
                     IndexBuildProfile::LogQuery => "log_query",
+                    IndexBuildProfile::Events => "events",
                     IndexBuildProfile::Erc20Transfer => "erc20_transfer",
                 },
                 "segments": segments,

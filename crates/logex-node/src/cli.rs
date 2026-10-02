@@ -15,7 +15,7 @@ use serde::Deserialize;
   logex sync
   logex repair --dry-run
   logex --data-dir /var/lib/logex/mainnet --config /etc/logex/config.toml sync --http-host 0.0.0.0 --dashboard-password '<password>'
-  logex --data-dir /var/lib/logex/mainnet build-indexes --sealed --missing-only --profile erc20-transfer --jobs 4
+  logex --data-dir /var/lib/logex/mainnet build-indexes --sealed --missing-only --profile events --jobs 4
   logex --data-dir /var/lib/logex/mainnet info"
 )]
 pub struct Cli {
@@ -560,7 +560,7 @@ Output:
     /// Build or rebuild query indexes.
     #[command(after_help = "Examples:
   logex --data-dir /var/lib/logex/mainnet build-indexes
-  logex --data-dir /var/lib/logex/mainnet build-indexes --sealed --missing-only --profile erc20-transfer --jobs 4
+  logex --data-dir /var/lib/logex/mainnet build-indexes --sealed --missing-only --profile events --jobs 4
   logex --data-dir /var/lib/logex/mainnet build-indexes --sealed --from-block 12000000 --to-block 25100000")]
     BuildIndexes {
         /// Include sealed historical segments.
@@ -575,9 +575,10 @@ Output:
 
         /// Index profile to build.
         ///
-        /// all: every supported query index.
+        /// all: all current primary/composite indexes and general event filters.
         /// log-query: general log filtering indexes.
-        /// erc20-transfer: common ERC20 Transfer/Approval bloom indexes.
+        /// events: compact filters for all event signatures and indexed arguments.
+        /// erc20-transfer: compatibility Transfer/Approval-only bloom indexes.
         #[arg(long, value_enum, default_value = "all")]
         profile: IndexProfile,
 
@@ -636,6 +637,7 @@ Output:
 pub enum IndexProfile {
     All,
     LogQuery,
+    Events,
     Erc20Transfer,
 }
 

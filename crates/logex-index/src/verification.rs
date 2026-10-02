@@ -98,6 +98,9 @@ pub(crate) fn verify_artifact(
     name: &str,
     file_id: [u8; 16],
 ) -> io::Result<()> {
+    if name == crate::EVENT_BLOOM_FILE {
+        return crate::event_bloom::verify_source_membership(source, path, file_id);
+    }
     if matches!(
         name,
         transfer_bloom::ERC20_EVENTS_BLOOM_FILE | transfer_bloom::TRANSFER_BLOOM_FILE

@@ -46,6 +46,7 @@ pub fn run_build_indexes(config: PartitionManagerConfig, options: BuildIndexesOp
     let profile = match options.profile {
         IndexProfile::All => IndexBuildProfile::All,
         IndexProfile::LogQuery => IndexBuildProfile::LogQuery,
+        IndexProfile::Events => IndexBuildProfile::Events,
         IndexProfile::Erc20Transfer => IndexBuildProfile::Erc20Transfer,
     };
     let mut targets = index_targets(&storage, options);
