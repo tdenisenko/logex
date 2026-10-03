@@ -49,8 +49,11 @@ captures a finite catalog selection while retaining storage ownership. It releas
 the global selection lock before I/O and verification. Each source reader keeps
 its artifacts; a shared publication lock binds all checked files to that exact
 source namespace, prefix commitment and row count. Every published artifact is
-checked, including optional B-trees beyond the required general-event filter.
-Unknown published files, missing required filters, stale/locked checkpoints,
+checked, including optional B-trees beyond the required general-event filter and
+emitter/event row index. Finish rebuilding the required profile before starting
+verification; an unfinished publication fails verification rather than passing
+from filter presence alone.
+Unknown published files, missing required indexes, stale/locked checkpoints,
 corruption, source changes, exhausted limits or failed writes prevent completion.
 Unpublished loose files are not admitted query indexes and are not counted.
 

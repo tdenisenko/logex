@@ -598,7 +598,7 @@ Output:
         ///
         /// all: all current primary/composite indexes and general event filters.
         /// log-query: general log filtering indexes.
-        /// events: compact filters for all event signatures and indexed arguments.
+        /// events: general event filters and exact emitter/event row indexes.
         /// erc20-transfer: compatibility Transfer/Approval-only bloom indexes.
         #[arg(long, value_enum, default_value = "all")]
         profile: IndexProfile,
