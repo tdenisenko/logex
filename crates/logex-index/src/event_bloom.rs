@@ -164,16 +164,20 @@ impl EventBloomReader {
 
 /// Check every source membership before publication and during explicit scrub.
 /// Reading the whole bounded vector also validates every protected file page.
-pub(crate) fn verify_source_membership(
-    source: &Path,
+pub(crate) fn verify_captured_membership(
+    reader: &SegmentReader,
     path: &Path,
     file_id: [u8; 16],
+    cancelled: &dyn Fn() -> bool,
 ) -> io::Result<()> {
+    crate::verification::check_cancelled(cancelled)?;
     let (mut file, mask) = open_bloom(IndexFile::open_bound(path, file_id)?, MAGIC)?;
     let mut bits = vec![0; ((mask + 1) / 8) as usize];
     file.read_exact(&mut bits)?;
-    let reader = source_reader(source)?;
-    visit_source_keys(&reader, |row, hashes| {
+    visit_source_keys(reader, |row, hashes| {
+        if row.is_multiple_of(16_384) {
+            crate::verification::check_cancelled(cancelled)?;
+        }
         if key_bits(hashes, mask).any(|bit| bits[(bit / 8) as usize] & (1 << (bit % 8)) == 0) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -181,7 +185,8 @@ pub(crate) fn verify_source_membership(
             ));
         }
         Ok(())
-    })
+    })?;
+    crate::verification::check_cancelled(cancelled)
 }
 
 fn source_reader(source: &Path) -> io::Result<SegmentReader> {
@@ -459,7 +464,8 @@ mod tests {
             );
         }
         let id = IndexFile::protected_file_id(&path).unwrap();
-        verify_source_membership(source.path(), &path, id).unwrap();
+        verify_captured_membership(&source_reader(source.path()).unwrap(), &path, id, &|| false)
+            .unwrap();
         assert!(crate::Erc20EventBloomReader::open(&path).is_err());
         assert!(EventBloomReader::open_bound(&path, [0; 16]).is_err());
     }
@@ -498,7 +504,13 @@ mod tests {
             })
             .unwrap();
             let id = IndexFile::protected_file_id(&path).unwrap();
-            let error = verify_source_membership(source.path(), &path, id).unwrap_err();
+            let error = verify_captured_membership(
+                &source_reader(source.path()).unwrap(),
+                &path,
+                id,
+                &|| false,
+            )
+            .unwrap_err();
             assert!(
                 error.to_string().contains("bloom omits source row"),
                 "position {position}: {error}"

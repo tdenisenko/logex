@@ -1414,6 +1414,19 @@ impl SegmentReader {
         Ok(())
     }
 
+    /// Only storage-owned online maintenance may opt into append-prefix reads
+    /// after preflight. The immutable manifest supplies the row boundary; no
+    /// newly appended file suffix becomes part of an allocation/read allowance.
+    pub(crate) fn retain_inspected_append_prefix(&mut self) -> io::Result<()> {
+        if self.manifest.is_none() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "online inspection requires a captured native manifest",
+            ));
+        }
+        self.artifacts.allow_inspected_append_prefix()
+    }
+
     /// Screen a read-only maintenance capture before row IDs, retained raw
     /// buffers, or payloads are materialized. Callers retain directory ownership
     /// and, for a live audit, check read-view validity around the scan. These

@@ -95,6 +95,17 @@ pub struct PrimaryAuditReport {
     pub segments: Vec<PrimarySegmentAudit>,
 }
 
+/// One retained source for derived-index verification. The reader includes the
+/// complete prefix opened now, which may include appends after the job captured
+/// its minimum row boundary. Every originally selected row remains included.
+/// The storage owner/read-view guard remains with the enclosing snapshot.
+pub struct AuditIndexSource<'a> {
+    pub segment_id: u64,
+    pub minimum_rows: u64,
+    pub reader: &'a SegmentReader,
+    pub index_directory: &'a Path,
+}
+
 fn invalid(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
@@ -181,6 +192,93 @@ impl NativeStorage {
 }
 
 impl PrimaryAuditSnapshot {
+    pub fn physical_rows(&self) -> u64 {
+        self.physical_rows
+    }
+
+    pub fn segment_count(&self) -> usize {
+        self.segments.len()
+    }
+
+    pub fn source_prefix_fingerprint(&self) -> B256 {
+        self.source_prefix_fingerprint
+    }
+
+    /// Visit a finite selection of nonempty sources for an online derived-index
+    /// scrub. Source artifacts are retained once per callback; no global storage
+    /// selection lock is held while reading. Appends and equivalent compaction
+    /// are allowed; reorg/close invalidation prevents successful completion.
+    ///
+    /// The callback must bind its publication to this exact reader, check all
+    /// memberships, and preserve any provisional evidence only after this method
+    /// and a final `validate` succeed. Empty selected prefixes have no required
+    /// memberships. New segments after capture belong to a later tail check.
+    /// This does not replace `scan`: it screens source shape/budgets but does not
+    /// independently recompute every physical row's primary commitment.
+    pub fn visit_index_sources(
+        &self,
+        cancelled: &dyn Fn() -> bool,
+        mut visit: impl FnMut(AuditIndexSource<'_>) -> io::Result<()>,
+    ) -> io::Result<()> {
+        let result = (|| {
+            self.check(cancelled)?;
+            let mut opened_rows = 0u64;
+            for descriptor in &self.segments {
+                self.check(cancelled)?;
+                if descriptor.row_count == 0 {
+                    continue;
+                }
+                let directory = self.paths.segment_dir(descriptor.id);
+                let mut reader = SegmentReader::open_for_inspection(&directory)?;
+                let rows = reader.read_row_count()?;
+                opened_rows = opened_rows
+                    .checked_add(rows)
+                    .ok_or_else(|| invalid("index audit opened row count overflow"))?;
+                limit("opened total rows", opened_rows, self.limits.max_total_rows)?;
+                limit(
+                    "opened segment rows",
+                    rows,
+                    self.limits.segment.max_segment_rows,
+                )?;
+                if reader
+                    .captured_manifest_identity()
+                    .is_none_or(|(id, _)| id != descriptor.id)
+                    || rows < descriptor.row_count
+                    || reader.source_namespace() != descriptor.source_namespace.map(|v| v.0)
+                    || (rows == descriptor.row_count
+                        && reader.source_commitment()? != descriptor.source_commitment.map(|v| v.0))
+                {
+                    return Err(invalid("index audit source differs from captured prefix"));
+                }
+                reader
+                    .inspection_preflight(
+                        self.limits.segment.max_retained_artifact_bytes,
+                        self.limits.segment.max_decoded_payload_bytes,
+                    )
+                    .map_err(|error| match error {
+                        crate::segment_reader::InspectionPreflightError::Io(error) => error,
+                        crate::segment_reader::InspectionPreflightError::LimitExceeded {
+                            resource,
+                            required,
+                            limit: allowed,
+                        } => limit_error(resource, required, allowed),
+                    })?;
+                reader.retain_inspected_append_prefix()?;
+                self.check(cancelled)?;
+                visit(AuditIndexSource {
+                    segment_id: descriptor.id,
+                    minimum_rows: descriptor.row_count,
+                    reader: &reader,
+                    index_directory: &directory.join("indexes"),
+                })?;
+                self.check(cancelled)?;
+            }
+            Ok(())
+        })();
+        self.validate()?;
+        result
+    }
+
     /// Recheck before admitting downstream results. A successful earlier scan
     /// does not make a subsequently invalidated view current again.
     pub fn validate(&self) -> io::Result<()> {

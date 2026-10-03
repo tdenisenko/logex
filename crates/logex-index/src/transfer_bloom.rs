@@ -21,12 +21,14 @@ pub const TRANSFER_BLOOM_FILE: &str = "erc20_transfer.bloom";
 /// bloom bits are harmless false positives; a single false negative is an error.
 /// The bounded bit vector is retained once instead of doing random file reads
 /// for each row. All protected pages are checked, including unused bits.
-pub(crate) fn verify_source_membership(
-    source: &Path,
+pub(crate) fn verify_captured_membership(
+    reader: &SegmentReader,
     path: &Path,
     name: &str,
     file_id: [u8; 16],
+    cancelled: &dyn Fn() -> bool,
 ) -> io::Result<()> {
+    crate::verification::check_cancelled(cancelled)?;
     let legacy = name == TRANSFER_BLOOM_FILE;
     let magic = if legacy {
         TRANSFER_MAGIC
@@ -36,7 +38,6 @@ pub(crate) fn verify_source_membership(
     let (mut file, mask) = open_bloom(IndexFile::open_bound(path, file_id)?, magic)?;
     let mut bits = vec![0; ((mask + 1) / 8) as usize];
     file.read_exact(&mut bits)?;
-    let reader = SegmentReader::open_projected(source, &["address", "topic0", "topic1", "topic2"])?;
     u32::try_from(reader.read_row_count()?).map_err(|_| {
         io::Error::new(
             io::ErrorKind::InvalidData,
@@ -48,7 +49,7 @@ pub(crate) fn verify_source_membership(
     let topic1s = reader.read_nullable_b256("topic1", None)?;
     let topic2s = reader.read_nullable_b256("topic2", None)?;
     validate_source_rows(
-        &reader,
+        reader,
         &[
             ("address", addresses.len()),
             ("topic0", topic0s.len()),
@@ -59,6 +60,9 @@ pub(crate) fn verify_source_membership(
     let transfer = transfer_topic0();
     let approval = approval_topic0();
     for row in 0..addresses.len() {
+        if row.is_multiple_of(16_384) {
+            crate::verification::check_cancelled(cancelled)?;
+        }
         let Some(topic0) = topic0s[row] else { continue };
         if topic0 != transfer && (legacy || topic0 != approval) {
             continue;
@@ -81,7 +85,7 @@ pub(crate) fn verify_source_membership(
             }
         }
     }
-    Ok(())
+    crate::verification::check_cancelled(cancelled)
 }
 
 pub fn transfer_topic0() -> B256 {

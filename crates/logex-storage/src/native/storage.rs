@@ -61,8 +61,8 @@ mod primary_audit;
 #[path = "verified.rs"]
 mod verified;
 pub use primary_audit::{
-    PrimaryAuditBatch, PrimaryAuditLimits, PrimaryAuditReport, PrimaryAuditSnapshot,
-    PrimaryAuditedRow, PrimarySegmentAudit,
+    AuditIndexSource, PrimaryAuditBatch, PrimaryAuditLimits, PrimaryAuditReport,
+    PrimaryAuditSnapshot, PrimaryAuditedRow, PrimarySegmentAudit,
 };
 
 const HISTORICAL_STAGING_MAX_BLOCK_SPAN: u64 = 65_536;

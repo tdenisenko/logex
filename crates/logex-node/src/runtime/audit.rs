@@ -27,10 +27,8 @@ use tokio_util::sync::CancellationToken;
 mod files;
 mod plan;
 pub(crate) use files::cancel_request;
-use files::{
-    cancel_path, cancellation_recorded, create_private_directory, ensure_directory,
-    ordinary_directory, read_json, save_json, session_directory,
-};
+use files::{cancel_path, cancellation_recorded, ordinary_directory, session_directory};
+pub(super) use files::{create_private_directory, ensure_directory, read_json, save_json};
 pub(crate) use plan::Invocation;
 use plan::Scope;
 

@@ -690,6 +690,12 @@ available through `sync --history-audit-plan`. They are disabled by default and
 never start on ordinary restarts. See [the audit operator guide](docs/history-audit.md)
 for plans, cost limits, checkpointed resume, local cancellation and evidence limits.
 
+For a separate local check of every published derived index while queries and
+sync remain online, use `sync --index-audit-plan`. This explicit finite operation
+does not rebuild indexes or download Ethereum data. See the
+[index verification guide](docs/index-audit.md) for source snapshots, work bounds,
+cancellation and the difference between a verified selection and a newer tail.
+
 To roll back, use the matching older binary with a preserved pre-upgrade data
 directory or backup. Do not change version fields to bypass compatibility checks;
 no downgrade migration is provided.

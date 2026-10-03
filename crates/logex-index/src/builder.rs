@@ -54,10 +54,127 @@ impl From<io::Error> for IndexVerificationError {
     }
 }
 
+/// Complete local membership verification of one captured publication. This
+/// binds the result to local source bytes; it does not authenticate Ethereum.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapturedIndexVerification {
+    pub source_namespace: [u8; 16],
+    pub source_commitment: [u8; 32],
+    pub rows: u64,
+    pub logical_bytes: u64,
+    pub artifacts: Vec<VerifiedIndexArtifact>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedIndexArtifact {
+    pub name: String,
+    pub file_id: [u8; 16],
+    pub logical_bytes: u64,
+}
+
 /// Builds per-partition indexes from column data.
 pub struct IndexBuilder;
 
 impl IndexBuilder {
+    /// Capture these columns once for online verification, before inspecting
+    /// the index checkpoint. A caller must retain the storage owner/read view
+    /// and re-admit that view before reporting the overall operation complete.
+    pub fn verification_columns() -> &'static [&'static str] {
+        &[
+            "address",
+            "topic0",
+            "topic1",
+            "topic2",
+            "topic3",
+            "block_number",
+            "block_hash",
+            "timestamp",
+        ]
+    }
+
+    /// Verify every artifact in a locked publication against one retained
+    /// source reader. Unlike the offline path API, this never reopens source
+    /// columns during verification. An old publication can verify its captured
+    /// prefix while newer rows append; it makes no claim about that newer tail.
+    /// `required` specifies the minimum profile; additional published indexes
+    /// are also checked. Missing, stale, locked or unknown artifacts fail.
+    /// Cancellation is cooperative between bounded artifact/column/row steps.
+    /// Logical index bytes are a work limit, not a process-memory or I/O cap.
+    pub fn verify_captured_indexes(
+        source: &SegmentReader,
+        index_dir: &Path,
+        required: IndexBuildProfile,
+        max_total_logical_bytes: u64,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<CapturedIndexVerification, IndexVerificationError> {
+        crate::verification::check_cancelled(cancelled)?;
+        require_ordinary_index_path(index_dir, true)?;
+        require_ordinary_index_path(&index_dir.join("index-checkpoint"), false)?;
+        let checkpoint = IndexReadCheckpoint::open_at(index_dir, source)?.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "index publication is unavailable for the captured source",
+            )
+        })?;
+        for name in Self::required_index_files(required) {
+            if checkpoint.artifact_id(name).is_none() {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    format!("index publication lacks {name}"),
+                )
+                .into());
+            }
+        }
+        let namespace = source.source_namespace().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "captured source namespace is missing",
+            )
+        })?;
+        let commitment = source.source_commitment()?.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "captured source commitment is missing",
+            )
+        })?;
+        let mut result = CapturedIndexVerification {
+            source_namespace: namespace,
+            source_commitment: commitment,
+            rows: source.read_row_count()?,
+            logical_bytes: 0,
+            artifacts: Vec::new(),
+        };
+        for (name, file_id) in checkpoint.artifacts() {
+            crate::verification::check_cancelled(cancelled)?;
+            crate::verification::source_columns(name)?;
+            let path = index_dir.join(name);
+            require_ordinary_index_path(&path, false)?;
+            let file = IndexFile::open_bound(&path, file_id)?;
+            let length = file.logical_len();
+            result.logical_bytes = result.logical_bytes.checked_add(length).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "index logical byte sum overflow",
+                )
+            })?;
+            if result.logical_bytes > max_total_logical_bytes {
+                return Err(IndexVerificationError::LimitExceeded {
+                    required: result.logical_bytes,
+                    limit: max_total_logical_bytes,
+                });
+            }
+            drop(file);
+            crate::verification::verify_captured_artifact(source, &path, name, file_id, cancelled)?;
+            result.artifacts.push(VerifiedIndexArtifact {
+                name: name.to_owned(),
+                file_id,
+                logical_bytes: length,
+            });
+        }
+        crate::verification::check_cancelled(cancelled)?;
+        Ok(result)
+    }
+
     /// Bound incremental file bytes for a fresh selected index profile.
     /// Includes each derived file's integrity framing and a 4096-byte publication
     /// checkpoint allowance. This counts logical file lengths, not allocated
@@ -741,6 +858,180 @@ mod tests {
     use super::*;
     use crate::btree::BTreeIndexReader;
     use alloy_primitives::{Address, B256, bytes};
+
+    #[test]
+    fn captured_verification_retains_source_after_paths_are_retired() {
+        let root = TempDir::new().unwrap();
+        let source = root.path().join("source");
+        fs::create_dir(&source).unwrap();
+        ColumnFile::write_batch(&source, &make_test_rows()).unwrap();
+        IndexBuilder::build_all_indexes(&source).unwrap();
+        let reader =
+            SegmentReader::open_projected(&source, IndexBuilder::verification_columns()).unwrap();
+        let retained = root.path().join("retained");
+        fs::rename(&source, &retained).unwrap();
+        let before = verification_tree(&retained);
+        let proof = IndexBuilder::verify_captured_indexes(
+            &reader,
+            &retained.join("indexes"),
+            IndexBuildProfile::Events,
+            u64::MAX,
+            &|| false,
+        )
+        .unwrap();
+        assert_eq!(proof.rows, make_test_rows().len() as u64);
+        assert_eq!(
+            proof.artifacts.len(),
+            IndexBuilder::required_index_files(IndexBuildProfile::All).len()
+        );
+        assert_eq!(verification_tree(&retained), before);
+        // No source path needs to exist after capture. An offline reopen cannot
+        // accidentally be used by any semantic verifier in this test.
+        assert!(!source.exists());
+    }
+
+    #[test]
+    fn captured_verification_covers_optional_publications_and_bounds() {
+        let source = TempDir::new().unwrap();
+        ColumnFile::write_batch(source.path(), &make_test_rows()).unwrap();
+        IndexBuilder::build_all_indexes(source.path()).unwrap();
+        let reader =
+            SegmentReader::open_projected(source.path(), IndexBuilder::verification_columns())
+                .unwrap();
+        let indexes = source.path().join("indexes");
+        let proof = IndexBuilder::verify_captured_indexes(
+            &reader,
+            &indexes,
+            IndexBuildProfile::Events,
+            u64::MAX,
+            &|| false,
+        )
+        .unwrap();
+        assert!(proof.logical_bytes > 0);
+        assert!(matches!(
+            IndexBuilder::verify_captured_indexes(
+                &reader,
+                &indexes,
+                IndexBuildProfile::Events,
+                proof.logical_bytes - 1,
+                &|| false
+            ),
+            Err(IndexVerificationError::LimitExceeded { .. })
+        ));
+        assert_eq!(
+            IndexBuilder::verify_captured_indexes(
+                &reader,
+                &indexes,
+                IndexBuildProfile::Events,
+                proof.logical_bytes,
+                &|| false
+            )
+            .unwrap(),
+            proof
+        );
+        let mut publication = IndexBuildCheckpoint::begin(source.path()).unwrap();
+        let mut bad = BTreeIndex::new(20);
+        bad.insert(Address::repeat_byte(0xcc).as_slice(), 0);
+        bad.write_to_file(&indexes.join("address.bptree")).unwrap();
+        for name in IndexBuilder::required_index_files(IndexBuildProfile::All) {
+            publication
+                .register_artifact(
+                    name,
+                    IndexFile::protected_file_id(&indexes.join(name)).unwrap(),
+                )
+                .unwrap();
+        }
+        publication.publish().unwrap();
+        // The minimum Events profile requires only the bloom, but the optional
+        // address index is published and queries can use it: it must be checked.
+        assert!(
+            matches!(IndexBuilder::verify_captured_indexes(&reader, &indexes, IndexBuildProfile::Events, u64::MAX, &|| false), Err(IndexVerificationError::Io(e)) if e.kind()==io::ErrorKind::InvalidData)
+        );
+    }
+
+    #[test]
+    fn captured_verification_refuses_locked_unknown_and_cancelled_work() {
+        let source = TempDir::new().unwrap();
+        ColumnFile::write_batch(source.path(), &make_test_rows()).unwrap();
+        IndexBuilder::build_indexes(source.path(), IndexBuildProfile::Events).unwrap();
+        let reader =
+            SegmentReader::open_projected(source.path(), IndexBuilder::verification_columns())
+                .unwrap();
+        let indexes = source.path().join("indexes");
+        // Cancellation happens before filesystem work and does not withdraw a
+        // publication. A writer's lock is reported as unavailable, never success.
+        assert!(
+            matches!(IndexBuilder::verify_captured_indexes(&reader, &source.path().join("absent"), IndexBuildProfile::Events, u64::MAX, &|| true), Err(IndexVerificationError::Io(e)) if e.kind()==io::ErrorKind::Interrupted)
+        );
+        let mut publication = IndexBuildCheckpoint::begin(source.path()).unwrap();
+        // begin withdrew the marker, so preserve the semantic failure rather
+        // than interpreting the absence as an empty publication.
+        assert!(
+            IndexBuilder::verify_captured_indexes(
+                &reader,
+                &indexes,
+                IndexBuildProfile::Events,
+                u64::MAX,
+                &|| false
+            )
+            .is_err()
+        );
+        let id = IndexFile::protected_file_id(&indexes.join(EVENT_BLOOM_FILE)).unwrap();
+        publication.register_artifact(EVENT_BLOOM_FILE, id).unwrap();
+        fs::copy(
+            indexes.join(EVENT_BLOOM_FILE),
+            indexes.join("unknown.bloom"),
+        )
+        .unwrap();
+        publication.register_artifact("unknown.bloom", id).unwrap();
+        publication.publish().unwrap();
+        assert!(
+            matches!(IndexBuilder::verify_captured_indexes(&reader, &indexes, IndexBuildProfile::Events, u64::MAX, &|| false), Err(IndexVerificationError::Io(e)) if e.to_string().contains("unknown derived index"))
+        );
+    }
+
+    #[test]
+    fn captured_verification_checks_old_prefix_while_native_hot_rows_append() {
+        use logex_storage::{PartitionManager, PartitionManagerConfig};
+        let root = TempDir::new().unwrap();
+        let mut storage = PartitionManager::open(PartitionManagerConfig {
+            data_dir: root.path().to_owned(),
+            partition_target_rows: 1_000,
+            ..Default::default()
+        })
+        .unwrap();
+        let rows = make_test_rows();
+        storage.write_batch(&rows).unwrap();
+        storage.checkpoint_durable().unwrap();
+        let source = storage.hot_partition().meta.path.clone();
+        IndexBuilder::build_all_indexes(&source).unwrap();
+        let captured =
+            SegmentReader::open_projected(&source, IndexBuilder::verification_columns()).unwrap();
+        storage.write_batch(&rows).unwrap();
+        storage.checkpoint_durable().unwrap();
+        let proof = IndexBuilder::verify_captured_indexes(
+            &captured,
+            &source.join("indexes"),
+            IndexBuildProfile::Events,
+            u64::MAX,
+            &|| false,
+        )
+        .unwrap();
+        assert_eq!(proof.rows, rows.len() as u64);
+        let latest =
+            SegmentReader::open_projected(&source, IndexBuilder::verification_columns()).unwrap();
+        assert_eq!(latest.read_row_count().unwrap(), 2 * proof.rows);
+        assert!(
+            IndexBuilder::verify_captured_indexes(
+                &latest,
+                &source.join("indexes"),
+                IndexBuildProfile::Events,
+                u64::MAX,
+                &|| false
+            )
+            .is_err()
+        );
+    }
     use logex_storage::ColumnFile;
     use logex_types::{LogRow, Source};
     use tempfile::TempDir;
