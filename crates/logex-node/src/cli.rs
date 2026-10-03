@@ -337,6 +337,8 @@ pub enum Command {
         /// Stable request ID from the audit JSON plan.
         request_id: alloy_primitives::B256,
     },
+    /// Cancel explicit index verification while leaving normal sync running.
+    CancelIndexAudit { request_id: alloy_primitives::B256 },
     /// Start the node: sync blocks from the P2P network and serve queries.
     #[command(after_help = "Examples:
   logex sync
@@ -355,6 +357,11 @@ Security:
         /// Resume this plan's existing frozen audit job instead of creating one.
         #[arg(long, requires = "history_audit_plan")]
         history_audit_resume: bool,
+
+        /// Explicit bounded verification of every published index against retained
+        /// source snapshots. Does not rebuild indexes or download Ethereum data.
+        #[arg(long, value_name = "JSON_PLAN")]
+        index_audit_plan: Option<PathBuf>,
 
         /// Shared maximum admitted SQL and native queries across REST, JSON-RPC and gRPC.
         /// Excess requests fail immediately; this is not a query memory budget.
@@ -757,6 +764,36 @@ mod tests {
             }
         ));
         assert!(Cli::try_parse_from(["logex", "cancel-history-audit", "invalid-id"]).is_err());
+    }
+
+    #[test]
+    fn index_audit_is_explicit_and_cancellation_requires_a_request_id() {
+        let cli = Cli::try_parse_from(["logex", "sync"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Sync {
+                index_audit_plan: None,
+                ..
+            }
+        ));
+        let cli =
+            Cli::try_parse_from(["logex", "sync", "--index-audit-plan", "bounded.json"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Sync {
+                index_audit_plan: Some(_),
+                history_audit_plan: None,
+                ..
+            }
+        ));
+        assert!(Cli::try_parse_from(["logex", "cancel-index-audit", "invalid-id"]).is_err());
+        let id = alloy_primitives::B256::repeat_byte(3).to_string();
+        assert!(matches!(
+            Cli::try_parse_from(["logex", "cancel-index-audit", &id])
+                .unwrap()
+                .command,
+            Command::CancelIndexAudit { .. }
+        ));
     }
 
     #[test]

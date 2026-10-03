@@ -212,6 +212,120 @@ fn close_invalidates_snapshot_and_retained_owner_prevents_reopen() {
 }
 
 #[test]
+fn index_sources_retain_finite_owned_prefixes_across_appends() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut storage = NativeStorage::open(NativeStorageConfig {
+        hot_target_rows: 1_000,
+        ..config(dir.path())
+    })
+    .unwrap();
+    write(&mut storage, &rows(2), false);
+    let snapshot = storage.primary_audit_snapshot(limits()).unwrap();
+    write(&mut storage, &rows(3), false);
+    let mut visited = 0;
+    snapshot
+        .visit_index_sources(&|| false, |source| {
+            assert_eq!(source.minimum_rows, 2);
+            assert_eq!(source.reader.read_row_count()?, 5);
+            let captured = source.reader.read_address(None)?;
+            write(&mut storage, &rows(40), false);
+            assert_eq!(source.reader.read_address(None)?, captured);
+            assert_eq!(source.reader.read_nullable_b256("topic0", None)?.len(), 5);
+            assert_eq!(source.reader.read_nullable_b256("topic1", None)?.len(), 5);
+            assert_eq!(source.reader.read_row_count()?, 5);
+            visited += 1;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(visited, 1);
+    assert_eq!(snapshot.physical_rows(), 2);
+    drop(storage);
+    assert_eq!(
+        snapshot
+            .visit_index_sources(&|| false, |_| Ok(()))
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::WouldBlock
+    );
+}
+
+#[test]
+fn index_source_capture_rejects_shape_budget_and_view_changes() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut storage = NativeStorage::open(config(dir.path())).unwrap();
+    write(&mut storage, &rows(6), true);
+    let snapshot = storage.primary_audit_snapshot(limits()).unwrap();
+    assert_eq!(
+        snapshot
+            .visit_index_sources(&|| true, |_| panic!("cancelled source visited"))
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::Interrupted
+    );
+    let mut bound = limits();
+    bound.segment.max_retained_artifact_bytes = 1;
+    let bounded = storage.primary_audit_snapshot(bound).unwrap();
+    assert_eq!(
+        bounded
+            .visit_index_sources(&|| false, |_| panic!("oversized source visited"))
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::InvalidInput
+    );
+    let hash = rows(1)[0].block_hash;
+    assert_eq!(
+        snapshot
+            .visit_index_sources(&|| false, |_| {
+                storage.mark_non_canonical(hash)?;
+                Ok(())
+            })
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::WouldBlock
+    );
+}
+
+#[test]
+fn online_index_source_bounds_reject_shrink_and_excess_opened_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut storage = NativeStorage::open(NativeStorageConfig {
+        hot_target_rows: 1_000,
+        ..config(dir.path())
+    })
+    .unwrap();
+    write(&mut storage, &rows(3), false);
+    let snapshot = storage.primary_audit_snapshot(limits()).unwrap();
+    let error = snapshot
+        .visit_index_sources(&|| false, |source| {
+            let path = source.index_directory.parent().unwrap().join("address.col");
+            let file = fs::OpenOptions::new().write(true).open(path)?;
+            file.set_len(0)?;
+            source.reader.read_address(None).map(|_| ())
+        })
+        .unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut storage = NativeStorage::open(NativeStorageConfig {
+        hot_target_rows: 1_000,
+        ..config(dir.path())
+    })
+    .unwrap();
+    write(&mut storage, &rows(2), false);
+    let mut limit = limits();
+    limit.max_total_rows = 3;
+    let snapshot = storage.primary_audit_snapshot(limit).unwrap();
+    write(&mut storage, &rows(2), false);
+    assert_eq!(
+        snapshot
+            .visit_index_sources(&|| false, |_| panic!("excess source visited"))
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::InvalidInput
+    );
+}
+
+#[test]
 fn cancellation_and_callback_failure_never_return_partial_success_or_mutate_storage() {
     let dir = tempfile::tempdir().unwrap();
     let mut storage = NativeStorage::open(config(dir.path())).unwrap();

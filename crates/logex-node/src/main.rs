@@ -73,6 +73,25 @@ fn main() {
         }
         _ => None,
     };
+    let index_audit = match &cli.command {
+        Command::Sync {
+            index_audit_plan: Some(path),
+            repair_corrupt_segments,
+            ..
+        } => {
+            if *repair_corrupt_segments {
+                eprintln!("Error: finish startup repair before requesting index verification");
+                std::process::exit(1);
+            }
+            Some(
+                runtime::index_audit::Plan::read(path).unwrap_or_else(|error| {
+                    eprintln!("Error: invalid explicit index audit plan: {error}");
+                    std::process::exit(1);
+                }),
+            )
+        }
+        _ => None,
+    };
     drop(matches);
     let log_level = normalize_info_log_filter(cli.log_level);
 
@@ -91,7 +110,10 @@ fn main() {
     let mut checkpoint = cli.checkpoint;
     let checkpoint_sync_url = cli.checkpoint_sync_url;
     let is_repair = matches!(cli.command, Command::Repair { .. });
-    let audit_control = matches!(cli.command, Command::CancelHistoryAudit { .. });
+    let audit_control = matches!(
+        cli.command,
+        Command::CancelHistoryAudit { .. } | Command::CancelIndexAudit { .. }
+    );
     let dry_run = matches!(cli.command, Command::Repair { dry_run: true, .. });
     if is_repair && (checkpoint.is_some() || checkpoint_sync_url.is_some()) {
         eprintln!(
@@ -190,6 +212,15 @@ fn main() {
     };
 
     match cli.command {
+        Command::CancelIndexAudit { request_id } => {
+            if let Err(error) =
+                runtime::index_audit::cancel_request(&pm_config.data_dir, request_id)
+            {
+                eprintln!("Error: cannot cancel index audit: {error}");
+                std::process::exit(1);
+            }
+            println!("Cancellation recorded for index audit {request_id}.");
+        }
         Command::CancelHistoryAudit { request_id } => {
             if let Err(error) = runtime::audit::cancel_request(&pm_config.data_dir, request_id) {
                 eprintln!("Error: cannot cancel history audit: {error}");
@@ -202,6 +233,7 @@ fn main() {
             query_memory_bytes: _,
             history_audit_plan: _,
             history_audit_resume: _,
+            index_audit_plan: _,
             http_host,
             http_port,
             grpc_host,
@@ -231,6 +263,7 @@ fn main() {
             let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
             let shutdown = rt.block_on(runtime::run_sync(runtime::RunSyncOptions {
                 history_audit,
+                index_audit,
                 query_memory: query_memory.expect("sync memory limit was validated"),
                 query_concurrency: query_concurrency
                     .expect("sync admission was validated before startup"),

@@ -148,6 +148,14 @@ impl IndexReadCheckpoint {
             .ok()
             .map(|index| self.artifacts[index].file_id.0)
     }
+
+    /// Enumerate every artifact in this locked publication. Unpublished files
+    /// are not query inputs and must not be mistaken for verified members.
+    pub fn artifacts(&self) -> impl ExactSizeIterator<Item = (&str, [u8; 16])> {
+        self.artifacts
+            .iter()
+            .map(|binding| (binding.name.as_str(), binding.file_id.0))
+    }
 }
 
 /// Serialize index builders and durably withdraw their old publication before

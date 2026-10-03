@@ -5160,6 +5160,7 @@ version = "0.1.0"
 dependencies = [
  "alloy-consensus",
  "alloy-primitives",
+ "blake3",
  "clap",
  "eyre",
  "futures-util",

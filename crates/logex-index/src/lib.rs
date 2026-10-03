@@ -12,7 +12,10 @@ mod transfer_bloom;
 mod verification;
 
 pub use btree::{BTreeIndex, BTreeIndexReader};
-pub use builder::{IndexBuildProfile, IndexBuilder, IndexVerificationError};
+pub use builder::{
+    CapturedIndexVerification, IndexBuildProfile, IndexBuilder, IndexVerificationError,
+    VerifiedIndexArtifact,
+};
 pub use composite::{CompositeIndexBuilder, CompositeQuery};
 pub use event_bloom::{EVENT_BLOOM_FILE, EventBloom, EventBloomReader};
 pub use query_bitmap::QueryBitmap;

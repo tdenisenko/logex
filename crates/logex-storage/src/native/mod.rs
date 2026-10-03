@@ -19,9 +19,9 @@ pub(crate) use segment::{
     compact_segment, persist_initial_raw_manifest_for_test, persist_segment_manifest,
 };
 pub use storage::{
-    CompactionMode, NativeStorage, PendingCanonicalReorg, PrimaryAuditBatch, PrimaryAuditLimits,
-    PrimaryAuditReport, PrimaryAuditSnapshot, PrimaryAuditedRow, PrimarySegmentAudit,
-    ReadViewToken, SegmentCompactionPlan, SegmentCompactionTask,
+    AuditIndexSource, CompactionMode, NativeStorage, PendingCanonicalReorg, PrimaryAuditBatch,
+    PrimaryAuditLimits, PrimaryAuditReport, PrimaryAuditSnapshot, PrimaryAuditedRow,
+    PrimarySegmentAudit, ReadViewToken, SegmentCompactionPlan, SegmentCompactionTask,
 };
 
 pub use inspection::{

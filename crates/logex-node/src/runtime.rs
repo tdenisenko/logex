@@ -34,6 +34,7 @@ use crate::checkpoint::{RECENT_CHECKPOINT_MAX_FINALIZED_EPOCH_LAG, resolve_check
 
 pub(crate) mod audit;
 mod cleanup;
+pub(crate) mod index_audit;
 pub(crate) mod repair;
 mod services;
 mod storage_health;
@@ -144,6 +145,7 @@ impl LocalP2pAddressCandidates {
 
 pub struct RunSyncOptions<'a> {
     pub history_audit: Option<audit::Invocation>,
+    pub index_audit: Option<index_audit::Plan>,
     pub query_concurrency: logex_server::QueryConcurrencyLimit,
     pub query_memory: logex_types::QueryMemoryLimit,
     pub pm_config: PartitionManagerConfig,
@@ -180,6 +182,7 @@ pub async fn run_sync(options: RunSyncOptions<'_>) -> cleanup::RuntimeShutdown {
     tokio::pin!(shutdown_signal);
     let RunSyncOptions {
         history_audit,
+        index_audit,
         query_concurrency,
         query_memory,
         pm_config,
@@ -728,6 +731,14 @@ pub async fn run_sync(options: RunSyncOptions<'_>) -> cleanup::RuntimeShutdown {
         }
     });
 
+    let index_audit_handle = index_audit.map(|plan| {
+        index_audit::spawn(
+            plan,
+            data_dir.clone(),
+            Arc::clone(&state),
+            shutdown_rx.clone(),
+        )
+    });
     let mut shutdown_guard = None;
     let mut engine_exit_code = supervision::SyncSupervisor {
         on_shutdown: || {
@@ -792,6 +803,9 @@ pub async fn run_sync(options: RunSyncOptions<'_>) -> cleanup::RuntimeShutdown {
     tasks.push(("consensus network", consensus_network_handle));
     if let Some(handle) = audit_handle {
         tasks.push(("one-time history audit", handle));
+    }
+    if let Some(handle) = index_audit_handle {
+        tasks.push(("explicit index audit", handle));
     }
     // These workers are already stopping independently. Await them together so
     // their cleanup windows do not multiply with the number of services.

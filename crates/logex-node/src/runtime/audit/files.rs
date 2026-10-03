@@ -38,7 +38,7 @@ pub(super) fn ordinary_directory(path: &Path) -> io::Result<()> {
     }
     Ok(())
 }
-pub(super) fn create_private_directory(path: &Path) -> io::Result<()> {
+pub(in crate::runtime) fn create_private_directory(path: &Path) -> io::Result<()> {
     let mut builder = fs::DirBuilder::new();
     #[cfg(unix)]
     {
@@ -47,7 +47,7 @@ pub(super) fn create_private_directory(path: &Path) -> io::Result<()> {
     }
     builder.create(path)
 }
-pub(super) fn ensure_directory(path: &Path) -> io::Result<()> {
+pub(in crate::runtime) fn ensure_directory(path: &Path) -> io::Result<()> {
     match create_private_directory(path) {
         Ok(()) => {
             File::open(path)?.sync_all()?;
@@ -58,7 +58,7 @@ pub(super) fn ensure_directory(path: &Path) -> io::Result<()> {
         Err(e) => Err(e),
     }
 }
-pub(super) fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> io::Result<T> {
+pub(in crate::runtime) fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> io::Result<T> {
     if !fs::symlink_metadata(path)?.is_file() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -76,7 +76,7 @@ pub(super) fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> io::Resu
     }
     serde_json::from_slice(&bytes).map_err(io::Error::other)
 }
-pub(super) fn save_json(
+pub(in crate::runtime) fn save_json(
     directory: &Path,
     name: &str,
     value: &impl Serialize,

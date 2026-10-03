@@ -73,6 +73,7 @@ pub(crate) struct ColumnArtifacts {
     bundle: Option<BundleReader>,
     pinned: Option<Arc<BTreeMap<String, Mutex<File>>>>,
     inspection_lengths: Option<Arc<BTreeMap<String, u64>>>,
+    inspection_allow_append: bool,
     memory: Option<QueryMemoryBudget>,
 }
 
@@ -312,6 +313,7 @@ impl ColumnArtifacts {
             bundle,
             pinned: None,
             inspection_lengths: None,
+            inspection_allow_append: false,
             memory: memory.cloned(),
         })
     }
@@ -344,6 +346,20 @@ impl ColumnArtifacts {
         let result = lengths.values().copied().collect();
         self.inspection_lengths = Some(Arc::new(lengths));
         Ok(result)
+    }
+
+    /// A storage-owned online reader may retain a validated append prefix.
+    /// Reads still stop at the preflight lengths; growth never increases an
+    /// allocation or permits an out-of-prefix read. Offline inspection keeps
+    /// rejecting every length change. Bundled streams are already immutable.
+    pub(crate) fn allow_inspected_append_prefix(&mut self) -> io::Result<()> {
+        if self.bundle.is_none() && self.inspection_lengths.is_none() {
+            return Err(invalid(
+                "append prefix needs completed inspection preflight",
+            ));
+        }
+        self.inspection_allow_append = true;
+        Ok(())
     }
 
     /// Read the fixed prefix and length from the SAME pinned canonical inode.
@@ -405,14 +421,14 @@ impl ColumnArtifacts {
                         let expected = *lengths
                             .get(path)
                             .ok_or_else(|| invalid("uncaptured inspection artifact"))?;
-                        check_inspection_length(&file, expected)?;
+                        check_inspection_length(&file, expected, self.inspection_allow_append)?;
                         let len = usize::try_from(expected)
                             .map_err(|_| invalid("captured column exceeds address space"))?;
                         let mut bytes = Vec::new();
                         bytes.try_reserve_exact(len).map_err(io::Error::other)?;
                         bytes.resize(len, 0);
                         file.read_exact(&mut bytes)?;
-                        check_inspection_length(&file, expected)?;
+                        check_inspection_length(&file, expected, self.inspection_allow_append)?;
                         return Ok(bytes);
                     }
                     let mut bytes = Vec::new();
@@ -476,7 +492,15 @@ impl ColumnArtifacts {
             };
         }
         // read_range rechecks the boundary on the same pinned artifact.
-        self.read_range_accounted(path, 0..self.len(path)?)
+        let length = if self.inspection_allow_append {
+            self.inspection_lengths
+                .as_ref()
+                .and_then(|lengths| lengths.get(path))
+                .copied()
+        } else {
+            None
+        };
+        self.read_range_accounted(path, 0..length.map_or_else(|| self.len(path), Ok)?)
     }
 
     pub(crate) fn read_range_accounted(
@@ -506,7 +530,7 @@ impl ColumnArtifacts {
                 let expected = *lengths
                     .get(path)
                     .ok_or_else(|| invalid("uncaptured inspection artifact"))?;
-                check_inspection_length(file, expected)?;
+                check_inspection_length(file, expected, self.inspection_allow_append)?;
                 if range.end > expected {
                     return Err(invalid("inspection range exceeds captured artifact"));
                 }
@@ -555,8 +579,9 @@ impl ColumnArtifacts {
     }
 }
 
-fn check_inspection_length(file: &File, expected: u64) -> io::Result<()> {
-    if file.metadata()?.len() != expected {
+fn check_inspection_length(file: &File, expected: u64, allow_append: bool) -> io::Result<()> {
+    let actual = file.metadata()?.len();
+    if actual < expected || (!allow_append && actual != expected) {
         return Err(io::Error::new(
             io::ErrorKind::WouldBlock,
             "artifact length changed after inspection preflight",
