@@ -20,6 +20,59 @@ use crate::{
 
 const MAGIC: &[u8; 8] = b"LXEVBF1\0";
 pub const EVENT_BLOOM_FILE: &str = "events.bloom";
+type EventKey = [u8; 8 + 32 + 20 + 1 + 32];
+const KEY_CACHE_ENTRIES: usize = 1024;
+const _: () = assert!(KEY_CACHE_ENTRIES.is_power_of_two());
+
+#[derive(Clone, Copy)]
+struct CachedKey {
+    key: EventKey,
+    hashes: (u64, u64),
+    occupied: bool,
+}
+
+/// Bound maintenance-only memoization independently of the number of rows.
+/// Repeated emitters/events and arguments still visit every source membership;
+/// only their unchanged Keccak calculation is reused. Complete-key equality is
+/// required for a hit, so slot collisions only evict an entry. Query readers do
+/// not allocate this cache, and the persisted key/hash format stays unchanged.
+struct KeyHashCache {
+    entries: Box<[CachedKey]>,
+}
+
+impl KeyHashCache {
+    fn new() -> Self {
+        Self {
+            entries: vec![
+                CachedKey {
+                    key: [0; size_of::<EventKey>()],
+                    hashes: (0, 0),
+                    occupied: false,
+                };
+                KEY_CACHE_ENTRIES
+            ]
+            .into_boxed_slice(),
+        }
+    }
+
+    fn slot(key: &EventKey) -> usize {
+        twox_hash::XxHash3_64::oneshot(key) as usize & (KEY_CACHE_ENTRIES - 1)
+    }
+
+    fn hashes(&mut self, key: EventKey) -> (u64, u64) {
+        let entry = &mut self.entries[Self::slot(&key)];
+        if entry.occupied && entry.key == key {
+            return entry.hashes;
+        }
+        let hashes = hash_key(&key);
+        *entry = CachedKey {
+            key,
+            hashes,
+            occupied: true,
+        };
+        hashes
+    }
+}
 
 /// At most 2 MiB of bits per segment, regardless of event type or row count.
 pub struct EventBloom;
@@ -157,9 +210,13 @@ fn visit_source_keys(
         reader,
         &[("address", addresses.len()), ("topic0", events.len())],
     )?;
+    let mut hashes = KeyHashCache::new();
     for (row, event) in events.iter().enumerate() {
         if let Some(event) = event {
-            visit(row, key_hashes(event, &addresses[row], 0, &B256::ZERO))?;
+            visit(
+                row,
+                hashes.hashes(event_key(event, &addresses[row], 0, &B256::ZERO)),
+            )?;
         }
     }
     for (position, name) in [(1, "topic1"), (2, "topic2"), (3, "topic3")] {
@@ -167,7 +224,10 @@ fn visit_source_keys(
         validate_source_rows(reader, &[(name, values.len())])?;
         for (row, (event, value)) in events.iter().zip(&values).enumerate() {
             if let (Some(event), Some(value)) = (event, value) {
-                visit(row, key_hashes(event, &addresses[row], position, value))?;
+                visit(
+                    row,
+                    hashes.hashes(event_key(event, &addresses[row], position, value)),
+                )?;
             }
         }
     }
@@ -175,6 +235,10 @@ fn visit_source_keys(
 }
 
 fn key_hashes(topic0: &B256, address: &Address, position: u8, value: &B256) -> (u64, u64) {
+    hash_key(&event_key(topic0, address, position, value))
+}
+
+fn event_key(topic0: &B256, address: &Address, position: u8, value: &B256) -> EventKey {
     // Position zero is a separate presence domain, including for zero arguments.
     let mut key = [0; 8 + 32 + 20 + 1 + 32];
     key[..8].copy_from_slice(MAGIC);
@@ -182,6 +246,10 @@ fn key_hashes(topic0: &B256, address: &Address, position: u8, value: &B256) -> (
     key[40..60].copy_from_slice(address.as_slice());
     key[60] = position;
     key[61..].copy_from_slice(value.as_slice());
+    key
+}
+
+fn hash_key(key: &EventKey) -> (u64, u64) {
     let hash = keccak256(key);
     let h1 = u64::from_le_bytes(hash[..8].try_into().expect("eight hash bytes"));
     let h2 = u64::from_le_bytes(hash[8..16].try_into().expect("eight hash bytes")) | 1;
@@ -194,6 +262,78 @@ mod tests {
     use logex_storage::ColumnFile;
     use logex_types::{LogRow, QueryMemoryError, QueryMemoryLimit, Source};
     use tempfile::TempDir;
+
+    #[test]
+    fn cache_collisions_eviction_and_hits_preserve_every_key_domain() {
+        let mut cache = KeyHashCache::new();
+        assert!(size_of::<CachedKey>() * KEY_CACHE_ENTRIES <= 128 * 1024);
+        let mut first_by_slot = vec![None; KEY_CACHE_ENTRIES];
+        let mut collision = None;
+        for value in 0..=KEY_CACHE_ENTRIES {
+            let event = keccak256(value.to_le_bytes());
+            for position in 0..=3 {
+                let address = Address::repeat_byte(position + 1);
+                let argument = B256::repeat_byte(position);
+                let key = event_key(&event, &address, position, &argument);
+                let expected = key_hashes(&event, &address, position, &argument);
+                assert_eq!(cache.hashes(key), expected);
+                assert_eq!(cache.hashes(key), expected);
+                let slot = KeyHashCache::slot(&key);
+                if let Some(previous) = first_by_slot[slot] {
+                    if previous != key {
+                        collision = Some((previous, key));
+                    }
+                } else {
+                    first_by_slot[slot] = Some(key);
+                }
+            }
+        }
+        let (first, second) = collision.expect("more keys than cache slots collide");
+        assert_eq!(KeyHashCache::slot(&first), KeyHashCache::slot(&second));
+        for key in [first, second, first, first, second] {
+            assert_eq!(cache.hashes(key), hash_key(&key));
+        }
+    }
+
+    #[test]
+    fn cached_source_visits_preserve_rows_and_all_arguments_with_repetition() {
+        let source = TempDir::new().unwrap();
+        let rows: Vec<_> = rows().into_iter().cycle().take(3000).collect();
+        ColumnFile::write_batch(source.path(), &rows).unwrap();
+        let reader = source_reader(source.path()).unwrap();
+        let mut actual = Vec::new();
+        visit_source_keys(&reader, |row, hashes| {
+            actual.push((row, hashes));
+            Ok(())
+        })
+        .unwrap();
+        let mut expected = Vec::new();
+        for position in 0..=3 {
+            for (index, row) in rows.iter().enumerate() {
+                let Some(event) = row.topic0 else { continue };
+                let Some(value) = [Some(B256::ZERO), row.topic1, row.topic2, row.topic3][position]
+                else {
+                    continue;
+                };
+                // Separate variable-length serialization guards the persisted
+                // format while comparing every row, including repeated keys.
+                let mut bytes = b"LXEVBF1\0".to_vec();
+                bytes.extend_from_slice(event.as_slice());
+                bytes.extend_from_slice(row.address.as_slice());
+                bytes.push(position as u8);
+                bytes.extend_from_slice(value.as_slice());
+                let digest = keccak256(bytes);
+                expected.push((
+                    index,
+                    (
+                        u64::from_le_bytes(digest[..8].try_into().unwrap()),
+                        u64::from_le_bytes(digest[8..16].try_into().unwrap()) | 1,
+                    ),
+                ));
+            }
+        }
+        assert_eq!(actual, expected);
+    }
 
     fn rows() -> Vec<LogRow> {
         [
