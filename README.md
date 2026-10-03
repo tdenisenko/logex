@@ -184,6 +184,11 @@ does not occupy the async serving threads. The worker limit follows the serving
 runtime's worker count; admitted requests also retain the shared concurrency
 slot while waiting. Cancellation is cooperative between filesystem operations,
 and the captured storage view is revalidated after response conversion.
+General SQL's streamed column reads and decoding also run outside the async
+serving threads. All table scans and partitions in one query share up to eight
+projection workers, reduced to the host's available parallelism. Running work
+retains its request, captured inputs and memory charges after a stream is dropped,
+until that work finishes.
 
 DataFusion operators, index candidates, fallback scan reads, scan output buffers,
 native row selection, COUNT, native sums and structured SQL results use a shared

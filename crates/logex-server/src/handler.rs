@@ -229,7 +229,9 @@ impl AppState {
     /// Drive their future and protocol conversion on the same bounded workers
     /// as native API queries, retaining the snapshot and cancellation owner
     /// until conversion finishes. The serving runtime still drives DataFusion
-    /// tasks spawned by its execution plans; no nested runtime is created.
+    /// tasks spawned by its execution plans; their synchronous column projection
+    /// is separately bounded and offloaded to blocking workers. No nested runtime
+    /// is created.
     pub(crate) async fn run_sql_query<T, F>(
         &self,
         query: &ActiveQueryGuard,
