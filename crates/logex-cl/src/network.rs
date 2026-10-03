@@ -851,6 +851,35 @@ struct PostBootstrapRequestReadiness {
     prefer_range_when_both_ready: bool,
 }
 
+/// Derived availability shared only between read-only peer selections in one
+/// synchronous scheduling pass. Never retain this across events: responses,
+/// disconnects and newly admitted requests can change ancestry or pending work.
+#[derive(Default)]
+struct HistoryRequestScans {
+    targets: Option<(Option<HistorySyncTarget>, Option<HistorySyncTarget>)>,
+    priority_roots: Option<bool>,
+    deferred_roots: Option<bool>,
+    range: Option<bool>,
+}
+
+impl HistoryRequestScans {
+    fn invalidate(&mut self) {
+        *self = Self::default();
+    }
+
+    fn bind_targets(
+        &mut self,
+        current: Option<HistorySyncTarget>,
+        latest: Option<HistorySyncTarget>,
+    ) {
+        let targets = Some((current, latest));
+        if self.targets != targets {
+            self.invalidate();
+            self.targets = targets;
+        }
+    }
+}
+
 fn select_post_bootstrap_request_kind(
     readiness: PostBootstrapRequestReadiness,
 ) -> Option<RpcRequestKind> {
@@ -4598,6 +4627,7 @@ impl ConsensusNetwork {
         if let Some(recovery) = &self.history_range_recovery {
             connected.sort_by_key(|peer| *peer != recovery.identity.peer);
         }
+        let mut history_scans = HistoryRequestScans::default();
         for peer in connected {
             if self.closing_peers.contains(&peer) || self.peer_remote_busy(peer, now) {
                 continue;
@@ -4613,6 +4643,7 @@ impl ConsensusNetwork {
                         "disconnecting consensus peer in cooldown to free a request slot"
                     );
                     self.disconnect_peer_with_reason(peer, GOODBYE_REASON_FAULT);
+                    history_scans.invalidate();
                 }
                 continue;
             }
@@ -4628,6 +4659,7 @@ impl ConsensusNetwork {
                     );
                     self.record_transport_backoff(peer, "identify_timeout".to_owned());
                     self.disconnect_peer_with_reason(peer, GOODBYE_REASON_FAULT);
+                    history_scans.invalidate();
                 }
                 continue;
             };
@@ -4639,12 +4671,14 @@ impl ConsensusNetwork {
                     "disconnecting consensus peer that identified without advertising the Status RPC"
                 );
                 self.disconnect_peer_with_reason(peer, GOODBYE_REASON_IRRELEVANT_NETWORK);
+                history_scans.invalidate();
                 continue;
             }
 
             if !self.is_request_satisfied(peer, RpcRequestKind::Status) {
                 if self.can_issue_request(RpcRequestKind::Status) {
                     self.ensure_request(peer, RpcRequestKind::Status);
+                    history_scans.invalidate();
                 }
                 continue;
             }
@@ -4654,6 +4688,7 @@ impl ConsensusNetwork {
                 && self.can_issue_request(RpcRequestKind::Ping)
             {
                 self.ensure_request(peer, RpcRequestKind::Ping);
+                history_scans.invalidate();
             }
 
             if bootstrap_needed && !support.supports_bootstrap_sync() {
@@ -4673,6 +4708,7 @@ impl ConsensusNetwork {
                     "disconnecting consensus peer that cannot serve bootstrap during bootstrap phase"
                 );
                 self.disconnect_peer_with_reason(peer, GOODBYE_REASON_IRRELEVANT_NETWORK);
+                history_scans.invalidate();
                 continue;
             }
 
@@ -4686,6 +4722,7 @@ impl ConsensusNetwork {
                     "disconnecting consensus peer that does not advertise useful post-bootstrap consensus RPCs"
                 );
                 self.disconnect_peer_with_reason(peer, GOODBYE_REASON_IRRELEVANT_NETWORK);
+                history_scans.invalidate();
                 continue;
             }
 
@@ -4694,6 +4731,7 @@ impl ConsensusNetwork {
                     && self.can_issue_request(RpcRequestKind::LightClientBootstrap)
                 {
                     self.ensure_request(peer, RpcRequestKind::LightClientBootstrap);
+                    history_scans.invalidate();
                 }
                 continue;
             }
@@ -4702,8 +4740,11 @@ impl ConsensusNetwork {
                 continue;
             }
 
-            if let Some(kind) = self.next_post_bootstrap_request_kind(support) {
+            if let Some(kind) = self.next_post_bootstrap_request_kind(support, &mut history_scans) {
                 self.ensure_request(peer, kind);
+                // Even an unissued request may update recovery bookkeeping.
+                // Recompute after every mutation, not just a successful send.
+                history_scans.invalidate();
             }
         }
     }
@@ -5044,7 +5085,15 @@ impl ConsensusNetwork {
         }
     }
 
-    fn next_post_bootstrap_request_kind(&self, support: PeerRpcSupport) -> Option<RpcRequestKind> {
+    fn next_post_bootstrap_request_kind(
+        &self,
+        support: PeerRpcSupport,
+        history_scans: &mut HistoryRequestScans,
+    ) -> Option<RpcRequestKind> {
+        history_scans.bind_targets(
+            self.current_history_sync_target(),
+            self.latest_history_sync_target(),
+        );
         let now = Instant::now();
         let head_progression_needed = live_head_progression_needed(
             self.latest_history_sync_target(),
@@ -5076,17 +5125,23 @@ impl ConsensusNetwork {
 
         let priority_root_ready = support.supports_request(RpcRequestKind::BeaconBlocksByRoot)
             && self.can_issue_request(RpcRequestKind::BeaconBlocksByRoot)
-            && self.next_priority_history_root_request().is_some();
+            && *history_scans
+                .priority_roots
+                .get_or_insert_with(|| self.next_priority_history_root_request().is_some());
         let range_ready = support.supports_request(RpcRequestKind::BeaconBlocksByRange)
             && self.can_issue_request(RpcRequestKind::BeaconBlocksByRange)
-            && self.next_history_range_request().is_some();
+            && *history_scans
+                .range
+                .get_or_insert_with(|| self.next_history_range_request().is_some());
         let pending_priority_root =
             self.pending_requests_for_kind(RpcRequestKind::BeaconBlocksByRoot) > 0;
         let pending_range = self.pending_requests_for_kind(RpcRequestKind::BeaconBlocksByRange) > 0;
         let deferred_root_ready = support.supports_request(RpcRequestKind::BeaconBlocksByRoot)
             && self.can_issue_request(RpcRequestKind::BeaconBlocksByRoot)
             && !priority_root_ready
-            && self.next_history_root_request().is_some();
+            && *history_scans
+                .deferred_roots
+                .get_or_insert_with(|| self.next_history_root_request().is_some());
         select_post_bootstrap_request_kind(PostBootstrapRequestReadiness {
             priority_root_ready,
             range_ready,
@@ -13830,6 +13885,112 @@ mod tests {
             optimistic_slot: 1000,
         });
         network
+    }
+
+    // Scheduler bookkeeping controls use the existing decoded-metadata fixture;
+    // they do not represent authenticated SSZ or mainnet query benchmarks.
+    #[tokio::test]
+    async fn request_scan_reuse_keeps_peer_capabilities_and_pending_ownership_live() {
+        let temp = TempDir::new().unwrap();
+        let mut network = candidate_test_network(&temp);
+        let roots = PeerRpcSupport {
+            beacon_blocks_by_root: true,
+            ..Default::default()
+        };
+        let mut scans = HistoryRequestScans::default();
+        assert!(
+            network
+                .next_post_bootstrap_request_kind(PeerRpcSupport::default(), &mut scans)
+                .is_none()
+        );
+        assert_eq!(scans.priority_roots, None);
+        assert_eq!(scans.range, None);
+
+        let peer = PeerId::random();
+        assert_eq!(
+            network.next_post_bootstrap_request_kind(roots, &mut scans),
+            Some(RpcRequestKind::BeaconBlocksByRoot)
+        );
+        network.ensure_request(peer, RpcRequestKind::BeaconBlocksByRoot);
+        scans.invalidate();
+        assert!(!network.pending_history_root_requests.is_empty());
+        for _ in 0..32 {
+            let expected = network
+                .next_post_bootstrap_request_kind(roots, &mut HistoryRequestScans::default());
+            assert_eq!(
+                network.next_post_bootstrap_request_kind(roots, &mut scans),
+                expected
+            );
+            assert_eq!(expected, None);
+        }
+        assert_eq!(scans.priority_roots, Some(false));
+        assert_eq!(scans.deferred_roots, Some(false));
+        // Disconnecting the owner exposes its uncompleted roots again. This is
+        // why every mutating driver action invalidates the pass-local scans.
+        network.clear_pending_requests_for_peer(peer);
+        scans.invalidate();
+        assert_eq!(
+            network.next_post_bootstrap_request_kind(roots, &mut scans),
+            Some(RpcRequestKind::BeaconBlocksByRoot)
+        );
+        assert!(
+            network
+                .next_post_bootstrap_request_kind(PeerRpcSupport::default(), &mut scans)
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn request_scan_reuse_rechecks_changed_targets_and_range_ownership() {
+        let temp = TempDir::new().unwrap();
+        let (mut network, _) = backward_test_network(&temp);
+        network.candidate_metadata_pressure = true;
+        let support = PeerRpcSupport {
+            beacon_blocks_by_root: true,
+            beacon_blocks_by_range: true,
+            ..Default::default()
+        };
+        let mut scans = HistoryRequestScans::default();
+        assert_eq!(
+            network.next_post_bootstrap_request_kind(support, &mut scans),
+            Some(RpcRequestKind::BeaconBlocksByRange)
+        );
+        let peer = PeerId::random();
+        network.ensure_request(peer, RpcRequestKind::BeaconBlocksByRange);
+        scans.invalidate();
+        assert_eq!(network.pending_history_range_requests.len(), 1);
+        let expected =
+            network.next_post_bootstrap_request_kind(support, &mut HistoryRequestScans::default());
+        assert_eq!(
+            network.next_post_bootstrap_request_kind(support, &mut scans),
+            expected
+        );
+        assert_eq!(scans.range, Some(false));
+        // A trusted target change must invalidate even without an explicit
+        // caller reset; peer-specific eligibility is still evaluated afresh.
+        network
+            .active_history_target
+            .as_mut()
+            .unwrap()
+            .optimistic_root = B256::repeat_byte(77);
+        let expected =
+            network.next_post_bootstrap_request_kind(support, &mut HistoryRequestScans::default());
+        assert_eq!(
+            network.next_post_bootstrap_request_kind(support, &mut scans),
+            expected
+        );
+        assert_eq!(
+            scans.targets.unwrap().0,
+            network.current_history_sync_target()
+        );
+        network.clear_pending_requests_for_peer(peer);
+        scans.invalidate();
+        let expected =
+            network.next_post_bootstrap_request_kind(support, &mut HistoryRequestScans::default());
+        assert_eq!(
+            network.next_post_bootstrap_request_kind(support, &mut scans),
+            expected
+        );
     }
 
     #[tokio::test]
