@@ -1631,25 +1631,20 @@ fn build_index_candidate_set(
         single_topic(&filter.topics[0]),
         filter.from_block,
         filter.to_block,
+        checkpoint.artifact_id("address_topic0_block.bptree"),
     ) {
-        (Some(address), Some(topic0), Some(from), Some(to)) => {
+        (Some(address), Some(topic0), Some(from), Some(to), Some(file_id)) => {
             let composite_path = index_dir.join("address_topic0_block.bptree");
-            if let Some(file_id) = checkpoint.artifact_id("address_topic0_block.bptree") {
-                let bitmap = access.composite_range(
-                    &composite_path,
-                    file_id,
-                    &address,
-                    &topic0,
-                    from,
-                    to,
-                )?;
-                result = Some(intersect_optional_set(result, bitmap)?);
-                covered_addresses = true;
-                covered_topics[0] = true;
-                covered_block_range = true;
-            }
+            let bitmap =
+                access.composite_range(&composite_path, file_id, &address, &topic0, from, to)?;
+            result = Some(intersect_optional_set(result, bitmap)?);
+            covered_addresses = true;
+            covered_topics[0] = true;
+            covered_block_range = true;
         }
-        (Some(address), Some(topic0), _, _) => {
+        (Some(address), Some(topic0), _, _, _) => {
+            // Compact publications provide point postings without a range
+            // composite. Keep the original block bounds for exact refinement.
             let composite_path = index_dir.join("address_topic0.bptree");
             if let Some(file_id) = checkpoint.artifact_id("address_topic0.bptree") {
                 if let Some(bitmap) =
@@ -2255,6 +2250,99 @@ mod tests {
                 source: Source::Receipt,
             },
         ]
+    }
+
+    #[test]
+    fn compact_event_postings_refine_ranges_residuals_and_canonical_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let prototype = make_test_rows()[0].clone();
+        let rows: Vec<_> = (0..8)
+            .map(|i| LogRow {
+                block_number: 100 + i,
+                block_hash: B256::repeat_byte(i as u8 + 1),
+                log_index: i as u32,
+                address: if i == 4 {
+                    Address::repeat_byte(0xbb)
+                } else {
+                    prototype.address
+                },
+                topic0: (i != 5).then_some(prototype.topic0.unwrap()),
+                topic1: Some(B256::repeat_byte(0x20 + (i % 2) as u8)),
+                ..prototype.clone()
+            })
+            .collect();
+        let mut storage = PartitionManager::open(PartitionManagerConfig {
+            data_dir: dir.path().to_owned(),
+            partition_target_rows: 1_000_000,
+            compaction_safety_margin_blocks: 2_048,
+        })
+        .unwrap();
+        storage.write_batch(&rows).unwrap();
+        assert_eq!(storage.mark_non_canonical(rows[2].block_hash).unwrap(), 1);
+        storage.checkpoint().unwrap();
+        let path = storage.hot_partition().meta.path.clone();
+        let base = NativeLogFilter::new()
+            .with_addresses(vec![prototype.address])
+            .with_topic(0, TopicConstraint::One(prototype.topic0.unwrap()))
+            .with_block_range(Some(101), Some(106));
+        for profile in [IndexBuildProfile::Events, IndexBuildProfile::All] {
+            IndexBuilder::build_indexes(&path, profile).unwrap();
+            let reader = SegmentReader::open_projected(&path, &[]).unwrap();
+            let checkpoint = IndexReadCheckpoint::open(&path, &reader).unwrap().unwrap();
+            let candidates = build_index_candidate_set(&path, &checkpoint, &base, None, None)
+                .unwrap()
+                .expect("bounded filters must use an available row index")
+                .into_plain()
+                .unwrap()
+                .iter()
+                .collect::<Vec<_>>();
+            assert_eq!(
+                candidates,
+                if profile == IndexBuildProfile::Events {
+                    vec![0, 1, 2, 3, 6, 7]
+                } else {
+                    vec![1, 2, 3, 6] // Prefer the complete block-range composite.
+                }
+            );
+            drop(checkpoint);
+            drop(reader);
+            for bounds in [
+                (Some(101), Some(106)),
+                (None, Some(103)),
+                (Some(103), None),
+                (None, None),
+                (Some(106), Some(101)),
+            ] {
+                for topic in [
+                    TopicConstraint::Any,
+                    TopicConstraint::One(B256::repeat_byte(0x21)),
+                ] {
+                    for canonical_only in [true, false] {
+                        let mut filter = base.clone().with_block_range(bounds.0, bounds.1);
+                        filter.topics[1] = topic.clone();
+                        filter.canonical_only = canonical_only;
+                        let expected: Vec<_> = rows
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(id, row)| {
+                                (matches_native_filter(row, &filter)
+                                    && (!canonical_only || id != 2))
+                                    .then_some(id as u32)
+                            })
+                            .collect();
+                        let memory = QueryMemoryBudget::new(
+                            QueryMemoryLimit::new(16 * 1024 * 1024).unwrap(),
+                        );
+                        let actual =
+                            candidate_row_ids_with_memory(&path, &filter, true, 8, &memory, None)
+                                .unwrap();
+                        assert_eq!(&*actual, expected, "{profile:?}: {filter:?}");
+                        drop(actual);
+                        assert_eq!(memory.used(), 0);
+                    }
+                }
+            }
+        }
     }
 
     #[test]

@@ -14,7 +14,7 @@ use crate::transfer_bloom::{ERC20_EVENTS_BLOOM_FILE, Erc20EventBloom};
 pub enum IndexBuildProfile {
     All,
     LogQuery,
-    /// Compact presence and indexed-argument filters for every event type.
+    /// Event presence/argument filters and exact emitter/event row postings.
     Events,
     /// Compatibility profile for existing Transfer/Approval-only consumers.
     Erc20Transfer,
@@ -455,6 +455,7 @@ impl IndexBuilder {
                 EventBloom::build(partition_dir, index_dir)?;
             }
             IndexBuildProfile::Events => {
+                CompositeIndexBuilder::build_address_topic0(partition_dir, index_dir)?;
                 EventBloom::build(partition_dir, index_dir)?;
             }
             IndexBuildProfile::Erc20Transfer => {
@@ -614,7 +615,7 @@ impl IndexBuilder {
                 "address_topic0_topic2.bptree",
                 EVENT_BLOOM_FILE,
             ],
-            IndexBuildProfile::Events => &[EVENT_BLOOM_FILE],
+            IndexBuildProfile::Events => &[EVENT_BLOOM_FILE, "address_topic0.bptree"],
             IndexBuildProfile::Erc20Transfer => &[ERC20_EVENTS_BLOOM_FILE],
         }
     }
@@ -669,9 +670,6 @@ impl IndexBuilder {
         partition_dir: &Path,
         index_dir: &Path,
     ) -> std::io::Result<()> {
-        if !index_dir.join("address_topic0.bptree").is_file() {
-            CompositeIndexBuilder::build_address_topic0(partition_dir, index_dir)?;
-        }
         if !index_dir.join("address_topic0_block.bptree").is_file() {
             CompositeIndexBuilder::build_address_topic0_block(partition_dir, index_dir)?;
         }
@@ -688,6 +686,9 @@ impl IndexBuilder {
     }
 
     fn build_missing_event_indexes(partition_dir: &Path, index_dir: &Path) -> io::Result<()> {
+        if !index_dir.join("address_topic0.bptree").is_file() {
+            CompositeIndexBuilder::build_address_topic0(partition_dir, index_dir)?;
+        }
         if !index_dir.join(EVENT_BLOOM_FILE).is_file() {
             EventBloom::build(partition_dir, index_dir)?;
         }
@@ -942,8 +943,8 @@ mod tests {
                 .unwrap();
         }
         publication.publish().unwrap();
-        // The minimum Events profile requires only the bloom, but the optional
-        // address index is published and queries can use it: it must be checked.
+        // The standalone address index is beyond the minimum Events profile,
+        // but it is published and queries can use it: it must be checked.
         assert!(
             matches!(IndexBuilder::verify_captured_indexes(&reader, &indexes, IndexBuildProfile::Events, u64::MAX, &|| false), Err(IndexVerificationError::Io(e)) if e.kind()==io::ErrorKind::InvalidData)
         );
@@ -977,7 +978,14 @@ mod tests {
             .is_err()
         );
         let id = IndexFile::protected_file_id(&indexes.join(EVENT_BLOOM_FILE)).unwrap();
-        publication.register_artifact(EVENT_BLOOM_FILE, id).unwrap();
+        for name in IndexBuilder::required_index_files(IndexBuildProfile::Events) {
+            publication
+                .register_artifact(
+                    name,
+                    IndexFile::protected_file_id(&indexes.join(name)).unwrap(),
+                )
+                .unwrap();
+        }
         fs::copy(
             indexes.join(EVENT_BLOOM_FILE),
             indexes.join("unknown.bloom"),
@@ -1294,6 +1302,77 @@ mod tests {
     }
 
     #[test]
+    fn event_row_index_upgrade_reuses_filter_and_preserves_primary() {
+        let dir = TempDir::new().unwrap();
+        let mut rows = make_test_rows();
+        rows[2].topic0 = None;
+        ColumnFile::write_batch(dir.path(), &rows).unwrap();
+        // Recreate a verified predecessor publication with only the filter.
+        let checkpoint = IndexBuilder::begin_publication(dir.path()).unwrap();
+        let indexes = dir.path().join("indexes");
+        EventBloom::build(dir.path(), &indexes).unwrap();
+        IndexBuilder::publish_at(dir.path(), &indexes, checkpoint, true).unwrap();
+        let before = verification_tree(dir.path());
+        assert!(IndexBuilder::indexes_missing(dir.path(), IndexBuildProfile::Events).unwrap());
+        IndexBuilder::build_missing_indexes(dir.path(), IndexBuildProfile::Events).unwrap();
+        IndexBuilder::verify_indexes(dir.path(), IndexBuildProfile::Events).unwrap();
+        let after = verification_tree(dir.path());
+        for (name, bytes) in before {
+            if !name.starts_with("indexes") || name == Path::new("indexes/events.bloom") {
+                assert_eq!(after[&name], bytes, "must retain {name:?}");
+            }
+        }
+        let point = BTreeIndexReader::open(&indexes.join("address_topic0.bptree")).unwrap();
+        assert_eq!(point.key_count(), 2);
+        for (id, row) in rows[..2].iter().enumerate() {
+            let mut key = [0; 52];
+            key[..20].copy_from_slice(row.address.as_slice());
+            key[20..].copy_from_slice(row.topic0.unwrap().as_slice());
+            assert_eq!(
+                point.get(&key).unwrap().iter().collect::<Vec<_>>(),
+                vec![id as u32]
+            );
+        }
+        assert!(!IndexBuilder::indexes_missing(dir.path(), IndexBuildProfile::Events).unwrap());
+    }
+
+    #[test]
+    fn event_profile_rejects_checksum_valid_missing_row_postings() {
+        let source = TempDir::new().unwrap();
+        let rows = make_test_rows();
+        ColumnFile::write_batch(source.path(), &rows).unwrap();
+        IndexBuilder::build_indexes(source.path(), IndexBuildProfile::Events).unwrap();
+        let mut checkpoint = IndexBuildCheckpoint::begin(source.path()).unwrap();
+        let indexes = source.path().join("indexes");
+        let mut point = BTreeIndex::new(52);
+        for (id, row) in rows.iter().enumerate().skip(1) {
+            let mut key = [0; 52];
+            key[..20].copy_from_slice(row.address.as_slice());
+            key[20..].copy_from_slice(row.topic0.unwrap().as_slice());
+            point.insert(&key, id as u32);
+        }
+        point
+            .write_to_file(&indexes.join("address_topic0.bptree"))
+            .unwrap();
+        // Valid protected bytes/bindings do not excuse omitted membership.
+        for name in IndexBuilder::required_index_files(IndexBuildProfile::Events) {
+            checkpoint
+                .register_artifact(
+                    name,
+                    IndexFile::protected_file_id(&indexes.join(name)).unwrap(),
+                )
+                .unwrap();
+        }
+        checkpoint.publish().unwrap();
+        let before = verification_tree(source.path());
+        let error =
+            IndexBuilder::verify_indexes(source.path(), IndexBuildProfile::Events).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("omits required source row"));
+        assert_eq!(verification_tree(source.path()), before);
+    }
+
+    #[test]
     fn version_six_indexes_are_rebuilt_without_rewriting_source() {
         let dir = TempDir::new().unwrap();
         ColumnFile::write_batch(dir.path(), &make_test_rows()).unwrap();
@@ -1538,7 +1617,7 @@ mod tests {
         let expected_empty_bloom = 4096 + 48 + logical + 8 * logical.div_ceil(4096);
         assert_eq!(
             IndexBuilder::estimate_fresh_index_bytes(0, IndexBuildProfile::Events).unwrap(),
-            expected_empty_bloom
+            expected_empty_bloom + 48 + 20 + 8 // Empty protected B-tree header.
         );
         assert!(crate::btree::row_partitioned_logical_size_bound(u64::MAX, 84).is_err());
         assert!(crate::btree::row_partitioned_logical_size_bound(1, u64::MAX).is_err());

@@ -238,10 +238,18 @@ Each general filter has at most 2 MiB of bits (plus integrity framing), replacin
 the previous common-event filter in new default index builds. Before publication,
 every source presence/argument membership is verified, including noncanonical
 rows later masked by queries. The source checkpoint and protected file identity
-bind each filter to its segment; append/stale indexes are not reused. Upgrades
-rebuild derived filters from local primary data with CPU and disk I/O, without
-another Ethereum download or a primary storage-format change. Existing verified
-primary data is preserved.
+bind each filter to its segment; append/stale indexes are not reused. The default
+profile also builds exact emitter/event row indexes alongside the filters. These
+select row positions within possible-match segments, including bounded queries when a
+larger block-range index is unavailable. Original block bounds, canonical
+membership and other predicates still receive exact source checks. Each row
+index's complete key/row membership is verified before publication. Its storage
+cost is additional to the filter's 2 MiB bit-vector cap and depends on the rows
+and distinct emitter/event pairs in the segment.
+
+Upgrades build missing derived indexes from local primary data with CPU and disk
+I/O, without another Ethereum download or a primary storage-format change.
+Existing verified primary data is preserved.
 Scans without a pushed limit select up to
 eight independent partitions concurrently under the shared memory budget;
 limited scans select sequentially so they can stop at the required prefix.
@@ -619,10 +627,10 @@ Command samples:
 ```
 
 Normal historical sync writes compacted sealed segments. Background indexing
-builds compact general event filters after historical sync completes; it remains
-deferred while history is incomplete to prioritize ingestion. `build-indexes` handles interrupted
-indexing and changed index profiles. `compact` handles older representations or
-changed compression profiles.
+builds general event filters and emitter/event row indexes after historical sync
+completes; it remains deferred while history is incomplete to prioritize ingestion.
+`build-indexes` handles interrupted indexing and changed index profiles. `compact`
+handles older representations or changed compression profiles.
 
 `repair --dry-run` performs a read-only assessment and prints JSON to stdout;
 logs and diagnostics go to stderr. Exit 0 means local primary commitments and
