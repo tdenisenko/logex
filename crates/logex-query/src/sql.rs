@@ -87,6 +87,9 @@ use native_sum_memory::{
     NATIVE_SUM_STAGE, NativeDataSumAccumulator, RestrictedProjectionBound, RestrictedSumAdmission,
     RestrictedSumBatchPlan, RestrictedSumState, decimal_scratch_bytes,
 };
+#[path = "sql_projection.rs"]
+mod sql_projection;
+use sql_projection::ProjectionWorkers;
 
 const DATAFUSION_BATCH_SIZE: usize = 4_096;
 static DEFAULT_QUERY_MEMORY_BUDGET: LazyLock<QueryMemoryBudget> =
@@ -194,6 +197,15 @@ pub type QueryCancelCheck = Arc<dyn Fn() -> bool + Send + Sync + 'static>;
 /// with no table scan. Stream field order drops the inner work before its request owner.
 struct DataFusionQueryLifetime {
     _cancel_check: QueryCancelCheck,
+    completion: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+impl Drop for DataFusionQueryLifetime {
+    fn drop(&mut self) {
+        if let Some(completion) = self.completion.take() {
+            let _ = completion.send(());
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -453,6 +465,7 @@ struct LogexTableProvider {
     total_scanned: Arc<AtomicU64>,
     cancel_check: Option<QueryCancelCheck>,
     memory: QueryMemoryBudget,
+    projection_workers: ProjectionWorkers,
 }
 
 impl std::fmt::Debug for LogexTableProvider {
@@ -478,6 +491,7 @@ impl LogexTableProvider {
             total_scanned,
             cancel_check,
             memory,
+            projection_workers: ProjectionWorkers::new(),
         }
     }
 }
@@ -625,6 +639,7 @@ impl TableProvider for LogexTableProvider {
                     row_ids,
                     self.cancel_check.clone(),
                     self.memory.clone(),
+                    self.projection_workers.clone(),
                 )));
             }
             if remaining_limit == Some(0) {
@@ -710,6 +725,7 @@ struct LogSegmentPartition {
     row_ids: Arc<QueryBuffer<u32>>,
     cancel_check: Option<QueryCancelCheck>,
     memory: QueryMemoryBudget,
+    projection_workers: ProjectionWorkers,
 }
 
 impl std::fmt::Debug for LogSegmentPartition {
@@ -730,6 +746,7 @@ impl LogSegmentPartition {
         row_ids: QueryBuffer<u32>,
         cancel_check: Option<QueryCancelCheck>,
         memory: QueryMemoryBudget,
+        projection_workers: ProjectionWorkers,
     ) -> Self {
         Self {
             dir,
@@ -738,6 +755,7 @@ impl LogSegmentPartition {
             row_ids: Arc::new(row_ids),
             cancel_check,
             memory,
+            projection_workers,
         }
     }
 }
@@ -757,14 +775,22 @@ impl PartitionStream for LogSegmentPartition {
                     return Ok(None);
                 }
                 let end = (offset + DATAFUSION_BATCH_SIZE).min(partition.row_ids.len());
-                let batch = build_projected_batch(
-                    partition.schema.clone(),
-                    &partition.dir,
-                    &partition.row_ids[offset..end],
-                    &partition.projected_columns,
-                    Some(&partition.memory),
-                )
-                .map_err(DataFusionError::from)?;
+                // DataFusion may poll this stream on the serving runtime.
+                // Keep synchronous column I/O and decoding on bounded workers,
+                // including when many physical partitions execute concurrently.
+                let source = partition.clone();
+                let batch = partition
+                    .projection_workers
+                    .run(partition.cancel_check.clone(), move || {
+                        build_projected_batch(
+                            source.schema.clone(),
+                            &source.dir,
+                            &source.row_ids[offset..end],
+                            &source.projected_columns,
+                            Some(&source.memory),
+                        )
+                    })
+                    .await?;
                 Ok(Some((batch, (partition, end))))
             }),
         ))
@@ -898,65 +924,84 @@ async fn execute_sql_page_on_snapshot_inner(
     {
         return Ok(result);
     }
-    let total_scanned = Arc::new(AtomicU64::new(0));
-    let table = LogexTableProvider::new(
-        snapshot,
-        Arc::clone(&total_scanned),
-        cancel_check.clone(),
-        memory.clone(),
-    );
+    let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+    let result = async {
+        let total_scanned = Arc::new(AtomicU64::new(0));
+        let query_lifetime = Arc::new(DataFusionQueryLifetime {
+            _cancel_check: cancel_check
+                .clone()
+                .expect("snapshot execution always installs a cancellation check"),
+            completion: Some(completion_tx),
+        });
+        // Projection can outlive an aborted DataFusion stream. Its cancellation
+        // owner also retains this completion lease through result disposal.
+        let projection_lifetime = Arc::clone(&query_lifetime);
+        let projection_cancel: QueryCancelCheck =
+            Arc::new(move || (projection_lifetime._cancel_check)());
+        let table = LogexTableProvider::new(
+            snapshot,
+            Arc::clone(&total_scanned),
+            Some(projection_cancel),
+            memory.clone(),
+        );
+        let config = SessionConfig::new().with_extension(Arc::clone(&query_lifetime));
+        let memory_limit = memory.limit();
+        let memory_reservation = memory
+            .reserve(0, "datafusion query operators")
+            .map_err(|error| SqlQueryError::Capacity(error.to_string()))?;
+        let memory_pool: Arc<dyn MemoryPool> = Arc::new(QueryLifetimeMemoryPool {
+            budget: memory.clone(),
+            reservation: Mutex::new(memory_reservation),
+            limit: memory_limit,
+            _lifetime: Arc::clone(&query_lifetime),
+        });
+        let runtime = RuntimeEnvBuilder::new()
+            .with_memory_pool(memory_pool)
+            .with_disk_manager_builder(
+                DiskManagerBuilder::default().with_mode(DiskManagerMode::Disabled),
+            )
+            .build()?;
+        let ctx = SessionContext::new_with_config_rt(config, Arc::new(runtime));
+        ctx.register_table("logs", Arc::new(table))?;
 
-    let query_lifetime = Arc::new(DataFusionQueryLifetime {
-        _cancel_check: cancel_check
-            .clone()
-            .expect("snapshot execution always installs a cancellation check"),
-    });
-    let config = SessionConfig::new().with_extension(Arc::clone(&query_lifetime));
-    let memory_limit = memory.limit();
-    let memory_reservation = memory
-        .reserve(0, "datafusion query operators")
-        .map_err(|error| SqlQueryError::Capacity(error.to_string()))?;
-    let memory_pool: Arc<dyn MemoryPool> = Arc::new(QueryLifetimeMemoryPool {
-        budget: memory.clone(),
-        reservation: Mutex::new(memory_reservation),
-        limit: memory_limit,
-        _lifetime: Arc::clone(&query_lifetime),
-    });
-    let runtime = RuntimeEnvBuilder::new()
-        .with_memory_pool(memory_pool)
-        .with_disk_manager_builder(
-            DiskManagerBuilder::default().with_mode(DiskManagerMode::Disabled),
-        )
-        .build()?;
-    let ctx = SessionContext::new_with_config_rt(config, Arc::new(runtime));
-    ctx.register_table("logs", Arc::new(table))?;
+        let dataframe = ctx
+            .sql_with_options(
+                &sql,
+                SQLOptions::new()
+                    .with_allow_ddl(false)
+                    .with_allow_dml(false)
+                    .with_allow_statements(false),
+            )
+            .await?;
+        let dataframe = if offset > 0 || limit.is_some() {
+            dataframe.limit(offset, limit)?
+        } else {
+            dataframe
+        };
+        check_query_canceled(cancel_check.as_ref()).map_err(SqlQueryError::DataFusion)?;
+        let task_context = Arc::new(dataframe.task_ctx());
+        let plan = dataframe.create_physical_plan().await?;
+        let plan = retain_query_lifetime_in_plan(plan, &query_lifetime)?;
+        let stream = execute_stream(plan, task_context)?;
+        let rows = collect_json_stream(stream, memory, cancel_check.as_ref()).await?;
+        check_query_canceled(cancel_check.as_ref()).map_err(SqlQueryError::DataFusion)?;
 
-    let dataframe = ctx
-        .sql_with_options(
-            &sql,
-            SQLOptions::new()
-                .with_allow_ddl(false)
-                .with_allow_dml(false)
-                .with_allow_statements(false),
-        )
-        .await?;
-    let dataframe = if offset > 0 || limit.is_some() {
-        dataframe.limit(offset, limit)?
-    } else {
-        dataframe
-    };
-    check_query_canceled(cancel_check.as_ref()).map_err(SqlQueryError::DataFusion)?;
-    let task_context = Arc::new(dataframe.task_ctx());
-    let plan = dataframe.create_physical_plan().await?;
-    let plan = retain_query_lifetime_in_plan(plan, &query_lifetime)?;
-    let stream = execute_stream(plan, task_context)?;
-    let rows = collect_json_stream(stream, memory, cancel_check.as_ref()).await?;
-    check_query_canceled(cancel_check.as_ref()).map_err(SqlQueryError::DataFusion)?;
-
-    Ok(SqlQueryResult {
-        rows,
-        total_scanned: total_scanned.load(Ordering::Relaxed),
-    })
+        Ok(SqlQueryResult {
+            rows,
+            total_scanned: total_scanned.load(Ordering::Relaxed),
+        })
+    }
+    .await;
+    // Dropping execution above aborts remaining DataFusion tasks. Await their
+    // existing lifetime leases (and any native projections) without blocking a
+    // runtime thread. Even an error return must release abandoned input buffers.
+    // If this caller itself is dropped, those leases still retain admission.
+    completion_rx.await.map_err(|_| {
+        SqlQueryError::DataFusion(DataFusionError::Internal(
+            "query cleanup owner exited without notification".to_owned(),
+        ))
+    })?;
+    result
 }
 
 async fn collect_json_stream(
@@ -8197,6 +8242,7 @@ mod tests {
             false
         });
         let query_lifetime = Arc::new(DataFusionQueryLifetime {
+            completion: None,
             _cancel_check: cancel_check,
         });
         let config = SessionConfig::new().with_extension(Arc::clone(&query_lifetime));
@@ -8225,6 +8271,7 @@ mod tests {
         let weak_request_owner = Arc::downgrade(&request_owner);
         let retained_owner = Arc::clone(&request_owner);
         let query_lifetime = Arc::new(DataFusionQueryLifetime {
+            completion: None,
             _cancel_check: Arc::new(move || {
                 let _keep_alive = &retained_owner;
                 false
@@ -8255,6 +8302,7 @@ mod tests {
     fn datafusion_pool_contends_and_split_reservations_release_exactly() {
         let budget = QueryMemoryBudget::new(QueryMemoryLimit::new(8).unwrap());
         let query_lifetime = Arc::new(DataFusionQueryLifetime {
+            completion: None,
             _cancel_check: Arc::new(|| false),
         });
         let first_pool: Arc<dyn MemoryPool> = Arc::new(QueryLifetimeMemoryPool {
@@ -8816,6 +8864,7 @@ mod tests {
             reservation: Mutex::new(budget.reserve(0, "test operators").unwrap()),
             limit: budget.limit(),
             _lifetime: Arc::new(DataFusionQueryLifetime {
+                completion: None,
                 _cancel_check: Arc::new(|| false),
             }),
         });
@@ -9910,6 +9959,7 @@ mod tests {
         let weak_request_owner = Arc::downgrade(&request_owner);
         let retained_owner = Arc::clone(&request_owner);
         let query_lifetime = Arc::new(DataFusionQueryLifetime {
+            completion: None,
             _cancel_check: Arc::new(move || {
                 let _keep_alive = &retained_owner;
                 false
@@ -9938,6 +9988,7 @@ mod tests {
         let weak_request_owner = Arc::downgrade(&request_owner);
         let retained_owner = Arc::clone(&request_owner);
         let query_lifetime = Arc::new(DataFusionQueryLifetime {
+            completion: None,
             _cancel_check: Arc::new(move || {
                 let _keep_alive = &retained_owner;
                 false
@@ -10138,6 +10189,7 @@ mod tests {
             QueryBuffer::unaccounted((0..count as u32).collect()),
             Some(Arc::new(move || cancellation.load(Ordering::Relaxed))),
             QueryMemoryBudget::new(QueryMemoryLimit::default()),
+            ProjectionWorkers::new(),
         );
         let plan: Arc<dyn ExecutionPlan> = Arc::new(
             StreamingTableExec::try_new(schema, vec![Arc::new(partition)], None, [], false, None)
