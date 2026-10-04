@@ -1,7 +1,6 @@
 pub mod engine;
 mod extract;
 pub mod head_tracker;
-pub mod history_audit;
 pub mod p2p;
 pub mod primitives;
 pub mod progress;

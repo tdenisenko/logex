@@ -138,7 +138,7 @@ fn complete_snapshot_checks_every_publication_and_seals_exact_manifest() {
     let source = owner
         .storage
         .blocking_read()
-        .primary_audit_snapshot(p.limits())
+        .index_audit_snapshot(p.limits())
         .unwrap();
     let ctl = control(&dir, &p);
     let mut report = Report::new(&p, now_ms().unwrap());
@@ -184,7 +184,7 @@ fn missing_indexes_and_manifest_exhaustion_never_complete_or_rebuild() {
         let source = owner
             .storage
             .blocking_read()
-            .primary_audit_snapshot(p.limits())
+            .index_audit_snapshot(p.limits())
             .unwrap();
         let index = owner.storage.blocking_read().sealed_partitions()[0]
             .meta

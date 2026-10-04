@@ -234,7 +234,6 @@ pub struct SyncEngine {
     historical_rows_per_block_ewma: Option<f64>,
     last_historical_allocator_trim: Option<Instant>,
     connected_once: bool,
-    audit_network: Option<crate::history_audit::AuditNetworkService>,
     shutdown: watch::Receiver<bool>,
 }
 
@@ -289,48 +288,8 @@ impl SyncEngine {
             historical_rows_per_block_ewma: None,
             last_historical_allocator_trim: None,
             connected_once: false,
-            audit_network: None,
             shutdown,
         }
-    }
-
-    /// Attach the explicitly enabled one-time maintenance network. No worker or
-    /// download is started by constructing a normal sync engine.
-    pub fn attach_audit_network(
-        &mut self,
-        service: crate::history_audit::AuditNetworkService,
-    ) -> Result<()> {
-        eyre::ensure!(
-            self.audit_network.is_none(),
-            "audit network is already attached"
-        );
-        self.audit_network = Some(service);
-        Ok(())
-    }
-
-    async fn poll_audit_network(&mut self, allow_start: bool) {
-        if let Some(service) = &mut self.audit_network {
-            service.poll(&mut self.peers, allow_start).await;
-        }
-    }
-
-    async fn wait_for_idle_sync(&mut self, duration: Duration) -> bool {
-        let wake = self
-            .audit_network
-            .as_ref()
-            .map(|service| service.notifier());
-        cancelable(&mut self.shutdown, async {
-            if let Some(wake) = wake {
-                tokio::select! {
-                    _ = tokio::time::sleep(duration) => {},
-                    _ = wake.notified() => {},
-                }
-            } else {
-                tokio::time::sleep(duration).await;
-            }
-        })
-        .await
-        .is_some()
     }
 
     pub fn known_peers(&self) -> Vec<NodeRecord> {
@@ -339,9 +298,6 @@ impl SyncEngine {
 
     pub async fn shutdown(&mut self) -> Result<()> {
         self.reset_historical_fetch_pipeline();
-        if let Some(mut service) = self.audit_network.take() {
-            service.shutdown(&mut self.peers).await;
-        }
         self.peers.shutdown().await
     }
 }

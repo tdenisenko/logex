@@ -32,9 +32,9 @@ use reth_ethereum_forks::Head;
 use crate::background::{join_task, run_background_indexer};
 use crate::checkpoint::{RECENT_CHECKPOINT_MAX_FINALIZED_EPOCH_LAG, resolve_checkpoint};
 
-pub(crate) mod audit;
 mod cleanup;
 pub(crate) mod index_audit;
+mod maintenance_files;
 pub(crate) mod repair;
 mod services;
 mod storage_health;
@@ -144,7 +144,6 @@ impl LocalP2pAddressCandidates {
 }
 
 pub struct RunSyncOptions<'a> {
-    pub history_audit: Option<audit::Invocation>,
     pub index_audit: Option<index_audit::Plan>,
     pub query_concurrency: logex_server::QueryConcurrencyLimit,
     pub query_memory: logex_types::QueryMemoryLimit,
@@ -181,7 +180,6 @@ pub async fn run_sync(options: RunSyncOptions<'_>) -> cleanup::RuntimeShutdown {
     let shutdown_signal = wait_for_shutdown_signal();
     tokio::pin!(shutdown_signal);
     let RunSyncOptions {
-        history_audit,
         index_audit,
         query_concurrency,
         query_memory,
@@ -706,31 +704,6 @@ pub async fn run_sync(options: RunSyncOptions<'_>) -> cleanup::RuntimeShutdown {
         shutdown_rx.clone(),
     );
 
-    let audit_handle = history_audit.and_then(|invocation| {
-        match logex_sync::history_audit::AuditNetworkService::channel(
-            invocation.network_batch_blocks(),
-        ) {
-            Ok((client, service)) => match engine.attach_audit_network(service) {
-                Ok(()) => Some(audit::spawn(
-                    invocation,
-                    data_dir.clone(),
-                    Arc::clone(&state),
-                    Arc::clone(&consensus),
-                    client,
-                    shutdown_rx.clone(),
-                )),
-                Err(error) => {
-                    tracing::error!(%error, "cannot attach explicit history audit");
-                    None
-                }
-            },
-            Err(error) => {
-                tracing::error!(%error, "cannot prepare explicit history audit network");
-                None
-            }
-        }
-    });
-
     let index_audit_handle = index_audit.map(|plan| {
         index_audit::spawn(
             plan,
@@ -801,9 +774,6 @@ pub async fn run_sync(options: RunSyncOptions<'_>) -> cleanup::RuntimeShutdown {
         ("background indexer", index_handle),
     ];
     tasks.push(("consensus network", consensus_network_handle));
-    if let Some(handle) = audit_handle {
-        tasks.push(("one-time history audit", handle));
-    }
     if let Some(handle) = index_audit_handle {
         tasks.push(("explicit index audit", handle));
     }
