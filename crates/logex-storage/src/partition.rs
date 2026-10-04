@@ -94,13 +94,13 @@ impl PartitionManager {
         self.inner.read_view_token()
     }
 
-    /// Capture all physical row prefixes for independent maintenance auditing.
-    /// Perform the scan after releasing the caller's storage selection lock.
-    pub fn primary_audit_snapshot(
+    /// Capture physical prefixes for exhaustive local index verification.
+    /// Visit sources after releasing the caller's storage selection lock.
+    pub fn index_audit_snapshot(
         &self,
-        limits: crate::native::PrimaryAuditLimits,
-    ) -> std::io::Result<crate::native::PrimaryAuditSnapshot> {
-        self.inner.primary_audit_snapshot(limits)
+        limits: crate::native::IndexAuditLimits,
+    ) -> std::io::Result<crate::native::IndexAuditSnapshot> {
+        self.inner.index_audit_snapshot(limits)
     }
 
     /// Ingest immutable historical rows using compacted dense segments and sparse staging.

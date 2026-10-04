@@ -2046,10 +2046,6 @@ impl SyncEngine {
                 return self.finish_shutdown();
             }
 
-            // Collect only finished audit work before normal sync. New audit
-            // requests are admitted solely in the fully idle branch below.
-            self.poll_audit_network(false).await;
-
             if let Some(min_peers) = peer_refill_goal(
                 self.peers.peer_count(),
                 self.peers.serving_peer_count(),
@@ -2167,10 +2163,13 @@ impl SyncEngine {
                 {
                     continue;
                 }
-                let fresh = self.sync_status.lock().unwrap().consensus_head_fresh == Some(true);
-                self.poll_audit_network(!historical_backfill_active && fresh)
-                    .await;
-                if !self.wait_for_idle_sync(CONSENSUS_WAIT_INTERVAL).await {
+                if cancelable(
+                    &mut self.shutdown,
+                    tokio::time::sleep(CONSENSUS_WAIT_INTERVAL),
+                )
+                .await
+                .is_none()
+                {
                     return self.finish_shutdown();
                 }
                 continue;

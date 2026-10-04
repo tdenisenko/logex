@@ -684,25 +684,6 @@ Index checkpoints before version 7 are treated as missing caches and rebuilt
 locally. Rebuilding these indexes preserves primary data and requires no
 Ethereum history download.
 
-For independent maintenance, the Rust storage API provides
-`primary_audit_snapshot`. It captures all physical row prefixes and retains
-directory ownership while a caller scans outside the storage selection lock.
-The scan reads every selected row and its canonical flag without query indexes
-or block-bound pruning; duplicate identities and retired fork rows remain visible.
-Appends are excluded, compaction may preserve the view, and a reorg or storage
-close invalidates it. Cancellation and explicit per-segment work limits prevent
-partial scans from reporting completion. These are input limits, not an RSS cap.
-Callbacks must treat rows as provisional until the full scan and final view
-check succeed. Its local source fingerprints do **not** authenticate Ethereum
-completeness: an independent history auditor must still compare the physical
-rows against complete consensus-authenticated blocks and receipts, including
-empty blocks and duplicate identities across segments.
-
-An explicit one-time historical receipt audit and bounded fetch-cost pilot are
-available through `sync --history-audit-plan`. They are disabled by default and
-never start on ordinary restarts. See [the audit operator guide](docs/history-audit.md)
-for plans, cost limits, checkpointed resume, local cancellation and evidence limits.
-
 For a separate local check of every published derived index while queries and
 sync remain online, use `sync --index-audit-plan`. This explicit finite operation
 does not rebuild indexes or download Ethereum data. See the

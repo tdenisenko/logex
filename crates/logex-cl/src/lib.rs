@@ -12,7 +12,6 @@ use logex_types::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-mod audit_anchor;
 mod beacon_block;
 mod beacon_cache;
 mod candidate_metadata;
@@ -28,7 +27,6 @@ mod snapshot_format;
 mod state_delta;
 use state_delta::StateDelta;
 
-pub use audit_anchor::FinalizedAuditAnchor;
 pub(crate) use beacon_block::{VerifiedBeaconBlock, decode_verified_beacon_block};
 pub use chain::{
     CONSENSUS_HEAD_FRESHNESS_TOLERANCE_SLOTS, MAINNET_CONSENSUS_CHAIN_SPEC,

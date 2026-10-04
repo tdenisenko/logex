@@ -3,9 +3,10 @@
 Normal index publication verifies every derived membership before making that
 publication available to queries. An explicit index audit repeats verification
 against retained local source snapshots, without rebuilding indexes, changing
-primary events, or downloading Ethereum data. It is separate from the
-[receipt audit](history-audit.md): local index agreement does not prove that the
-primary store contains every authenticated Ethereum event.
+primary events, or downloading Ethereum data. Local index agreement does not
+independently prove that the primary store contains every authenticated Ethereum
+event; contiguous header, transaction-root, receipt-root and exact persisted-event
+validation remain mandatory during ingestion.
 
 Start this finite operation explicitly alongside the normal sync service:
 

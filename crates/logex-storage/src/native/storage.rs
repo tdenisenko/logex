@@ -56,14 +56,11 @@ mod recovery_space;
 #[path = "reorg.rs"]
 mod reorg;
 pub use reorg::PendingCanonicalReorg;
-#[path = "primary_audit.rs"]
-mod primary_audit;
+#[path = "index_snapshot.rs"]
+mod index_snapshot;
 #[path = "verified.rs"]
 mod verified;
-pub use primary_audit::{
-    AuditIndexSource, PrimaryAuditBatch, PrimaryAuditLimits, PrimaryAuditReport,
-    PrimaryAuditSnapshot, PrimaryAuditedRow, PrimarySegmentAudit,
-};
+pub use index_snapshot::{IndexAuditLimits, IndexAuditSnapshot, IndexAuditSource};
 
 const HISTORICAL_STAGING_MAX_BLOCK_SPAN: u64 = 65_536;
 

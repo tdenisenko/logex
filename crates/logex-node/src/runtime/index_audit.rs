@@ -1,10 +1,10 @@
 //! Explicit finite verification of published indexes while normal service runs.
 //! This never rebuilds an index, downloads Ethereum data, or changes primary rows.
-use super::audit::{create_private_directory, ensure_directory, read_json, save_json};
+use super::maintenance_files::{create_private_directory, ensure_directory, read_json, save_json};
 use alloy_primitives::B256;
 use logex_index::{CapturedIndexVerification, IndexBuildProfile, IndexBuilder};
 use logex_server::AppState;
-use logex_storage::native::{InspectionLimits, PrimaryAuditLimits, PrimaryAuditSnapshot};
+use logex_storage::native::{IndexAuditLimits, IndexAuditSnapshot, InspectionLimits};
 use serde::{Deserialize, Serialize};
 use std::{
     cell::{Cell, RefCell},
@@ -61,8 +61,8 @@ impl Plan {
         Ok(())
     }
 
-    fn limits(&self) -> PrimaryAuditLimits {
-        PrimaryAuditLimits {
+    fn limits(&self) -> IndexAuditLimits {
+        IndexAuditLimits {
             max_segments: self.max_segments,
             max_total_rows: self.max_total_rows,
             segment: InspectionLimits {
@@ -220,7 +220,7 @@ struct Control {
 }
 
 impl Control {
-    fn check(&self, source: Option<&PrimaryAuditSnapshot>) -> io::Result<()> {
+    fn check(&self, source: Option<&IndexAuditSnapshot>) -> io::Result<()> {
         if let Some(error) = self.error.borrow().as_ref() {
             return Err(io::Error::other(error.clone()));
         }
@@ -267,7 +267,7 @@ impl Control {
         Ok(())
     }
 
-    fn cancelled(&self, source: &PrimaryAuditSnapshot) -> bool {
+    fn cancelled(&self, source: &IndexAuditSnapshot) -> bool {
         if self.cancellation.is_cancelled() || self.error.borrow().is_some() {
             return true;
         }
@@ -381,7 +381,7 @@ fn execute(
                 .verified_log_coverage()
                 .is_some_and(|v| v.from.block_number == 0)
             {
-                break storage.primary_audit_snapshot(plan.limits())?;
+                break storage.index_audit_snapshot(plan.limits())?;
             }
         }
         std::thread::sleep(Duration::from_millis(250));
@@ -396,7 +396,7 @@ fn verify_snapshot(
     control: &Control,
     started: Instant,
     report: &mut Report,
-    source: PrimaryAuditSnapshot,
+    source: IndexAuditSnapshot,
 ) -> io::Result<()> {
     control.check(Some(&source))?;
     source.check_available_space(
