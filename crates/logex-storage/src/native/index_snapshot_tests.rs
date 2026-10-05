@@ -390,3 +390,81 @@ fn empty_selection_excludes_first_append_and_changed_source_binding_is_rejected(
         io::ErrorKind::InvalidData
     );
 }
+
+#[test]
+fn retry_reopens_grown_prefix_and_charges_only_the_admitted_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut storage = NativeStorage::open(NativeStorageConfig {
+        hot_target_rows: 1_000,
+        ..config(dir.path())
+    })
+    .unwrap();
+    write(&mut storage, &rows(2), false);
+    let mut budget = limits();
+    budget.max_total_rows = 3;
+    let source = storage.index_audit_snapshot(budget).unwrap();
+    let mut attempts = 0;
+    source
+        .visit_index_sources_with_retry(&|| false, |item| {
+            attempts += 1;
+            assert_eq!(item.minimum_rows, 2);
+            if attempts == 1 {
+                assert_eq!(item.reader.read_row_count()?, 2);
+                write(&mut storage, &rows(1), false);
+                // The retained reader cannot absorb the concurrent append.
+                assert_eq!(item.reader.read_row_count()?, 2);
+                Ok(IndexAuditSourceAction::Retry)
+            } else {
+                assert_eq!(item.reader.read_row_count()?, 3);
+                assert_eq!(item.reader.read_address(None)?.len(), 3);
+                Ok(IndexAuditSourceAction::Complete)
+            }
+        })
+        .unwrap();
+    assert_eq!(attempts, 2);
+    assert_eq!(source.physical_rows(), 2);
+}
+
+#[test]
+fn retry_rechecks_cancellation_view_and_opened_source_limits() {
+    for cause in ["cancel", "reorg", "total", "segment"] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut storage = NativeStorage::open(NativeStorageConfig {
+            hot_target_rows: 1_000,
+            ..config(dir.path())
+        })
+        .unwrap();
+        write(&mut storage, &rows(2), false);
+        let mut budget = limits();
+        if cause == "total" {
+            budget.max_total_rows = 3;
+        }
+        if cause == "segment" {
+            budget.segment.max_segment_rows = 3;
+        }
+        let source = storage.index_audit_snapshot(budget).unwrap();
+        let cancelled = Cell::new(false);
+        let mut visits = 0;
+        let error = source
+            .visit_index_sources_with_retry(&|| cancelled.get(), |_| {
+                visits += 1;
+                assert_eq!(visits, 1, "unavailable source was admitted: {cause}");
+                match cause {
+                    "cancel" => cancelled.set(true),
+                    "reorg" => {
+                        storage.mark_non_canonical(rows(1)[0].block_hash)?;
+                    }
+                    _ => write(&mut storage, &rows(2), false),
+                }
+                Ok(IndexAuditSourceAction::Retry)
+            })
+            .unwrap_err();
+        let expected = match cause {
+            "cancel" => io::ErrorKind::Interrupted,
+            "reorg" => io::ErrorKind::WouldBlock,
+            _ => io::ErrorKind::InvalidInput,
+        };
+        assert_eq!(error.kind(), expected, "{cause}: {error}");
+        assert_eq!(visits, 1);
+    }
+}

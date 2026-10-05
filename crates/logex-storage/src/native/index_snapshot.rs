@@ -44,6 +44,14 @@ pub struct IndexAuditSource<'a> {
     pub index_directory: &'a Path,
 }
 
+/// A completed source visit or an explicit request to reopen only this source.
+/// Retry is for publication availability, not an instruction to ignore errors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexAuditSourceAction {
+    Complete,
+    Retry,
+}
+
 fn invalid(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
@@ -156,6 +164,25 @@ impl IndexAuditSnapshot {
         cancelled: &dyn Fn() -> bool,
         mut visit: impl FnMut(IndexAuditSource<'_>) -> io::Result<()>,
     ) -> io::Result<()> {
+        self.visit_index_sources_with_retry(cancelled, |source| {
+            visit(source).map(|()| IndexAuditSourceAction::Complete)
+        })
+    }
+
+    /// Visit the same finite selection, allowing an unavailable publication to
+    /// be retried with a newly retained reader for that source. Completed sources
+    /// are not revisited and a prefix is charged to the total row budget once.
+    /// Each reopen independently enforces source identity and per-source limits.
+    ///
+    /// The caller must pace retries, enforce a finite deadline/cancellation, and
+    /// return `Retry` only for publication availability before admitting any
+    /// result. Source, view, budget and callback errors remain terminal. No
+    /// source or publication lock is held across callbacks for other segments.
+    pub fn visit_index_sources_with_retry(
+        &self,
+        cancelled: &dyn Fn() -> bool,
+        mut visit: impl FnMut(IndexAuditSource<'_>) -> io::Result<IndexAuditSourceAction>,
+    ) -> io::Result<()> {
         let result = (|| {
             self.check(cancelled)?;
             let mut opened_rows = 0u64;
@@ -165,49 +192,70 @@ impl IndexAuditSnapshot {
                     continue;
                 }
                 let directory = self.paths.segment_dir(descriptor.id);
-                let mut reader = SegmentReader::open_for_inspection(&directory)?;
-                let rows = reader.read_row_count()?;
-                opened_rows = opened_rows
-                    .checked_add(rows)
-                    .ok_or_else(|| invalid("index audit opened row count overflow"))?;
-                limit("opened total rows", opened_rows, self.limits.max_total_rows)?;
-                limit(
-                    "opened segment rows",
-                    rows,
-                    self.limits.segment.max_segment_rows,
-                )?;
-                if reader
-                    .captured_manifest_identity()
-                    .is_none_or(|(id, _)| id != descriptor.id)
-                    || rows < descriptor.row_count
-                    || reader.source_namespace() != descriptor.source_namespace.map(|v| v.0)
-                    || (rows == descriptor.row_count
-                        && reader.source_commitment()? != descriptor.source_commitment.map(|v| v.0))
-                {
-                    return Err(invalid("index audit source differs from captured prefix"));
-                }
-                reader
-                    .inspection_preflight(
-                        self.limits.segment.max_retained_artifact_bytes,
-                        self.limits.segment.max_decoded_payload_bytes,
-                    )
-                    .map_err(|error| match error {
-                        crate::segment_reader::InspectionPreflightError::Io(error) => error,
-                        crate::segment_reader::InspectionPreflightError::LimitExceeded {
-                            resource,
-                            required,
-                            limit: allowed,
-                        } => limit_error(resource, required, allowed),
+                loop {
+                    self.check(cancelled)?;
+                    let mut reader =
+                        SegmentReader::open_for_inspection(&directory).map_err(|error| {
+                            io::Error::new(
+                                error.kind(),
+                                format!(
+                                    "open index audit source segment {}: {error}",
+                                    descriptor.id
+                                ),
+                            )
+                        })?;
+                    let rows = reader.read_row_count()?;
+                    let candidate_rows = opened_rows
+                        .checked_add(rows)
+                        .ok_or_else(|| invalid("index audit opened row count overflow"))?;
+                    limit(
+                        "opened total rows",
+                        candidate_rows,
+                        self.limits.max_total_rows,
+                    )?;
+                    limit(
+                        "opened segment rows",
+                        rows,
+                        self.limits.segment.max_segment_rows,
+                    )?;
+                    if reader
+                        .captured_manifest_identity()
+                        .is_none_or(|(id, _)| id != descriptor.id)
+                        || rows < descriptor.row_count
+                        || reader.source_namespace() != descriptor.source_namespace.map(|v| v.0)
+                        || (rows == descriptor.row_count
+                            && reader.source_commitment()?
+                                != descriptor.source_commitment.map(|v| v.0))
+                    {
+                        return Err(invalid("index audit source differs from captured prefix"));
+                    }
+                    reader
+                        .inspection_preflight(
+                            self.limits.segment.max_retained_artifact_bytes,
+                            self.limits.segment.max_decoded_payload_bytes,
+                        )
+                        .map_err(|error| match error {
+                            crate::segment_reader::InspectionPreflightError::Io(error) => error,
+                            crate::segment_reader::InspectionPreflightError::LimitExceeded {
+                                resource,
+                                required,
+                                limit: allowed,
+                            } => limit_error(resource, required, allowed),
+                        })?;
+                    reader.retain_inspected_append_prefix()?;
+                    self.check(cancelled)?;
+                    let action = visit(IndexAuditSource {
+                        segment_id: descriptor.id,
+                        minimum_rows: descriptor.row_count,
+                        reader: &reader,
+                        index_directory: &directory.join("indexes"),
                     })?;
-                reader.retain_inspected_append_prefix()?;
-                self.check(cancelled)?;
-                visit(IndexAuditSource {
-                    segment_id: descriptor.id,
-                    minimum_rows: descriptor.row_count,
-                    reader: &reader,
-                    index_directory: &directory.join("indexes"),
-                })?;
-                self.check(cancelled)?;
+                    self.check(cancelled)?;
+                    if action == IndexAuditSourceAction::Complete {
+                        opened_rows = candidate_rows;
+                        break;
+                    }
+                }
             }
             Ok(())
         })();

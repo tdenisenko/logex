@@ -4,7 +4,9 @@ use super::maintenance_files::{create_private_directory, ensure_directory, read_
 use alloy_primitives::B256;
 use logex_index::{CapturedIndexVerification, IndexBuildProfile, IndexBuilder};
 use logex_server::AppState;
-use logex_storage::native::{IndexAuditLimits, IndexAuditSnapshot, InspectionLimits};
+use logex_storage::native::{
+    IndexAuditLimits, IndexAuditSnapshot, IndexAuditSourceAction, InspectionLimits,
+};
 use serde::{Deserialize, Serialize};
 use std::{
     cell::{Cell, RefCell},
@@ -151,6 +153,8 @@ struct Report {
     captured_segments: usize,
     captured_physical_rows: u64,
     verified_nonempty_segments: usize,
+    publication_retries: u64,
+    waiting_segment: Option<u64>,
     minimum_rows_covered: u64,
     verified_rows_in_opened_prefixes: u64,
     verified_index_logical_bytes: u64,
@@ -174,6 +178,8 @@ impl Report {
             captured_segments: 0,
             captured_physical_rows: 0,
             verified_nonempty_segments: 0,
+            publication_retries: 0,
+            waiting_segment: None,
             minimum_rows_covered: 0,
             verified_rows_in_opened_prefixes: 0,
             verified_index_logical_bytes: 0,
@@ -419,7 +425,7 @@ fn verify_snapshot(
     let mut file = options.open(directory.join("segments.jsonl"))?;
     let mut digest = blake3::Hasher::new();
     digest.update(b"logex.index-audit.segments.v1\0");
-    source.visit_index_sources(&|| control.cancelled(&source), |item| {
+    source.visit_index_sources_with_retry(&|| control.cancelled(&source), |item| {
         control.check(Some(&source))?;
         let proof = IndexBuilder::verify_captured_indexes(
             item.reader,
@@ -428,8 +434,38 @@ fn verify_snapshot(
             plan.max_index_logical_bytes_per_segment,
             &|| control.cancelled(&source),
         )
-        .map_err(io::Error::other)?;
+        .map_err(|error| {
+            io::Error::other(format!(
+                "verify index publication for segment {}: {error}",
+                item.segment_id
+            ))
+        })?;
         control.check(Some(&source))?;
+        let Some(proof) = proof else {
+            report.phase = "waiting_for_index_publication";
+            report.waiting_segment = Some(item.segment_id);
+            report.publication_retries = report
+                .publication_retries
+                .checked_add(1)
+                .ok_or_else(|| io::Error::other("index publication retry count overflow"))?;
+            report.updated_unix_ms = now_ms()?;
+            report.elapsed_seconds = started.elapsed().as_secs_f64();
+            save_json(directory, "progress.json", report, true)?;
+            // No publication lock is retained on this path. Allow ordinary
+            // maintenance to publish, while honoring the original job controls.
+            let retry_at = Instant::now() + Duration::from_secs(1);
+            while Instant::now() < retry_at {
+                control.check(Some(&source))?;
+                std::thread::sleep(
+                    retry_at
+                        .saturating_duration_since(Instant::now())
+                        .min(Duration::from_millis(100)),
+                );
+            }
+            return Ok(IndexAuditSourceAction::Retry);
+        };
+        report.phase = "verifying_captured_publications";
+        report.waiting_segment = None;
         append_segment(
             &mut file,
             &mut digest,
@@ -441,7 +477,8 @@ fn verify_snapshot(
         )?;
         report.updated_unix_ms = now_ms()?;
         report.elapsed_seconds = started.elapsed().as_secs_f64();
-        save_json(directory, "progress.json", report, true)
+        save_json(directory, "progress.json", report, true)?;
+        Ok(IndexAuditSourceAction::Complete)
     })?;
     control.check(Some(&source))?;
     if report.minimum_rows_covered != source.physical_rows() {
