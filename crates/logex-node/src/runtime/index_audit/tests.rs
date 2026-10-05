@@ -283,3 +283,173 @@ fn cancellation_and_plan_reads_reject_symlink_targets() {
     symlink(&regular, &link).unwrap();
     assert!(Plan::read(&link).is_err());
 }
+
+#[test]
+fn withdrawn_publication_waits_then_verifies_without_repeating_prior_segments() {
+    let temp = tempfile::tempdir().unwrap();
+    let owner = state(temp.path(), true);
+    let p = plan();
+    let dir = job(temp.path(), &p);
+    let source = owner
+        .storage
+        .blocking_read()
+        .index_audit_snapshot(p.limits())
+        .unwrap();
+    let hot = owner
+        .storage
+        .blocking_read()
+        .hot_partition()
+        .meta
+        .path
+        .clone();
+    // Ordinary builder lifecycle: beginning a rebuild withdraws its marker.
+    // The verifier must wait without treating this unpublished set as corruption.
+    drop(logex_storage::IndexBuildCheckpoint::begin(&hot).unwrap());
+    let report = std::thread::scope(|scope| {
+        let worker = scope.spawn(|| {
+            let ctl = control(&dir, &p);
+            let mut report = Report::new(&p, now_ms().unwrap());
+            let result =
+                verify_snapshot(&p, &dir, &owner, &ctl, Instant::now(), &mut report, source);
+            (result, report)
+        });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Ok(bytes) = fs::read(dir.join("progress.json")) {
+                let progress: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                if progress["phase"] == "waiting_for_index_publication" {
+                    assert_eq!(progress["verified_nonempty_segments"], 1);
+                    // This independent maintenance action is not performed by the audit.
+                    IndexBuilder::build_all_indexes(&hot).unwrap();
+                    break;
+                }
+            }
+            if worker.is_finished() || Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let (result, report) = worker.join().unwrap();
+        result.unwrap();
+        report
+    });
+    assert!(report.complete);
+    assert_eq!(report.verified_nonempty_segments, 2);
+    assert_eq!(report.minimum_rows_covered, 3);
+    assert!(report.publication_retries >= 1);
+    assert_eq!(report.waiting_segment, None);
+    let bytes = fs::read(dir.join("segments.jsonl")).unwrap();
+    let records: Vec<serde_json::Value> = bytes
+        .split(|b| *b == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| serde_json::from_slice(line).unwrap())
+        .collect();
+    assert_eq!(records.len(), 2);
+    assert_ne!(records[0]["segment_id"], records[1]["segment_id"]);
+}
+
+#[test]
+fn publication_wait_expires_without_rebuilding_or_admitting_partial_success() {
+    let temp = tempfile::tempdir().unwrap();
+    let owner = state(temp.path(), true);
+    let p = plan();
+    let dir = job(temp.path(), &p);
+    let source = owner
+        .storage
+        .blocking_read()
+        .index_audit_snapshot(p.limits())
+        .unwrap();
+    let hot = owner
+        .storage
+        .blocking_read()
+        .hot_partition()
+        .meta
+        .path
+        .clone();
+    drop(logex_storage::IndexBuildCheckpoint::begin(&hot).unwrap());
+    let index = hot.join("indexes").join(logex_index::EVENT_BLOOM_FILE);
+    let before = fs::read(&index).unwrap();
+    let mut ctl = control(&dir, &p);
+    ctl.deadline = Instant::now() + Duration::from_secs(2);
+    let mut report = Report::new(&p, now_ms().unwrap());
+    let error =
+        verify_snapshot(&p, &dir, &owner, &ctl, Instant::now(), &mut report, source).unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+    assert!(!report.complete);
+    assert_eq!(report.manifest_blake3, None);
+    assert_eq!(report.verified_nonempty_segments, 1);
+    assert!(report.publication_retries >= 1);
+    assert!(report.waiting_segment.is_some());
+    assert!(!hot.join("indexes/index-checkpoint").exists());
+    assert_eq!(fs::read(index).unwrap(), before);
+}
+
+#[test]
+fn publication_wait_stops_on_cancellation_or_source_invalidation() {
+    for reorg in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let owner = state(temp.path(), true);
+        let p = plan();
+        let dir = job(temp.path(), &p);
+        let source = owner
+            .storage
+            .blocking_read()
+            .index_audit_snapshot(p.limits())
+            .unwrap();
+        let hot = owner
+            .storage
+            .blocking_read()
+            .hot_partition()
+            .meta
+            .path
+            .clone();
+        drop(logex_storage::IndexBuildCheckpoint::begin(&hot).unwrap());
+        let cancellation = CancellationToken::new();
+        let (result, report) = std::thread::scope(|scope| {
+            let worker = scope.spawn(|| {
+                let mut ctl = control(&dir, &p);
+                ctl.cancellation = cancellation.clone();
+                let mut report = Report::new(&p, now_ms().unwrap());
+                let result =
+                    verify_snapshot(&p, &dir, &owner, &ctl, Instant::now(), &mut report, source);
+                (result, report)
+            });
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let mut waiting = false;
+            while !worker.is_finished() && Instant::now() < deadline {
+                if let Ok(bytes) = fs::read(dir.join("progress.json")) {
+                    let progress: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                    if progress["phase"] == "waiting_for_index_publication" {
+                        waiting = true;
+                        break;
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            if waiting && reorg {
+                owner
+                    .storage
+                    .blocking_write()
+                    .mark_non_canonical(B256::repeat_byte(2))
+                    .unwrap();
+            } else {
+                cancellation.cancel();
+            }
+            let result = worker.join().unwrap();
+            assert!(waiting, "worker never reached publication wait");
+            result
+        });
+        assert_eq!(
+            result.unwrap_err().kind(),
+            if reorg {
+                io::ErrorKind::WouldBlock
+            } else {
+                io::ErrorKind::Interrupted
+            }
+        );
+        assert!(!report.complete);
+        assert_eq!(report.manifest_blake3, None);
+        assert_eq!(report.verified_nonempty_segments, 1);
+        assert!(!hot.join("indexes/index-checkpoint").exists());
+    }
+}

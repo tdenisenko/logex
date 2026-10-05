@@ -97,7 +97,10 @@ impl IndexBuilder {
     /// columns during verification. An old publication can verify its captured
     /// prefix while newer rows append; it makes no claim about that newer tail.
     /// `required` specifies the minimum profile; additional published indexes
-    /// are also checked. Missing, stale, locked or unknown artifacts fail.
+    /// are also checked. `Ok(None)` means the publication is absent, locked,
+    /// stale, or lacks a required binding; callers may wait and recapture the
+    /// source within their own deadline. A missing or corrupt published artifact,
+    /// invalid checkpoint, unknown artifact, or source error is a hard failure.
     /// Cancellation is cooperative between bounded artifact/column/row steps.
     /// Logical index bytes are a work limit, not a process-memory or I/O cap.
     pub fn verify_captured_indexes(
@@ -106,25 +109,8 @@ impl IndexBuilder {
         required: IndexBuildProfile,
         max_total_logical_bytes: u64,
         cancelled: &dyn Fn() -> bool,
-    ) -> Result<CapturedIndexVerification, IndexVerificationError> {
+    ) -> Result<Option<CapturedIndexVerification>, IndexVerificationError> {
         crate::verification::check_cancelled(cancelled)?;
-        require_ordinary_index_path(index_dir, true)?;
-        require_ordinary_index_path(&index_dir.join("index-checkpoint"), false)?;
-        let checkpoint = IndexReadCheckpoint::open_at(index_dir, source)?.ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::WouldBlock,
-                "index publication is unavailable for the captured source",
-            )
-        })?;
-        for name in Self::required_index_files(required) {
-            if checkpoint.artifact_id(name).is_none() {
-                return Err(io::Error::new(
-                    io::ErrorKind::WouldBlock,
-                    format!("index publication lacks {name}"),
-                )
-                .into());
-            }
-        }
         let namespace = source.source_namespace().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -137,6 +123,22 @@ impl IndexBuilder {
                 "captured source commitment is missing",
             )
         })?;
+        let marker = index_dir.join("index-checkpoint");
+        for (path, is_directory) in [(index_dir, true), (marker.as_path(), false)] {
+            match require_ordinary_index_path(path, is_directory) {
+                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+                result => result?,
+            }
+        }
+        let Some(checkpoint) = IndexReadCheckpoint::open_at(index_dir, source)? else {
+            return Ok(None);
+        };
+        if Self::required_index_files(required)
+            .iter()
+            .any(|name| checkpoint.artifact_id(name).is_none())
+        {
+            return Ok(None);
+        }
         let mut result = CapturedIndexVerification {
             source_namespace: namespace,
             source_commitment: commitment,
@@ -147,32 +149,45 @@ impl IndexBuilder {
         for (name, file_id) in checkpoint.artifacts() {
             crate::verification::check_cancelled(cancelled)?;
             crate::verification::source_columns(name)?;
-            let path = index_dir.join(name);
-            require_ordinary_index_path(&path, false)?;
-            let file = IndexFile::open_bound(&path, file_id)?;
-            let length = file.logical_len();
-            result.logical_bytes = result.logical_bytes.checked_add(length).ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "index logical byte sum overflow",
-                )
+            let artifact = (|| -> Result<VerifiedIndexArtifact, IndexVerificationError> {
+                let path = index_dir.join(name);
+                require_ordinary_index_path(&path, false)?;
+                let file = IndexFile::open_bound(&path, file_id)?;
+                let length = file.logical_len();
+                result.logical_bytes =
+                    result.logical_bytes.checked_add(length).ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "index logical byte sum overflow",
+                        )
+                    })?;
+                if result.logical_bytes > max_total_logical_bytes {
+                    return Err(IndexVerificationError::LimitExceeded {
+                        required: result.logical_bytes,
+                        limit: max_total_logical_bytes,
+                    });
+                }
+                drop(file);
+                crate::verification::verify_captured_artifact(
+                    source, &path, name, file_id, cancelled,
+                )?;
+                Ok(VerifiedIndexArtifact {
+                    name: name.to_owned(),
+                    file_id,
+                    logical_bytes: length,
+                })
+            })()
+            .map_err(|error| match error {
+                IndexVerificationError::Io(error) => IndexVerificationError::Io(io::Error::new(
+                    error.kind(),
+                    format!("verify published index {name}: {error}"),
+                )),
+                error => error,
             })?;
-            if result.logical_bytes > max_total_logical_bytes {
-                return Err(IndexVerificationError::LimitExceeded {
-                    required: result.logical_bytes,
-                    limit: max_total_logical_bytes,
-                });
-            }
-            drop(file);
-            crate::verification::verify_captured_artifact(source, &path, name, file_id, cancelled)?;
-            result.artifacts.push(VerifiedIndexArtifact {
-                name: name.to_owned(),
-                file_id,
-                logical_bytes: length,
-            });
+            result.artifacts.push(artifact);
         }
         crate::verification::check_cancelled(cancelled)?;
-        Ok(result)
+        Ok(Some(result))
     }
 
     /// Bound incremental file bytes for a fresh selected index profile.
@@ -879,7 +894,8 @@ mod tests {
             u64::MAX,
             &|| false,
         )
-        .unwrap();
+        .unwrap()
+        .expect("publication is available");
         assert_eq!(proof.rows, make_test_rows().len() as u64);
         assert_eq!(
             proof.artifacts.len(),
@@ -907,7 +923,8 @@ mod tests {
             u64::MAX,
             &|| false,
         )
-        .unwrap();
+        .unwrap()
+        .expect("publication is available");
         assert!(proof.logical_bytes > 0);
         assert!(matches!(
             IndexBuilder::verify_captured_indexes(
@@ -927,7 +944,8 @@ mod tests {
                 proof.logical_bytes,
                 &|| false
             )
-            .unwrap(),
+            .unwrap()
+            .expect("publication is available"),
             proof
         );
         let mut publication = IndexBuildCheckpoint::begin(source.path()).unwrap();
@@ -975,7 +993,8 @@ mod tests {
                 u64::MAX,
                 &|| false
             )
-            .is_err()
+            .unwrap()
+            .is_none()
         );
         let id = IndexFile::protected_file_id(&indexes.join(EVENT_BLOOM_FILE)).unwrap();
         for name in IndexBuilder::required_index_files(IndexBuildProfile::Events) {
@@ -1024,7 +1043,8 @@ mod tests {
             u64::MAX,
             &|| false,
         )
-        .unwrap();
+        .unwrap()
+        .expect("publication is available");
         assert_eq!(proof.rows, rows.len() as u64);
         let latest =
             SegmentReader::open_projected(&source, IndexBuilder::verification_columns()).unwrap();
@@ -1037,7 +1057,68 @@ mod tests {
                 u64::MAX,
                 &|| false
             )
-            .is_err()
+            .unwrap()
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn unavailable_publications_are_distinct_from_missing_or_corrupt_published_files() {
+        let source = TempDir::new().unwrap();
+        ColumnFile::write_batch(source.path(), &make_test_rows()).unwrap();
+        let reader =
+            SegmentReader::open_projected(source.path(), IndexBuilder::verification_columns())
+                .unwrap();
+        let indexes = source.path().join("indexes");
+        let verify = || {
+            IndexBuilder::verify_captured_indexes(
+                &reader,
+                &indexes,
+                IndexBuildProfile::Events,
+                u64::MAX,
+                &|| false,
+            )
+        };
+        // Missing directory and unpublished/missing required bindings can wait.
+        assert!(verify().unwrap().is_none());
+        IndexBuilder::build_indexes(source.path(), IndexBuildProfile::Erc20Transfer).unwrap();
+        assert!(verify().unwrap().is_none());
+        IndexBuilder::build_indexes(source.path(), IndexBuildProfile::Events).unwrap();
+        assert!(verify().unwrap().is_some());
+        let marker = fs::read(indexes.join("index-checkpoint")).unwrap();
+        let lock = fs::File::open(&indexes).unwrap();
+        lock.lock().unwrap();
+        assert!(verify().unwrap().is_none());
+        lock.unlock().unwrap();
+        // Once an artifact is registered as published, absence is corruption,
+        // not another reason to retry or silently rebuild it.
+        fs::remove_file(indexes.join(EVENT_BLOOM_FILE)).unwrap();
+        assert!(
+            matches!(verify(), Err(IndexVerificationError::Io(e)) if e.kind() == io::ErrorKind::NotFound)
+        );
+        assert_eq!(fs::read(indexes.join("index-checkpoint")).unwrap(), marker);
+        fs::write(indexes.join("index-checkpoint"), b"corrupt marker").unwrap();
+        assert!(
+            matches!(verify(), Err(IndexVerificationError::Io(e)) if e.kind() == io::ErrorKind::InvalidData)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unavailable_publication_detection_rejects_symlink_markers() {
+        let source = TempDir::new().unwrap();
+        ColumnFile::write_batch(source.path(), &make_test_rows()).unwrap();
+        IndexBuilder::build_indexes(source.path(), IndexBuildProfile::Events).unwrap();
+        let reader =
+            SegmentReader::open_projected(source.path(), IndexBuilder::verification_columns())
+                .unwrap();
+        let indexes = source.path().join("indexes");
+        let marker = indexes.join("index-checkpoint");
+        let saved = source.path().join("saved-marker");
+        fs::rename(&marker, &saved).unwrap();
+        std::os::unix::fs::symlink(&saved, &marker).unwrap();
+        assert!(
+            matches!(IndexBuilder::verify_captured_indexes(&reader, &indexes, IndexBuildProfile::Events, u64::MAX, &|| false), Err(IndexVerificationError::Io(e)) if e.kind() == io::ErrorKind::Unsupported)
         );
     }
     use logex_storage::ColumnFile;

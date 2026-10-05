@@ -52,10 +52,13 @@ its artifacts; a shared publication lock binds all checked files to that exact
 source namespace, prefix commitment and row count. Every published artifact is
 checked, including optional B-trees beyond the required general-event filter and
 emitter/event row index. Finish rebuilding the required profile before starting
-verification; an unfinished publication fails verification rather than passing
-from filter presence alone.
-Unknown published files, missing required indexes, stale/locked checkpoints,
-corruption, source changes, exhausted limits or failed writes prevent completion.
+verification. If a publication is withdrawn during a rebuild, locked, stale,
+or lacks required bindings, the worker waits within the original job deadline.
+It reopens only that source, rechecks its captured identity and budgets, then
+verifies a matching publication. Previously completed segments are not repeated.
+Waiting neither rebuilds indexes nor admits unverified rows. A missing published
+artifact, corrupt checkpoint or index, unknown published file, changed source
+view, exhausted limit or failed write stops verification immediately.
 Unpublished loose files are not admitted query indexes and are not counted.
 
 Every source membership is checked, including retained noncanonical rows that
@@ -76,17 +79,19 @@ Artifacts are stored under `index-audits/request-<id>/`:
 
 - `plan.json` preserves the explicit request and bounds.
 - `progress.json` is provisional status, including verified rows and logical bytes.
+  `waiting_for_index_publication`, `waiting_segment` and `publication_retries`
+  identify publication waits; they are not successful verification evidence.
 - `segments.jsonl` records each verified source and all of its published file IDs.
 - `result.json` records success or failure. Only `complete: true` and phase
   `captured_publications_verified` admit the complete selection. Its domain-separated
   BLAKE3 digest commits to the complete newline-delimited segment manifest.
 
 The manifest is synced before success and the source view is re-admitted. Partial
-progress or a surviving manifest does not constitute a completed audit. After a
-missing-publication failure, allow normal index construction to finish before
-starting another explicitly identified pass. The verifier does not rebuild or
-silently skip an unavailable index. Historical receipt proof, advancing-tail
-reconciliation and real-query correctness/performance remain separate gates.
+progress or a surviving manifest does not constitute a completed audit. If a
+publication remains unavailable until the deadline, the job fails with its partial
+progress preserved. Investigate failures before starting another explicitly
+identified pass. The verifier does not rebuild or skip an unavailable index.
+Historical receipt proof, advancing-tail reconciliation and real-query correctness/performance remain separate gates.
 
 To cancel only this job while keeping the node running:
 

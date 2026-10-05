@@ -60,7 +60,9 @@ pub use reorg::PendingCanonicalReorg;
 mod index_snapshot;
 #[path = "verified.rs"]
 mod verified;
-pub use index_snapshot::{IndexAuditLimits, IndexAuditSnapshot, IndexAuditSource};
+pub use index_snapshot::{
+    IndexAuditLimits, IndexAuditSnapshot, IndexAuditSource, IndexAuditSourceAction,
+};
 
 const HISTORICAL_STAGING_MAX_BLOCK_SPAN: u64 = 65_536;
 
