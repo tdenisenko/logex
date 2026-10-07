@@ -66,6 +66,16 @@ use crate::{
     decode_verified_beacon_block, force_update_light_client_store, verify_bootstrap_payload,
 };
 
+// This is the observation time of the diagnostic, not the start of a request or
+// a reconstructed timestamp for earlier events. Request IDs live in the enclosing
+// response/failure span; ownership transitions are on the logex_requests target.
+fn timestamped_diagnostic(detail: String) -> String {
+    match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(elapsed) => format!("observed_unix_ms={} {detail}", elapsed.as_millis()),
+        Err(_) => format!("observed_unix_ms=unavailable {detail}"),
+    }
+}
+
 const CONSENSUS_STATE_DIR: &str = "cl";
 const DISCOVERY_SECRET_FILE: &str = "discovery-secret";
 const KNOWN_PEERS_FILE: &str = "known-peers.json";
@@ -3261,7 +3271,9 @@ impl ConsensusNetwork {
         match event {
             request_response::Event::Message { peer, message, .. } => match message {
                 request_response::Message::Request {
-                    request, channel, ..
+                    request_id,
+                    request,
+                    channel,
                 } => {
                     tracing::debug!(%peer, ?request, "received inbound consensus RPC request");
                     self.record_p2p_download_payload(consensus_request_payload_bytes(&request));
@@ -3360,11 +3372,11 @@ impl ConsensusNetwork {
                     if let Err(response) = self.send_rpc_response(kind, channel, response) {
                         let response_summary = rpc_response_summary(response.response());
                         let peer_context = self.peer_context(peer);
-                        self.last_response_send_failure = Some(format!(
-                            "{peer_context} request={} response={response_summary:?}",
+                        self.last_response_send_failure = Some(timestamped_diagnostic(format!(
+                            "{peer_context} request={} request_id={request_id:?} response={response_summary:?}",
                             kind.as_str()
-                        ));
-                        tracing::debug!(
+                        )));
+                        tracing::info!(target: "logex_requests", ?request_id,
                             %peer,
                             error = ?response_summary,
                             "failed to send consensus RPC response"
@@ -3392,7 +3404,13 @@ impl ConsensusNetwork {
                 error,
                 ..
             } => {
-                if self.take_pending_request(kind, request_id).is_none() {
+                let _request_span = tracing::info_span!("consensus_rpc", %peer,
+                    request = kind.as_str(), ?request_id)
+                .entered();
+                if self
+                    .take_pending_request(kind, request_id, "outbound_failure")
+                    .is_none()
+                {
                     return;
                 }
                 self.pending_light_client_range_requests
@@ -3413,10 +3431,10 @@ impl ConsensusNetwork {
                 self.request_failures.increment(kind);
                 let peer_failures = self.record_peer_failure(peer, kind);
                 let peer_context = self.peer_context(peer);
-                self.last_rpc_failure = Some(format!(
-                    "{peer_context} request={} failure={error}",
+                self.last_rpc_failure = Some(timestamped_diagnostic(format!(
+                    "{peer_context} request={} request_id={request_id:?} failure={error}",
                     kind.as_str()
-                ));
+                )));
                 match kind {
                     RpcRequestKind::LightClientBootstrap
                     | RpcRequestKind::LightClientUpdatesByRange
@@ -3424,7 +3442,7 @@ impl ConsensusNetwork {
                     | RpcRequestKind::LightClientOptimisticUpdate
                     | RpcRequestKind::BeaconBlocksByRange
                     | RpcRequestKind::BeaconBlocksByRoot => {
-                        tracing::debug!(
+                        tracing::info!(target: "logex_requests",
                             %peer,
                             request = kind.as_str(),
                             %error,
@@ -3432,7 +3450,7 @@ impl ConsensusNetwork {
                         );
                     }
                     _ => {
-                        tracing::debug!(
+                        tracing::info!(target: "logex_requests",
                             %peer,
                             request = kind.as_str(),
                             %error,
@@ -3523,8 +3541,11 @@ impl ConsensusNetwork {
                     request_id,
                     response,
                 } => {
-                    let Some(_) = self.take_pending_request(RpcRequestKind::Goodbye, request_id)
-                    else {
+                    let Some(_) = self.take_pending_request(
+                        RpcRequestKind::Goodbye,
+                        request_id,
+                        "response_received",
+                    ) else {
                         tracing::warn!(%peer, ?request_id, "received consensus goodbye response for an unknown request");
                         return;
                     };
@@ -3559,8 +3580,11 @@ impl ConsensusNetwork {
                 error,
                 ..
             } => {
+                let _request_span = tracing::info_span!("consensus_rpc", %peer,
+                    request = "goodbye", ?request_id)
+                .entered();
                 if self
-                    .take_pending_request(RpcRequestKind::Goodbye, request_id)
+                    .take_pending_request(RpcRequestKind::Goodbye, request_id, "outbound_failure")
                     .is_none()
                 {
                     return;
@@ -3590,8 +3614,9 @@ impl ConsensusNetwork {
                 } else {
                     self.request_failures.increment(RpcRequestKind::Goodbye);
                     let peer_context = self.peer_context(peer);
-                    self.last_rpc_failure =
-                        Some(format!("{peer_context} request=goodbye failure={error}"));
+                    self.last_rpc_failure = Some(timestamped_diagnostic(format!(
+                        "{peer_context} request=goodbye request_id={request_id:?} failure={error}"
+                    )));
                     tracing::debug!(
                         %peer,
                         ?request_id,
@@ -3623,7 +3648,9 @@ impl ConsensusNetwork {
         match event {
             request_response::Event::Message { peer, message, .. } => match message {
                 request_response::Message::Request {
-                    request, channel, ..
+                    request_id,
+                    request,
+                    channel,
                 } => {
                     tracing::debug!(%peer, ?request, "received inbound consensus metadata RPC request");
                     self.record_p2p_download_payload(consensus_request_payload_bytes(&request));
@@ -3645,10 +3672,10 @@ impl ConsensusNetwork {
                     if let Err(response) = result {
                         let response_summary = rpc_response_summary(response.response());
                         let peer_context = self.peer_context(peer);
-                        self.last_response_send_failure = Some(format!(
-                            "{peer_context} request=metadata response={response_summary:?}"
-                        ));
-                        tracing::debug!(
+                        self.last_response_send_failure = Some(timestamped_diagnostic(format!(
+                            "{peer_context} request=metadata request_id={request_id:?} response={response_summary:?}"
+                        )));
+                        tracing::info!(target: "logex_requests", ?request_id,
                             %peer,
                             error = ?response_summary,
                             "failed to send consensus metadata RPC response"
@@ -3669,8 +3696,11 @@ impl ConsensusNetwork {
                 error,
                 ..
             } => {
+                let _request_span = tracing::info_span!("consensus_rpc", %peer,
+                    request = "metadata", ?request_id)
+                .entered();
                 if self
-                    .take_pending_request(RpcRequestKind::MetaData, request_id)
+                    .take_pending_request(RpcRequestKind::MetaData, request_id, "outbound_failure")
                     .is_none()
                 {
                     return;
@@ -3686,9 +3716,10 @@ impl ConsensusNetwork {
                 self.request_failures.increment(RpcRequestKind::MetaData);
                 self.record_peer_failure(peer, RpcRequestKind::MetaData);
                 let peer_context = self.peer_context(peer);
-                self.last_rpc_failure =
-                    Some(format!("{peer_context} request=metadata failure={error}"));
-                tracing::debug!(%peer, ?request_id, %error, "consensus metadata RPC request failed");
+                self.last_rpc_failure = Some(timestamped_diagnostic(format!(
+                    "{peer_context} request=metadata request_id={request_id:?} failure={error}"
+                )));
+                tracing::info!(target: "logex_requests",%peer, ?request_id, %error, "consensus metadata RPC request failed");
             }
             request_response::Event::InboundFailure {
                 peer,
@@ -3706,6 +3737,8 @@ impl ConsensusNetwork {
         }
     }
 
+    #[tracing::instrument(name = "consensus_rpc", level = "info", skip_all,
+        fields(%peer, request = kind.as_str(), ?request_id))]
     fn handle_rpc_response(
         &mut self,
         kind: RpcRequestKind,
@@ -3714,6 +3747,8 @@ impl ConsensusNetwork {
         response: Eth2RpcResponse,
     ) {
         let key = PendingRequestKey { kind, request_id };
+        tracing::debug!(target: "logex_requests", response = ?rpc_response_summary(&response),
+            "consensus response received");
         if self.pending_requests.contains_key(&key) {
             if let Some(roots) = self.pending_history_root_requests.get(&key) {
                 self.metadata_response_owners.extend(roots.iter().copied());
@@ -3745,7 +3780,7 @@ impl ConsensusNetwork {
         request_id: Eth2OutboundRequestId,
         response: Eth2RpcResponse,
     ) {
-        let Some(_) = self.take_pending_request(kind, request_id) else {
+        let Some(_) = self.take_pending_request(kind, request_id, "response_received") else {
             tracing::warn!(%peer, request = kind.as_str(), ?request_id, "received consensus RPC response for an unknown request");
             return;
         };
@@ -4397,11 +4432,11 @@ impl ConsensusNetwork {
                 let peer_failures = self.record_peer_failure(peer, kind);
                 let message = String::from_utf8_lossy(&error.message);
                 let peer_context = self.peer_context(peer);
-                self.last_rpc_failure = Some(format!(
-                    "{peer_context} request={} error_code={} message={message}",
+                self.last_rpc_failure = Some(timestamped_diagnostic(format!(
+                    "{peer_context} request={} request_id={request_id:?} error_code={} message={message}",
                     kind.as_str(),
                     error.code
-                ));
+                )));
                 match kind {
                     RpcRequestKind::LightClientBootstrap
                     | RpcRequestKind::LightClientUpdatesByRange
@@ -4409,7 +4444,7 @@ impl ConsensusNetwork {
                     | RpcRequestKind::LightClientOptimisticUpdate
                     | RpcRequestKind::BeaconBlocksByRange
                     | RpcRequestKind::BeaconBlocksByRoot => {
-                        tracing::debug!(
+                        tracing::info!(target: "logex_requests",
                             %peer,
                             request = kind.as_str(),
                             error_code = error.code,
@@ -4418,7 +4453,7 @@ impl ConsensusNetwork {
                         );
                     }
                     _ => {
-                        tracing::debug!(
+                        tracing::info!(target: "logex_requests",
                             %peer,
                             request = kind.as_str(),
                             error_code = error.code,
@@ -4441,10 +4476,10 @@ impl ConsensusNetwork {
             (kind, response) => {
                 let response = rpc_response_summary(&response);
                 let peer_context = self.peer_context(peer);
-                self.last_rpc_failure = Some(format!(
-                    "{peer_context} request={} unexpected_response={response:?}",
+                self.last_rpc_failure = Some(timestamped_diagnostic(format!(
+                    "{peer_context} request={} request_id={request_id:?} unexpected_response={response:?}",
                     kind.as_str()
-                ));
+                )));
                 tracing::warn!(
                     %peer,
                     request = kind.as_str(),
@@ -5021,7 +5056,11 @@ impl ConsensusNetwork {
                 .inner
                 .send_request(&peer, request),
         };
-        tracing::debug!(%peer, request = kind.as_str(), ?request_id, "sent outbound consensus RPC request");
+        tracing::debug!(target: "logex_requests", %peer, request = kind.as_str(), ?request_id,
+            light_client_range = ?requested_light_client_range,
+            beacon_range = ?requested_history_range.as_ref().map(|pending| pending.request),
+            root_count = requested_history_roots.as_ref().map(Vec::len),
+            "sent outbound consensus RPC request");
         self.record_p2p_upload_payload(payload_bytes);
         let key = PendingRequestKey { kind, request_id };
         self.pending_requests.insert(key, peer);
@@ -6129,6 +6168,8 @@ impl ConsensusNetwork {
     }
 
     fn record_peer_success(&mut self, peer: PeerId, kind: RpcRequestKind) {
+        tracing::debug!(target: "logex_requests", %peer, request = kind.as_str(),
+            "consensus request accepted");
         self.reset_peer_failure(peer, kind);
         self.peer_lifecycle
             .entry(peer)
@@ -6162,11 +6203,11 @@ impl ConsensusNetwork {
     ) {
         self.request_failures.increment(kind);
         let peer_failures = self.record_peer_failure(peer, kind);
-        self.last_rpc_failure = Some(format!(
+        self.last_rpc_failure = Some(timestamped_diagnostic(format!(
             "{} request={} {detail}",
             self.peer_context(peer),
             kind.as_str()
-        ));
+        )));
         tracing::info!(
             %peer,
             request = kind.as_str(),
@@ -6184,11 +6225,11 @@ impl ConsensusNetwork {
     ) {
         self.request_failures.increment(kind);
         let failures = self.record_peer_failure(peer, kind);
-        self.last_rpc_failure = Some(format!(
+        self.last_rpc_failure = Some(timestamped_diagnostic(format!(
             "{} request={} invalid_response={detail}",
             self.peer_context(peer),
             kind.as_str()
-        ));
+        )));
         tracing::info!(
             %peer,
             request = kind.as_str(),
@@ -6210,11 +6251,11 @@ impl ConsensusNetwork {
             .entry(peer)
             .or_default()
             .mark_ignored_for_run();
-        self.last_rpc_failure = Some(format!(
+        self.last_rpc_failure = Some(timestamped_diagnostic(format!(
             "{} request={} {detail}",
             self.peer_context(peer),
             kind.as_str()
-        ));
+        )));
         tracing::info!(
             %peer,
             request = kind.as_str(),
@@ -6253,6 +6294,8 @@ impl ConsensusNetwork {
             .goodbye_rpc
             .inner
             .send_request(&peer, Eth2RpcRequest::Goodbye(reason));
+        tracing::debug!(target: "logex_requests", %peer, request = "goodbye", ?request_id,
+            "sent outbound consensus RPC request");
         self.record_p2p_upload_payload(8);
         self.pending_requests.insert(
             PendingRequestKey {
@@ -6301,11 +6344,14 @@ impl ConsensusNetwork {
         &mut self,
         kind: RpcRequestKind,
         request_id: Eth2OutboundRequestId,
+        reason: &'static str,
     ) -> Option<PeerId> {
         let peer = self
             .pending_requests
             .remove(&PendingRequestKey { kind, request_id })?;
         self.pending_peer_kinds.remove(&(peer, kind));
+        tracing::debug!(target: "logex_requests", %peer, request = kind.as_str(),
+            ?request_id, reason, "consensus request ownership released");
         Some(peer)
     }
 
@@ -6316,7 +6362,7 @@ impl ConsensusNetwork {
             .filter_map(|(key, pending_peer)| (*pending_peer == peer).then_some(*key))
             .collect::<Vec<_>>();
         for key in stale {
-            let _ = self.take_pending_request(key.kind, key.request_id);
+            let _ = self.take_pending_request(key.kind, key.request_id, "peer_state_cleared");
             self.pending_light_client_range_requests.remove(&key);
             self.pending_history_root_requests.remove(&key);
             self.pending_history_range_requests.remove(&key);
@@ -6404,11 +6450,11 @@ impl ConsensusNetwork {
         if rotate {
             lifecycle.remote_busy_redial_until = Some(now + REMOTE_BUSY_REDIAL_DELAY);
         }
-        self.last_rpc_failure = Some(format!(
+        self.last_rpc_failure = Some(timestamped_diagnostic(format!(
             "{} request={} temporarily unavailable error_code={RATE_LIMITED_CODE}",
             self.peer_context(peer),
             kind.as_str(),
-        ));
+        )));
         if rotate {
             self.last_peer_policy_event = Some(format!(
                 "{} policy=rotate_busy_peer request={} redial_delay_secs={}",
@@ -6511,10 +6557,10 @@ impl ConsensusNetwork {
                 }
             }
         }
-        self.last_rpc_failure = Some(format!(
+        self.last_rpc_failure = Some(timestamped_diagnostic(format!(
             "local response resource limit request={} error={local}",
             kind.as_str()
-        ));
+        )));
         tracing::debug!(request = kind.as_str(), %local, "deferring consensus RPC after local resource limit");
         true
     }
@@ -7750,6 +7796,7 @@ const MAINNET_BOOTNODES: &[&str] = &[
 
 #[cfg(test)]
 mod tests {
+    mod diagnostics;
     use std::net::{Ipv4Addr, Ipv6Addr};
     use std::sync::{Arc, Mutex};
 
