@@ -149,3 +149,17 @@ Use `/usr/bin/time -l` on macOS or `/usr/bin/time -v` on Linux around the compil
 test executable for process RSS. This includes fixture and oracle buffers; it is
 not per-query memory. Use platform profilers for allocation and I/O attribution.
 Keep raw outputs and comparison archives outside the repository.
+
+For sparse bundle-read regressions, `bundle::query_cache_tests` checks actual file
+read ranges as well as output equality, whole-extent corruption detection and memory
+ownership. Repeated selections inside one large captured extent must not reread it
+for every page. This is a deterministic read-amplification control, not a throughput
+benchmark or a reason to weaken checksums.
+
+Live profiles should bind to the exact process start, binary and dataset before
+sampling. Keep durations and sampling intervals finite; record the overhead and
+concurrent sync/maintenance work. Stack samples show where threads reside, including
+I/O and synchronization waits, and do not directly measure per-stage CPU durations.
+Do not add inclusive call counts across frames. Process CPU and disk-I/O counter
+deltas also include other node work; paired exact-result timings and surrounding
+health checks are needed before making a mainnet performance claim.

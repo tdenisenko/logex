@@ -234,46 +234,51 @@ struct ReadWindow {
     offset: u64,
     bytes: QueryBuffer<u8>,
     logical_ends: BTreeMap<u8, QueryBuffer<u64>>,
+    #[cfg(test)]
+    reads: Vec<Range<u64>>,
     memory: Option<QueryMemoryBudget>,
 }
 
 impl ReadWindow {
+    fn invalidate(&mut self) {
+        // Drop the allocation and its charge before a replacement is reserved.
+        // An allocation or I/O failure must not expose a partly replaced cache.
+        self.bytes = QueryBuffer::unaccounted(Vec::new());
+    }
+
     fn read_extent(
         &mut self,
         extent: &Extent,
         snapshot_end: u64,
         read_ahead: bool,
-        output_memory: Option<&QueryMemoryBudget>,
-    ) -> io::Result<QueryBuffer<u8>> {
-        if !read_ahead {
-            // Preserve the direct path for large or physically isolated pages.
-            // Reading unrelated columns would add copying without saving I/O.
-            let mut bytes = query_buffer(extent.len as usize, output_memory)?;
-            self.file.seek(SeekFrom::Start(extent.offset))?;
-            self.file.read_exact(&mut bytes)?;
-            if crc32fast::hash(&bytes) != extent.checksum {
-                return Err(invalid("bundle extent checksum mismatch"));
-            }
-            return Ok(bytes);
-        }
+    ) -> io::Result<&[u8]> {
         let end = extent.offset + u64::from(extent.len); // validated by decode_table
         if extent.offset < self.offset || end > self.offset + self.bytes.len() as u64 {
-            // Small pages are interleaved with other columns and table records.
-            // Read a bounded physical window instead of seeking for every page
-            // header and payload. Large extents read exactly their own bytes.
-            let offset = extent.offset / READ_AHEAD_BYTES as u64 * READ_AHEAD_BYTES as u64;
-            let end = offset
-                .saturating_add(READ_AHEAD_BYTES as u64)
-                .max(end)
-                .min(snapshot_end);
-            let len = (end - offset) as usize;
-            // Invalidate before I/O: a short read must not expose a partly
-            // overwritten old cache on retry. Never read an unpublished suffix.
-            self.bytes.clear();
+            // Adjacent small extents can share a bounded physical window. A
+            // large or isolated extent is cached exactly, so sparse page reads
+            // within it do not reread its entire checksummed payload. The table
+            // bounds the retained allocation by MAX_EXTENT_BYTES (or a small
+            // read-ahead window), regardless of the selected stream's length.
+            let offset = if read_ahead {
+                extent.offset / READ_AHEAD_BYTES as u64 * READ_AHEAD_BYTES as u64
+            } else {
+                extent.offset
+            };
+            let window_end = if read_ahead {
+                offset
+                    .saturating_add(READ_AHEAD_BYTES as u64)
+                    .max(end)
+                    .min(snapshot_end)
+            } else {
+                end
+            };
+            self.invalidate();
             self.offset = offset;
-            let mut bytes = query_buffer(len, self.memory.as_ref())?;
+            let mut bytes = query_buffer((window_end - offset) as usize, self.memory.as_ref())?;
             self.file.seek(SeekFrom::Start(offset))?;
             self.file.read_exact(&mut bytes)?;
+            #[cfg(test)]
+            self.reads.push(offset..window_end);
             self.bytes = bytes;
         }
         let start = (extent.offset - self.offset) as usize;
@@ -281,10 +286,9 @@ impl ReadWindow {
         if crc32fast::hash(bytes) != extent.checksum {
             return Err(invalid("bundle extent checksum mismatch"));
         }
-        let mut output =
-            QueryBuffer::try_with_capacity(bytes.len(), output_memory, "bundle extent copy")?;
-        output.try_extend_from_slice(bytes)?;
-        Ok(output)
+        // The caller copies only its selected range while holding the reader
+        // lock; no additional full-extent allocation or unowned alias escapes.
+        Ok(bytes)
     }
 }
 
@@ -396,6 +400,8 @@ impl BundleReader {
                 offset: 0,
                 bytes: QueryBuffer::unaccounted(Vec::new()),
                 logical_ends: BTreeMap::new(),
+                #[cfg(test)]
+                reads: Vec::new(),
                 memory: memory.cloned(),
             })),
             reference: reference.clone(),
@@ -481,12 +487,13 @@ impl BundleReader {
             let start = range.start.max(logical);
             let end = range.end.min(next);
             if start < end {
-                let bytes = self.read_extent_with_memory(&stream.extents, index, output_memory)?;
                 let destination = (start - range.start) as usize;
                 let local = (start - logical) as usize;
                 let count = (end - start) as usize;
-                output[destination..destination + count]
-                    .copy_from_slice(&bytes[local..local + count]);
+                self.with_extent(&stream.extents, index, |bytes| {
+                    output[destination..destination + count]
+                        .copy_from_slice(&bytes[local..local + count]);
+                })?;
             }
             logical = next;
             if logical >= range.end {
@@ -497,16 +504,19 @@ impl BundleReader {
     }
 
     pub(crate) fn verify_all(&self) -> io::Result<()> {
-        // An explicit integrity check must inspect the backing file again,
-        // even if a previous query cached valid bytes from this snapshot.
-        self.file
+        // Discard all prior cached bytes. Hold this captured reader's lock for
+        // the pass so a concurrent query cannot repopulate it from an earlier
+        // read. Fresh read-ahead windows still amortize small extent I/O, and
+        // every extent checksum is checked against bytes read during this pass.
+        let mut file = self
+            .file
             .lock()
-            .map_err(|_| invalid("bundle reader lock poisoned"))?
-            .bytes
-            .clear();
+            .map_err(|_| invalid("bundle reader lock poisoned"))?;
+        file.invalidate();
+        let snapshot_end = self.reference.end()?;
         for stream in self.streams.values() {
-            for index in 0..stream.extents.len() {
-                self.read_extent(&stream.extents, index)?;
+            for (index, extent) in stream.extents.iter().enumerate() {
+                file.read_extent(extent, snapshot_end, read_ahead_for(&stream.extents, index))?;
             }
         }
         Ok(())
@@ -518,30 +528,30 @@ impl BundleReader {
             .ok_or_else(|| invalid("missing bundle stream"))
     }
 
-    fn read_extent(&self, extents: &[Extent], index: usize) -> io::Result<QueryBuffer<u8>> {
-        self.read_extent_with_memory(extents, index, self.memory.as_ref())
-    }
-
-    fn read_extent_with_memory(
+    fn with_extent<T>(
         &self,
         extents: &[Extent],
         index: usize,
-        output_memory: Option<&QueryMemoryBudget>,
-    ) -> io::Result<QueryBuffer<u8>> {
-        // Tables bound each extent before allocation. Verify even a partial
-        // selection against the whole extent, at most MAX_EXTENT_BYTES.
+        use_bytes: impl FnOnce(&[u8]) -> T,
+    ) -> io::Result<T> {
+        // Even a partial selection checks its whole, captured extent.
         let extent = &extents[index];
-        // Table validation orders physical extents. Read ahead only where
-        // nearby extents of this column can reuse the physical window.
-        let read_ahead = extents
-            .get(index + 1)
-            .is_some_and(|next| next.offset - extent.offset < 4 * 1024);
+        let read_ahead = read_ahead_for(extents, index);
         let mut file = self
             .file
             .lock()
             .map_err(|_| invalid("bundle reader lock poisoned"))?;
-        file.read_extent(extent, self.reference.end()?, read_ahead, output_memory)
+        let bytes = file.read_extent(extent, self.reference.end()?, read_ahead)?;
+        Ok(use_bytes(bytes))
     }
+}
+
+// Validated extents are physically ordered and nonoverlapping. Read ahead only
+// when another extent of this stream is close enough to reuse the window.
+fn read_ahead_for(extents: &[Extent], index: usize) -> bool {
+    extents
+        .get(index + 1)
+        .is_some_and(|next| next.offset - extents[index].offset < 4 * 1024)
 }
 
 /// Count a fresh repair bundle using the writer's stream layout, without a file.
@@ -1302,6 +1312,10 @@ fn query_buffer(len: usize, memory: Option<&QueryMemoryBudget>) -> io::Result<Qu
 }
 
 #[cfg(test)]
+#[path = "bundle/query_cache_tests.rs"]
+mod query_cache_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
@@ -1340,7 +1354,7 @@ mod tests {
     }
 
     #[test]
-    fn accounted_cache_replacement_failure_retains_old_capacity() {
+    fn accounted_cache_replacement_reuses_its_budget() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("bundle");
         let reference = accounted_fixture(&path);
@@ -1355,18 +1369,18 @@ mod tests {
             .unwrap();
         drop(reader.read_range_accounted(0, 0..1).unwrap());
         let before = memory.used();
-        let error = reader.read_range_accounted(0, 70_000..70_001).unwrap_err();
-        assert!(
-            error
-                .get_ref()
-                .unwrap()
-                .is::<logex_types::QueryMemoryError>()
+        // Only one read-ahead window fits. Replacement must release the old
+        // owner before allocating, and retain the new window's full charge.
+        assert_eq!(
+            &*reader.read_range_accounted(0, 70_000..70_001).unwrap(),
+            &[7]
         );
-        let window = reader.file.lock().unwrap();
-        assert!(window.bytes.is_empty());
-        assert_eq!(window.bytes.capacity(), READ_AHEAD_BYTES);
-        assert!(memory.used() >= before);
-        drop(window);
+        let lookup_bytes = reader.stream(0).unwrap().extents.len() * std::mem::size_of::<u64>();
+        assert_eq!(memory.used(), before + lookup_bytes as u128);
+        assert_eq!(
+            reader.file.lock().unwrap().bytes.capacity(),
+            READ_AHEAD_BYTES
+        );
         drop(reader);
         drop(pressure);
         assert_eq!(memory.used(), 0);
