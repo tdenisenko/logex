@@ -290,6 +290,14 @@ changing either requires reviewing these bounds. Cancellation is checked between
 batches and arithmetic operations; an individual admitted read, numeric operation
 or decimal conversion remains synchronous.
 
+Captured bundle readers reuse one accounted physical window while reading selected
+pages: small nearby extents may share a 64 KiB read-ahead window, and large extents
+retain at most their 1 MiB format bound. Only the requested encoded range is copied
+out. Every access checks its complete extent checksum; explicit integrity verification
+discards the cache and checks freshly read bytes in bounded physical windows. Cache replacement releases
+the previous allocation before reserving the new one, and clones share the original
+capture and memory owner. Neither persisted formats nor snapshot bounds change.
+
 Sums with grouping, conditional inputs or residual expressions also charge their
 candidate unions, selected row IDs, stored-column inputs and final Boolean/integer
 expression arrays. Exact `SUM(data)` supports one group key: `address` or any of
