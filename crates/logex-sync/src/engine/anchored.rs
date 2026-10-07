@@ -11,7 +11,10 @@ use alloy_consensus::{EMPTY_OMMER_ROOT_HASH, EMPTY_ROOT_HASH, ReceiptWithBloom};
 use alloy_eips::BlockHashOrNumber;
 use logex_types::{ExecutionAnchor, NodeState};
 use reth_eth_wire::NetworkPrimitives;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::task::JoinSet;
+
+static NEXT_ANCHORED_BATCH: AtomicU64 = AtomicU64::new(1);
 
 #[cfg(test)]
 mod fetch_supervision_tests;
@@ -2815,7 +2818,9 @@ impl SyncEngine {
                     return Ok((progressed, last_head));
                 }
                 Some(Err(error)) => {
-                    tracing::warn!(%error, "checkpoint gap tail body request failed");
+                    tracing::warn!(%error, start_block = chunk_headers[0].number(),
+                        end_block = required_block, request_count = chunk_headers.len(),
+                        "checkpoint gap tail body request failed");
                     return Ok((progressed, last_head));
                 }
                 None => {
@@ -2850,7 +2855,9 @@ impl SyncEngine {
                     return Ok((progressed, last_head));
                 }
                 Some(Err(error)) => {
-                    tracing::warn!(%error, "checkpoint gap tail receipt request failed");
+                    tracing::warn!(%error, start_block = chunk_headers[0].number(),
+                        end_block = required_block, request_count = chunk_headers.len(),
+                        "checkpoint gap tail receipt request failed");
                     return Ok((progressed, last_head));
                 }
                 None => {
@@ -3049,6 +3056,12 @@ impl SyncEngine {
             || prepare_progressed)
     }
 
+    #[tracing::instrument(name = "anchored_batch", level = "info", skip_all, fields(
+        batch_id = NEXT_ANCHORED_BATCH.fetch_add(1, Ordering::Relaxed),
+        start_block = ?anchors.first().map(|anchor| anchor.block_number),
+        end_block = ?anchors.last().map(|anchor| anchor.block_number),
+        anchor_count = anchors.len(),
+    ))]
     async fn ingest_anchored_blocks(
         &mut self,
         anchors: Vec<ExecutionAnchor>,
@@ -3179,7 +3192,9 @@ impl SyncEngine {
                     return Ok(progressed);
                 }
                 Some(Err(error)) => {
-                    tracing::warn!(%error, "anchored block body request failed");
+                    tracing::warn!(%error, start_block = chunk_headers[0].number(),
+                        end_block = required_block, request_count = chunk_headers.len(),
+                        "anchored block body request failed");
                     return Ok(progressed);
                 }
                 None => {
@@ -3232,7 +3247,9 @@ impl SyncEngine {
                     return Ok(progressed);
                 }
                 Some(Err(error)) => {
-                    tracing::warn!(%error, "anchored receipt request failed");
+                    tracing::warn!(%error, start_block = chunk_headers[0].number(),
+                        end_block = required_block, request_count = chunk_headers.len(),
+                        "anchored receipt request failed");
                     return Ok(progressed);
                 }
                 None => {

@@ -5125,6 +5125,7 @@ dependencies = [
  "tokio",
  "toml",
  "tracing",
+ "tracing-subscriber 0.3.23",
  "tree_hash",
  "tree_hash_derive",
  "typenum",
@@ -5313,6 +5314,7 @@ dependencies = [
  "tokio-stream",
  "tokio-util",
  "tracing",
+ "tracing-subscriber 0.3.23",
 ]
 
 [[package]]

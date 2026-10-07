@@ -12,6 +12,7 @@ use crate::primitives::{
 use super::state::execution_client_family;
 use super::*;
 
+mod diagnostics;
 mod receipt_resources;
 pub use receipt_resources::ReceiptRequestContext;
 use receipt_resources::{ReceiptResourceExceeded, check_receipt_block};
@@ -5514,13 +5515,17 @@ where
         oneshot::Sender<reth_network::p2p::error::RequestResult<W>>,
     ) -> PeerRequest<LogexNetworkPrimitives>,
 {
+    let deadline = tokio::time::Instant::now() + request_timeout;
     let (response_tx, response_rx) = oneshot::channel();
-    timeout(request_timeout, async {
+    let request = make_request(response_tx);
+    let mut exchange = diagnostics::Exchange::new(sender.peer_id, &request, request_timeout);
+    let result = tokio::time::timeout_at(deadline, async {
         sender
             .to_session_tx
-            .send(make_request(response_tx))
+            .send(request)
             .await
             .map_err(|_| RequestAttempt::Disconnected)?;
+        exchange.admitted();
 
         match response_rx.await {
             Ok(Ok(response)) => Ok(response.into_value()),
@@ -5533,7 +5538,9 @@ where
         Err(RequestAttempt::Request(
             reth_network::p2p::error::RequestError::Timeout,
         ))
-    })
+    });
+    exchange.finish(result.as_ref().err());
+    result
 }
 
 fn body_receipt_missing_prefix_reassign_candidate<T>(

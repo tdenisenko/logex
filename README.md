@@ -709,6 +709,23 @@ extra bootnode list. Unknown config keys are errors. Parse errors identify the
 file and location without printing config contents; check the supported keys and
 types below when correcting them.
 
+For a bounded request investigation, add `logex_requests=debug` to the existing
+log filter. This target records execution exchange admission, response receipt,
+local receiver drops, and consensus request ownership transitions. Execution
+`exchange_id` values are process-local diagnostics, not ETH wire request IDs.
+They carry the peer, exact header request or an ordered block-hash digest, and
+elapsed milliseconds; ETH70 receipt continuation offsets are retained. Anchored
+ingestion logs also carry a process-local batch ID and block range. Consensus
+response/failure spans retain the protocol request ID, request kind and peer.
+Successful response receipt is distinct from subsequent validation or persistence,
+and dropping an admitted receiver does not cancel the session's wire request.
+
+The retained consensus failure strings include `observed_unix_ms`, the time the
+diagnostic was recorded. Detailed lifecycle logging is opt-in; scope it to an
+actual investigation and retain the complete interval with resource/health
+samples. These records cannot reconstruct earlier unsampled availability or
+identify a historical retry whose request context was not captured.
+
 Example `logex.toml`:
 
 ```toml
