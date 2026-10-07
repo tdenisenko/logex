@@ -4,6 +4,57 @@ The repository retains executable correctness fixtures and opt-in release
 benchmarks. Historical audit reports, machine-specific logs and raw measurement
 archives are kept outside Git; they are not inputs to the build or test suite.
 
+## Complete mainnet query references
+
+`tools/live_query_complete_reference.py` captures every selected local input in
+the catalog's original inclusive query range and evaluates the original SQL with
+SQLite or exact Python integer arithmetic. It does not shorten queries to their
+separate bounded verification ranges. Multiple cases with the same emitter set
+and range share captured inputs. A conservative predicate proof can restrict
+topics only when every direct `logs` read requires them; unsupported predicates
+retain all topics. SQLite remains the independent expression evaluator.
+
+Inspect the plan before executing against an owned deployment:
+
+```sh
+python3 tools/live_query_complete_reference.py benchmarks/ethereum-mainnet.json \
+  --output /private/path/mainnet-complete-reference \
+  --url http://owned-logex-host:18683 \
+  --credentials-config /private/path/runtime-config.toml \
+  --ssh-host owned-logex-host --remote-root /path/to/owned/deployment \
+  --expected-identity /private/path/initial-identity.json \
+  --case usdc_daily_transfers --plan-only
+```
+
+Remove `--plan-only` for the explicitly selected run. The existing identity
+checker must match process start, parent, commands, binary, data inode and volume;
+this helper never initializes identity or changes a node. Healthy finalized
+coverage is required before and after bounded work. No cache flush, shared-query
+cancellation, offline live-store verifier or external Ethereum download occurs.
+
+RPC responses at the row cap cause an exact non-overlapping range split. A single
+block at the cap cannot pass. Every complete leaf is compared with a raw SQL
+projection; duplicate canonical identities within or across leaves fail. Inputs
+are loaded one leaf at a time into a disk-backed SQLite database with a bounded
+page cache. Original SQL, complete range, process identity, reference mode, input
+pieces and hashes, health samples and final result are retained outside Git.
+
+The default allowances are 10,000 rows per response, 5 million selected rows and
+16 GiB captured evidence per emitter/range group, a 64 MiB response bound, 10 GiB
+minimum local free space, and a one-day invocation deadline checked between work
+units. These are input/work limits, not a promised duration or peak-RSS bound.
+The temporary SQLite database is removed after evaluation; immutable captures stay.
+
+The request intent is saved before submission. An interrupted or failed request
+must be investigated before another attempt. Only complete saved pieces from the
+same plan, helper versions and deployment can be reused; failed or completed runs
+are never silently retried. A transport timeout does not prove server work stopped.
+
+Matching results establish independent evaluation over the complete selected
+**local** inputs. RPC and SQL share the same underlying store; this is not an
+independent completeness proof for Ethereum history. Frozen historical references
+must retain their original capture source rather than being relabeled after upgrades.
+
 ## Storage, indexes and queries
 
 The `audit_harness` integration target creates disposable deterministic datasets.
