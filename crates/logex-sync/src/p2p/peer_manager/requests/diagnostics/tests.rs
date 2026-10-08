@@ -20,14 +20,24 @@ impl Output {
     fn text(&self) -> String {
         String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
     }
-    fn subscriber(&self) -> impl tracing::Subscriber + Send + Sync + 'static {
+    async fn capture<T>(&self, future: impl std::future::Future<Output = T>) -> T {
         let output = self.clone();
-        tracing_subscriber::fmt()
-            .with_ansi(false)
-            .without_time()
-            .with_max_level(tracing::Level::DEBUG)
-            .with_writer(move || output.clone())
-            .finish()
+        let subscriber = tracing::Dispatch::new(
+            tracing_subscriber::fmt()
+                .with_ansi(false)
+                .without_time()
+                .with_max_level(tracing::Level::DEBUG)
+                .with_writer(move || output.clone())
+                .finish(),
+        );
+        // With only one registered dispatcher, tracing derives a new callsite's
+        // cached interest from the thread that first reaches it. A sibling test
+        // without a subscriber can therefore cache `never` for our events. Keep
+        // a second dispatcher alive so registration considers both subscribers,
+        // while only the scoped capture receives this future's events. Creating
+        // it also refreshes callsites already reached by unobserved requests.
+        let _interest_guard = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+        future.with_subscriber(subscriber).await
     }
 }
 
@@ -47,35 +57,38 @@ fn bodies(
 #[tokio::test]
 async fn diagnostics_distinguish_admitted_receiver_drop_and_later_response() {
     let output = Output::default();
-    async {
-        let peer = PeerId::repeat_byte(7);
-        let (tx, mut rx) = mpsc::channel(1);
-        let sender = PeerRequestSender::new(peer, tx);
-        let mut first = Box::pin(request_with_sender::<RawBlockBodies, _, _>(
-            &sender,
-            &bodies,
-            Duration::from_secs(10),
-        ));
-        assert!(futures_util::poll!(&mut first).is_pending());
-        let PeerRequest::GetBlockBodies { response, .. } = rx.try_recv().unwrap() else {
-            panic!()
-        };
-        drop(first);
-        // The session still owns the first response even though its consumer left.
-        assert!(response.send(Ok(BlockBodies(Vec::new()))).is_err());
-        let second =
-            request_with_sender::<RawBlockBodies, _, _>(&sender, &bodies, Duration::from_secs(10));
-        let deliver = async {
-            let PeerRequest::GetBlockBodies { response, .. } = rx.recv().await.unwrap() else {
+    output
+        .capture(async {
+            let peer = PeerId::repeat_byte(7);
+            let (tx, mut rx) = mpsc::channel(1);
+            let sender = PeerRequestSender::new(peer, tx);
+            let mut first = Box::pin(request_with_sender::<RawBlockBodies, _, _>(
+                &sender,
+                &bodies,
+                Duration::from_secs(10),
+            ));
+            assert!(futures_util::poll!(&mut first).is_pending());
+            let PeerRequest::GetBlockBodies { response, .. } = rx.try_recv().unwrap() else {
                 panic!()
             };
-            response.send(Ok(BlockBodies(Vec::new()))).unwrap();
-        };
-        let (result, ()) = tokio::join!(second, deliver);
-        assert!(result.unwrap().is_empty());
-    }
-    .with_subscriber(output.subscriber())
-    .await;
+            drop(first);
+            // The session still owns the first response even though its consumer left.
+            assert!(response.send(Ok(BlockBodies(Vec::new()))).is_err());
+            let second = request_with_sender::<RawBlockBodies, _, _>(
+                &sender,
+                &bodies,
+                Duration::from_secs(10),
+            );
+            let deliver = async {
+                let PeerRequest::GetBlockBodies { response, .. } = rx.recv().await.unwrap() else {
+                    panic!()
+                };
+                response.send(Ok(BlockBodies(Vec::new()))).unwrap();
+            };
+            let (result, ()) = tokio::join!(second, deliver);
+            assert!(result.unwrap().is_empty());
+        })
+        .await;
     let text = output.text();
     let ids: Vec<_> = text
         .lines()
@@ -108,24 +121,27 @@ async fn diagnostics_distinguish_admitted_receiver_drop_and_later_response() {
 #[tokio::test(start_paused = true)]
 async fn diagnostics_queue_timeout_is_not_reported_as_admitted_or_cancelled() {
     let output = Output::default();
-    async {
-        let (tx, mut rx) = mpsc::channel(1);
-        tx.send(bodies(oneshot::channel().0)).await.unwrap();
-        let sender = PeerRequestSender::new(PeerId::repeat_byte(7), tx);
-        let result =
-            request_with_sender::<RawBlockBodies, _, _>(&sender, &bodies, Duration::from_secs(1))
-                .await;
-        assert!(matches!(
-            result,
-            Err(RequestAttempt::Request(
-                reth_network::p2p::error::RequestError::Timeout
-            ))
-        ));
-        assert!(rx.try_recv().is_ok());
-        assert!(rx.try_recv().is_err());
-    }
-    .with_subscriber(output.subscriber())
-    .await;
+    output
+        .capture(async {
+            let (tx, mut rx) = mpsc::channel(1);
+            tx.send(bodies(oneshot::channel().0)).await.unwrap();
+            let sender = PeerRequestSender::new(PeerId::repeat_byte(7), tx);
+            let result = request_with_sender::<RawBlockBodies, _, _>(
+                &sender,
+                &bodies,
+                Duration::from_secs(1),
+            )
+            .await;
+            assert!(matches!(
+                result,
+                Err(RequestAttempt::Request(
+                    reth_network::p2p::error::RequestError::Timeout
+                ))
+            ));
+            assert!(rx.try_recv().is_ok());
+            assert!(rx.try_recv().is_err());
+        })
+        .await;
     let text = output.text();
     assert!(
         text.lines()
@@ -140,22 +156,22 @@ async fn diagnostics_queue_timeout_is_not_reported_as_admitted_or_cancelled() {
 #[tokio::test]
 async fn diagnostics_drop_before_admission_never_submits_the_request() {
     let output = Output::default();
-    async {
-        let (tx, mut rx) = mpsc::channel(1);
-        tx.send(bodies(oneshot::channel().0)).await.unwrap();
-        let sender = PeerRequestSender::new(PeerId::repeat_byte(7), tx);
-        let mut request = Box::pin(request_with_sender::<RawBlockBodies, _, _>(
-            &sender,
-            &bodies,
-            Duration::from_secs(10),
-        ));
-        assert!(futures_util::poll!(&mut request).is_pending());
-        drop(request);
-        assert!(rx.try_recv().is_ok());
-        assert!(rx.try_recv().is_err());
-    }
-    .with_subscriber(output.subscriber())
-    .await;
+    output
+        .capture(async {
+            let (tx, mut rx) = mpsc::channel(1);
+            tx.send(bodies(oneshot::channel().0)).await.unwrap();
+            let sender = PeerRequestSender::new(PeerId::repeat_byte(7), tx);
+            let mut request = Box::pin(request_with_sender::<RawBlockBodies, _, _>(
+                &sender,
+                &bodies,
+                Duration::from_secs(10),
+            ));
+            assert!(futures_util::poll!(&mut request).is_pending());
+            drop(request);
+            assert!(rx.try_recv().is_ok());
+            assert!(rx.try_recv().is_err());
+        })
+        .await;
     assert!(
         output
             .text()
@@ -194,4 +210,29 @@ fn diagnostics_payload_scope_is_bounded_and_preserves_hash_order_and_offset() {
     for expected in ["123", "count=8", "skip=2", "Falling"] {
         assert!(text.contains(expected));
     }
+}
+
+#[tokio::test]
+async fn diagnostics_capture_after_unobserved_exchange_on_another_thread() {
+    let output = Output::default();
+    output
+        .capture(async {
+            // Exercise the production callsites from a subscriber-less thread first.
+            // Run this test alone in a fresh process to cover cold registration too.
+            std::thread::spawn(|| {
+                let request = bodies(oneshot::channel().0);
+                let _exchange =
+                    Exchange::new(PeerId::repeat_byte(7), &request, Duration::from_secs(10));
+            })
+            .join()
+            .unwrap();
+            let request = bodies(oneshot::channel().0);
+            let _exchange =
+                Exchange::new(PeerId::repeat_byte(8), &request, Duration::from_secs(10));
+        })
+        .await;
+    let text = output.text();
+    assert_eq!(text.lines().count(), 2, "{text:?}");
+    assert!(text.contains("execution exchange queued"), "{text:?}");
+    assert!(text.contains("local_receiver_dropped"), "{text:?}");
 }
