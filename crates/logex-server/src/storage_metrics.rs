@@ -824,10 +824,49 @@ mod tests {
 
         let first = dir_size_bytes(tmp.path(), &mut cache).expect("first size");
         fs::write(segment.join("compacted.bin"), [0_u8; 7]).expect("compacted file");
-        fs::write(segment.join("segment.json"), br#"{"generation":1}"#).expect("manifest");
+        publish_test_manifest(&segment, 1, None);
 
         let second = dir_size_bytes(tmp.path(), &mut cache).expect("second size");
         assert_eq!(second, first + 7);
+    }
+
+    #[test]
+    fn segment_size_cache_refreshes_replaced_manifest_with_unchanged_mtime() {
+        let tmp = TempDir::new().expect("tempdir");
+        write_active_hot_catalog(tmp.path(), 9);
+        let segment = create_segment(tmp.path(), 1, 4);
+        let manifest_path = segment.join("segment.json");
+        let original = fs::File::open(&manifest_path).expect("original manifest");
+        let original_metadata = original.metadata().expect("original metadata");
+        let mut cache = StorageSizeCache::default();
+        let first = dir_size_bytes(tmp.path(), &mut cache).expect("first size");
+        assert_eq!(cache.segment_dirs.len(), 1);
+
+        fs::OpenOptions::new()
+            .append(true)
+            .open(segment.join("rows.bin"))
+            .expect("rows file")
+            .write_all(&[0_u8; 7])
+            .expect("append");
+        publish_test_manifest(
+            &segment,
+            1,
+            Some(original_metadata.modified().expect("original mtime")),
+        );
+        let updated = fs::metadata(&manifest_path).expect("updated metadata");
+        assert_eq!(updated.len(), original_metadata.len());
+        assert_eq!(
+            updated.modified().unwrap(),
+            original_metadata.modified().unwrap()
+        );
+        let second = dir_size_bytes(tmp.path(), &mut cache).expect("second size");
+        assert_eq!(second, first + 7);
+        #[cfg(unix)]
+        assert_ne!(metadata_id(&updated), metadata_id(&original_metadata));
+        assert_eq!(
+            second,
+            dir_size_bytes(tmp.path(), &mut StorageSizeCache::default()).expect("uncached size")
+        );
     }
 
     #[test]
@@ -944,6 +983,7 @@ mod tests {
         assert_eq!(warm.directory_allocated_bytes, Some(expected_directories));
         // Invalidate just one subtree while the other keeps its inventory.
         fs::write(second.join("extra.bin"), [1; 7]).unwrap();
+        publish_test_manifest(&second, 1, None);
         let partial = dir_usage(tmp.path(), &mut cache).unwrap();
         assert_eq!(partial.logical_bytes, expected_logical + 7);
         let mut uncached = StorageSizeCache::default();
@@ -1072,6 +1112,24 @@ mod tests {
         catalog
             .persist(&StorageCatalogPaths::new(root.to_owned()))
             .expect("catalog");
+    }
+
+    fn publish_test_manifest(segment: &Path, generation: u64, modified: Option<SystemTime>) {
+        // Native segment publication replaces an existing manifest atomically.
+        // In-place writes can keep its length, identity and coarse mtime intact.
+        let mut replacement = tempfile::NamedTempFile::new_in(segment).expect("staged manifest");
+        replacement
+            .write_all(format!(r#"{{"generation":{generation}}}"#).as_bytes())
+            .expect("write manifest");
+        if let Some(modified) = modified {
+            replacement
+                .as_file()
+                .set_times(fs::FileTimes::new().set_modified(modified))
+                .expect("preserve manifest mtime");
+        }
+        replacement
+            .persist(segment.join("segment.json"))
+            .expect("publish manifest");
     }
 
     fn create_segment(root: &Path, segment_id: u64, rows_len: usize) -> PathBuf {

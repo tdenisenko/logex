@@ -419,12 +419,18 @@ receipts for log extraction only. They are still useful for expectations:
 
 ## Install
 
-LogEx is a Rust workspace.
+Download a native executable from [GitHub Releases](https://github.com/tdenisenko/logex/releases).
+The [installation guide](INSTALL.md) covers Linux x86_64/ARM64, Intel/Apple Silicon
+Macs, Windows through WSL2, download verification and first startup. The binary
+includes the browser dashboard; Rust and Protobuf are not needed to run it.
+
+To build from source, LogEx is a Rust workspace with a pinned toolchain and a
+Protobuf compiler requirement:
 
 ```bash
 git clone https://github.com/tdenisenko/logex.git
 cd logex
-cargo build -p logex-node --release
+cargo build -p logex-node --release --locked
 ```
 
 The binary is:
@@ -458,7 +464,7 @@ The default data directory is OS-specific:
 | --- | --- |
 | Linux | `$XDG_DATA_HOME/logex`, or `~/.local/share/logex` when `XDG_DATA_HOME` is unset |
 | macOS | `~/Library/Application Support/LogEx` |
-| Windows | `%APPDATA%\LogEx` |
+| Windows through WSL2 | The Linux data directory inside the WSL2 distribution |
 
 Server run with an explicit data directory and public dashboard:
 
@@ -1019,6 +1025,9 @@ return an error instead of a partial or misleading result.
   and historical ETA together.
 
 ## Development
+
+Maintainers can find the native package, verification and publication process in
+[RELEASING.md](RELEASING.md).
 
 Common checks:
 

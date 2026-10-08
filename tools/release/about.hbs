@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LogEx third-party licenses</title>
+  <style>
+    body { font: 1rem/1.5 system-ui, sans-serif; margin: 2rem auto; max-width: 70rem; padding: 0 1rem; }
+    pre { white-space: pre-wrap; overflow-wrap: anywhere; padding: 1rem; background: #f3f4f6; }
+    h2 { margin-top: 3rem; }
+  </style>
+</head>
+<body>
+  <h1>LogEx third-party licenses</h1>
+  <p>Dependency notices for the Linux and macOS release targets, including build
+  dependencies. This is a union across targets; not every listed crate is linked
+  into every binary. The release also includes Cargo.lock and build-info.json.</p>
+  {{#each licenses}}
+  <section>
+    <h2>{{name}} ({{id}})</h2>
+    <ul>
+      {{#each used_by}}
+      <li>{{crate.name}} {{crate.version}}{{#if crate.repository}} — {{crate.repository}}{{/if}}</li>
+      {{/each}}
+    </ul>
+    <pre>{{text}}</pre>
+  </section>
+  {{/each}}
+</body>
+</html>
