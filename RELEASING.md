@@ -33,6 +33,8 @@ git diff --check
 
 Every release build uses the pinned Rust toolchain, locked dependencies, a native
 runner, release-profile workspace tests and an extracted-binary CLI smoke check.
+Each native job has a four-hour work allowance for cold compilation, tests and
+packaging; this is a timeout cap, not a runtime-performance target or ETA.
 The helper checks the executable architecture and runtime libraries. Linux uses
 a glibc 2.35 baseline; macOS uses a conservative deployment target of 15.0.
 macOS archives use an ad-hoc integrity signature. They are not signed with an

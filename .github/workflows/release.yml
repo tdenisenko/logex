@@ -94,7 +94,8 @@ jobs:
     name: Package (${{ matrix.target }})
     needs: prepare
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 120
+    # Cold native runs compile dependencies, all test binaries and the final CLI.
+    timeout-minutes: 240
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
