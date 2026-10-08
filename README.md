@@ -786,6 +786,9 @@ Run with:
 
 ## Query Examples
 
+See the [SQL guide](SQL.md) for the complete log schema, query API, LogEx-specific
+literals and exact sums, practical examples, pagination, coverage rules and limits.
+
 HTTP LogSQL:
 
 ```bash
@@ -959,8 +962,10 @@ the mathematical mean would fit the result type. Decimal averages also reject
 overflowing scale conversions. Their intermediate sums may exceed input
 precision; final result precision remains enforced.
 Exact data aggregation supports sums, addition/subtraction of sums, conditional
-inputs and optional grouping by address. Other aggregate shapes use the general
-SQL engine, where data remains hexadecimal text; they may reject it as nonnumeric.
+inputs and optional grouping by one key: address or topic0 through topic3. Other
+aggregate shapes use the general SQL engine, where data remains hexadecimal text;
+they may reject it as nonnumeric. See [exact data sums](SQL.md#exact-sums-of-data)
+for supported combinations and cast forms.
 Arrays and objects retain their nested values and explicit nulls. SQL temporal
 values use Arrow's textual format; SQL binary values use hexadecimal without a
 prefix. The existing log hash, address and data columns keep their `0x` prefix.
