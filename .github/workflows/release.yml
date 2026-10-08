@@ -10,6 +10,7 @@ on:
       - 'Cargo.lock'
       - 'LICENSE-*'
       - 'INSTALL.md'
+      - 'RELEASING.md'
       - 'docs/releases/**'
   workflow_dispatch:
     inputs:

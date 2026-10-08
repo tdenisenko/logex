@@ -32,14 +32,14 @@ archive=logex-v0.1.0-x86_64-unknown-linux-gnu.tar.gz
 release_url=https://github.com/tdenisenko/logex/releases/download/v0.1.0
 curl --fail --location --remote-name "$release_url/$archive"
 curl --fail --location --remote-name "$release_url/SHA256SUMS"
-grep -F "  $archive" SHA256SUMS | sha256sum --check
+awk -v file="$archive" '$2 == file' SHA256SUMS | sha256sum --check
 ```
 
 On macOS, set `archive` to the appropriate Mac filename and use this checksum
 command instead:
 
 ```bash
-grep -F "  $archive" SHA256SUMS | shasum -a 256 --check
+awk -v file="$archive" '$2 == file' SHA256SUMS | shasum -a 256 --check
 ```
 
 Require an `OK` result for your archive. Checksums detect corrupted downloads;
@@ -86,7 +86,7 @@ default HTTP and gRPC listeners are local-only. Stop the process with **Ctrl+C**
 and let it finish shutting down before replacing the binary or moving its data.
 
 A fresh mainnet directory needs a recent weak-subjectivity checkpoint. The
-default command resolves one from the configured trusted checkpoint service;
+default command resolves one through a two-of-three trusted checkpoint quorum;
 you can provide your own with `--checkpoint` or `--checkpoint-sync-url`. See
 the [checkpoint and trust model](https://github.com/tdenisenko/logex#what-logex-verifies).
 The process needs network access to Ethereum peers and storage for the history

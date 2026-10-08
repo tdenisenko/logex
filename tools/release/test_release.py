@@ -9,6 +9,7 @@ import struct
 import tarfile
 import tempfile
 import unittest
+from unittest import mock
 
 import package
 import publish
@@ -148,6 +149,33 @@ class ReleaseTests(unittest.TestCase):
                 package.version(value)
         with self.assertRaises(ValueError):
             package.archive_name(self.version, "../../outside")
+
+    def test_extended_archive_metadata_and_privileged_manifest_are_rejected(self):
+        for kind in ("pax", "mode"):
+            with self.subTest(kind=kind):
+                path, _ = self.fixture(directory=self.root / kind)
+                def alter(entries):
+                    for member, _ in entries:
+                        if member.name.endswith("/build-info.json"):
+                            if kind == "pax":
+                                member.pax_headers = {"comment": "unexpected extension"}
+                            else:
+                                member.mode = 0o4755
+                    return entries
+                self.rewrite(path, alter)
+                with self.assertRaisesRegex(ValueError, "metadata"):
+                    self.validate(path)
+
+    def test_compressed_archive_cannot_exceed_unpacked_budget(self):
+        path, _ = self.fixture()
+        self.rewrite(path, lambda entries: [
+            (member, b"x" * 4096 if member.name.endswith("/SQL.md") else data)
+            for member, data in entries
+        ])
+        self.assertLess(path.stat().st_size, 2048)
+        with mock.patch.object(package, "MAX_ARCHIVE_BYTES", 2048):
+            with self.assertRaisesRegex(ValueError, "unpacked archive exceeds"):
+                self.validate(path)
 
     def test_checksum_manifest_requires_every_file_once(self):
         (self.root / "asset").write_bytes(b"payload")

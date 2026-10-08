@@ -1026,6 +1026,9 @@ return an error instead of a partial or misleading result.
 
 ## Development
 
+Maintainers can find the native package, verification and publication process in
+[RELEASING.md](RELEASING.md).
+
 Common checks:
 
 ```bash

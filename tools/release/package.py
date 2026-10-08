@@ -163,13 +163,20 @@ def validate_archive(path: Path, release_version: str, source_commit: str, targe
     prefix = path.name.removesuffix(".tar.gz")
     expected = {f"{prefix}/{name}" for name in PAYLOAD_NAMES | {"build-info.json"}}
     with tarfile.open(path, "r:gz") as archive:
-        members = archive.getmembers()
+        members = []
+        unpacked_bytes = 0
+        for member in archive:
+            require(len(members) < len(expected), "archive has unexpected entries")
+            require(member.isfile() and not member.issparse() and member.size >= 0,
+                    "archive contains a non-regular entry")
+            require(not member.pax_headers, "archive contains unexpected extended metadata")
+            unpacked_bytes += member.size
+            require(unpacked_bytes <= MAX_ARCHIVE_BYTES, "unpacked archive exceeds budget")
+            members.append(member)
         require(len(members) == len(expected) and {m.name for m in members} == expected,
                 "archive has missing, duplicate, or unexpected entries")
-        require(all(m.isfile() and m.size >= 0 for m in members), "archive contains a non-regular entry")
-        require(sum(m.size for m in members) <= MAX_ARCHIVE_BYTES, "unpacked archive exceeds budget")
         info = archive.getmember(f"{prefix}/build-info.json")
-        require(info.size < 128 * 1024, "build metadata exceeds budget")
+        require(info.mode == 0o644 and info.size < 128 * 1024, "unexpected build metadata mode or size")
         metadata = json.load(archive.extractfile(info))
         require(metadata["format_version"] == 1 and metadata["version"] == release_version
                 and metadata["source_commit"] == commit(source_commit)
@@ -208,7 +215,8 @@ def smoke_archive(path: Path, release_version: str, source_commit: str, target: 
         result = subprocess.run([str(executable), "--data-dir", str(unused), "sync",
                                  "--query-max-concurrent", "0"], capture_output=True, text=True,
                                 timeout=30, cwd=root)
-        require(result.returncode != 0 and "query" in result.stderr.lower()
+        require(result.returncode == 1
+                and "invalid --query-max-concurrent / query_max_concurrent:" in result.stderr
                 and not unused.exists(), "invalid admission did not fail before storage initialization")
 
 
