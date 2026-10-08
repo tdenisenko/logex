@@ -19,7 +19,9 @@ checks. Publishing does not install or restart a running node.
    original dependency notices; never substitute LogEx's copyright for them.
 4. Run the release helper tests and a workflow validator, then submit and merge
    the release-preparation PR. The release-related PR workflow builds and tests
-   the four native packages but does not attest, tag or publish them.
+   the four native packages but does not attest, tag or publish them. Changes
+   to runtime source, vendored dependencies, the toolchain or packaged inputs
+   also trigger this matrix, including follow-up fixes within an existing PR.
 5. Require successful CI on the final merged commit. A green PR run does not
    replace CI on the actual commit used for a release.
 
