@@ -9,6 +9,10 @@ case "${RUNNER_OS:-}/${RUNNER_ARCH:-}" in
     platform=linux-x86_64
     sha256=0502f286ac9ed860b629a7965a14527b1f2dd131e4283fa23c2d7f184672aa9a
     ;;
+  Linux/ARM64)
+    platform=linux-aarch_64
+    sha256=1c7750b6e038305b5a7fc3d0cda1ebefdf106a4f30a787bf826ed2fc47c3967d
+    ;;
   macOS/ARM64)
     platform=osx-aarch_64
     sha256=8c7afae8626b6811e7b5897d16d940c2dbf50b1e135ed958a01db6566bdda726
