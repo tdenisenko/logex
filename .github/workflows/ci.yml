@@ -149,6 +149,12 @@ jobs:
       - name: Install pinned Protobuf compiler
         run: bash tools/setup_ci_protoc.sh
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # A separate process keeps the tracing callsites cold for this regression.
+      - name: Check diagnostics capture with cold callsites
+        run: >-
+          cargo test -p logex-sync --lib --locked
+          p2p::peer_manager::requests::diagnostics::tests::diagnostics_capture_after_unobserved_exchange_on_another_thread
+          -- --exact
       - run: cargo test --workspace --all-targets --locked
       - run: cargo test --workspace --doc --locked
       - name: Check pinned gRPC encoding ownership
@@ -213,6 +219,12 @@ jobs:
       - name: Install pinned Protobuf compiler
         run: bash tools/setup_ci_protoc.sh
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # A separate process keeps the tracing callsites cold for this regression.
+      - name: Check diagnostics capture with cold callsites
+        run: >-
+          cargo test -p logex-sync --lib --locked
+          p2p::peer_manager::requests::diagnostics::tests::diagnostics_capture_after_unobserved_exchange_on_another_thread
+          -- --exact
       - run: cargo test --workspace --all-targets --locked
       - run: cargo test --workspace --doc --locked
       - name: Check pinned gRPC encoding ownership
